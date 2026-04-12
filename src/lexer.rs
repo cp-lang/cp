@@ -32,6 +32,14 @@ pub enum Token {
     Fn,
     #[token("class")]
     Class,
+    #[token("trait")]
+    Trait,
+    #[token("impl")]
+    Impl,
+    #[token("for")]
+    For,
+    #[token("enum")]
+    Enum,
     #[token("interface")]
     Interface,
     #[token("implements")]

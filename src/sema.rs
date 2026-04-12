@@ -87,7 +87,7 @@ impl Analyzer {
         match decl {
             Decl::Func(f) => self.analyze_function(f),
             Decl::Class(c) => self.analyze_class(c),
-            Decl::Interface(_) | Decl::ErrorSet(_) => Ok(()), 
+            Decl::Trait(_) | Decl::Impl(_) | Decl::Enum(_) | Decl::Interface(_) | Decl::ErrorSet(_) => Ok(()), 
         }
     }
 
@@ -123,12 +123,12 @@ impl Analyzer {
             Stmt::Expr(expr) => { self.infer_type(expr)?; Ok(()) },
             Stmt::While(w) => {
                 let test_ty = self.infer_type(&w.test)?;
-                if test_ty != Type::Bool { return Err(SemaError::TypeMismatch(Type::Bool, test_ty, w.span)); }
+                if !self.types_eq(&test_ty, &Type::Bool) { return Err(SemaError::TypeMismatch(Type::Bool, test_ty, w.span)); }
                 self.analyze_stmt(&w.body)
             },
             Stmt::If(i) => {
                 let test_ty = self.infer_type(&i.test)?;
-                if test_ty != Type::Bool { return Err(SemaError::TypeMismatch(Type::Bool, test_ty, i.span)); }
+                if !self.types_eq(&test_ty, &Type::Bool) { return Err(SemaError::TypeMismatch(Type::Bool, test_ty, i.span)); }
                 self.analyze_stmt(&i.cons)?;
                 if let Some(alt) = &i.alt {
                     self.analyze_stmt(alt)?;
@@ -148,11 +148,13 @@ impl Analyzer {
                 let is_compatible = match (explicit_ty, &ty) {
                     (Type::Optional(_), Type::Optional(inner)) if **inner == Type::Unknown => true,
                     (Type::Ref(target), Type::Ref(source)) => {
-                        if let (Some(iface), Some(cls)) = (self.interfaces.get(&target.sym), self.classes.get(&source.sym)) {
+                        if target.sym == source.sym {
+                            true
+                        } else if let (Some(iface), Some(cls)) = (self.interfaces.get(&target.sym), self.classes.get(&source.sym)) {
                              cls.implements.iter().any(|i| i.sym == iface.ident.sym)
                         } else { false }
                     },
-                    (a, b) => a == b,
+                    (a, b) => self.types_eq(a, b),
                 };
                 if !is_compatible {
                     return Err(SemaError::TypeMismatch(explicit_ty.clone(), ty, var.span));
@@ -161,6 +163,23 @@ impl Analyzer {
             ty
         } else { var.ty.clone().ok_or_else(|| SemaError::MissingType(var.span))? };
         self.analyze_pattern(&var.pat, inferred_ty, &var.kind)
+    }
+
+    fn types_eq(&self, a: &Type, b: &Type) -> bool {
+        match (a, b) {
+            (Type::Ref(t1), Type::Ref(t2)) => t1.sym == t2.sym,
+            (Type::Optional(t1), Type::Optional(t2)) => self.types_eq(t1, t2),
+            (Type::ErrorUnion(t1), Type::ErrorUnion(t2)) => self.types_eq(t1, t2),
+            (Type::Array(t1), Type::Array(t2)) => self.types_eq(t1, t2),
+            (Type::Fn(p1, r1), Type::Fn(p2, r2)) => {
+                if p1.len() != p2.len() { return false; }
+                for (i, p) in p1.iter().enumerate() {
+                    if !self.types_eq(p, &p2[i]) { return false; }
+                }
+                self.types_eq(r1, r2)
+            },
+            _ => a == b,
+        }
     }
 
     fn analyze_pattern(&mut self, pat: &Pattern, ty: Type, kind: &VarDeclKind) -> SemaResult<()> {
@@ -201,7 +220,17 @@ impl Analyzer {
             Expr::Bin(bin) => {
                 let left = self.infer_type(&bin.left)?;
                 let right = self.infer_type(&bin.right)?;
-                if bin.op == BinaryOp::Eq { Ok(left) } else if bin.op == BinaryOp::Lt { Ok(Type::Bool) } else { Ok(left) }
+                if bin.op == BinaryOp::Eq {
+                    if let Expr::Ident(ident) = &*bin.left {
+                        if let Some(SymbolKind::Var { kind: VarDeclKind::Const, .. }) = self.resolve(&ident.sym) { return Err(SemaError::ConstAssignment(ident.sym.clone(), bin.span)); }
+                    }
+                    if !self.types_eq(&left, &right) { return Err(SemaError::TypeMismatch(left, right, bin.span)); }
+                    Ok(left)
+                } else if bin.op == BinaryOp::Lt { Ok(Type::Bool) } 
+                else { 
+                    if !self.types_eq(&left, &right) { return Err(SemaError::TypeMismatch(left, right, bin.span)); }
+                    Ok(left) 
+                }
             },
             Expr::Call(call) => {
                 let callee_ty = self.infer_type(&call.callee)?;
@@ -210,6 +239,9 @@ impl Analyzer {
             Expr::New(call) => {
                 if let Expr::Ident(ident) = &*call.callee { if self.classes.contains_key(&ident.sym) { return Ok(Type::Ref(ident.clone())); } }
                 Err(SemaError::UndefinedSymbol("Class".to_string(), call.span))
+            },
+            Expr::EnumInit(init) => {
+                Ok(Type::Ref(init.enum_name.clone()))
             },
             Expr::Spawn(_) => Ok(Type::PID),
             Expr::Receive(ty) => Ok(ty.as_ref().map(|t| (**t).clone()).unwrap_or(Type::I32)),

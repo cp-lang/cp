@@ -17,8 +17,40 @@ pub enum ModuleItem {
 pub enum Decl {
     Func(Function),
     Class(Class),
-    Interface(Interface),
+    Trait(TraitDecl),
+    Impl(ImplDecl),
+    Enum(EnumDecl),
+    Interface(Interface), // Keep for legacy but Trait is preferred
     ErrorSet(ErrorSetDecl),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TraitDecl {
+    pub span: Span,
+    pub ident: Ident,
+    pub methods: Vec<MethodSig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImplDecl {
+    pub span: Span,
+    pub trait_name: Ident,
+    pub target_name: Ident,
+    pub methods: Vec<Function>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnumDecl {
+    pub span: Span,
+    pub ident: Ident,
+    pub variants: Vec<EnumVariant>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnumVariant {
+    pub span: Span,
+    pub ident: Ident,
+    pub fields: Option<Vec<Field>>, // Struct-like variants
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -94,8 +126,18 @@ pub enum Pattern {
     Ident(Ident),
     Array(Vec<Pattern>),
     Object(Vec<ObjectPatProp>),
+    Enum(EnumPattern), // ES6-like matching for ADTs
+    Lit(Lit),
     Rest(Box<Pattern>),
     Wildcard,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnumPattern {
+    pub span: Span,
+    pub enum_name: Ident,
+    pub variant_name: Ident,
+    pub fields: Option<Vec<ObjectPatProp>>, // Destructure variant fields
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -136,12 +178,27 @@ pub enum Expr {
     Slice(SliceExpr),
     Match(Box<MatchExpr>),
     Spawn(Box<SpawnExpr>),
-    Receive(Option<Box<Type>>), // Added for Actor: receive<T>()
+    Receive(Option<Box<Type>>),
     Zig(ZigEscapeExpr),
     Question(Box<Expr>),
     Array(Vec<Expr>),
     Arrow(Box<ArrowExpr>),
+    EnumInit(EnumInitExpr),
     Template(TemplateLit),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnumInitExpr {
+    pub span: Span,
+    pub enum_name: Ident,
+    pub variant_name: Ident,
+    pub fields: Option<Vec<EnumInitField>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnumInitField {
+    pub key: Ident,
+    pub val: Expr,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
