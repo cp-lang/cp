@@ -38,6 +38,12 @@ pub enum Token {
     Implements,
     #[token("new")]
     New,
+    #[token("error")]
+    ErrorKw,
+    #[token("defer")]
+    Defer,
+    #[token("errdefer")]
+    ErrDefer,
 
     // --- Types (RFC-001 4.1) ---
     #[token("i32")]

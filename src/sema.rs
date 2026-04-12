@@ -87,7 +87,7 @@ impl Analyzer {
         match decl {
             Decl::Func(f) => self.analyze_function(f),
             Decl::Class(c) => self.analyze_class(c),
-            Decl::Interface(_) => Ok(()), 
+            Decl::Interface(_) | Decl::ErrorSet(_) => Ok(()), 
         }
     }
 
@@ -126,6 +126,7 @@ impl Analyzer {
                 if test_ty != Type::Bool { return Err(SemaError::TypeMismatch(Type::Bool, test_ty, w.span)); }
                 self.analyze_stmt(&w.body)
             },
+            Stmt::Defer(d) | Stmt::ErrDefer(d) => self.analyze_stmt(d),
             _ => Ok(()),
         }
     }
@@ -134,12 +135,17 @@ impl Analyzer {
         let inferred_ty = if let Some(init) = &var.init {
             let ty = self.infer_type(init)?;
             if let Some(explicit_ty) = &var.ty {
-                if *explicit_ty != ty {
-                    if let (Type::Ref(target), Type::Ref(source)) = (explicit_ty, &ty) {
+                let is_compatible = match (explicit_ty, &ty) {
+                    (Type::Optional(_), Type::Optional(inner)) if **inner == Type::Unknown => true,
+                    (Type::Ref(target), Type::Ref(source)) => {
                         if let (Some(iface), Some(cls)) = (self.interfaces.get(&target.sym), self.classes.get(&source.sym)) {
-                             if !cls.implements.iter().any(|i| i.sym == iface.ident.sym) { return Err(SemaError::TypeMismatch(explicit_ty.clone(), ty, var.span)); }
-                        } else { return Err(SemaError::TypeMismatch(explicit_ty.clone(), ty, var.span)); }
-                    } else { return Err(SemaError::TypeMismatch(explicit_ty.clone(), ty, var.span)); }
+                             cls.implements.iter().any(|i| i.sym == iface.ident.sym)
+                        } else { false }
+                    },
+                    (a, b) => a == b,
+                };
+                if !is_compatible {
+                    return Err(SemaError::TypeMismatch(explicit_ty.clone(), ty, var.span));
                 }
             }
             ty
@@ -173,6 +179,7 @@ impl Analyzer {
             },
             Expr::Ident(ident) => {
                 if ident.sym == "true" || ident.sym == "false" { return Ok(Type::Bool); }
+                if ident.sym == "null" { return Ok(Type::Optional(Box::new(Type::Unknown))); }
                 match self.resolve(&ident.sym) {
                     Some(SymbolKind::Var { ty, .. }) => Ok(ty.clone()),
                     Some(SymbolKind::Func { params, ret }) => Ok(Type::Fn(params.clone(), Box::new(ret.clone().unwrap_or(Type::I32)))),
@@ -198,6 +205,13 @@ impl Analyzer {
             Expr::Slice(slice) => {
                 let obj_ty = self.infer_type(&slice.obj)?;
                 Ok(obj_ty) // Slicing an Array results in an Array, String results in String
+            },
+            Expr::Question(inner) => {
+                let inner_ty = self.infer_type(inner)?;
+                match inner_ty {
+                    Type::ErrorUnion(t) | Type::Optional(t) => Ok(*t),
+                    _ => Ok(inner_ty),
+                }
             },
             Expr::Member(member) => {
                 let obj_ty = self.infer_type(&member.obj)?;

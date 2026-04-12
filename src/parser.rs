@@ -56,7 +56,9 @@ impl<'a> Parser<'a> {
 
     fn parse_module_item(&mut self) -> ParseResult<ModuleItem> {
         match self.peek() {
-            Some(Token::Fn) | Some(Token::Class) | Some(Token::Interface) => Ok(ModuleItem::Decl(self.parse_decl()?)),
+            Some(Token::Fn) | Some(Token::Class) | Some(Token::Interface) | Some(Token::ErrorKw) => {
+                Ok(ModuleItem::Decl(self.parse_decl()?))
+            }
             _ => Ok(ModuleItem::Stmt(self.parse_stmt()?)),
         }
     }
@@ -66,11 +68,26 @@ impl<'a> Parser<'a> {
             Some(Token::Fn) => Ok(Decl::Func(self.parse_function()?)),
             Some(Token::Class) => Ok(Decl::Class(self.parse_class()?)),
             Some(Token::Interface) => Ok(Decl::Interface(self.parse_interface()?)),
+            Some(Token::ErrorKw) => Ok(Decl::ErrorSet(self.parse_error_set()?)),
             _ => Err(ParseError::UnexpectedToken(self.peek().unwrap().clone(), self.peek_span())),
         }
     }
 
+    fn parse_error_set(&mut self) -> ParseResult<ErrorSetDecl> {
+        let start = self.expect(Token::ErrorKw)?.start;
+        let ident = self.parse_ident()?;
+        self.expect(Token::LBrace)?;
+        let mut variants = Vec::new();
+        while self.peek() != Some(&Token::RBrace) && self.peek().is_some() {
+            variants.push(self.parse_ident()?);
+            if self.peek() == Some(&Token::Comma) { self.bump()?; } else { break; }
+        }
+        let end = self.expect(Token::RBrace)?.end;
+        Ok(ErrorSetDecl { span: Span { start, end }, ident, variants })
+    }
+
     fn parse_class(&mut self) -> ParseResult<Class> {
+
         let start = self.expect(Token::Class)?.start;
         let ident = self.parse_ident()?;
         let mut implements = Vec::new();
@@ -137,6 +154,16 @@ impl<'a> Parser<'a> {
             Some(Token::Return) => Ok(Stmt::Return(self.parse_return_stmt()?)),
             Some(Token::LBrace) => Ok(Stmt::Block(self.parse_block_stmt()?)),
             Some(Token::While) => Ok(Stmt::While(self.parse_while_stmt()?)),
+            Some(Token::Defer) => {
+                self.bump()?;
+                let stmt = self.parse_stmt()?;
+                Ok(Stmt::Defer(Box::new(stmt)))
+            },
+            Some(Token::ErrDefer) => {
+                self.bump()?;
+                let stmt = self.parse_stmt()?;
+                Ok(Stmt::ErrDefer(Box::new(stmt)))
+            },
             Some(Token::ZigEscape) => {
                 let start = self.bump()?.1.start;
                 self.expect(Token::LBrace)?;
@@ -238,6 +265,10 @@ impl<'a> Parser<'a> {
                     self.bump()?;
                     let prop = self.parse_ident()?;
                     left = Expr::Member(MemberExpr { span: Span { start: left_span(&left).start, end: prop.span.end }, obj: Box::new(left), prop });
+                },
+                Some(Token::Question) => {
+                    self.bump()?;
+                    left = Expr::Question(Box::new(left));
                 },
                 Some(Token::LBracket) => {
                     // --- SLICE & ACCESS SUPPORT ---
@@ -382,13 +413,31 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type(&mut self) -> ParseResult<Type> {
+        let is_error_union = if self.peek() == Some(&Token::Question) {
+            self.bump()?;
+            true
+        } else {
+            false
+        };
+
         let (token, span) = self.bump()?;
-        match token {
-            Token::I32 => Ok(Type::I32), Token::U64 => Ok(Type::U64), Token::F32 => Ok(Type::F32), Token::USize => Ok(Type::USize), Token::String => Ok(Type::String),
-            Token::Ident(sym) => { if sym == "pid" { Ok(Type::PID) } else { Ok(Type::Ref(Ident { span, sym })) } },
-            Token::LBracket => { self.expect(Token::RBracket)?; let elem_ty = self.parse_type()?; Ok(Type::Array(Box::new(elem_ty))) }
-            _ => Err(ParseError::UnexpectedToken(token, span)),
+        let mut ty = match token {
+            Token::I32 => Type::I32, Token::U64 => Type::U64, Token::F32 => Type::F32, Token::USize => Type::USize, Token::String => Type::String,
+            Token::Ident(sym) => { if sym == "pid" { Type::PID } else { Type::Ref(Ident { span, sym }) } },
+            Token::LBracket => { self.expect(Token::RBracket)?; let elem_ty = self.parse_type()?; Type::Array(Box::new(elem_ty)) }
+            _ => return Err(ParseError::UnexpectedToken(token, span)),
+        };
+
+        if self.peek() == Some(&Token::Question) {
+            self.bump()?;
+            ty = Type::Optional(Box::new(ty));
         }
+
+        if is_error_union {
+            ty = Type::ErrorUnion(Box::new(ty));
+        }
+
+        Ok(ty)
     }
 }
 

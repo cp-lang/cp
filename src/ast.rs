@@ -18,6 +18,14 @@ pub enum Decl {
     Func(Function),
     Class(Class),
     Interface(Interface),
+    ErrorSet(ErrorSetDecl),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ErrorSetDecl {
+    pub span: Span,
+    pub ident: Ident,
+    pub variants: Vec<Ident>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -55,6 +63,8 @@ pub enum Stmt {
     While(WhileStmt),
     Match(MatchExpr),
     Spawn(SpawnExpr),
+    Defer(Box<Stmt>),
+    ErrDefer(Box<Stmt>),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -237,8 +247,10 @@ pub enum Type {
     Map(Box<Type>, Box<Type>),
     Ref(Ident), 
     Fn(Vec<Type>, Box<Type>), 
-    PID, // Added for Actor
+    PID, 
     Unknown, 
+    ErrorUnion(Box<Type>),
+    Optional(Box<Type>),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

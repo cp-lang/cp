@@ -40,6 +40,16 @@ impl Codegen {
 
         for item in &module.body { if let ModuleItem::Decl(Decl::Interface(i)) = item { self.generate_interface(i); } }
         for item in &module.body { if let ModuleItem::Decl(Decl::Class(c)) = item { self.generate_class(c); } }
+        for item in &module.body {
+            if let ModuleItem::Decl(Decl::ErrorSet(e)) = item {
+                let mut variants = String::new();
+                for (i, v) in e.variants.iter().enumerate() {
+                    variants.push_str(&v.sym);
+                    if i < e.variants.len() - 1 { variants.push_str(", "); }
+                }
+                self.writeln(&format!("const {} = error {{ {} }};", e.ident.sym, variants));
+            }
+        }
 
         let mut has_main = false;
         for item in &module.body {
@@ -144,6 +154,20 @@ impl Codegen {
                 self.write_to_case(&format!("ctx.pc = {}; continue;", body_pc)); self.next_state();
                 self.generate_stmt(&w.body); self.write_to_case(&format!("ctx.pc = {}; continue;", cond_pc)); self.next_state();
             },
+            Stmt::Defer(d) => {
+                self.write_to_case("defer {");
+                self.indent();
+                self.generate_stmt(d);
+                self.dedent();
+                self.write_to_case("}");
+            },
+            Stmt::ErrDefer(d) => {
+                self.write_to_case("errdefer {");
+                self.indent();
+                self.generate_stmt(d);
+                self.dedent();
+                self.write_to_case("}");
+            },
             Stmt::Block(b) => for s in &b.body { self.generate_stmt(s); },
             Stmt::Return(ret) => { if let Some(arg) = &ret.arg { let e = self.generate_expr(arg); self.write_to_case(&format!("_ = {};", e)); } self.write_to_case("ctx.pc = 9999; return;"); },
             Stmt::Expr(expr) => match expr {
@@ -168,7 +192,7 @@ impl Codegen {
         match expr {
             Expr::Lit(Lit::Int(v)) => v.to_string(),
             Expr::Lit(Lit::Str(s)) => s.clone(),
-            Expr::Ident(i) => if i.sym == "true" || i.sym == "false" { i.sym.clone() } else { format!("ctx.{}", i.sym) },
+            Expr::Ident(i) => if i.sym == "true" || i.sym == "false" || i.sym == "null" { i.sym.clone() } else { format!("ctx.{}", i.sym) },
             Expr::Bin(bin) => {
                 let left = self.generate_expr(&bin.left); let right = self.generate_expr(&bin.right);
                 let op = match bin.op { BinaryOp::Add => "+", BinaryOp::Sub => "-", BinaryOp::Mul => "*", BinaryOp::Div => "/", BinaryOp::Lt => "<", _ => "todo" };
@@ -182,7 +206,10 @@ impl Codegen {
                         return format!("(blk: {{ mailboxes[{}].push(Message{{ .data = {} }}); break :blk 0; }})", pid, msg);
                     }
                 }
-                let callee = self.generate_expr(&call.callee);
+                let callee = match &*call.callee {
+                    Expr::Ident(ident) => ident.sym.clone(),
+                    _ => self.generate_expr(&call.callee),
+                };
                 let mut args = String::new();
                 for (i, arg) in call.args.iter().enumerate() { args.push_str(&self.generate_expr(arg)); if i < call.args.len() - 1 { args.push_str(", "); } }
                 format!("{}({})", callee, args)
@@ -197,6 +224,10 @@ impl Codegen {
                 let start = slice.start.as_ref().map(|e| self.generate_expr(e)).unwrap_or("0".to_string());
                 let end = slice.end.as_ref().map(|e| self.generate_expr(e)).unwrap_or(format!("{}.len", obj));
                 format!("{}[{}..{}]", obj, start, end)
+            },
+            Expr::Question(inner) => {
+                let inner_expr = self.generate_expr(inner);
+                format!("try {}", inner_expr)
             },
             Expr::Array(elements) => {
                 let mut s = String::from("&[_]i32{ ");
@@ -232,6 +263,8 @@ impl Codegen {
         match ty {
             Type::I32 => "i32".to_string(), Type::USize => "usize".to_string(), Type::String => "[]const u8".to_string(),
             Type::Bool => "bool".to_string(), Type::PID => "PID".to_string(),
+            Type::ErrorUnion(inner) => format!("!{}", self.map_type(inner)),
+            Type::Optional(inner) => format!("?{}", self.map_type(inner)),
             Type::Array(inner) => format!("[]const {}", self.map_type(inner)),
             Type::Ref(ident) => { if ident.sym == "Logger" { ident.sym.clone() } else { format!("*{}", ident.sym) } },
             _ => "void".to_string(),
