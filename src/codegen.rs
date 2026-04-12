@@ -7,6 +7,7 @@ pub struct Codegen {
     indent_level: usize,
     pc_counter: u32,
     current_case_content: String,
+    is_comptime: bool,
 }
 
 impl Codegen {
@@ -17,6 +18,7 @@ impl Codegen {
             indent_level: 0,
             pc_counter: 0,
             current_case_content: String::new(),
+            is_comptime: false,
         }
     }
 
@@ -144,7 +146,14 @@ impl Codegen {
         match stmt {
             Stmt::Var(var) => if let Some(init) = &var.init {
                 let expr_code = self.generate_expr(init);
-                if let Pattern::Ident(ref ident) = var.pat { self.write_to_case(&format!("ctx.{} = {};", ident.sym, expr_code)); }
+                if let Pattern::Ident(ref ident) = var.pat {
+                    if self.is_comptime {
+                        let kind_str = match var.kind { VarDeclKind::Const => "const", VarDeclKind::Let => "var" };
+                        self.write_to_case(&format!("{} {} = {};", kind_str, ident.sym, expr_code));
+                    } else {
+                        self.write_to_case(&format!("ctx.{} = {};", ident.sym, expr_code));
+                    }
+                }
             },
             Stmt::While(w) => {
                 let cond_pc = self.pc_counter + 1; let body_pc = self.pc_counter + 2; let exit_pc = self.pc_counter + 3;
@@ -153,6 +162,20 @@ impl Codegen {
                 self.write_to_case(&format!("if (!({})) {{ ctx.pc = {}; continue; }}", cond_expr, exit_pc));
                 self.write_to_case(&format!("ctx.pc = {}; continue;", body_pc)); self.next_state();
                 self.generate_stmt(&w.body); self.write_to_case(&format!("ctx.pc = {}; continue;", cond_pc)); self.next_state();
+            },
+            Stmt::If(i) => {
+                let test = self.generate_expr(&i.test);
+                self.write_to_case(&format!("if ({}) {{", test));
+                self.indent();
+                self.generate_stmt(&i.cons);
+                self.dedent();
+                if let Some(alt) = &i.alt {
+                    self.write_to_case("} else {");
+                    self.indent();
+                    self.generate_stmt(alt);
+                    self.dedent();
+                }
+                self.write_to_case("}");
             },
             Stmt::Defer(d) => {
                 self.write_to_case("defer {");
@@ -166,6 +189,15 @@ impl Codegen {
                 self.indent();
                 self.generate_stmt(d);
                 self.dedent();
+                self.write_to_case("}");
+            },
+            Stmt::ComptimeBlock(b) => {
+                self.write_to_case("comptime {");
+                self.is_comptime = true;
+                self.indent();
+                for s in &b.body { self.generate_stmt(s); }
+                self.dedent();
+                self.is_comptime = false;
                 self.write_to_case("}");
             },
             Stmt::Block(b) => for s in &b.body { self.generate_stmt(s); },
@@ -192,7 +224,7 @@ impl Codegen {
         match expr {
             Expr::Lit(Lit::Int(v)) => v.to_string(),
             Expr::Lit(Lit::Str(s)) => s.clone(),
-            Expr::Ident(i) => if i.sym == "true" || i.sym == "false" || i.sym == "null" { i.sym.clone() } else { format!("ctx.{}", i.sym) },
+            Expr::Ident(i) => if i.sym == "true" || i.sym == "false" || i.sym == "null" || i.sym.starts_with('@') || self.is_comptime { i.sym.clone() } else { format!("ctx.{}", i.sym) },
             Expr::Bin(bin) => {
                 let left = self.generate_expr(&bin.left); let right = self.generate_expr(&bin.right);
                 let op = match bin.op { BinaryOp::Add => "+", BinaryOp::Sub => "-", BinaryOp::Mul => "*", BinaryOp::Div => "/", BinaryOp::Lt => "<", _ => "todo" };

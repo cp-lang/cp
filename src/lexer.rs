@@ -96,6 +96,8 @@ pub enum Token {
     GreaterEq,
     #[token("?")]
     Question, // Error bubbling
+    #[token("!")]
+    Bang,
     #[token("..")]
     DotDot,   // Slices
     #[token("=>")]
@@ -122,6 +124,8 @@ pub enum Token {
     Semicolon,
     #[token(".")]
     Dot,
+    #[token("@")]
+    At,
     #[token("&")]
     Ampersand,
     #[token("|")]

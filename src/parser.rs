@@ -38,6 +38,7 @@ impl<'a> Parser<'a> {
     }
 
     fn peek(&self) -> Option<&Token> { self.current_token.as_ref().map(|(t, _)| t) }
+    fn peek_next(&self) -> Option<&Token> { self.next_token.as_ref().map(|(t, _)| t) }
     fn peek_span(&self) -> Span { self.current_token.as_ref().map(|(_, s)| *s).unwrap_or(Span { start: 0, end: 0 }) }
 
     fn expect(&mut self, expected: Token) -> ParseResult<Span> {
@@ -154,6 +155,7 @@ impl<'a> Parser<'a> {
             Some(Token::Return) => Ok(Stmt::Return(self.parse_return_stmt()?)),
             Some(Token::LBrace) => Ok(Stmt::Block(self.parse_block_stmt()?)),
             Some(Token::While) => Ok(Stmt::While(self.parse_while_stmt()?)),
+            Some(Token::If) => Ok(Stmt::If(self.parse_if_stmt()?)),
             Some(Token::Defer) => {
                 self.bump()?;
                 let stmt = self.parse_stmt()?;
@@ -163,6 +165,11 @@ impl<'a> Parser<'a> {
                 self.bump()?;
                 let stmt = self.parse_stmt()?;
                 Ok(Stmt::ErrDefer(Box::new(stmt)))
+            },
+            Some(Token::Bang) if self.peek_next() == Some(&Token::LBrace) => {
+                self.bump()?; // consume !
+                let block = self.parse_block_stmt()?;
+                Ok(Stmt::ComptimeBlock(block))
             },
             Some(Token::ZigEscape) => {
                 let start = self.bump()?.1.start;
@@ -184,6 +191,21 @@ impl<'a> Parser<'a> {
                 Ok(Stmt::Expr(expr))
             },
         }
+    }
+
+    fn parse_if_stmt(&mut self) -> ParseResult<IfStmt> {
+        let start = self.expect(Token::If)?.start;
+        self.expect(Token::LParen)?;
+        let test = self.parse_expr()?;
+        self.expect(Token::RParen)?;
+        let cons = Box::new(self.parse_stmt()?);
+        let mut alt = None;
+        if self.peek() == Some(&Token::Else) {
+            self.bump()?;
+            alt = Some(Box::new(self.parse_stmt()?));
+        }
+        let end = self.peek_span().end; // Simplified span
+        Ok(IfStmt { span: Span { start, end }, test, cons, alt })
     }
 
     fn parse_while_stmt(&mut self) -> ParseResult<WhileStmt> {
@@ -251,15 +273,24 @@ impl<'a> Parser<'a> {
         let mut left = self.parse_primary_expr()?;
         loop {
             match self.peek() {
-                Some(Token::LParen) => {
-                    self.bump()?;
+                Some(Token::LParen) | Some(Token::Bang) => {
+                    let mut is_comptime = false;
+                    if self.peek() == Some(&Token::Bang) {
+                        if self.peek_next() == Some(&Token::LParen) {
+                            self.bump()?; // consume !
+                            is_comptime = true;
+                        } else {
+                            break;
+                        }
+                    }
+                    self.expect(Token::LParen)?;
                     let mut args = Vec::new();
                     while self.peek() != Some(&Token::RParen) {
                         args.push(self.parse_expr()?);
                         if self.peek() == Some(&Token::Comma) { self.bump()?; }
                     }
                     let end = self.expect(Token::RParen)?.end;
-                    left = Expr::Call(CallExpr { span: Span { start: left_span(&left).start, end }, callee: Box::new(left), args });
+                    left = Expr::Call(CallExpr { span: Span { start: left_span(&left).start, end }, callee: Box::new(left), args, is_comptime });
                 },
                 Some(Token::Dot) => {
                     self.bump()?;
@@ -327,6 +358,10 @@ impl<'a> Parser<'a> {
                     Ok(Expr::Arrow(Box::new(ArrowExpr { span: Span { start: span.start, end: self.peek_span().end }, params: vec![Pattern::Ident(Ident { span, sym })], body: Box::new(body) })))
                 } else { Ok(Expr::Ident(Ident { span, sym })) }
             },
+            Token::At => {
+                let ident = self.parse_ident()?;
+                Ok(Expr::Ident(Ident { span: Span { start: span.start, end: ident.span.end }, sym: format!("@{}", ident.sym) }))
+            },
             Token::LParen => {
                 // Could be (a, b) => ... or (expr)
                 // Simplified: for now only (expr)
@@ -346,7 +381,7 @@ impl<'a> Parser<'a> {
                         if self.peek() == Some(&Token::Comma) { self.bump()?; }
                     }
                     let end = self.expect(Token::RParen)?.end;
-                    Ok(Expr::New(CallExpr { span: Span { start: span.start, end }, callee: Box::new(Expr::Ident(ident)), args }))
+                    Ok(Expr::New(CallExpr { span: Span { start: span.start, end }, callee: Box::new(Expr::Ident(ident)), args, is_comptime: false }))
                 } else { Err(ParseError::UnexpectedToken(Token::New, span)) }
             },
             Token::Spawn => {
@@ -403,10 +438,15 @@ impl<'a> Parser<'a> {
     fn parse_params(&mut self) -> ParseResult<Vec<Param>> {
         let mut params = Vec::new();
         while self.peek() != Some(&Token::RParen) {
+            let mut is_comptime = false;
+            if self.peek() == Some(&Token::Bang) {
+                self.bump()?;
+                is_comptime = true;
+            }
             let ident = self.parse_ident()?;
             self.expect(Token::Colon)?;
             let ty = self.parse_type()?;
-            params.push(Param { span: ident.span, ident, ty });
+            params.push(Param { span: ident.span, ident, ty, is_comptime });
             if self.peek() == Some(&Token::Comma) { self.bump()?; }
         }
         Ok(params)

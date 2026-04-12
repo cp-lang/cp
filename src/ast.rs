@@ -65,6 +65,7 @@ pub enum Stmt {
     Spawn(SpawnExpr),
     Defer(Box<Stmt>),
     ErrDefer(Box<Stmt>),
+    ComptimeBlock(BlockStmt),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -196,6 +197,7 @@ pub struct CallExpr {
     pub span: Span,
     pub callee: Box<Expr>,
     pub args: Vec<Expr>,
+    pub is_comptime: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -258,6 +260,7 @@ pub struct Param {
     pub span: Span,
     pub ident: Ident,
     pub ty: Type,
+    pub is_comptime: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

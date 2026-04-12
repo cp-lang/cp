@@ -126,7 +126,17 @@ impl Analyzer {
                 if test_ty != Type::Bool { return Err(SemaError::TypeMismatch(Type::Bool, test_ty, w.span)); }
                 self.analyze_stmt(&w.body)
             },
+            Stmt::If(i) => {
+                let test_ty = self.infer_type(&i.test)?;
+                if test_ty != Type::Bool { return Err(SemaError::TypeMismatch(Type::Bool, test_ty, i.span)); }
+                self.analyze_stmt(&i.cons)?;
+                if let Some(alt) = &i.alt {
+                    self.analyze_stmt(alt)?;
+                }
+                Ok(())
+            },
             Stmt::Defer(d) | Stmt::ErrDefer(d) => self.analyze_stmt(d),
+            Stmt::ComptimeBlock(block) => self.analyze_block(block),
             _ => Ok(()),
         }
     }
@@ -180,6 +190,7 @@ impl Analyzer {
             Expr::Ident(ident) => {
                 if ident.sym == "true" || ident.sym == "false" { return Ok(Type::Bool); }
                 if ident.sym == "null" { return Ok(Type::Optional(Box::new(Type::Unknown))); }
+                if ident.sym.starts_with('@') { return Ok(Type::Fn(vec![], Box::new(Type::Unknown))); }
                 match self.resolve(&ident.sym) {
                     Some(SymbolKind::Var { ty, .. }) => Ok(ty.clone()),
                     Some(SymbolKind::Func { params, ret }) => Ok(Type::Fn(params.clone(), Box::new(ret.clone().unwrap_or(Type::I32)))),
