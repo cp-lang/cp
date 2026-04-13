@@ -28,6 +28,10 @@ pub enum Token {
     From,
     #[token("as")]
     As,
+    #[token("async")]
+    Async,
+    #[token("await")]
+    Await,
     #[token("fn")]
     Fn,
     #[token("class")]
@@ -52,6 +56,8 @@ pub enum Token {
     Defer,
     #[token("errdefer")]
     ErrDefer,
+    #[token("void")]
+    Void,
 
     // --- Types (RFC-001 4.1) ---
     #[token("i32")]
@@ -185,7 +191,7 @@ mod tests {
         let mut lexer = Lexer::new(input);
         
         assert_eq!(lexer.next().unwrap().0, Token::Let);
-        assert_eq!(lexer.next().unwrap().0, Token::Ident);
+        assert_eq!(lexer.next().unwrap().0, Token::Ident("x".to_string()));
         assert_eq!(lexer.next().unwrap().0, Token::Colon);
         assert_eq!(lexer.next().unwrap().0, Token::I32);
         assert_eq!(lexer.next().unwrap().0, Token::Assign);
@@ -196,7 +202,7 @@ mod tests {
     #[test]
     fn test_rfc_features() {
         let input = "spawn aiWorker(); match result { Ok(v) => reply(v), Err(_) => ? }";
-        let mut lexer = Lexer::new(input);
+        let lexer = Lexer::new(input);
         
         // Simplified check
         let tokens: Vec<Token> = lexer.map(|(t, _)| t).collect();

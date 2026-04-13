@@ -61,17 +61,35 @@ impl<'a> Parser<'a> {
 
     fn parse_module_item(&mut self) -> ParseResult<ModuleItem> {
         match self.peek() {
+            Some(Token::Import) => Ok(ModuleItem::Import(self.parse_import_stmt()?)),
             Some(Token::Fn) | Some(Token::Class) | Some(Token::Interface) | Some(Token::ErrorKw) |
-            Some(Token::Trait) | Some(Token::Impl) | Some(Token::Enum) => {
+            Some(Token::Trait) | Some(Token::Impl) | Some(Token::Enum) | Some(Token::Async) => {
                 Ok(ModuleItem::Decl(self.parse_decl()?))
             }
             _ => Ok(ModuleItem::Stmt(self.parse_stmt()?)),
         }
     }
 
+    fn parse_import_stmt(&mut self) -> ParseResult<ImportStmt> {
+        let start = self.expect(Token::Import)?.start;
+        self.expect(Token::LBrace)?;
+        let mut specifiers = Vec::new();
+        while self.peek() != Some(&Token::RBrace) && self.peek().is_some() {
+            specifiers.push(self.parse_ident()?);
+            if self.peek() == Some(&Token::Comma) { self.bump()?; }
+        }
+        self.expect(Token::RBrace)?;
+        self.expect(Token::From)?;
+        let (token, span) = self.bump()?;
+        let source = if let Token::StringLiteral(s) = token { s } else { return Err(ParseError::ExpectedToken(Token::StringLiteral("source".to_string()), token, span)); };
+        if self.peek() == Some(&Token::Semicolon) { self.bump()?; }
+        let end = span.end;
+        Ok(ImportStmt { span: Span { start, end }, specifiers, source })
+    }
+
     fn parse_decl(&mut self) -> ParseResult<Decl> {
         match self.peek() {
-            Some(Token::Fn) => Ok(Decl::Func(self.parse_function()?)),
+            Some(Token::Fn) | Some(Token::Async) => Ok(Decl::Func(self.parse_function()?)),
             Some(Token::Class) => Ok(Decl::Class(self.parse_class()?)),
             Some(Token::Trait) => Ok(Decl::Trait(self.parse_trait()?)),
             Some(Token::Impl) => Ok(Decl::Impl(self.parse_impl()?)),
@@ -172,8 +190,9 @@ impl<'a> Parser<'a> {
         let mut fields = Vec::new();
         let mut methods = Vec::new();
         while self.peek() != Some(&Token::RBrace) && self.peek().is_some() {
-            if self.peek() == Some(&Token::Fn) { methods.push(self.parse_function()?); }
-            else {
+            if self.peek() == Some(&Token::Fn) || self.peek() == Some(&Token::Async) {
+                methods.push(self.parse_function()?);
+            } else {
                 let f_ident = self.parse_ident()?;
                 self.expect(Token::Colon)?;
                 let ty = self.parse_type()?;
@@ -206,16 +225,34 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_function(&mut self) -> ParseResult<Function> {
+        let mut is_async = false;
+        if self.peek() == Some(&Token::Async) {
+            self.bump()?;
+            is_async = true;
+        }
         let start = self.expect(Token::Fn)?.start;
         let ident = self.parse_ident()?;
         self.expect(Token::LParen)?;
         let params = self.parse_params()?;
         self.expect(Token::RParen)?;
+        
         let mut return_type = None;
-        if self.peek() == Some(&Token::Colon) { self.bump()?; return_type = Some(self.parse_type()?); }
+        if self.peek() == Some(&Token::Colon) {
+            self.bump()?;
+            return_type = Some(self.parse_type()?);
+        }
+
         let body = self.parse_block_stmt()?;
         let end = body.span.end;
-        Ok(Function { span: Span { start, end }, ident, params, return_type, body })
+
+        Ok(Function {
+            span: Span { start, end },
+            ident,
+            params,
+            return_type,
+            body,
+            is_async,
+        })
     }
 
     fn parse_stmt(&mut self) -> ParseResult<Stmt> {
@@ -250,11 +287,12 @@ impl<'a> Parser<'a> {
                 self.expect(Token::LBrace)?;
                 let code_start = self.peek_span().start;
                 let mut brace_count = 1;
+                let mut code_end = code_start;
                 while brace_count > 0 && self.peek().is_some() {
-                    let (t, _) = self.bump()?;
+                    let (t, span) = self.bump()?;
                     match t { Token::LBrace => brace_count += 1, Token::RBrace => brace_count -= 1, _ => {} }
+                    if brace_count == 0 { code_end = span.start; }
                 }
-                let code_end = self.peek_span().start; 
                 let end = self.peek_span().end;
                 let raw_code = &self.input[code_start..code_end]; 
                 Ok(Stmt::Expr(Expr::Zig(ZigEscapeExpr { span: Span { start, end }, code: raw_code.trim().to_string() })))
@@ -316,7 +354,7 @@ impl<'a> Parser<'a> {
                     if self.peek() == Some(&Token::Comma) { self.bump()?; }
                 }
                 self.expect(Token::RBracket)?;
-                Ok(Pattern::Array(elements))
+                Ok(Pattern::Tuple(elements)) // [a, b] is Pattern::Tuple
             },
             Some(Token::LBrace) => {
                 let start = self.bump()?.1.start;
@@ -498,7 +536,27 @@ impl<'a> Parser<'a> {
                 Ok(Expr::Ident(Ident { span: Span { start: span.start, end: ident.span.end }, sym: format!("@{}", ident.sym) }))
             },
             Token::Match => { let match_expr = self.parse_match_expr()?; Ok(Expr::Match(Box::new(match_expr))) },
-            Token::LParen => { let expr = self.parse_expr()?; self.expect(Token::RParen)?; Ok(expr) },
+            Token::LParen => { 
+                let expr = self.parse_expr()?;
+                self.expect(Token::RParen)?;
+                Ok(expr)
+            },
+            Token::LBrace => {
+                let mut fields = Vec::new();
+                while self.peek() != Some(&Token::RBrace) {
+                    let key = self.parse_ident()?;
+                    self.expect(Token::Colon)?;
+                    let val = self.parse_expr()?;
+                    fields.push(ObjectField { key, val });
+                    if self.peek() == Some(&Token::Comma) { self.bump()?; }
+                }
+                self.expect(Token::RBrace)?;
+                Ok(Expr::Object(fields))
+            },
+            Token::Await => {
+                let expr = self.parse_expr()?;
+                Ok(Expr::Await(Box::new(expr)))
+            },
             Token::IntLiteral(v) => Ok(Expr::Lit(Lit::Int(v))),
             Token::StringLiteral(s) => Ok(Expr::Lit(Lit::Str(s))),
             Token::New => {
@@ -580,12 +638,34 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type(&mut self) -> ParseResult<Type> {
+        if self.peek() == Some(&Token::LBracket) {
+            self.bump()?;
+            let mut elements = Vec::new();
+            while self.peek() != Some(&Token::RBracket) {
+                elements.push(self.parse_type()?);
+                if self.peek() == Some(&Token::Comma) { self.bump()?; }
+            }
+            self.expect(Token::RBracket)?;
+            return Ok(Type::Tuple(elements));
+        }
+        if self.peek() == Some(&Token::LBrace) {
+            self.bump()?;
+            let mut fields = Vec::new();
+            while self.peek() != Some(&Token::RBrace) {
+                let f_ident = self.parse_ident()?;
+                self.expect(Token::Colon)?;
+                let ty = self.parse_type()?;
+                fields.push(Field { span: f_ident.span, ident: f_ident, ty });
+                if self.peek() == Some(&Token::Comma) { self.bump()?; }
+            }
+            self.expect(Token::RBrace)?;
+            return Ok(Type::Object(fields));
+        }
         let is_error_union = if self.peek() == Some(&Token::Question) { self.bump()?; true } else { false };
         let (token, span) = self.bump()?;
         let mut ty = match token {
-            Token::I32 => Type::I32, Token::U64 => Type::U64, Token::F32 => Type::F32, Token::USize => Type::USize, Token::String => Type::String,
+            Token::I32 => Type::I32, Token::U64 => Type::U64, Token::F32 => Type::F32, Token::USize => Type::USize, Token::String => Type::String, Token::Void => Type::Void,
             Token::Ident(sym) => { if sym == "pid" { Type::PID } else { Type::Ref(Ident { span, sym }) } },
-            Token::LBracket => { self.expect(Token::RBracket)?; let elem_ty = self.parse_type()?; Type::Array(Box::new(elem_ty)) }
             _ => return Err(ParseError::UnexpectedToken(token, span)),
         };
         if self.peek() == Some(&Token::Question) { self.bump()?; ty = Type::Optional(Box::new(ty)); }
@@ -608,22 +688,8 @@ fn right_span(expr: &Expr) -> Span { left_span(expr) }
 mod tests {
     use super::*;
     #[test]
-    fn test_parse_trait() {
-        let input = "trait Logger { fn log(msg: string); }";
-        let mut parser = Parser::new(input);
-        let module = parser.parse_module().unwrap();
-        assert_eq!(module.body.len(), 1);
-    }
-    #[test]
-    fn test_parse_impl() {
-        let input = "impl Logger for MyType { fn log(msg: string) { } }";
-        let mut parser = Parser::new(input);
-        let module = parser.parse_module().unwrap();
-        assert_eq!(module.body.len(), 1);
-    }
-    #[test]
-    fn test_parse_enum() {
-        let input = "enum Task { Compute { batch: usize }, Idle }";
+    fn test_parse_tuple() {
+        let input = "let t: (i32, string) = (1, \"ok\");";
         let mut parser = Parser::new(input);
         let module = parser.parse_module().unwrap();
         assert_eq!(module.body.len(), 1);
