@@ -28,7 +28,7 @@ pub enum Decl {
     Trait(TraitDecl),
     Impl(ImplDecl),
     Enum(EnumDecl),
-    Interface(Interface), 
+    Interface(Interface),
     ErrorSet(ErrorSetDecl),
 }
 
@@ -58,7 +58,7 @@ pub struct EnumDecl {
 pub struct EnumVariant {
     pub span: Span,
     pub ident: Ident,
-    pub fields: Option<Vec<Field>>, 
+    pub fields: Option<Vec<Field>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -69,25 +69,6 @@ pub struct ErrorSetDecl {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Function {
-    pub span: Span,
-    pub ident: Ident,
-    pub params: Vec<Param>,
-    pub return_type: Option<Type>,
-    pub body: BlockStmt,
-    pub is_async: bool, // Added for async fn
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Class {
-    pub span: Span,
-    pub ident: Ident,
-    pub implements: Vec<Ident>,
-    pub fields: Vec<Field>,
-    pub methods: Vec<Function>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Interface {
     pub span: Span,
     pub ident: Ident,
@@ -95,8 +76,26 @@ pub struct Interface {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Class {
+    pub span: Span,
+    pub ident: Ident,
+    pub fields: Vec<Field>,
+    pub methods: Vec<Function>,
+    pub implements: Vec<Ident>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Function {
+    pub span: Span,
+    pub ident: Ident,
+    pub params: Vec<Param>,
+    pub return_type: Option<Type>,
+    pub body: BlockStmt,
+    pub is_async: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Stmt {
-    Block(BlockStmt),
     Expr(Expr),
     Var(VarDecl),
     Return(ReturnStmt),
@@ -107,6 +106,7 @@ pub enum Stmt {
     Defer(Box<Stmt>),
     ErrDefer(Box<Stmt>),
     ComptimeBlock(BlockStmt),
+    Block(BlockStmt),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -192,11 +192,19 @@ pub enum Expr {
     Zig(ZigEscapeExpr),
     Question(Box<Expr>),
     Array(Vec<Expr>),
-    Object(Vec<ObjectField>), // Used for {k: v} (Anonymous Structs)
+    Object(Vec<ObjectField>), 
     Arrow(Box<ArrowExpr>),
     EnumInit(EnumInitExpr),
     Template(TemplateLit),
     Await(Box<Expr>), 
+    Builtin(BuiltinCall),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BuiltinCall {
+    pub span: Span,
+    pub name: String,
+    pub args: Vec<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -250,15 +258,15 @@ pub enum Lit {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TemplateLit {
     pub span: Span,
-    pub parts: Vec<String>,
-    pub exprs: Vec<Expr>,
+    pub quasis: Vec<String>,
+    pub expressions: Vec<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BinExpr {
     pub span: Span,
     pub op: BinaryOp,
-    pub left: Box<Expr>, 
+    pub left: Box<Expr>,
     pub right: Box<Expr>,
 }
 
@@ -270,7 +278,7 @@ pub enum BinaryOp {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CallExpr {
     pub span: Span,
-    pub callee: Box<Expr>, 
+    pub callee: Box<Expr>,
     pub args: Vec<Expr>,
     pub is_comptime: bool,
 }
@@ -319,7 +327,7 @@ pub struct ZigEscapeExpr {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Type {
-    I32, U64, F32, F64, USize, Bool, String, Void,
+    I32, U64, F32, F64, USize, Bool, String, Void, Any,
     Array(Box<Type>),
     Map(Box<Type>, Box<Type>),
     Tuple(Vec<Type>), // [T1, T2]

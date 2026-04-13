@@ -56,7 +56,12 @@ impl Analyzer {
                 self.define(f.ident.sym.clone(), SymbolKind::Func { params, ret: f.return_type.clone(), is_async: f.is_async }, f.ident.span)?;
                 let old_async = self.current_fn_is_async;
                 self.current_fn_is_async = f.is_async;
-                self.analyze_block(&f.body)?;
+                self.enter_scope();
+                for p in &f.params {
+                    self.define(p.ident.sym.clone(), SymbolKind::Var { ty: p.ty.clone(), kind: VarDeclKind::Let }, p.ident.span)?;
+                }
+                for stmt in &f.body.body { self.analyze_stmt(stmt)?; }
+                self.exit_scope();
                 self.current_fn_is_async = old_async;
             },
             Decl::Class(c) => {
@@ -128,6 +133,7 @@ impl Analyzer {
                 self.types_eq(r1, r2)
             },
             (Type::Void, Type::Void) => true,
+            (Type::Any, _) | (_, Type::Any) => true,
             _ => a == b,
         }
     }
@@ -235,6 +241,20 @@ impl Analyzer {
             Expr::Await(inner) => {
                 if !self.current_fn_is_async { return Err(SemaError::AwaitOutsideAsync(inner_span(inner))); }
                 self.infer_type(inner) 
+            },
+            Expr::Builtin(call) => {
+                // Builtins could have specific return types. 
+                // For now, @map returns an array, @print returns void.
+                if call.name == "@map" {
+                    if call.args.len() > 0 {
+                        let inner = self.infer_type(&call.args[0])?;
+                        Ok(inner) // Simplified: in reality we'd need to extract mapping result type
+                    } else { Ok(Type::Unknown) }
+                } else if call.name == "@print" {
+                    Ok(Type::Void)
+                } else {
+                    Ok(Type::Unknown)
+                }
             },
             _ => Ok(Type::I32),
         }

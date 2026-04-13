@@ -22,6 +22,8 @@ pub enum Token {
     Spawn,
     #[token("receive")]
     Receive,
+    #[token("export")]
+    Export,
     #[token("import")]
     Import,
     #[token("from")]
@@ -58,6 +60,8 @@ pub enum Token {
     ErrDefer,
     #[token("void")]
     Void,
+    #[token("any")]
+    Any,
 
     // --- Types (RFC-001 4.1) ---
     #[token("i32")]
@@ -153,6 +157,7 @@ pub enum Token {
     Error,
 }
 
+#[derive(Clone)]
 pub struct Lexer<'a> {
     inner: logos::Lexer<'a, Token>,
 }
