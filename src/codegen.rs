@@ -89,6 +89,8 @@ impl Codegen {
         self.writeln("float: f32,");
         self.writeln("tensor: SharedTensor,");
         self.writeln("string: []const u8,");
+        self.writeln("ping: PID,");
+        self.writeln("pong: PID,");
         self.dedent();
         self.writeln("};");
         self.writeln("");
