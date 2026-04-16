@@ -4,7 +4,7 @@ const builtin = @import("builtin");
 const manifest = @import("project/manifest.zig");
 const semver = @import("project/semver.zig");
 
-const REGISTRY_PATH = "/data/cps/cap_registry";
+const REGISTRY_PATH = "/data/cps/mock_registry";
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
