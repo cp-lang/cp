@@ -1,2 +1,50 @@
-target/
-**/*.rs.bk
+# 编译产物
+cpc/target/
+cpc/**/*.rs.bk
+cap/**/*.zig.bk
+cap/*.cp.zig
+cap/.con-build/ 
+#zig-out/
+.zig-cache/
+bin/
+build/
+dist/
+obj/
+_ref/
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.lib
+*.a
+*.exe
+*.out
+*.app
+
+# 备份文件
+**/*.bk
+**/*.backup
+**/*.orig
+*~
+
+# CP 语言特定
+cap/.con-build/
+cap/**/*.cp.zig
+cap/**/*.beam      # Erlang 字节码（如果有）
+.cap/
+cap_modules/
+
+# cap Node.js/Bun
+node_modules/
+bun.lockb          # 如果使用 bun
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 环境变量
+.env
+.env.local
