@@ -1,0 +1,6 @@
+zig-out/
+.zig-cache/
+**/*.zig.bk
+*.cp.zig
+.con-build/ 
+con_modules/

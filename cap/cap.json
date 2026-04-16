@@ -1,0 +1,11 @@
+{
+  "name": "cp-demo",
+  "version": "0.1.0",
+  "scripts": {
+    "sniff": "./zig-out/bin/con sniff",
+    "test": "./zig-out/bin/con hello.cp"
+  },
+  "dependencies": {
+    "std-math": "^0.1.0"
+  }
+}
