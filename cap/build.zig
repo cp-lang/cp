@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
+    const native_target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
     // Custom cache and output directories
@@ -18,12 +18,12 @@ pub fn build(b: *std.Build) void {
         .name = "cap",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
-            .target = target,
+            .target = native_target,
             .optimize = optimize,
         }),
     });
 
-    // Install directly into bin/ (the prefix is already set via install_path)
+    // Install directly into bin/
     const install_artifact = b.addInstallArtifact(exe, .{
         .dest_dir = .{ .override = .{ .custom = "" } }
     });
@@ -39,10 +39,39 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
+    // Cross-compilation targets
+    const TargetConfig = struct {
+        name: []const u8,
+        query: std.Target.Query,
+    };
+
+    const cross_targets = &[_]TargetConfig{
+        .{ .name = "cap-macos-aarch64", .query = .{ .cpu_arch = .aarch64, .os_tag = .macos } },
+        .{ .name = "cap-macos-x86_64", .query = .{ .cpu_arch = .x86_64, .os_tag = .macos } },
+        .{ .name = "cap-linux-x86_64", .query = .{ .cpu_arch = .x86_64, .os_tag = .linux } },
+        .{ .name = "cap-windows-x86_64", .query = .{ .cpu_arch = .x86_64, .os_tag = .windows } },
+    };
+
+    for (cross_targets) |t| {
+        const cross_target = b.resolveTargetQuery(t.query);
+        const cross_exe = b.addExecutable(.{
+            .name = "cap",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/main.zig"),
+                .target = cross_target,
+                .optimize = optimize,
+            }),
+        });
+        const cross_install = b.addInstallArtifact(cross_exe, .{
+            .dest_dir = .{ .override = .{ .custom = t.name } }
+        });
+        b.getInstallStep().dependOn(&cross_install.step);
+    }
+
     const unit_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("test/main_test.zig"),
-            .target = target,
+            .target = native_target,
             .optimize = optimize,
         }),
     });

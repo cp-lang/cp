@@ -203,7 +203,11 @@ fn fetchAndLink(allocator: std.mem.Allocator, name: []const u8, version: semver.
     std.fs.cwd().deleteTree(link_path) catch {};
 
     std.debug.print("Linking {s}@{s} -> cap_modules/{s}\n", .{name, v_str, name});
-    try std.posix.symlink(cache_pkg_path, link_path);
+    if (@import("builtin").os.tag == .windows) {
+        try copyDir(cache_pkg_path, link_path);
+    } else {
+        try std.posix.symlink(cache_pkg_path, link_path);
+    }
 }
 
 fn copyDir(src: []const u8, dest: []const u8) !void {
@@ -256,9 +260,69 @@ fn sniffHardware() !void {
 
 fn buildPackage(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len == 0) return;
-    const build_lib_args = &[_][]const u8{ "zig", "build-lib", args[0], "-dynamic", "-O", "ReleaseFast" };
-    var child = std.process.Child.init(build_lib_args, allocator);
-    _ = try child.spawnAndWait();
+    const filename = args[0];
+    
+    std.debug.print("Building: {s}...\n", .{filename});
+
+    std.fs.cwd().makePath(".cap/zig") catch {};
+    std.fs.cwd().makePath("bin") catch {};
+
+    const base_name = if (std.mem.lastIndexOfScalar(u8, filename, '/')) |idx| filename[idx + 1 .. filename.len - 3] else filename[0 .. filename.len - 3];
+    const zig_file = try std.fmt.allocPrint(allocator, ".cap/zig/{s}.zig", .{base_name});
+    defer allocator.free(zig_file);
+
+    const compile_args = &[_][]const u8{ "/data/cps/cpc/target/release/cpc", "compile", filename, "--output", zig_file, "-I", "/data/cps/cap/cap_modules", "-I", "/data/cps/lib" };
+    var compile_child = std.process.Child.init(compile_args, allocator);
+    const compile_res = try compile_child.spawnAndWait();
+    if (compile_res.Exited != 0) return error.CompileFailed;
+
+    std.fs.cwd().makePath(".cap/zig-cache") catch {};
+
+    const Target = struct { name: []const u8, triple: []const u8, ext: []const u8 };
+    const targets = &[_]Target{
+        .{ .name = "Native", .triple = "native", .ext = "" },
+        .{ .name = "cap-macos-aarch64", .triple = "aarch64-macos", .ext = "" },
+        .{ .name = "cap-macos-x86_64", .triple = "x86_64-macos", .ext = "" },
+        .{ .name = "cap-linux-x86_64", .triple = "x86_64-linux", .ext = "" },
+        .{ .name = "cap-windows-x86_64", .triple = "x86_64-windows", .ext = ".exe" },
+    };
+
+    for (targets) |t| {
+        var out_dir: []const u8 = "bin";
+        if (!std.mem.eql(u8, t.name, "Native")) {
+            const dir_path = try std.fmt.allocPrint(allocator, "bin/{s}", .{t.name});
+            std.fs.cwd().makePath(dir_path) catch {};
+            out_dir = dir_path;
+        }
+
+        const emit_bin_arg = try std.fmt.allocPrint(allocator, "-femit-bin={s}/{s}{s}", .{out_dir, base_name, t.ext});
+        defer allocator.free(emit_bin_arg);
+
+        std.debug.print("Compiling for {s}...\n", .{t.name});
+
+        var build_args: [10][]const u8 = undefined;
+        var argc: usize = 0;
+        build_args[argc] = "zig"; argc += 1;
+        build_args[argc] = "build-exe"; argc += 1;
+        build_args[argc] = zig_file; argc += 1;
+        build_args[argc] = emit_bin_arg; argc += 1;
+        build_args[argc] = "--cache-dir"; argc += 1;
+        build_args[argc] = ".cap/zig-cache"; argc += 1;
+        build_args[argc] = "-O"; argc += 1;
+        build_args[argc] = "ReleaseFast"; argc += 1;
+        
+        if (!std.mem.eql(u8, t.name, "Native")) {
+            build_args[argc] = "-target"; argc += 1;
+            build_args[argc] = t.triple; argc += 1;
+        }
+
+        var build_child = std.process.Child.init(build_args[0..argc], allocator);
+        const build_res = try build_child.spawnAndWait();
+        if (build_res.Exited != 0) {
+            std.debug.print("Failed to build for {s}\n", .{t.name});
+        }
+    }
+    std.debug.print("Build completed! Artifacts in bin/\n", .{});
 }
 
 fn handleInit(allocator: std.mem.Allocator) !void {
