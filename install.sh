@@ -17,13 +17,13 @@ cargo build --release
 # 3. Build CAP (Orchestrator)
 echo "⚡ Building cap (Zig)..."
 cd "$ROOT_DIR/cap"
-zig build-exe src/main.zig -O ReleaseFast -femit-bin=zig-out/bin/cap
+zig build -Doptimize=ReleaseFast
 
 # 4. Final Setup
 echo ""
 echo "✅ Installation complete!"
 echo ""
 echo "Please add the following to your PATH:"
-echo "export PATH=\"\$PATH:$ROOT_DIR/cap/zig-out/bin:$ROOT_DIR/cpc/target/release\""
+echo "export PATH=\"\$PATH:$ROOT_DIR/cap/bin:$ROOT_DIR/cpc/target/release\""
 echo ""
 echo "Run 'cap init' in a new folder to start your first CP-BEAM project!"

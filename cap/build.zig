@@ -4,8 +4,18 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Custom cache and output directories
+    b.cache_root = std.Build.Cache.Directory{
+        .path = ".cap/zig-cache",
+        .handle = std.fs.cwd().openDir(".cap/zig-cache", .{}) catch blk: {
+            std.fs.cwd().makePath(".cap/zig-cache") catch {};
+            break :blk std.fs.cwd().openDir(".cap/zig-cache", .{}) catch unreachable;
+        },
+    };
+    b.install_path = "bin";
+
     const exe = b.addExecutable(.{
-        .name = "con",
+        .name = "cap",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
@@ -13,7 +23,11 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    b.installArtifact(exe);
+    // Install directly into bin/ (the prefix is already set via install_path)
+    const install_artifact = b.addInstallArtifact(exe, .{
+        .dest_dir = .{ .override = .{ .custom = "" } }
+    });
+    b.getInstallStep().dependOn(&install_artifact.step);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
