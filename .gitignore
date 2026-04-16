@@ -1,4 +1,8 @@
-# 编译产物
+# Design
+GEMINI.md
+cp_ref.md
+
+# Build
 cpc/target/
 cpc/**/*.rs.bk
 cap/**/*.zig.bk
@@ -22,13 +26,13 @@ _ref/
 *.out
 *.app
 
-# 备份文件
+# Backup
 **/*.bk
 **/*.backup
 **/*.orig
 *~
 
-# CP 语言特定
+# CP Lang
 cap/.con-build/
 cap/**/*.cp.zig
 cap/**/*.beam      # Erlang 字节码（如果有）
@@ -45,6 +49,6 @@ bun.lockb          # 如果使用 bun
 *.swp
 *.swo
 
-# 环境变量
+# evn
 .env
 .env.local
