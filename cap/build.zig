@@ -40,6 +40,8 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     // Cross-compilation targets
+    const release_step = b.step("release", "Build cap CLI for all target platforms");
+
     const TargetConfig = struct {
         name: []const u8,
         query: std.Target.Query,
@@ -59,13 +61,13 @@ pub fn build(b: *std.Build) void {
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/main.zig"),
                 .target = cross_target,
-                .optimize = optimize,
+                .optimize = .ReleaseFast,
             }),
         });
         const cross_install = b.addInstallArtifact(cross_exe, .{
             .dest_dir = .{ .override = .{ .custom = t.name } }
         });
-        b.getInstallStep().dependOn(&cross_install.step);
+        release_step.dependOn(&cross_install.step);
     }
 
     const unit_tests = b.addTest(.{

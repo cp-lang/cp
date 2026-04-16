@@ -262,6 +262,11 @@ fn buildPackage(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len == 0) return;
     const filename = args[0];
     
+    var is_release = false;
+    if (args.len > 1 and std.mem.eql(u8, args[1], "release")) {
+        is_release = true;
+    }
+
     std.debug.print("Building: {s}...\n", .{filename});
 
     std.fs.cwd().makePath(".cap/zig") catch {};
@@ -279,6 +284,10 @@ fn buildPackage(allocator: std.mem.Allocator, args: []const []const u8) !void {
     std.fs.cwd().makePath(".cap/zig-cache") catch {};
 
     const Target = struct { name: []const u8, triple: []const u8, ext: []const u8 };
+    
+    var target_count: usize = 1;
+    if (is_release) target_count = 5;
+
     const targets = &[_]Target{
         .{ .name = "Native", .triple = "native", .ext = "" },
         .{ .name = "cap-macos-aarch64", .triple = "aarch64-macos", .ext = "" },
@@ -287,12 +296,14 @@ fn buildPackage(allocator: std.mem.Allocator, args: []const []const u8) !void {
         .{ .name = "cap-windows-x86_64", .triple = "x86_64-windows", .ext = ".exe" },
     };
 
-    for (targets) |t| {
+    for (targets[0..target_count]) |t| {
+        var dir_path: ?[]const u8 = null;
+        defer if (dir_path) |d| allocator.free(d);
         var out_dir: []const u8 = "bin";
         if (!std.mem.eql(u8, t.name, "Native")) {
-            const dir_path = try std.fmt.allocPrint(allocator, "bin/{s}", .{t.name});
-            std.fs.cwd().makePath(dir_path) catch {};
-            out_dir = dir_path;
+            dir_path = try std.fmt.allocPrint(allocator, "bin/{s}", .{t.name});
+            std.fs.cwd().makePath(dir_path.?) catch {};
+            out_dir = dir_path.?;
         }
 
         const emit_bin_arg = try std.fmt.allocPrint(allocator, "-femit-bin={s}/{s}{s}", .{out_dir, base_name, t.ext});
@@ -308,8 +319,11 @@ fn buildPackage(allocator: std.mem.Allocator, args: []const []const u8) !void {
         build_args[argc] = emit_bin_arg; argc += 1;
         build_args[argc] = "--cache-dir"; argc += 1;
         build_args[argc] = ".cap/zig-cache"; argc += 1;
-        build_args[argc] = "-O"; argc += 1;
-        build_args[argc] = "ReleaseFast"; argc += 1;
+        
+        if (is_release) {
+            build_args[argc] = "-O"; argc += 1;
+            build_args[argc] = "ReleaseFast"; argc += 1;
+        }
         
         if (!std.mem.eql(u8, t.name, "Native")) {
             build_args[argc] = "-target"; argc += 1;
