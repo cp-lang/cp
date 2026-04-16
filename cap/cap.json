@@ -1,9 +1,9 @@
 {
-  "name": "cp-demo",
+  "name": "cap",
   "version": "0.1.0",
   "scripts": {
-    "sniff": "./zig-out/bin/con sniff",
-    "test": "./zig-out/bin/con hello.cp"
+    "sniff": "./bin/cap sniff",
+    "test": "./bin/cap test/hello.cp"
   },
   "dependencies": {
     "std-math": "^0.1.0"
