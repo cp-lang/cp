@@ -1,7 +1,7 @@
 {
-  "name": "cp-beam-lang",
-  "displayName": "CP-BEAM Language Support",
-  "description": "Official VS Code extension for the CP-BEAM language. Provides syntax highlighting and LSP-powered intelligence.",
+  "name": "cp-lang",
+  "displayName": "CP Language Support",
+  "description": "Official VS Code extension for the CP language. Provides syntax highlighting and LSP-powered intelligence.",
   "version": "0.1.0",
   "publisher": "cp-lang",
   "engines": {

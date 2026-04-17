@@ -26,7 +26,7 @@ impl LanguageServer for Backend {
 
     async fn initialized(&self, _: InitializedParams) {
         self.client
-            .log_message(MessageType::INFO, "CP-BEAM LSP Server initialized!")
+            .log_message(MessageType::INFO, "CP LSP Server initialized!")
             .await;
     }
 

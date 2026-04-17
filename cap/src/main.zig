@@ -38,7 +38,7 @@ pub fn main() !void {
 fn usage() void {
     std.debug.print(
         \\CAP (Concurrent Agent Packager) v0.1.0
-        \\The unified build tool and runner for CP-BEAM.
+        \\The unified build tool and runner for CP.
         \\
         \\Usage:
         \\  cap <file.cp>           Run a CP file directly
@@ -453,7 +453,7 @@ fn handleInit(allocator: std.mem.Allocator) !void {
     } else |_| {
         var file = try std.fs.cwd().createFile(cp_path, .{});
         defer file.close();
-        try file.writeAll("import { print } from \"cap:io\";\n\nfn main(): ?void {\n    @print(\"Hello from CP-BEAM! 🚀\");\n}\n");
+        try file.writeAll("import { print } from \"cap:io\";\n\nfn main(): ?void {\n    @print(\"Hello from CP! 🚀\");\n}\n");
         std.debug.print("Created {s}\n", .{cp_path});
     }
 

@@ -18,7 +18,7 @@ function activate(context) {
             fileEvents: vscode_1.workspace.createFileSystemWatcher('**/.clientrc')
         }
     };
-    client = new node_1.LanguageClient('cpLanguageServer', 'CP-BEAM Language Server', serverOptions, clientOptions);
+    client = new node_1.LanguageClient('cpLanguageServer', 'CP Language Server', serverOptions, clientOptions);
     client.start();
 }
 exports.activate = activate;

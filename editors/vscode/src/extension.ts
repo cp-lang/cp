@@ -29,7 +29,7 @@ export function activate(context: ExtensionContext) {
 
   client = new LanguageClient(
     'cpLanguageServer',
-    'CP-BEAM Language Server',
+    'CP Language Server',
     serverOptions,
     clientOptions
   );
