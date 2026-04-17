@@ -3,6 +3,7 @@ const std = @import("std");
 pub const Manifest = struct {
     name: []const u8,
     version: []const u8,
+    main: ?[]const u8,
     scripts: std.StringHashMap([]const u8),
     dependencies: std.StringHashMap([]const u8),
 
@@ -14,6 +15,12 @@ pub const Manifest = struct {
         
         const name = try allocator.dupe(u8, root.get("name").?.string);
         const version = try allocator.dupe(u8, root.get("version").?.string);
+        var main: ?[]const u8 = null;
+        if (root.get("main")) |m| {
+            if (m == .string) {
+                main = try allocator.dupe(u8, m.string);
+            }
+        }
         
         var scripts = std.StringHashMap([]const u8).init(allocator);
         if (root.get("scripts")) |s| {
@@ -34,6 +41,7 @@ pub const Manifest = struct {
         return Manifest{
             .name = name,
             .version = version,
+            .main = main,
             .scripts = scripts,
             .dependencies = deps,
         };
@@ -50,6 +58,9 @@ pub const Manifest = struct {
         var root = std.json.Value{ .object = std.json.ObjectMap.init(aa) };
         try root.object.put("name", std.json.Value{ .string = self.name });
         try root.object.put("version", std.json.Value{ .string = self.version });
+        if (self.main) |m| {
+            try root.object.put("main", std.json.Value{ .string = m });
+        }
 
         var scripts_map = std.json.ObjectMap.init(aa);
         var script_iter = self.scripts.iterator();

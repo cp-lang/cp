@@ -25,14 +25,54 @@ pub fn main() !void {
     else if (std.mem.eql(u8, cmd, "sniff")) { try sniffHardware(); }
     else if (std.mem.eql(u8, cmd, "help")) { usage(); }
     else {
-        if (std.mem.endsWith(u8, cmd, ".cp")) { try runFile(allocator, cmd); }
-        else {
-            const is_script = try handleRun(allocator, args[1..]);
-            if (!is_script) {
-                std.debug.print("Unknown command or script: {s}\n", .{cmd}); usage();
+        if (std.mem.endsWith(u8, cmd, ".cp")) {
+            try runFile(allocator, cmd);
+        } else {
+            const stat = std.fs.cwd().statFile(cmd) catch null;
+            if (stat != null and stat.?.kind == .directory) {
+                if (try resolveDirectoryMain(allocator, cmd)) |main_file| {
+                    defer allocator.free(main_file);
+                    try runFile(allocator, main_file);
+                } else {
+                    std.debug.print("Error: Could not resolve entry point in directory '{s}'\n", .{cmd});
+                }
+            } else {
+                const is_script = try handleRun(allocator, args[1..]);
+                if (!is_script) {
+                    std.debug.print("Unknown command, script, or directory: {s}\n", .{cmd}); usage();
+                }
             }
         }
     }
+}
+
+fn resolveDirectoryMain(allocator: std.mem.Allocator, dir_path: []const u8) !?[]const u8 {
+    var dir = std.fs.cwd().openDir(dir_path, .{}) catch return null;
+    defer dir.close();
+
+    // 1. Check main.cp
+    if (dir.statFile("main.cp")) |_| {
+        return try std.fmt.allocPrint(allocator, "{s}/main.cp", .{dir_path});
+    } else |_| {}
+
+    // 2. Check index.cp
+    if (dir.statFile("index.cp")) |_| {
+        return try std.fmt.allocPrint(allocator, "{s}/index.cp", .{dir_path});
+    } else |_| {}
+
+    // 3. Check cap.json main
+    if (dir.openFile("cap.json", .{})) |file| {
+        defer file.close();
+        const content = try file.readToEndAlloc(allocator, 1024 * 1024);
+        defer allocator.free(content);
+        var mf = manifest.Manifest.parse(allocator, content) catch return null;
+        defer mf.deinit(allocator);
+        if (mf.main) |main_file| {
+            return try std.fmt.allocPrint(allocator, "{s}/{s}", .{dir_path, main_file});
+        }
+    } else |_| {}
+
+    return null;
 }
 
 fn usage() void {
@@ -85,13 +125,29 @@ fn handleRun(allocator: std.mem.Allocator, args: []const []const u8) !bool {
 
 fn handleAdd(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len == 0) return;
-    const pkg_arg = args[0];
+    var pkg_arg: []const u8 = undefined;
+    var is_global = false;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "-g") or std.mem.eql(u8, arg, "--global")) {
+            is_global = true;
+        } else {
+            pkg_arg = arg;
+        }
+    }
+    
     var pkg_name = pkg_arg;
     var version_range = try allocator.dupe(u8, "^0.1.0"); // Default
 
     if (std.mem.indexOfScalar(u8, pkg_arg, '@')) |idx| {
         pkg_name = pkg_arg[0..idx];
         version_range = try allocator.dupe(u8, pkg_arg[idx+1..]);
+    }
+
+    if (is_global) {
+        const best_ver = try resolveBestVersion(allocator, pkg_name, try semver.VersionRange.parse(version_range));
+        try fetchAndLinkGlobal(allocator, pkg_name, best_ver);
+        std.debug.print("Globally installed: {s}@{s}\n", .{pkg_name, version_range});
+        return;
     }
 
     const file = std.fs.cwd().openFile("cap.json", .{ .mode = .read_write }) catch {
@@ -101,7 +157,7 @@ fn handleAdd(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer file.close();
     const content = try file.readToEndAlloc(allocator, 1024 * 1024);
     defer allocator.free(content);
-    var mf = try manifest.Manifest.parse(allocator, content);
+    var mf = manifest.Manifest.parse(allocator, content) catch return;
     defer mf.deinit(allocator);
 
     try mf.addDependency(allocator, pkg_name, version_range);
@@ -154,6 +210,28 @@ fn resolveBestVersion(_: std.mem.Allocator, name: []const u8, range: semver.Vers
 
     if (best) |v| return v;
     return error.PackageNotFound;
+}
+
+fn fetchAndLinkGlobal(allocator: std.mem.Allocator, name: []const u8, version: semver.Version) !void {
+    const v_str = try version.format(allocator);
+    defer allocator.free(v_str);
+
+    const home = process.getEnvVarOwned(allocator, "HOME") catch try allocator.dupe(u8, "/root");
+    defer allocator.free(home);
+    const global_root = try std.fs.path.join(allocator, &[_][]const u8{ home, ".cap", "global", "cap_modules" });
+    defer allocator.free(global_root);
+    try std.fs.cwd().makePath(global_root);
+    
+    const global_pkg_path = try std.fs.path.join(allocator, &[_][]const u8{ global_root, name });
+    defer allocator.free(global_pkg_path);
+    
+    std.fs.cwd().deleteFile(global_pkg_path) catch {};
+    std.fs.cwd().deleteTree(global_pkg_path) catch {};
+
+    const reg_pkg_path = try std.fs.path.join(allocator, &[_][]const u8{ REGISTRY_PATH, name, v_str });
+    defer allocator.free(reg_pkg_path);
+        
+    try copyDir(reg_pkg_path, global_pkg_path);
 }
 
 fn fetchAndLink(allocator: std.mem.Allocator, name: []const u8, version: semver.Version) !void {
@@ -439,22 +517,20 @@ fn handleInit(allocator: std.mem.Allocator) !void {
         
         var file = try std.fs.cwd().createFile("cap.json", .{});
         defer file.close();
-        const json_content = try std.fmt.allocPrint(allocator, "{{\n  \"name\": \"{s}\",\n  \"version\": \"0.1.0\",\n  \"main\": \"src/{s}.cp\",\n  \"scripts\": {{\n    \"start\": \"cap src/{s}.cp\"\n  }},\n  \"dependencies\": {{}}\n}}\n", .{basename, basename, basename});
+        const json_content = try std.fmt.allocPrint(allocator, "{{\n  \"name\": \"{s}\",\n  \"version\": \"0.1.0\",\n  \"main\": \"src/main.cp\",\n  \"scripts\": {{\n    \"start\": \"cap src/main.cp\"\n  }},\n  \"dependencies\": {{}}\n}}\n", .{basename});
         defer allocator.free(json_content);
         try file.writeAll(json_content);
         std.debug.print("Created cap.json\n", .{});
     }
 
-    // Create src/{basename}.cp if it doesn't exist
-    const cp_path = try std.fmt.allocPrint(allocator, "src/{s}.cp", .{std.fs.path.basename(try std.fs.cwd().realpathAlloc(allocator, "."))});
-    defer allocator.free(cp_path);
-    if (std.fs.cwd().statFile(cp_path)) |_| {
-        std.debug.print("{s} already exists.\n", .{cp_path});
+    // Create src/main.cp if it doesn't exist
+    if (std.fs.cwd().statFile("src/main.cp")) |_| {
+        std.debug.print("src/main.cp already exists.\n", .{});
     } else |_| {
-        var file = try std.fs.cwd().createFile(cp_path, .{});
+        var file = try std.fs.cwd().createFile("src/main.cp", .{});
         defer file.close();
         try file.writeAll("import { print } from \"cap:io\";\n\nfn main(): ?void {\n    @print(\"Hello from CP! 🚀\");\n}\n");
-        std.debug.print("Created {s}\n", .{cp_path});
+        std.debug.print("Created src/main.cp\n", .{});
     }
 
     // Create .gitignore if it doesn't exist
