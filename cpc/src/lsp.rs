@@ -48,10 +48,39 @@ impl LanguageServer for Backend {
 
     async fn completion(&self, _: CompletionParams) -> Result<Option<CompletionResponse>> {
         Ok(Some(CompletionResponse::Array(vec![
+            // Declarations
             CompletionItem::new_simple("fn".to_string(), "Function definition".to_string()),
-            CompletionItem::new_simple("actor".to_string(), "Actor definition".to_string()),
+            CompletionItem::new_simple("let".to_string(), "Variable declaration".to_string()),
+            CompletionItem::new_simple("const".to_string(), "Constant declaration".to_string()),
+            CompletionItem::new_simple("class".to_string(), "Class definition".to_string()),
             CompletionItem::new_simple("trait".to_string(), "Trait definition".to_string()),
-            CompletionItem::new_simple("@matmul".to_string(), "Matrix Multiplication".to_string()),
+            CompletionItem::new_simple("impl".to_string(), "Trait implementation".to_string()),
+            CompletionItem::new_simple("enum".to_string(), "Enum definition".to_string()),
+            CompletionItem::new_simple("error".to_string(), "Error set definition".to_string()),
+            
+            // Control Flow
+            CompletionItem::new_simple("match".to_string(), "Pattern matching".to_string()),
+            CompletionItem::new_simple("defer".to_string(), "Defer execution".to_string()),
+            CompletionItem::new_simple("errdefer".to_string(), "Defer execution on error".to_string()),
+            CompletionItem::new_simple("await".to_string(), "Await asynchronous operation".to_string()),
+            CompletionItem::new_simple("async".to_string(), "Asynchronous function".to_string()),
+            
+            // Built-ins (RFC-002)
+            CompletionItem::new_simple("@spawn".to_string(), "Spawn a new actor: @spawn(target, ...args)".to_string()),
+            CompletionItem::new_simple("@receive".to_string(), "Receive message from mailbox: @receive()".to_string()),
+            CompletionItem::new_simple("@reply".to_string(), "Send message to an actor: @reply(pid, msg)".to_string()),
+            CompletionItem::new_simple("@print".to_string(), "Print to console: @print(fmt, ...args)".to_string()),
+            CompletionItem::new_simple("@self".to_string(), "Get current actor PID: @self()".to_string()),
+            CompletionItem::new_simple("@shared_tensor_init".to_string(), "Initialize shared off-heap tensor: @shared_tensor_init(shape)".to_string()),
+            CompletionItem::new_simple("@matmul".to_string(), "High performance matrix multiplication: @matmul(a, b, out)".to_string()),
+            CompletionItem::new_simple("@alloc".to_string(), "Allocate memory in agent arena".to_string()),
+            CompletionItem::new_simple("@free".to_string(), "Free agent arena memory".to_string()),
+            CompletionItem::new_simple("@release".to_string(), "Release reference counted shared memory: @release(obj)".to_string()),
+            
+            // Cap Standard Library (Imports)
+            CompletionItem::new_simple("cap:io".to_string(), "Standard IO library (print)".to_string()),
+            CompletionItem::new_simple("cap:mem".to_string(), "Standard Memory library (Arena, SharedTensor)".to_string()),
+            CompletionItem::new_simple("cap:actor".to_string(), "Standard Actor library (spawn, receive, reply, join)".to_string()),
         ])))
     }
 }
