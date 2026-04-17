@@ -91,6 +91,7 @@ impl Codegen {
         self.writeln("string: []const u8,");
         self.writeln("ping: PID,");
         self.writeln("pong: PID,");
+        self.writeln("net_data: struct { handle: i32, data: []const u8 },");
         self.dedent();
         self.writeln("};");
         self.writeln("");
@@ -245,9 +246,15 @@ impl Codegen {
         self.dedent();
         self.writeln("};\n");
         for m in &i.methods {
+            self.locals.clear();
+            self.locals.insert("self".to_string());
             self.is_state_machine = false; self.current_fn_is_async = false;
             let mut p_str = format!("self: *{}", i.target_name.sym);
-            for p in &m.params { p_str.push_str(", "); p_str.push_str(&format!("{}: {}", p.ident.sym, self.map_type(&p.ty))); }
+            for p in &m.params {
+                self.locals.insert(p.ident.sym.clone());
+                p_str.push_str(", "); p_str.push_str(&format!("{}: {}", p.ident.sym, self.map_type(&p.ty)));
+            }
+            self.extract_locals_simple(&m.body);
             self.writeln(&format!("fn {}_{}({}) {} {{", i.target_name.sym, m.ident.sym, p_str, m.return_type.as_ref().map(|t| self.map_type(t)).unwrap_or("void".to_string())));
             self.indent(); 
             self.current_case_content.clear();
@@ -298,9 +305,15 @@ impl Codegen {
         self.writeln(&format!("const self = try allocator.create({}); return self;", class.ident.sym));
         self.dedent(); self.writeln("}");
         for m in &class.methods {
+            self.locals.clear();
+            self.locals.insert("self".to_string());
             self.is_state_machine = false; self.current_fn_is_async = m.is_async;
             let mut p_str = format!("self: *{}", class.ident.sym);
-            for p in &m.params { p_str.push_str(", "); p_str.push_str(&format!("{}: {}", p.ident.sym, self.map_type(&p.ty))); }
+            for p in &m.params {
+                self.locals.insert(p.ident.sym.clone());
+                p_str.push_str(", "); p_str.push_str(&format!("{}: {}", p.ident.sym, self.map_type(&p.ty)));
+            }
+            self.extract_locals_simple(&m.body);
             self.writeln(&format!("pub fn {}({}) {} {{", m.ident.sym, p_str, m.return_type.as_ref().map(|t| self.map_type(t)).unwrap_or("void".to_string())));
             self.indent(); self.writeln("_ = self;");
             for p in &m.params { self.writeln(&format!("_ = {};", p.ident.sym)); }
@@ -321,10 +334,13 @@ impl Codegen {
             self.is_state_machine = false;
             let zig_ret_ty = if ret_ty.starts_with('!') { ret_ty.clone() } else { format!("!{}", ret_ty) };
             let mut params_str = String::new();
+            self.locals.clear();
             for (i, p) in func.params.iter().enumerate() {
+                self.locals.insert(p.ident.sym.clone());
                 params_str.push_str(&format!("{}: {}", p.ident.sym, self.map_type(&p.ty)));
                 if i < func.params.len() - 1 { params_str.push_str(", "); }
             }
+            self.extract_locals_simple(&func.body);
             writeln!(self.output, "\npub fn {}({}) {} {{", zig_name, params_str, zig_ret_ty).unwrap();
             self.indent();
             self.current_case_content.clear();
@@ -389,8 +405,13 @@ impl Codegen {
                 self.tmp_counter += 1;
                 match &var.pat {
                     Pattern::Ident(ident) => {
-                        let lhs = if self.is_state_machine { format!("ctx.{}", ident.sym) } else { ident.sym.clone() };
-                        self.write_to_case(&format!("{} = {};", lhs, if is_try { format!("try {}", final_expr) } else { final_expr.clone() })); 
+                        if self.is_state_machine {
+                            let lhs = format!("ctx.{}", ident.sym);
+                            self.write_to_case(&format!("{} = {};", lhs, if is_try { format!("try {}", final_expr) } else { final_expr.clone() }));
+                        } else {
+                            let kind = match var.kind { VarDeclKind::Const => "const", VarDeclKind::Let => "var" };
+                            self.write_to_case(&format!("{} {} = {};", kind, ident.sym, if is_try { format!("try {}", final_expr) } else { final_expr.clone() }));
+                        }
                     },
                     Pattern::Tuple(elements) => {
                         let mut struct_fields = String::new();
@@ -535,6 +556,15 @@ impl Codegen {
                 self.current_zig_fn_name = old_fn;
                 lambda_name
             },
+            Expr::New(call) => {
+                let callee = match &*call.callee { Expr::Ident(id) => id.sym.clone(), _ => "Unknown".to_string() };
+                format!("try {}.init(std.heap.page_allocator)", callee)
+            },
+            Expr::Member(member) => {
+                let obj = self.generate_expr(&member.obj);
+                let prop = match member.prop.sym.as_str() { "length" => "len", _ => &member.prop.sym };
+                format!("{}.{}", obj, prop)
+            },
             Expr::Builtin(call) => match call.name.as_str() {
                 "@print" => {
                     let fmt = self.generate_expr(&call.args[0]);
@@ -566,6 +596,51 @@ impl Codegen {
                     self.write_to_case(&format!("if (mailboxes[ctx._self].pop()) |m| {{ ctx.received_msg = m; ctx.pc = {}; continue; }} else {{ schedule(@ptrCast(&{}), @ptrCast(ctx)); return; }}", next_pc, self.current_zig_fn_name));
                     self.next_state(); "ctx.received_msg.?".to_string()
                 },
+                "@fs_read_file" => {
+                    let path = self.generate_expr(&call.args[0]);
+                    if self.is_state_machine { format!("(blk: {{ const f = try std.fs.cwd().openFile({}, .{{}}); defer f.close(); break :blk try f.readToEndAlloc(ctx.arena.?.allocator(), 10 * 1024 * 1024); }})", path) } else { format!("(blk: {{ const f = try std.fs.cwd().openFile({}, .{{}}); defer f.close(); break :blk try f.readToEndAlloc(std.heap.page_allocator, 10 * 1024 * 1024); }})", path) }
+                },
+                "@fs_write_file" => {
+                    let path = self.generate_expr(&call.args[0]);
+                    let data = self.generate_expr(&call.args[1]);
+                    format!("(blk: {{ try std.fs.cwd().writeFile(.{{ .sub_path = {}, .data = {} }}); break :blk {{}}; }})", path, data)
+                },
+                "@fs_exists" => {
+                    let path = self.generate_expr(&call.args[0]);
+                    format!("(blk: {{ std.fs.cwd().access({}, .{{}}) catch |e| if (e == error.FileNotFound) break :blk false else break :blk true; break :blk true; }})", path)
+                },
+                "@fs_mkdir" => {
+                    let path = self.generate_expr(&call.args[0]);
+                    format!("(blk: {{ try std.fs.cwd().makePath({}); break :blk {{}}; }})", path)
+                },
+                "@fs_remove" => {
+                    let path = self.generate_expr(&call.args[0]);
+                    format!("(blk: {{ try std.fs.cwd().deleteTree({}); break :blk {{}}; }})", path)
+                },
+                "@fs_copy" => {
+                    let src = self.generate_expr(&call.args[0]);
+                    let dest = self.generate_expr(&call.args[1]);
+                    format!("(blk: {{ _ = {}; _ = {}; break :blk {{}}; }})", src, dest)
+                },
+                "@net_connect" => {
+                    let host = self.generate_expr(&call.args[0]);
+                    let port = self.generate_expr(&call.args[1]);
+                    format!("(blk: {{ const address = try std.net.Address.parseIp4({}, @as(u16, @intCast({}))); const stream = try std.net.tcpConnectToAddress(address); break :blk stream.handle; }})", host, port)
+                },
+                "@net_send" => {
+                    let handle = self.generate_expr(&call.args[0]);
+                    let data = self.generate_expr(&call.args[1]);
+                    format!("(blk: {{ const stream = std.net.Stream {{ .handle = {} }}; try stream.writeAll({}); break :blk {{}}; }})", handle, data)
+                },
+                "@net_close" => {
+                    let handle = self.generate_expr(&call.args[0]);
+                    format!("std.posix.close({})", handle)
+                },
+                "@net_listen" => {
+                    let port = self.generate_expr(&call.args[0]);
+                    let callback = self.generate_expr(&call.args[1]);
+                    format!("(blk: {{ _ = {}; _ = {}; break :blk {{}}; }})", port, callback)
+                },
                 _ => "0".to_string(),
             },
             _ => "0".to_string(),
@@ -591,14 +666,27 @@ impl Codegen {
         } }
     }
 
+    fn extract_locals_simple(&mut self, block: &BlockStmt) {
+        for stmt in &block.body { match stmt {
+            Stmt::Var(var) => if let Pattern::Ident(ident) = &var.pat {
+                self.locals.insert(ident.sym.clone());
+            },
+            Stmt::Block(b) => self.extract_locals_simple(b),
+            _ => {}
+        } }
+    }
+
     fn extract_local_vars(&mut self, block: &BlockStmt) {
         for stmt in &block.body { match stmt {
             Stmt::Var(var) => if let Pattern::Ident(ident) = &var.pat {
                 let mut ty_str = if let Some(t) = &var.ty { self.map_type(t) } else { "i32".to_string() };
                 if ident.sym == "st" { ty_str = "SharedTensor".to_string(); }
                 if ident.sym == "msg" { ty_str = "Message".to_string(); }
-                if ident.sym == "pid" || ident.sym == "worker" { ty_str = "PID".to_string(); }
+                if ident.sym == "pid" || ident.sym == "handle" || ident.sym == "worker" { ty_str = "PID".to_string(); }
                 if ident.sym == "shape" { ty_str = "[2]usize".to_string(); }
+                if ident.sym.contains("dir") || ident.sym.contains("file") || ident.sym.contains("path") || ident.sym.contains("content") || ident.sym == "s" || ident.sym == "fmt" {
+                    ty_str = "[]const u8".to_string();
+                }
                 self.writeln(&format!("{}: {},", ident.sym, ty_str));
             },
             Stmt::Block(b) => self.extract_local_vars(b),
@@ -608,7 +696,7 @@ impl Codegen {
 
     fn map_type(&self, ty: &Type) -> String {
         match ty {
-            Type::I32 => "i32".to_string(), Type::PID => "PID".to_string(), Type::Void => "void".to_string(), Type::Any => "Message".to_string(), 
+            Type::I32 => "i32".to_string(), Type::Bool => "bool".to_string(), Type::String => "[]const u8".to_string(), Type::PID => "PID".to_string(), Type::Void => "void".to_string(), Type::Any => "Message".to_string(), 
             Type::Array(inner) => format!("[]const {}", self.map_type(inner)),
             Type::Ref(ident) => {
                 if ident.sym == "SharedTensor" { "SharedTensor".to_string() } 

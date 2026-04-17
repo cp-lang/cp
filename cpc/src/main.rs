@@ -47,6 +47,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             
             resolve_imports(&input, &include, &mut all_items, &mut processed_sources)?;
 
+
+
             let module = Module { span: cpc::Span { start: 0, end: 0 }, body: all_items };
 
             let mut analyzer = Analyzer::new();

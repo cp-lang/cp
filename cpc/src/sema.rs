@@ -336,15 +336,20 @@ impl Analyzer {
             Expr::Builtin(call) => {
                 // Builtins could have specific return types. 
                 // For now, @map returns an array, @print returns void.
-                if call.name == "@map" {
-                    if call.args.len() > 0 {
-                        let inner = self.infer_type(&call.args[0])?;
-                        Ok(inner) // Simplified: in reality we'd need to extract mapping result type
-                    } else { Ok(Type::Unknown) }
-                } else if call.name == "@print" {
-                    Ok(Type::Void)
-                } else {
-                    Ok(Type::Unknown)
+                match call.name.as_str() {
+                    "@print" | "@fs_write_file" | "@fs_mkdir" | "@fs_remove" | "@fs_copy" | "@net_send" | "@net_close" | "@net_listen" => Ok(Type::Void),
+                    "@fs_read_file" => Ok(Type::String),
+                    "@fs_exists" => Ok(Type::Bool),
+                    "@net_connect" => Ok(Type::I32),
+                    "@self" => Ok(Type::PID),
+                    "@shared_tensor_init" => Ok(Type::Ref(Ident { span: Span { start: 0, end: 0 }, sym: "SharedTensor".to_string() })),
+                    "@map" => {
+                        if call.args.len() > 0 {
+                            let inner = self.infer_type(&call.args[0])?;
+                            Ok(inner)
+                        } else { Ok(Type::Unknown) }
+                    },
+                    _ => Ok(Type::Unknown),
                 }
             },
             _ => Ok(Type::I32),

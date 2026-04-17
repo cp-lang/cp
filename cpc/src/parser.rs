@@ -99,7 +99,7 @@ impl<'a> Parser<'a> {
         self.expect(Token::From)?;
         let (token, span) = self.bump()?;
         let source = if let Token::StringLiteral(s) = token { 
-            s[1..s.len()-1].to_string() 
+            s
         } else { return Err(ParseError::ExpectedToken(Token::StringLiteral("source".to_string()), token, span)); };
         if self.peek() == Some(&Token::Semicolon) { self.bump()?; }
         let end = span.end;
@@ -146,8 +146,12 @@ impl<'a> Parser<'a> {
         let mut params = Vec::new();
         while self.peek() != Some(&Token::RParen) {
             let p_ident = self.parse_ident()?;
-            self.expect(Token::Colon)?;
-            let ty = self.parse_type()?;
+            let ty = if p_ident.sym == "this" && self.peek() != Some(&Token::Colon) {
+                Type::Any
+            } else {
+                self.expect(Token::Colon)?;
+                self.parse_type()?
+            };
             params.push(Param { span: p_ident.span, ident: p_ident, ty, is_comptime: false });
             if self.peek() == Some(&Token::Comma) { self.bump()?; }
         }
@@ -182,7 +186,7 @@ impl<'a> Parser<'a> {
         let is_error_union = if self.peek() == Some(&Token::Question) { self.bump()?; true } else { false };
         let (token, span) = self.bump()?;
         let mut ty = match token {
-            Token::I32 => Type::I32, Token::U64 => Type::U64, Token::F32 => Type::F32, Token::USize => Type::USize, Token::String => Type::String, Token::Void => Type::Void, Token::Any => Type::Any,
+            Token::I32 => Type::I32, Token::U64 => Type::U64, Token::F32 => Type::F32, Token::USize => Type::USize, Token::String => Type::String, Token::Void => Type::Void, Token::Any => Type::Any, Token::Bool => Type::Bool,
             Token::Ident(sym) => { if sym == "pid" { Type::PID } else { Type::Ref(Ident { span, sym }) } },
             _ => return Err(ParseError::UnexpectedToken(token, span)),
         };

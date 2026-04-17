@@ -86,7 +86,10 @@ pub enum Token {
     IntLiteral(i64),
     #[regex(r"[0-9]*\.[0-9]+", |lex| lex.slice().parse::<f64>().ok())]
     FloatLiteral(f64),
-    #[regex(r#""([^"\\]|\\.)*""#, |lex| lex.slice().to_string())]
+    #[regex(r#""([^"\\]|\\.)*""#, |lex| {
+        let s = lex.slice();
+        s[1..s.len()-1].to_string()
+    })]
     StringLiteral(String),
 
     // --- Operators & Punctuation ---

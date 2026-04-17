@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::collections::HashSet;
 
-pub fn resolve_file_or_dir(base: &Path) -> Option<PathBuf> {
+pub fn resolve_file_or_dir(base: &Path) -> Option<PathBuf> { 
     // 1. Check <base>.d.cp
     let dcp_file = base.with_extension("d.cp");
     if dcp_file.exists() {
@@ -132,6 +132,7 @@ pub fn resolve_imports(
     all_items: &mut Vec<ModuleItem>,
     processed: &mut HashSet<PathBuf>,
 ) -> anyhow::Result<()> {
+    
     let abs_path = fs::canonicalize(path)?;
     if processed.contains(&abs_path) {
         return Ok(());
