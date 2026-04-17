@@ -219,21 +219,34 @@ fn copyDir(src: []const u8, dest: []const u8) !void {
 fn runFile(allocator: std.mem.Allocator, filename: []const u8) !void {
     std.debug.print("Compiling: {s}...\n", .{filename});
 
-    std.fs.cwd().makePath(".cap/zig") catch {};
-    std.fs.cwd().makePath(".cap/obj") catch {};
-    std.fs.cwd().makePath("bin") catch {};
-
-    const base_name = if (std.mem.lastIndexOfScalar(u8, filename, '/')) |idx| filename[idx + 1 .. filename.len - 3] else filename[0 .. filename.len - 3];
-    const zig_file = try std.fmt.allocPrint(allocator, ".cap/zig/{s}.zig", .{base_name});
+    const full_base_name = filename[0 .. filename.len - 3];
+    const zig_file = try std.fmt.allocPrint(allocator, ".cap/zig/{s}.zig", .{full_base_name});
     defer allocator.free(zig_file);
+    
+    if (std.fs.path.dirname(zig_file)) |dirname| {
+        std.fs.cwd().makePath(dirname) catch {};
+    }
 
-    const compile_args = &[_][]const u8{ "/data/cps/cpc/target/release/cpc", "compile", filename, "--output", zig_file, "-I", "/data/cps/cap/cap_modules", "-I", "/data/cps/cap/lib" };
+    const compile_args = &[_][]const u8{ "/data/cps/cpc/target/release/cpc", "compile", filename, "--output", zig_file, "-I", "/data/cps/cap/cap_modules", "-I", "/data/cps/lib" };
     var compile_child = std.process.Child.init(compile_args, allocator);
     const compile_res = try compile_child.spawnAndWait();
     if (compile_res.Exited != 0) return error.CompileFailed;
 
     std.debug.print("Linking: {s}...\n", .{zig_file});
-    const emit_bin_arg = try std.fmt.allocPrint(allocator, "-femit-bin=bin/{s}", .{base_name});
+    
+    var bin_subpath: []const u8 = full_base_name;
+    if (std.mem.startsWith(u8, full_base_name, "src/")) {
+        bin_subpath = full_base_name[4..];
+    }
+    
+    const run_path = try std.fmt.allocPrint(allocator, "bin/{s}", .{bin_subpath});
+    defer allocator.free(run_path);
+    
+    if (std.fs.path.dirname(run_path)) |dirname| {
+        std.fs.cwd().makePath(dirname) catch {};
+    }
+
+    const emit_bin_arg = try std.fmt.allocPrint(allocator, "-femit-bin={s}", .{run_path});
     defer allocator.free(emit_bin_arg);
     std.fs.cwd().makePath(".cap/zig-cache") catch {};
     const build_args = &[_][]const u8{ "zig", "build-exe", zig_file, emit_bin_arg, "--cache-dir", ".cap/zig-cache" };
@@ -241,15 +254,13 @@ fn runFile(allocator: std.mem.Allocator, filename: []const u8) !void {
     const build_res = try build_child.spawnAndWait();
     if (build_res.Exited != 0) return error.BuildFailed;
 
-    const run_path = try std.fmt.allocPrint(allocator, "bin/{s}", .{base_name});
-    defer allocator.free(run_path);
     std.debug.print("Executing: {s}...\n", .{run_path});
     var run_child = std.process.Child.init(&[_][]const u8{run_path}, allocator);
     _ = try run_child.spawnAndWait();
 }
 
 fn sniffHardware() !void {
-    std.debug.print("--- CON Hardware Sniffing ---\n", .{});
+    std.debug.print("--- CAP Hardware Sniffing ---\n", .{});
     std.debug.print("CPU: {s}\n", .{@tagName(builtin.cpu.arch)});
     if (builtin.cpu.arch == .x86_64) {
         const avx2 = std.Target.x86.featureSetHas(builtin.cpu.features, .avx2);
@@ -259,22 +270,79 @@ fn sniffHardware() !void {
 }
 
 fn buildPackage(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    if (args.len == 0) return;
-    const filename = args[0];
-    
+    var targets_to_build: [100][]const u8 = undefined;
+    var targets_len: usize = 0;
+
     var is_release = false;
-    if (args.len > 1 and std.mem.eql(u8, args[1], "release")) {
-        is_release = true;
+    var optimize_mode: []const u8 = "ReleaseSafe";
+    var build_type: []const u8 = "build-exe";
+    var zig_args: [100][]const u8 = undefined;
+    var zig_args_len: usize = 0;
+
+    var has_target = false;
+
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "-r") or std.mem.eql(u8, arg, "--release") or std.mem.eql(u8, arg, "release")) {
+            is_release = true;
+        } else if (std.mem.eql(u8, arg, "-f")) {
+            optimize_mode = "ReleaseFast";
+        } else if (std.mem.eql(u8, arg, "-s")) {
+            optimize_mode = "ReleaseSmall";
+        } else if (std.mem.eql(u8, arg, "--exe")) {
+            build_type = "build-exe";
+        } else if (std.mem.eql(u8, arg, "--obj")) {
+            build_type = "build-obj";
+        } else if (std.mem.eql(u8, arg, "--lib")) {
+            build_type = "build-lib";
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            if (zig_args_len < 100) { zig_args[zig_args_len] = arg; zig_args_len += 1; }
+        } else {
+            has_target = true;
+            if (targets_len < 100) { targets_to_build[targets_len] = arg; targets_len += 1; }
+        }
     }
 
+    if (!has_target) {
+        if (std.fs.cwd().statFile("src")) |_| {
+            if (targets_len < 100) { targets_to_build[targets_len] = "src"; targets_len += 1; }
+        } else |_| {}
+        if (std.fs.cwd().statFile("test")) |_| {
+            if (targets_len < 100) { targets_to_build[targets_len] = "test"; targets_len += 1; }
+        } else |_| {}
+    }
+
+    for (targets_to_build[0..targets_len]) |target_path| {
+        try buildTarget(allocator, target_path, is_release, optimize_mode, build_type, zig_args[0..zig_args_len]);
+    }
+    std.debug.print("Build completed! Artifacts in bin/\n", .{});
+}
+
+fn buildTarget(allocator: std.mem.Allocator, target_path: []const u8, is_release: bool, optimize_mode: []const u8, build_type: []const u8, zig_args: []const []const u8) !void {
+    const stat = std.fs.cwd().statFile(target_path) catch return;
+    if (stat.kind == .directory) {
+        var dir = try std.fs.cwd().openDir(target_path, .{ .iterate = true });
+        defer dir.close();
+        var it = dir.iterate();
+        while (try it.next()) |entry| {
+            const child_path = try std.fs.path.join(allocator, &[_][]const u8{ target_path, entry.name });
+            defer allocator.free(child_path);
+            try buildTarget(allocator, child_path, is_release, optimize_mode, build_type, zig_args);
+        }
+    } else if (std.mem.endsWith(u8, target_path, ".cp")) {
+        try compileSingleFile(allocator, target_path, is_release, optimize_mode, build_type, zig_args);
+    }
+}
+
+fn compileSingleFile(allocator: std.mem.Allocator, filename: []const u8, is_release: bool, optimize_mode: []const u8, build_type: []const u8, zig_args: []const []const u8) !void {
     std.debug.print("Building: {s}...\n", .{filename});
 
-    std.fs.cwd().makePath(".cap/zig") catch {};
-    std.fs.cwd().makePath("bin") catch {};
-
-    const base_name = if (std.mem.lastIndexOfScalar(u8, filename, '/')) |idx| filename[idx + 1 .. filename.len - 3] else filename[0 .. filename.len - 3];
+    const base_name = filename[0 .. filename.len - 3];
     const zig_file = try std.fmt.allocPrint(allocator, ".cap/zig/{s}.zig", .{base_name});
     defer allocator.free(zig_file);
+    
+    if (std.fs.path.dirname(zig_file)) |dirname| {
+        std.fs.cwd().makePath(dirname) catch {};
+    }
 
     const compile_args = &[_][]const u8{ "/data/cps/cpc/target/release/cpc", "compile", filename, "--output", zig_file, "-I", "/data/cps/cap/cap_modules", "-I", "/data/cps/lib" };
     var compile_child = std.process.Child.init(compile_args, allocator);
@@ -284,7 +352,6 @@ fn buildPackage(allocator: std.mem.Allocator, args: []const []const u8) !void {
     std.fs.cwd().makePath(".cap/zig-cache") catch {};
 
     const Target = struct { name: []const u8, triple: []const u8, ext: []const u8 };
-    
     var target_count: usize = 1;
     if (is_release) target_count = 5;
 
@@ -296,47 +363,64 @@ fn buildPackage(allocator: std.mem.Allocator, args: []const []const u8) !void {
         .{ .name = "cap-windows-x86_64", .triple = "x86_64-windows", .ext = ".exe" },
     };
 
+    var bin_subpath: []const u8 = base_name;
+    if (std.mem.startsWith(u8, base_name, "src/")) {
+        bin_subpath = base_name[4..];
+    }
+    
+    const base_ext = if (std.mem.eql(u8, build_type, "build-obj")) ".o" else if (std.mem.eql(u8, build_type, "build-lib")) ".a" else "";
+
     for (targets[0..target_count]) |t| {
         var dir_path: ?[]const u8 = null;
         defer if (dir_path) |d| allocator.free(d);
         var out_dir: []const u8 = "bin";
         if (!std.mem.eql(u8, t.name, "Native")) {
             dir_path = try std.fmt.allocPrint(allocator, "bin/{s}", .{t.name});
-            std.fs.cwd().makePath(dir_path.?) catch {};
             out_dir = dir_path.?;
+            std.fs.cwd().makePath(out_dir) catch {};
         }
 
-        const emit_bin_arg = try std.fmt.allocPrint(allocator, "-femit-bin={s}/{s}{s}", .{out_dir, base_name, t.ext});
-        defer allocator.free(emit_bin_arg);
+        const out_file_path = try std.fmt.allocPrint(allocator, "{s}/{s}{s}{s}", .{out_dir, bin_subpath, base_ext, t.ext});
+        defer allocator.free(out_file_path);
+
+        if (std.fs.path.dirname(out_file_path)) |dirname| {
+            std.fs.cwd().makePath(dirname) catch {};
+        }
+        
+        var emit_flag: []const u8 = "-femit-bin=";
+        if (std.mem.eql(u8, build_type, "build-obj")) emit_flag = "-femit-obj=";
+        
+        const emit_arg = try std.fmt.allocPrint(allocator, "{s}{s}", .{emit_flag, out_file_path});
+        defer allocator.free(emit_arg);
 
         std.debug.print("Compiling for {s}...\n", .{t.name});
 
-        var build_args: [10][]const u8 = undefined;
+        var child_args: [100][]const u8 = undefined;
         var argc: usize = 0;
-        build_args[argc] = "zig"; argc += 1;
-        build_args[argc] = "build-exe"; argc += 1;
-        build_args[argc] = zig_file; argc += 1;
-        build_args[argc] = emit_bin_arg; argc += 1;
-        build_args[argc] = "--cache-dir"; argc += 1;
-        build_args[argc] = ".cap/zig-cache"; argc += 1;
-        
-        if (is_release) {
-            build_args[argc] = "-O"; argc += 1;
-            build_args[argc] = "ReleaseFast"; argc += 1;
-        }
+        child_args[argc] = "zig"; argc += 1;
+        child_args[argc] = build_type; argc += 1;
+        child_args[argc] = zig_file; argc += 1;
+        child_args[argc] = emit_arg; argc += 1;
+        child_args[argc] = "--cache-dir"; argc += 1;
+        child_args[argc] = ".cap/zig-cache"; argc += 1;
+        child_args[argc] = "-O"; argc += 1;
+        child_args[argc] = optimize_mode; argc += 1;
         
         if (!std.mem.eql(u8, t.name, "Native")) {
-            build_args[argc] = "-target"; argc += 1;
-            build_args[argc] = t.triple; argc += 1;
+            child_args[argc] = "-target"; argc += 1;
+            child_args[argc] = t.triple; argc += 1;
+        }
+        
+        for (zig_args) |za| {
+            child_args[argc] = za; argc += 1;
         }
 
-        var build_child = std.process.Child.init(build_args[0..argc], allocator);
+        var build_child = std.process.Child.init(child_args[0..argc], allocator);
         const build_res = try build_child.spawnAndWait();
         if (build_res.Exited != 0) {
             std.debug.print("Failed to build for {s}\n", .{t.name});
         }
     }
-    std.debug.print("Build completed! Artifacts in bin/\n", .{});
 }
 
 fn handleInit(allocator: std.mem.Allocator) !void {
