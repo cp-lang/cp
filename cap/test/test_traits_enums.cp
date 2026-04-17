@@ -1,5 +1,5 @@
 trait Worker {
-    fn work(this, batch: usize): void;
+    fn work(this: any, batch: usize): void;
 }
 
 enum Task {
@@ -12,7 +12,7 @@ class AIWorker {
 }
 
 impl Worker for AIWorker {
-    fn work(this, batch: usize): void {
+    fn work(this: any, batch: usize): void {
         @print("AIWorker {d} computing batch {d}", this.id, batch);
     }
 }

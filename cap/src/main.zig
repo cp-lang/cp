@@ -310,12 +310,22 @@ fn runFile(allocator: std.mem.Allocator, filename: []const u8) !void {
     const compile_res = try compile_child.spawnAndWait();
     if (compile_res.Exited != 0) return error.CompileFailed;
 
-    std.debug.print("Linking: {s}...\n", .{zig_file});
-    
     var bin_subpath: []const u8 = full_base_name;
     if (std.mem.startsWith(u8, full_base_name, "src/")) {
         bin_subpath = full_base_name[4..];
     }
+    // Emit Type Definitions (.d.cp)
+    {
+        const type_out_path = try std.fmt.allocPrint(allocator, "bin/{s}.d.cp", .{bin_subpath});
+        defer allocator.free(type_out_path);
+        const emit_types_args = &[_][]const u8{ "/data/cps/cpc/target/release/cpc", "emit-types", filename, "--output", type_out_path };
+        var emit_types_child = std.process.Child.init(emit_types_args, allocator);
+        _ = try emit_types_child.spawnAndWait();
+    }
+
+    std.debug.print("Linking: {s}...\n", .{zig_file});
+    
+    
     
     const run_path = try std.fmt.allocPrint(allocator, "bin/{s}", .{bin_subpath});
     defer allocator.free(run_path);
@@ -427,6 +437,19 @@ fn compileSingleFile(allocator: std.mem.Allocator, filename: []const u8, is_rele
     const compile_res = try compile_child.spawnAndWait();
     if (compile_res.Exited != 0) return error.CompileFailed;
 
+    var bin_subpath: []const u8 = base_name;
+    if (std.mem.startsWith(u8, base_name, "src/")) {
+        bin_subpath = base_name[4..];
+    }
+    // Emit Type Definitions (.d.cp)
+    {
+        const type_out_path = try std.fmt.allocPrint(allocator, "bin/{s}.d.cp", .{bin_subpath});
+        defer allocator.free(type_out_path);
+        const emit_types_args = &[_][]const u8{ "/data/cps/cpc/target/release/cpc", "emit-types", filename, "--output", type_out_path };
+        var emit_types_child = std.process.Child.init(emit_types_args, allocator);
+        _ = try emit_types_child.spawnAndWait();
+    }
+
     std.fs.cwd().makePath(".cap/zig-cache") catch {};
 
     const Target = struct { name: []const u8, triple: []const u8, ext: []const u8 };
@@ -441,7 +464,7 @@ fn compileSingleFile(allocator: std.mem.Allocator, filename: []const u8, is_rele
         .{ .name = "cap-windows-x86_64", .triple = "x86_64-windows", .ext = ".exe" },
     };
 
-    var bin_subpath: []const u8 = base_name;
+    
     if (std.mem.startsWith(u8, base_name, "src/")) {
         bin_subpath = base_name[4..];
     }
