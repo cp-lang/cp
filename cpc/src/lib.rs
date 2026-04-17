@@ -2,13 +2,14 @@ pub mod lexer;
 pub mod ast;
 pub mod parser;
 pub mod sema;
+pub mod resolver;
 pub mod codegen;
 pub mod dcp;
 pub mod lsp;
 
 pub use lexer::{Token, Lexer};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Span {
     pub start: usize,
     pub end: usize,

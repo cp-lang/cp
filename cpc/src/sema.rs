@@ -15,28 +15,44 @@ pub enum SemaError {
 
 pub type SemaResult<T> = Result<T, SemaError>;
 
+#[derive(Clone)]
 pub enum SymbolKind {
     Var { ty: Type, kind: VarDeclKind },
     Func { params: Vec<Type>, ret: Option<Type>, is_async: bool },
     Class(Class),
+    Trait(TraitDecl),
+    Enum(EnumDecl),
 }
 
 pub struct Analyzer {
     scopes: Vec<HashMap<String, SymbolKind>>,
     classes: HashMap<String, Class>,
     current_fn_is_async: bool,
+    pub symbol_map: HashMap<Span, SymbolKind>,
 }
 
 impl Analyzer {
     pub fn new() -> Self {
-        Self { scopes: vec![HashMap::new()], classes: HashMap::new(), current_fn_is_async: false }
+        Self { scopes: vec![HashMap::new()], classes: HashMap::new(), current_fn_is_async: false, symbol_map: HashMap::new() }
     }
 
     pub fn analyze_module(&mut self, module: &Module) -> SemaResult<()> {
         for item in &module.body {
-            if let ModuleItem::Decl(Decl::Class(c)) = item {
-                self.classes.insert(c.ident.sym.clone(), c.clone());
-                self.define(c.ident.sym.clone(), SymbolKind::Class(c.clone()), c.ident.span)?;
+            match item {
+                ModuleItem::Decl(Decl::Class(c)) => {
+                    self.classes.insert(c.ident.sym.clone(), c.clone());
+                    self.define(c.ident.sym.clone(), SymbolKind::Class(c.clone()), c.ident.span)?;
+                    self.symbol_map.insert(c.ident.span, SymbolKind::Class(c.clone()));
+                }
+                ModuleItem::Decl(Decl::Trait(t)) => {
+                    self.define(t.ident.sym.clone(), SymbolKind::Trait(t.clone()), t.ident.span)?;
+                    self.symbol_map.insert(t.ident.span, SymbolKind::Trait(t.clone()));
+                }
+                ModuleItem::Decl(Decl::Enum(e)) => {
+                    self.define(e.ident.sym.clone(), SymbolKind::Enum(e.clone()), e.ident.span)?;
+                    self.symbol_map.insert(e.ident.span, SymbolKind::Enum(e.clone()));
+                }
+                _ => {}
             }
         }
         for item in &module.body {
@@ -53,12 +69,17 @@ impl Analyzer {
         match decl {
             Decl::Func(f) => {
                 let params = f.params.iter().map(|p| p.ty.clone()).collect();
-                self.define(f.ident.sym.clone(), SymbolKind::Func { params, ret: f.return_type.clone(), is_async: f.is_async }, f.ident.span)?;
+                let kind = SymbolKind::Func { params, ret: f.return_type.clone(), is_async: f.is_async };
+                self.define(f.ident.sym.clone(), kind.clone(), f.ident.span)?;
+                self.symbol_map.insert(f.ident.span, kind);
+
                 let old_async = self.current_fn_is_async;
                 self.current_fn_is_async = f.is_async;
                 self.enter_scope();
                 for p in &f.params {
-                    self.define(p.ident.sym.clone(), SymbolKind::Var { ty: p.ty.clone(), kind: VarDeclKind::Let }, p.ident.span)?;
+                    let p_kind = SymbolKind::Var { ty: p.ty.clone(), kind: VarDeclKind::Let };
+                    self.define(p.ident.sym.clone(), p_kind.clone(), p.ident.span)?;
+                    self.symbol_map.insert(p.ident.span, p_kind);
                 }
                 for stmt in &f.body.body { self.analyze_stmt(stmt)?; }
                 self.exit_scope();
@@ -81,15 +102,85 @@ impl Analyzer {
         match stmt {
             Stmt::Var(var) => {
                 let mut inferred_ty = Type::Unknown;
-                if let Some(init) = &var.init { inferred_ty = self.infer_type(init)?; }
+                if let Some(init) = &var.init { 
+                    inferred_ty = self.infer_type(init)?; 
+                    self.analyze_expr(init)?;
+                }
                 let ty = var.ty.clone().unwrap_or(inferred_ty);
                 self.analyze_pattern(&var.pat, ty, &var.kind)?;
             },
-            Stmt::Expr(expr) => { self.infer_type(expr)?; },
+            Stmt::Expr(expr) => { 
+                self.infer_type(expr)?; 
+                self.analyze_expr(expr)?;
+            },
             Stmt::Block(block) => self.analyze_block(block)?,
-            Stmt::If(i) => { self.infer_type(&i.test)?; self.analyze_stmt(&i.cons)?; if let Some(alt) = &i.alt { self.analyze_stmt(alt)?; } },
-            Stmt::While(w) => { self.infer_type(&w.test)?; self.analyze_stmt(&w.body)?; },
-            Stmt::Return(r) => { if let Some(arg) = &r.arg { self.infer_type(arg)?; } },
+            Stmt::If(i) => { 
+                self.infer_type(&i.test)?; 
+                self.analyze_expr(&i.test)?;
+                self.analyze_stmt(&i.cons)?; 
+                if let Some(alt) = &i.alt { self.analyze_stmt(alt)?; } 
+            },
+            Stmt::While(w) => { 
+                self.infer_type(&w.test)?; 
+                self.analyze_expr(&w.test)?;
+                self.analyze_stmt(&w.body)?; 
+            },
+            Stmt::Return(r) => { 
+                if let Some(arg) = &r.arg { 
+                    self.infer_type(arg)?; 
+                    self.analyze_expr(arg)?;
+                } 
+            },
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn analyze_expr(&mut self, expr: &Expr) -> SemaResult<()> {
+        match expr {
+            Expr::Ident(ident) => {
+                if let Some(kind) = self.resolve(&ident.sym) {
+                    self.symbol_map.insert(ident.span, kind.clone());
+                }
+            }
+            Expr::Bin(bin) => {
+                self.analyze_expr(&bin.left)?;
+                self.analyze_expr(&bin.right)?;
+            }
+            Expr::Call(call) => {
+                self.analyze_expr(&call.callee)?;
+                for arg in &call.args { self.analyze_expr(arg)?; }
+            }
+            Expr::New(call) => {
+                self.analyze_expr(&call.callee)?;
+                for arg in &call.args { self.analyze_expr(arg)?; }
+            }
+            Expr::Member(member) => {
+                self.analyze_expr(&member.obj)?;
+            }
+            Expr::Slice(slice) => {
+                self.analyze_expr(&slice.obj)?;
+                if let Some(s) = &slice.start { self.analyze_expr(s)?; }
+                if let Some(e) = &slice.end { self.analyze_expr(e)?; }
+            }
+            Expr::Match(m) => {
+                self.analyze_expr(&m.disc)?;
+                for arm in &m.arms {
+                    self.analyze_stmt(&arm.body)?;
+                }
+            }
+            Expr::Array(elements) => {
+                for el in elements { self.analyze_expr(el)?; }
+            }
+            Expr::Object(fields) => {
+                for f in fields { self.analyze_expr(&f.val)?; }
+            }
+            Expr::Await(inner) => {
+                self.analyze_expr(inner)?;
+            }
+            Expr::Builtin(call) => {
+                for arg in &call.args { self.analyze_expr(arg)?; }
+            }
             _ => {}
         }
         Ok(())
