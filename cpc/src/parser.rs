@@ -127,8 +127,17 @@ impl<'a> Parser<'a> {
         let params = self.parse_params()?;
         let mut return_type = None;
         if self.peek() == Some(&Token::Colon) { self.bump()?; return_type = Some(self.parse_type()?); }
-        let body = self.parse_block_stmt()?;
-        let end = body.span.end;
+        
+        let body;
+        let end;
+        if self.peek() == Some(&Token::Semicolon) {
+            let span = self.bump()?.1;
+            body = BlockStmt { span, body: vec![] };
+            end = span.end;
+        } else {
+            body = self.parse_block_stmt()?;
+            end = body.span.end;
+        }
         Ok(Function { span: Span { start, end }, ident, params, return_type, body, is_async })
     }
 
@@ -451,7 +460,25 @@ impl<'a> Parser<'a> {
                 Some(Token::Dot) => {
                     self.bump()?;
                     let prop = self.parse_ident()?;
-                    left = Expr::Member(MemberExpr { span: Span { start: left_span(&left).start, end: prop.span.end }, obj: Box::new(left), prop });
+                    if self.peek() == Some(&Token::LBrace) {
+                        self.bump()?;
+                        let mut fields = Vec::new();
+                        while self.peek() != Some(&Token::RBrace) {
+                            let key = self.parse_ident()?;
+                            self.expect(Token::Colon)?;
+                            let val = self.parse_expr()?;
+                            fields.push(EnumInitField { key, val });
+                            if self.peek() == Some(&Token::Comma) { self.bump()?; }
+                        }
+                        let end = self.expect(Token::RBrace)?.end;
+                        let enum_name = match &left {
+                            Expr::Ident(id) => id.clone(),
+                            _ => Ident { span: Span { start: 0, end: 0 }, sym: "Unknown".to_string() },
+                        };
+                        left = Expr::EnumInit(EnumInitExpr { span: Span { start: left_span(&left).start, end }, enum_name, variant_name: prop, fields: Some(fields) });
+                    } else {
+                        left = Expr::Member(MemberExpr { span: Span { start: left_span(&left).start, end: prop.span.end }, obj: Box::new(left), prop });
+                    }
                 },
                 Some(Token::Question) => { self.bump()?; left = Expr::Question(Box::new(left)); },
                 Some(Token::LBracket) => {
@@ -547,8 +574,8 @@ impl<'a> Parser<'a> {
             },
             Token::Match => { let match_expr = self.parse_match_expr()?; Ok(Expr::Match(Box::new(match_expr))) },
             Token::LParen => { 
-                let mut checkpoint = self.lexer.clone();
-                let mut peeked_checkpoint = self.peeked.clone();
+                let checkpoint = self.lexer.clone();
+                let peeked_checkpoint = self.peeked.clone();
                 
                 // Try parsing as arrow function parameters
                 if let Ok(params) = self.parse_arrow_params() {
@@ -610,7 +637,7 @@ impl<'a> Parser<'a> {
                     elements.push(self.parse_expr()?);
                     if self.peek() == Some(&Token::Comma) { self.bump()?; }
                 }
-                let end = self.expect(Token::RBracket)?.end;
+                let _end = self.expect(Token::RBracket)?.end;
                 Ok(Expr::Array(elements))
             },
             _ => Err(ParseError::UnexpectedToken(token, span)),

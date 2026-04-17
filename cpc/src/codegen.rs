@@ -155,8 +155,8 @@ impl Codegen {
         self.writeln("};");
         self.writeln("");
         self.writeln("// --- Scheduler Mock ---");
-        self.writeln("const Task = struct { run: *const fn(*anyopaque) anyerror!void, ctx: *anyopaque };");
-        self.writeln("var task_queue: [1000]Task = undefined;");
+        self.writeln("const _Task = struct { run: *const fn(*anyopaque) anyerror!void, ctx: *anyopaque };");
+        self.writeln("var task_queue: [1000]_Task = undefined;");
         self.writeln("var queue_len: usize = 0;");
         self.writeln("fn schedule(run: *const fn(*anyopaque) anyerror!void, ctx: *anyopaque) void {");
         self.writeln("    if (queue_len < 1000) { task_queue[queue_len] = .{ .run = run, .ctx = ctx }; queue_len += 1; }");

@@ -97,7 +97,7 @@ impl Analyzer {
 
     fn enter_scope(&mut self) { self.scopes.push(HashMap::new()); }
     fn exit_scope(&mut self) { self.scopes.pop(); }
-    fn define(&mut self, name: String, kind: SymbolKind, span: Span) -> SemaResult<()> {
+    fn define(&mut self, name: String, kind: SymbolKind, _span: Span) -> SemaResult<()> {
         if self.scopes.last().unwrap().contains_key(&name) {
             // Already defined in current scope
         }

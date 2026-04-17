@@ -3,6 +3,7 @@ pub mod ast;
 pub mod parser;
 pub mod sema;
 pub mod codegen;
+pub mod dcp;
 pub mod lsp;
 
 pub use lexer::{Token, Lexer};

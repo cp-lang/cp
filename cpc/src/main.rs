@@ -24,7 +24,7 @@ enum Commands {
         include: Vec<PathBuf>,
     },
     Check { input: PathBuf },
-    EmitTypes { input: PathBuf },
+    EmitTypes { input: PathBuf, #[arg(short = 'o', long)] output: Option<PathBuf> },
     Lsp,
 }
 
@@ -66,8 +66,18 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             analyzer.analyze_module(&module)?;
             println!("Check successful");
         }
-        Commands::EmitTypes { input: _ } => {
-            // TODO
+        Commands::EmitTypes { input, output } => {
+            let code = fs::read_to_string(&input)?;
+            let mut parser = CPParser::new(&code);
+            let module = parser.parse_module().map_err(|e| anyhow::anyhow!("Parse Error in {:?}: {}", input, e))?;
+            let mut emitter = cpc::dcp::DcpEmitter::new();
+            let type_defs = emitter.emit_module(&module);
+            
+            let out_path = output.unwrap_or_else(|| input.with_extension("d.cp"));
+            if let Some(parent) = out_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&out_path, type_defs)?;
         }
         Commands::Lsp => {
             let rt = tokio::runtime::Runtime::new()?;
@@ -78,28 +88,48 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 }
 
 fn resolve_file_or_dir(base: &Path) -> Option<PathBuf> {
+    // 1. Check <base>.d.cp
+    let dcp_file = base.with_extension("d.cp");
+    if dcp_file.exists() {
+        return Some(dcp_file);
+    }
+    // 2. Check <base>.cp
     let cp_file = base.with_extension("cp");
     if cp_file.exists() {
         return Some(cp_file);
     }
+
     if base.is_dir() {
-        let index_cp = base.join("index.cp");
-        if index_cp.exists() {
-            return Some(index_cp);
+        // 3. Check for pre-compiled types in bin/ (for dependencies)
+        if let Some(name) = base.file_name().and_then(|n| n.to_str()) {
+            let bin_dcp = base.join("bin").join(format!("{}.d.cp", name));
+            if bin_dcp.exists() {
+                return Some(bin_dcp);
+            }
         }
-        let main_cp = base.join("main.cp");
-        if main_cp.exists() {
-            return Some(main_cp);
+
+        // 4. Check directory defaults
+        let checks = vec!["index.d.cp", "index.cp", "main.d.cp", "main.cp"];
+        for check in checks {
+            let p = base.join(check);
+            if p.exists() {
+                return Some(p);
+            }
         }
+
+        // 5. Check cap.json main
         let cap_json = base.join("cap.json");
         if cap_json.exists() {
             if let Ok(content) = fs::read_to_string(&cap_json) {
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
                     if let Some(main_file) = json.get("main").and_then(|v| v.as_str()) {
-                        let main_path = base.join(main_file);
-                        if main_path.exists() {
-                            return Some(main_path);
-                        }
+                        let m_path = PathBuf::from(main_file);
+                        let m_base = base.join(m_path.parent().unwrap_or(Path::new(""))).join(m_path.file_stem().unwrap_or(std::ffi::OsStr::new("")));
+                        
+                        let dcp = m_base.with_extension("d.cp");
+                        if dcp.exists() { return Some(dcp); }
+                        let cp = m_base.with_extension("cp");
+                        if cp.exists() { return Some(cp); }
                     }
                 }
             }
