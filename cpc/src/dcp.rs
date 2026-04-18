@@ -99,6 +99,14 @@ impl DcpEmitter {
                 self.output.push_str(&format!("export enum {} {{\n", e.ident.sym));
                 for (i, variant) in e.variants.iter().enumerate() {
                     self.output.push_str(&format!("    {}", variant.ident.sym));
+                    if let Some(val) = &variant.value {
+                        // In .d.cp we should probably just print the raw text, but formatting expr is hard without codegen.
+                        // For MVP, just assume literal numbers.
+                        // We will add = 0, = 1 etc if it's a literal int.
+                        if let Expr::Lit(crate::ast::Lit::Int(n)) = val {
+                            self.output.push_str(&format!(" = {}", n));
+                        }
+                    }
                     if let Some(fields) = &variant.fields {
                         self.output.push_str(" { ");
                         for (j, field) in fields.iter().enumerate() {
@@ -159,6 +167,7 @@ impl DcpEmitter {
     fn format_type(&self, ty: &Type) -> String {
         match ty {
             Type::I32 => "i32".to_string(),
+            Type::U32 => "u32".to_string(),
             Type::U64 => "u64".to_string(),
             Type::F32 => "f32".to_string(),
             Type::F64 => "f64".to_string(),

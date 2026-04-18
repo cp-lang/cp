@@ -186,7 +186,7 @@ impl<'a> Parser<'a> {
         let is_error_union = if self.peek() == Some(&Token::Question) { self.bump()?; true } else { false };
         let (token, span) = self.bump()?;
         let mut ty = match token {
-            Token::I32 => Type::I32, Token::U64 => Type::U64, Token::F32 => Type::F32, Token::USize => Type::USize, Token::String => Type::String, Token::Void => Type::Void, Token::Any => Type::Any, Token::Bool => Type::Bool,
+            Token::I32 => Type::I32, Token::U32 => Type::U32, Token::U64 => Type::U64, Token::F32 => Type::F32, Token::USize => Type::USize, Token::String => Type::String, Token::Void => Type::Void, Token::Any => Type::Any, Token::Bool => Type::Bool,
             Token::Ident(sym) => { if sym == "pid" { Type::PID } else { Type::Ref(Ident { span, sym }) } },
             _ => return Err(ParseError::UnexpectedToken(token, span)),
         };
@@ -346,6 +346,13 @@ impl<'a> Parser<'a> {
     fn parse_class(&mut self) -> ParseResult<Class> {
         let start = self.expect(Token::Class)?.start;
         let ident = self.parse_ident()?;
+        
+        let mut implements = Vec::new();
+        if self.peek() == Some(&Token::Extends) {
+            self.bump()?;
+            implements.push(self.parse_ident()?);
+        }
+        
         let mut fields = Vec::new();
         let mut methods = Vec::new();
         self.expect(Token::LBrace)?;
@@ -361,7 +368,7 @@ impl<'a> Parser<'a> {
             }
         }
         let end = self.expect(Token::RBrace)?.end;
-        Ok(Class { span: Span { start, end }, ident, fields, methods, implements: vec![] })
+        Ok(Class { span: Span { start, end }, ident, fields, methods, implements })
     }
 
     fn parse_trait(&mut self) -> ParseResult<TraitDecl> {
@@ -418,7 +425,12 @@ impl<'a> Parser<'a> {
                 self.expect(Token::RBrace)?;
                 fields = Some(f_list);
             }
-            variants.push(EnumVariant { span: v_ident.span, ident: v_ident, fields });
+            let mut value = None;
+            if self.peek() == Some(&Token::Assign) {
+                self.bump()?;
+                value = Some(self.parse_expr()?);
+            }
+            variants.push(EnumVariant { span: v_ident.span, ident: v_ident, fields, value });
             if self.peek() == Some(&Token::Comma) { self.bump()?; }
         }
         let end = self.expect(Token::RBrace)?.end;
@@ -680,6 +692,7 @@ impl<'a> Parser<'a> {
             Token::Enum => "enum".to_string(),
             Token::Impl => "impl".to_string(),
             Token::Interface => "interface".to_string(),
+            Token::Extends => "extends".to_string(),
             Token::Any => "any".to_string(),
             Token::Void => "void".to_string(),
             _ => return Err(ParseError::ExpectedToken(Token::Ident("Ident".to_string()), token, span)),

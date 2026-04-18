@@ -1,10 +1,10 @@
 use clap::{Parser, Subcommand};
-use cpc::ast::{Module, ModuleItem, Decl};
+use cpc::ast::Module;
 use cpc::parser::Parser as CPParser;
 use cpc::sema::Analyzer;
 use cpc::codegen::Codegen;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::collections::HashSet;
 
 use cpc::resolver::resolve_imports;
@@ -18,12 +18,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    Compile {
-        input: PathBuf,
-        #[arg(short, long)]
-        output: Option<PathBuf>,
-        #[arg(short = 'I', long)]
+    Compile { 
+        input: PathBuf, 
+        #[arg(short = 'o', long)] 
+        output: Option<PathBuf>, 
+        #[arg(short = 'I', long)] 
         include: Vec<PathBuf>,
+        #[arg(short = 'b', long)]
+        beam: bool 
     },
     Check { input: PathBuf },
     EmitTypes { input: PathBuf, #[arg(short = 'o', long)] output: Option<PathBuf> },
@@ -41,13 +43,11 @@ fn main() {
 
 fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Commands::Compile { input, output, include } => {
+        Commands::Compile { input, output, include, beam } => {
             let mut all_items = Vec::new();
             let mut processed_sources = HashSet::new();
             
             resolve_imports(&input, &include, &mut all_items, &mut processed_sources)?;
-
-
 
             let module = Module { span: cpc::Span { start: 0, end: 0 }, body: all_items };
 
@@ -55,6 +55,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             analyzer.analyze_module(&module).map_err(|e| anyhow::anyhow!("Semantic Error: {}", e))?;
 
             let mut codegen = Codegen::new();
+            codegen.is_beam_mode = beam;
             let zig_code = codegen.generate_module(&module);
 
             match output {
@@ -65,7 +66,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Check { input } => {
             let code = fs::read_to_string(&input)?;
             let mut parser = CPParser::new(&code);
-            let module = parser.parse_module().map_err(|e| anyhow::anyhow!("Parse Error: {}", e))?;
+            let module = parser.parse_module().map_err(|e| anyhow::anyhow!("Parse Error in {:?}: {}", input, e))?;
             let mut analyzer = Analyzer::new();
             analyzer.analyze_module(&module)?;
             println!("Check successful");

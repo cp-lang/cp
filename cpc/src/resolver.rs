@@ -1,4 +1,4 @@
-use crate::ast::{ModuleItem, Module};
+use crate::ast::ModuleItem;
 use crate::parser::Parser as CPParser;
 use std::fs;
 use std::path::{Path, PathBuf};

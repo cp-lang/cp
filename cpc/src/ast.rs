@@ -59,6 +59,7 @@ pub struct EnumVariant {
     pub span: Span,
     pub ident: Ident,
     pub fields: Option<Vec<Field>>,
+    pub value: Option<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -327,7 +328,7 @@ pub struct ZigEscapeExpr {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Type {
-    I32, U64, F32, F64, USize, Bool, String, Void, Any,
+    I32, U32, U64, F32, F64, USize, Bool, String, Void, Any,
     Array(Box<Type>),
     Map(Box<Type>, Box<Type>),
     Tuple(Vec<Type>), // [T1, T2]

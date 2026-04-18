@@ -1,7 +1,7 @@
 use logos::Logos;
 
 #[derive(Logos, Debug, PartialEq, Clone)]
-#[logos(skip r"[ \t\n\f]+|//[^\n]*")] // Skip whitespace and comments
+#[logos(skip r"[ \t\n\f]+|//[^\n]*|/\*([^*]|\*[^/])*\*/")] // Skip whitespace and comments
 pub enum Token {
     // --- Keywords ---
     #[token("let")]
@@ -48,6 +48,8 @@ pub enum Token {
     Enum,
     #[token("interface")]
     Interface,
+    #[token("extends")]
+    Extends,
     #[token("implements")]
     Implements,
     #[token("new")]
@@ -66,6 +68,8 @@ pub enum Token {
     // --- Types (RFC-001 4.1) ---
     #[token("i32")]
     I32,
+    #[token("u32")]
+    U32,
     #[token("u64")]
     U64,
     #[token("f32")]
