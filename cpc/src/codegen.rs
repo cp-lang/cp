@@ -87,7 +87,7 @@ impl Codegen {
         self.writeln("        self.allocator.free(self.shape);");
         self.writeln("        const rc_ptr: *anyopaque = @ptrCast(self.ref_count);");
         self.writeln("        self.allocator.destroy(@as(*std.atomic.Value(u32), @alignCast(@ptrCast(rc_ptr))));");
-        self.writeln("        std.debug.print(\"[Runtime] SharedTensor physically released\\n\", .{});");
+        self.writeln("        std.debug.print(\"[Runtime] SharedTensor physically released\\n\", .{}) catch unreachable;");
         self.writeln("    }");
         self.writeln("}");
         self.dedent();
@@ -380,7 +380,7 @@ impl Codegen {
         for stmt in &func.body.body { self.generate_stmt(stmt); }
         self.emit_current_case();
         
-        writeln!(self.output, "\npub fn {}(ptr: *anyopaque) anyerror!void {{", zig_name).unwrap();
+        writeln!(self.output, "\nexport fn {}(ptr: *anyopaque) void {{", zig_name).unwrap();
         self.indent();
         self.writeln(&format!("const ctx: *{0}_Context = @ptrCast(@alignCast(ptr));", zig_name));
         self.writeln("while (true) { switch (ctx.pc) {");
@@ -585,11 +585,11 @@ impl Codegen {
                 },
                 "@spawn" => {
                     let callee = self.generate_expr(&call.args[0]);
-                    format!("(blk: {{ const sub_ctx = try ctx.arena.?.allocator().create({0}_Context); sub_ctx.* = undefined; sub_ctx.pc = 0; sub_ctx.arena = ctx.arena; const p = PID{{ .node_id = current_node_id, .local_id = next_local_id }}; next_local_id += 1; sub_ctx._self = p; schedule(@ptrCast(&{0}), @ptrCast(sub_ctx)); break :blk p; }})", callee)
+                    format!("(blk: {{ const sub_ctx = ctx.arena.?.allocator().create({0}_Context) catch unreachable; sub_ctx.* = undefined; sub_ctx.pc = 0; sub_ctx.arena = ctx.arena; const p = PID{{ .node_id = current_node_id, .local_id = next_local_id }}; next_local_id += 1; sub_ctx._self = p; schedule(@ptrCast(&{0}), @ptrCast(sub_ctx)); break :blk p; }})", callee)
                 },
                 "@shared_tensor_init" => {
                     let shape = self.generate_expr(&call.args[0]);
-                    format!("(blk: {{ const t = try Tensor.init(std.heap.page_allocator, &{0}); const rc = try std.heap.page_allocator.create(std.atomic.Value(u32)); rc.* = std.atomic.Value(u32).init(1); break :blk SharedTensor{{ .data = t.data, .shape = t.shape, .ref_count = rc, .allocator = std.heap.page_allocator }}; }})", shape)
+                    format!("(blk: {{ const t = Tensor.init(std.heap.page_allocator, &{0}) catch unreachable; const rc = std.heap.page_allocator.create(std.atomic.Value(u32)) catch unreachable; rc.* = std.atomic.Value(u32).init(1); break :blk SharedTensor{{ .data = t.data, .shape = t.shape, .ref_count = rc, .allocator = std.heap.page_allocator }}; }})", shape)
                 },
                 "@reply" => {
                     let target = self.generate_expr(&call.args[0]);
@@ -609,12 +609,12 @@ impl Codegen {
                 },
                 "@fs_read_file" => {
                     let path = self.generate_expr(&call.args[0]);
-                    if self.is_state_machine { format!("(blk: {{ const f = try std.fs.cwd().openFile({}, .{{}}); defer f.close(); break :blk try f.readToEndAlloc(ctx.arena.?.allocator(), 10 * 1024 * 1024); }})", path) } else { format!("(blk: {{ const f = try std.fs.cwd().openFile({}, .{{}}); defer f.close(); break :blk try f.readToEndAlloc(std.heap.page_allocator, 10 * 1024 * 1024); }})", path) }
+                    if self.is_state_machine { format!("(blk: {{ const f = std.fs.cwd().openFile({}, .{{}}); defer f.close(); break :blk f.readToEndAlloc(ctx.arena.?.allocator(), 10 * 1024 * 1024) catch unreachable; }})", path) } else { format!("(blk: {{ const f = std.fs.cwd().openFile({}, .{{}}); defer f.close(); break :blk f.readToEndAlloc(std.heap.page_allocator, 10 * 1024 * 1024) catch unreachable; }})", path) }
                 },
                 "@fs_write_file" => {
                     let path = self.generate_expr(&call.args[0]);
                     let data = self.generate_expr(&call.args[1]);
-                    format!("(blk: {{ try std.fs.cwd().writeFile(.{{ .sub_path = {}, .data = {} }}); break :blk {{}}; }})", path, data)
+                    format!("(blk: {{ std.fs.cwd().writeFile(.{{ .sub_path = {}, .data = {} }}); break :blk {{}}; }})", path, data)
                 },
                 "@fs_exists" => {
                     let path = self.generate_expr(&call.args[0]);
@@ -622,11 +622,11 @@ impl Codegen {
                 },
                 "@fs_mkdir" => {
                     let path = self.generate_expr(&call.args[0]);
-                    format!("(blk: {{ try std.fs.cwd().makePath({}); break :blk {{}}; }})", path)
+                    format!("(blk: {{ std.fs.cwd().makePath({}) catch unreachable; break :blk {{}}; }})", path)
                 },
                 "@fs_remove" => {
                     let path = self.generate_expr(&call.args[0]);
-                    format!("(blk: {{ try std.fs.cwd().deleteTree({}); break :blk {{}}; }})", path)
+                    format!("(blk: {{ std.fs.cwd().deleteTree({}) catch unreachable; break :blk {{}}; }})", path)
                 },
                 "@fs_copy" => {
                     let src = self.generate_expr(&call.args[0]);
@@ -636,12 +636,12 @@ impl Codegen {
                 "@net_connect" => {
                     let host = self.generate_expr(&call.args[0]);
                     let port = self.generate_expr(&call.args[1]);
-                    format!("(blk: {{ const address = try std.net.Address.parseIp4({}, @as(u16, @intCast({}))); const stream = try std.net.tcpConnectToAddress(address); break :blk stream.handle; }})", host, port)
+                    format!("(blk: {{ const address = std.net.Address.parseIp4({}, @as(u16, @intCast({}))) catch unreachable; const stream = std.net.tcpConnectToAddress(address) catch unreachable; break :blk stream.handle; }})", host, port)
                 },
                 "@net_send" => {
                     let handle = self.generate_expr(&call.args[0]);
                     let data = self.generate_expr(&call.args[1]);
-                    format!("(blk: {{ const stream = std.net.Stream {{ .handle = {} }}; try stream.writeAll({}); break :blk {{}}; }})", handle, data)
+                    format!("(blk: {{ const stream = std.net.Stream {{ .handle = {} }}; stream.writeAll({}) catch unreachable; break :blk {{}}; }})", handle, data)
                 },
                 "@net_close" => {
                     let handle = self.generate_expr(&call.args[0]);
