@@ -86,6 +86,7 @@ fn usage() void {
         \\  cap <script>            Execute a script directly (e.g. cap start)
         \\  cap init                Initialize a new CP project
         \\  cap build <file.cp>     Build a CP package
+        \\  cap build --beam       Build for BEAM VM (shared library)
         \\  cap add <package>       Add a dependency
         \\  cap install             Install all dependencies
         \\  cap sniff               Detect hardware features
@@ -362,6 +363,7 @@ fn buildPackage(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var targets_len: usize = 0;
 
     var is_release = false;
+    var is_beam = false;
     var optimize_mode: []const u8 = "ReleaseSafe";
     var build_type: []const u8 = "build-exe";
     var zig_args: [100][]const u8 = undefined;
@@ -372,6 +374,9 @@ fn buildPackage(allocator: std.mem.Allocator, args: []const []const u8) !void {
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "-r") or std.mem.eql(u8, arg, "--release") or std.mem.eql(u8, arg, "release")) {
             is_release = true;
+        } else if (std.mem.eql(u8, arg, "-b") or std.mem.eql(u8, arg, "--beam")) {
+            is_beam = true;
+            build_type = "build-lib";
         } else if (std.mem.eql(u8, arg, "-f")) {
             optimize_mode = "ReleaseFast";
         } else if (std.mem.eql(u8, arg, "-s")) {
@@ -400,12 +405,12 @@ fn buildPackage(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     for (targets_to_build[0..targets_len]) |target_path| {
-        try buildTarget(allocator, target_path, is_release, optimize_mode, build_type, zig_args[0..zig_args_len]);
+        try buildTarget(allocator, target_path, is_release, is_beam, optimize_mode, build_type, zig_args[0..zig_args_len]);
     }
     std.debug.print("Build completed! Artifacts in bin/\n", .{});
 }
 
-fn buildTarget(allocator: std.mem.Allocator, target_path: []const u8, is_release: bool, optimize_mode: []const u8, build_type: []const u8, zig_args: []const []const u8) !void {
+fn buildTarget(allocator: std.mem.Allocator, target_path: []const u8, is_release: bool, is_beam: bool, optimize_mode: []const u8, build_type: []const u8, zig_args: []const []const u8) !void {
     const stat = std.fs.cwd().statFile(target_path) catch return;
     if (stat.kind == .directory) {
         var dir = try std.fs.cwd().openDir(target_path, .{ .iterate = true });
@@ -414,14 +419,14 @@ fn buildTarget(allocator: std.mem.Allocator, target_path: []const u8, is_release
         while (try it.next()) |entry| {
             const child_path = try std.fs.path.join(allocator, &[_][]const u8{ target_path, entry.name });
             defer allocator.free(child_path);
-            try buildTarget(allocator, child_path, is_release, optimize_mode, build_type, zig_args);
+            try buildTarget(allocator, child_path, is_release, is_beam, optimize_mode, build_type, zig_args);
         }
     } else if (std.mem.endsWith(u8, target_path, ".cp")) {
-        try compileSingleFile(allocator, target_path, is_release, optimize_mode, build_type, zig_args);
+        try compileSingleFile(allocator, target_path, is_release, is_beam, optimize_mode, build_type, zig_args);
     }
 }
 
-fn compileSingleFile(allocator: std.mem.Allocator, filename: []const u8, is_release: bool, optimize_mode: []const u8, build_type: []const u8, zig_args: []const []const u8) !void {
+fn compileSingleFile(allocator: std.mem.Allocator, filename: []const u8, is_release: bool, is_beam: bool, optimize_mode: []const u8, build_type: []const u8, zig_args: []const []const u8) !void {
     std.debug.print("Building: {s}...\n", .{filename});
 
     const base_name = filename[0 .. filename.len - 3];
@@ -469,7 +474,7 @@ fn compileSingleFile(allocator: std.mem.Allocator, filename: []const u8, is_rele
         bin_subpath = base_name[4..];
     }
     
-    const base_ext = if (std.mem.eql(u8, build_type, "build-obj")) ".o" else if (std.mem.eql(u8, build_type, "build-lib")) ".a" else "";
+    const base_ext = if (std.mem.eql(u8, build_type, "build-obj")) ".o" else if (is_beam) ".so" else if (std.mem.eql(u8, build_type, "build-lib")) ".a" else "";
 
     for (targets[0..target_count]) |t| {
         var dir_path: ?[]const u8 = null;
@@ -500,6 +505,9 @@ fn compileSingleFile(allocator: std.mem.Allocator, filename: []const u8, is_rele
         var argc: usize = 0;
         child_args[argc] = "zig"; argc += 1;
         child_args[argc] = build_type; argc += 1;
+        if (is_beam) {
+            child_args[argc] = "-dynamic"; argc += 1;
+        }
         child_args[argc] = zig_file; argc += 1;
         child_args[argc] = emit_arg; argc += 1;
         child_args[argc] = "--cache-dir"; argc += 1;
