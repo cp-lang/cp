@@ -304,10 +304,28 @@ fn runFile(allocator: std.mem.Allocator, filename: []const u8) !void {
     
     if (std.fs.path.dirname(zig_file)) |dirname| {
         std.fs.cwd().makePath(dirname) catch {};
+        if (false) {
+            copyDir("/data/cps/sdk/beam.zig", dirname) catch {};
+            copyDir("/data/cps/sdk/erl_nif.zig", dirname) catch {};
+        }
     }
 
-    const compile_args = &[_][]const u8{ "/data/cps/cpc/target/release/cpc", "compile", filename, "--output", zig_file, "-I", "/data/cps/cap/cap_modules", "-I", "/data/cps/lib" };
-    var compile_child = std.process.Child.init(compile_args, allocator);
+    var cpc_args_buf: [15][]const u8 = undefined;
+    var cpc_argc: usize = 0;
+    cpc_args_buf[cpc_argc] = "/data/cps/cpc/target/release/cpc"; cpc_argc += 1;
+    cpc_args_buf[cpc_argc] = "compile"; cpc_argc += 1;
+    cpc_args_buf[cpc_argc] = filename; cpc_argc += 1;
+    cpc_args_buf[cpc_argc] = "--output"; cpc_argc += 1;
+    cpc_args_buf[cpc_argc] = zig_file; cpc_argc += 1;
+    cpc_args_buf[cpc_argc] = "-I"; cpc_argc += 1;
+    cpc_args_buf[cpc_argc] = "/data/cps/cap/cap_modules"; cpc_argc += 1;
+    cpc_args_buf[cpc_argc] = "-I"; cpc_argc += 1;
+    cpc_args_buf[cpc_argc] = "/data/cps/lib"; cpc_argc += 1;
+    if (false) {
+        cpc_args_buf[cpc_argc] = "-b"; cpc_argc += 1;
+    }
+    
+    var compile_child = std.process.Child.init(cpc_args_buf[0..cpc_argc], allocator);
     const compile_res = try compile_child.spawnAndWait();
     if (compile_res.Exited != 0) return error.CompileFailed;
 
@@ -435,10 +453,28 @@ fn compileSingleFile(allocator: std.mem.Allocator, filename: []const u8, is_rele
     
     if (std.fs.path.dirname(zig_file)) |dirname| {
         std.fs.cwd().makePath(dirname) catch {};
+        if (is_beam) {
+            copyDir("/data/cps/sdk/beam.zig", dirname) catch {};
+            copyDir("/data/cps/sdk/erl_nif.zig", dirname) catch {};
+        }
     }
 
-    const compile_args = &[_][]const u8{ "/data/cps/cpc/target/release/cpc", "compile", filename, "--output", zig_file, "-I", "/data/cps/cap/cap_modules", "-I", "/data/cps/lib" };
-    var compile_child = std.process.Child.init(compile_args, allocator);
+    var cpc_args_buf: [15][]const u8 = undefined;
+    var cpc_argc: usize = 0;
+    cpc_args_buf[cpc_argc] = "/data/cps/cpc/target/release/cpc"; cpc_argc += 1;
+    cpc_args_buf[cpc_argc] = "compile"; cpc_argc += 1;
+    cpc_args_buf[cpc_argc] = filename; cpc_argc += 1;
+    cpc_args_buf[cpc_argc] = "--output"; cpc_argc += 1;
+    cpc_args_buf[cpc_argc] = zig_file; cpc_argc += 1;
+    cpc_args_buf[cpc_argc] = "-I"; cpc_argc += 1;
+    cpc_args_buf[cpc_argc] = "/data/cps/cap/cap_modules"; cpc_argc += 1;
+    cpc_args_buf[cpc_argc] = "-I"; cpc_argc += 1;
+    cpc_args_buf[cpc_argc] = "/data/cps/lib"; cpc_argc += 1;
+    if (is_beam) {
+        cpc_args_buf[cpc_argc] = "-b"; cpc_argc += 1;
+    }
+    
+    var compile_child = std.process.Child.init(cpc_args_buf[0..cpc_argc], allocator);
     const compile_res = try compile_child.spawnAndWait();
     if (compile_res.Exited != 0) return error.CompileFailed;
 

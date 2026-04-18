@@ -16,3 +16,5 @@
 - **Implemented LSP Client**:
     - Built TypeScript extension client that launches `cpc lsp`.
 - Verified compilation of both `cpc` and the VS Code extension.
+
+* 2026-04-19: Implemented Bun-BEAM Native Agent NIF dispatcher generation, added `extends` syntax, and integrated `cap:beam` standard library.
