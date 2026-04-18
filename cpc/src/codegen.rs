@@ -448,7 +448,7 @@ impl Codegen {
         for stmt in &func.body.body { self.generate_stmt(stmt); }
         self.emit_current_case();
         
-        if self.is_beam_mode { writeln!(self.output, "\nexport fn {}(ptr: *anyopaque) void {{", zig_name).unwrap(); } else { writeln!(self.output, "\npub fn {}(ptr: *anyopaque) anyerror!void {{", zig_name).unwrap(); }
+        if self.is_beam_mode { writeln!(self.output, "\nexport fn {}(ptr: *anyopaque) i32 {{", zig_name).unwrap(); } else { writeln!(self.output, "\npub fn {}(ptr: *anyopaque) anyerror!void {{", zig_name).unwrap(); }
         self.indent();
         self.writeln(&format!("const ctx: *{0}_Context = @ptrCast(@alignCast(ptr));", zig_name));
         self.writeln("while (true) { switch (ctx.pc) {");
@@ -518,7 +518,7 @@ impl Codegen {
             Stmt::Return(ret) => {
                 if let Some(arg) = &ret.arg { 
                     let e = self.generate_expr(arg); 
-                    if self.current_fn_is_async { self.write_to_case(&format!("_ = {}; return;", e)); } 
+                    if self.current_fn_is_async { self.write_to_case(&format!("_ = {}; if (beam_mode) return 0 else return;", e)); } 
                     else { self.write_to_case(&format!("return {};", e)); }
                 } else { self.write_to_case("return;"); }
             },
