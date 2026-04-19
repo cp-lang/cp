@@ -89,7 +89,14 @@ impl Analyzer {
                 for m in &c.methods {
                     let old_async = self.current_fn_is_async;
                     self.current_fn_is_async = m.is_async;
-                    self.analyze_block(&m.body)?;
+                    self.enter_scope();
+                    for p in &m.params {
+                        let p_kind = SymbolKind::Var { ty: p.ty.clone(), kind: VarDeclKind::Let };
+                        self.define(p.ident.sym.clone(), p_kind.clone(), p.ident.span)?;
+                        self.symbol_map.insert(p.ident.span, p_kind);
+                    }
+                    for stmt in &m.body.body { self.analyze_stmt(stmt)?; }
+                    self.exit_scope();
                     self.current_fn_is_async = old_async;
                 }
             },
@@ -201,6 +208,8 @@ impl Analyzer {
     }
 
     fn types_eq(&self, a: &Type, b: &Type) -> bool {
+        if a == b { return true; }
+        if (*a == Type::I32 && *b == Type::U32) || (*a == Type::U32 && *b == Type::I32) { return true; }
         match (a, b) {
             (Type::Ref(t1), Type::Ref(t2)) => t1.sym == t2.sym,
             (Type::Optional(t1), Type::Optional(t2)) => self.types_eq(t1, t2),
@@ -338,7 +347,7 @@ impl Analyzer {
                 // For now, @map returns an array, @print returns void.
                 match call.name.as_str() {
                     "@print" | "@fs_write_file" | "@fs_mkdir" | "@fs_remove" | "@fs_copy" | "@net_send" | "@net_close" | "@net_listen" => Ok(Type::Void),
-                    "@fs_read_file" => Ok(Type::String),
+                    "@fs_read_file" | "@fs_read_async" | "@net_read_async" => Ok(Type::String),
                     "@fs_exists" => Ok(Type::Bool),
                     "@net_connect" => Ok(Type::I32),
                     "@self" => Ok(Type::PID),

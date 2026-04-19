@@ -3,6 +3,9 @@ export class Socket {
     fn send(this, data: string): void {
         @net_send(this.handle, data);
     }
+    async fn read(this): string {
+        return @net_read_async(this.handle);
+    }
     fn close(this): void {
         @net_close(this.handle);
     }

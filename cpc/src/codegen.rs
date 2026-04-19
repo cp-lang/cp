@@ -1,4 +1,5 @@
 use crate::ast::*;
+use crate::Span;
 use std::fmt::Write;
 use std::collections::HashSet;
 
@@ -80,6 +81,32 @@ impl Codegen {
         self.writeln("    }");
         self.writeln("}");
         self.writeln("");
+        
+        self.writeln("// --- Native Reactor Registry ---");
+        self.writeln("var poll_fds: [1024]std.posix.pollfd = undefined;");
+        self.writeln("var poll_pid_map: [1024]PID = undefined;");
+        self.writeln("var active_fds: usize = 0;");
+        self.writeln("");
+        self.writeln("fn register_fd(fd: i32, pid: PID, events: i16) void {");
+        self.writeln("    if (active_fds < 1024) {");
+        self.writeln("        poll_fds[active_fds] = .{ .fd = fd, .events = events, .revents = 0 };");
+        self.writeln("        poll_pid_map[active_fds] = pid;");
+        self.writeln("        active_fds += 1;");
+        self.writeln("    }");
+        self.writeln("}");
+        self.writeln("");
+        self.writeln("fn unregister_fd(fd: i32) void {");
+        self.writeln("    for (0..active_fds) |i| {");
+        self.writeln("        if (poll_fds[i].fd == fd) {");
+        self.writeln("            poll_fds[i] = poll_fds[active_fds - 1];");
+        self.writeln("            poll_pid_map[i] = poll_pid_map[active_fds - 1];");
+        self.writeln("            active_fds -= 1;");
+        self.writeln("            break;");
+        self.writeln("        }");
+        self.writeln("    }");
+        self.writeln("}");
+        self.writeln("");
+
         self.writeln("// --- Shared Memory & Reference Counting (BEAM Philosophy) ---");
         self.writeln("const SharedTensor = struct {");
         self.indent();
@@ -88,17 +115,17 @@ impl Codegen {
         self.writeln("ref_count: *std.atomic.Value(u32),");
         self.writeln("allocator: std.mem.Allocator,");
         self.writeln("");
-        self.writeln("pub fn retain(self: SharedTensor) void {");
-        self.writeln("    _ = self.ref_count.fetchAdd(1, .monotonic);");
+        self.writeln("pub fn retain(self_obj: SharedTensor) void {");
+        self.writeln("    _ = self_obj.ref_count.fetchAdd(1, .monotonic);");
         self.writeln("}");
         self.writeln("");
-        self.writeln("pub fn release(self: SharedTensor) void {");
-        self.writeln("    if (self.ref_count.fetchSub(1, .release) == 1) {");
-        self.writeln("        _ = self.ref_count.load(.acquire);");
-        self.writeln("        self.allocator.free(self.data);");
-        self.writeln("        self.allocator.free(self.shape);");
-        self.writeln("        const rc_ptr: *anyopaque = @ptrCast(self.ref_count);");
-        self.writeln("        self.allocator.destroy(@as(*std.atomic.Value(u32), @alignCast(@ptrCast(rc_ptr))));");
+        self.writeln("pub fn release(self_obj: SharedTensor) void {");
+        self.writeln("    if (self_obj.ref_count.fetchSub(1, .release) == 1) {");
+        self.writeln("        _ = self_obj.ref_count.load(.acquire);");
+        self.writeln("        self_obj.allocator.free(self_obj.data);");
+        self.writeln("        self_obj.allocator.free(self_obj.shape);");
+        self.writeln("        const rc_ptr: *anyopaque = @ptrCast(self_obj.ref_count);");
+        self.writeln("        self_obj.allocator.destroy(@as(*std.atomic.Value(u32), @alignCast(@ptrCast(rc_ptr))));");
         self.writeln("        std.debug.print(\"[Runtime] SharedTensor physically released\\n\", .{}) ;");
         self.writeln("    }");
         self.writeln("}");
@@ -125,25 +152,25 @@ impl Codegen {
         self.writeln("count: usize = 0,");
         self.writeln("mutex: std.Thread.Mutex = .{},");
         self.writeln("");
-        self.writeln("fn push(self: *Mailbox, msg: Message) void {");
+        self.writeln("fn push(mailbox_ptr: *Mailbox, msg: Message) void {");
         self.indent();
-        self.writeln("self.mutex.lock(); defer self.mutex.unlock();");
-        self.writeln("if (self.count < 16) {");
-        self.writeln("    self.queue[self.tail] = msg;");
-        self.writeln("    self.tail = (self.tail + 1) % 16;");
-        self.writeln("    self.count += 1;");
+        self.writeln("mailbox_ptr.mutex.lock(); defer mailbox_ptr.mutex.unlock();");
+        self.writeln("if (mailbox_ptr.count < 16) {");
+        self.writeln("    mailbox_ptr.queue[mailbox_ptr.tail] = msg;");
+        self.writeln("    mailbox_ptr.tail = (mailbox_ptr.tail + 1) % 16;");
+        self.writeln("    mailbox_ptr.count += 1;");
         self.writeln("    switch (msg) { .tensor => |t| t.retain(), else => {} }");
         self.writeln("}");
         self.dedent();
         self.writeln("}");
         self.writeln("");
-        self.writeln("fn pop(self: *Mailbox) ?Message {");
+        self.writeln("fn pop(mailbox_ptr: *Mailbox) ?Message {");
         self.indent();
-        self.writeln("self.mutex.lock(); defer self.mutex.unlock();");
-        self.writeln("if (self.count > 0) {");
-        self.writeln("    const msg = self.queue[self.head];");
-        self.writeln("    self.head = (self.head + 1) % 16;");
-        self.writeln("    self.count -= 1;");
+        self.writeln("mailbox_ptr.mutex.lock(); defer mailbox_ptr.mutex.unlock();");
+        self.writeln("if (mailbox_ptr.count > 0) {");
+        self.writeln("    const msg = mailbox_ptr.queue[mailbox_ptr.head];");
+        self.writeln("    mailbox_ptr.head = (mailbox_ptr.head + 1) % 16;");
+        self.writeln("    mailbox_ptr.count -= 1;");
         self.writeln("    return msg;");
         self.writeln("}");
         self.writeln("return null;");
@@ -195,9 +222,9 @@ impl Codegen {
         for item in &module.body {
             if let ModuleItem::Decl(Decl::ErrorSet(e)) = item {
                 let mut variants = String::new();
-                for (i, v) in e.variants.iter().enumerate() {
+                for (v_idx, v) in e.variants.iter().enumerate() {
                     variants.push_str(&v.sym);
-                    if i < e.variants.len() - 1 { variants.push_str(", "); }
+                    if v_idx < e.variants.len() - 1 { variants.push_str(", "); }
                 }
                 self.writeln(&format!("const {} = error {{ {} }};", e.ident.sym, variants));
             }
@@ -210,9 +237,9 @@ impl Codegen {
                 },
                 ModuleItem::Import(imp) => {
                     let mut specs = String::new();
-                    for (i, s) in imp.specifiers.iter().enumerate() {
+                    for (v_idx, s) in imp.specifiers.iter().enumerate() {
                         specs.push_str(&s.sym);
-                        if i < imp.specifiers.len() - 1 { specs.push_str(", "); }
+                        if v_idx < imp.specifiers.len() - 1 { specs.push_str(", "); }
                     }
                     self.writeln(&format!("// import {{ {} }} from \"{}\"", specs, imp.source));
                 }
@@ -231,37 +258,34 @@ impl Codegen {
             self.writeln("    const class_name = beam.Beam.getBinary(env, argv[0]) catch return beam.Beam.makeAtom(env, \"badarg\");");
             self.writeln("    const agent_id = beam.Beam.getInt(env, argv[1]) catch return beam.Beam.makeAtom(env, \"badarg\");");
             self.writeln("    const cp_ctx_bin = beam.Beam.getBinary(env, argv[2]) catch return beam.Beam.makeAtom(env, \"badarg\");");
-            self.writeln("    _ = cp_ctx_bin;");
+            self.writeln("    ");
             self.writeln("    const action_id = beam.Beam.getInt(env, argv[3]) catch return beam.Beam.makeAtom(env, \"badarg\");");
             self.writeln("    const payload = beam.Beam.getBinary(env, argv[4]) catch return beam.Beam.makeAtom(env, \"badarg\");");
             self.writeln("");
             
-            // Generate routing for each Agent class
             let agents = self.agent_classes.clone();
             for agent in &agents {
                 self.writeln(&format!("    if (std.mem.eql(u8, class_name, \"{}\")) {{", agent.ident.sym));
-                
-                // Initialize an instance of the class
-                // Realistically, we'd deserialize the context into the class instance,
-                // but for MVP, we allocate a new instance and call onMessage.
                 self.writeln(&format!("        var instance = {}.init(std.heap.page_allocator) catch return beam.Beam.makeAtom(env, \"error\");", agent.ident.sym));
-                
-                // Set the id and env if they exist in the class
-                // Assume the base Agent class fields are present
                 self.writeln("        instance.id = agent_id;");
-                // TODO: Properly wrap env pointer if needed, but for now we might skip or just set it as is if defined.
-                // Assuming `env: Env` in Agent is an opaque pointer or similar.
-                
-                // Call onMessage
-                self.writeln("        instance.onMessage(@intCast(action_id), .{ .string = payload });");
-                
-                // Clean up instance for MVP
-                self.writeln("        std.heap.page_allocator.destroy(instance);");
-                
-                self.writeln("        return beam.Beam.makeAtom(env, \"ok\");");
+                self.writeln("        instance.env = env;");
+                self.writeln("        if (cp_ctx_bin.len > 0) {");
+                self.writeln(&format!("            const ctx_ptr: *{0}.{0}_onMessage_Context = @ptrCast(@alignCast(@constCast(cp_ctx_bin.ptr)));", agent.ident.sym));
+                self.writeln("            ctx_ptr.received_msg = .{ .string = payload };");
+                self.writeln(&format!("            const result = {0}.onMessage(ctx_ptr) catch return beam.Beam.makeAtom(env, \"error\");", agent.ident.sym));
+                self.writeln("            return result;");
+                self.writeln("        } else {");
+                self.writeln("            const result = (blk: {");
+                self.writeln(&format!("                var ctx_struct = {0}.{0}_onMessage_Context{{", agent.ident.sym));
+                self.writeln("                    .pc = 0, .self = instance, .received_msg = .{ .string = payload },");
+                self.writeln("                    .action_id = @intCast(action_id), .payload = .{ .string = payload }");
+                self.writeln("                };");
+                self.writeln(&format!("                break :blk {0}.onMessage(&ctx_struct);", agent.ident.sym));
+                self.writeln("            }) catch return beam.Beam.makeAtom(env, \"error\");");
+                self.writeln("            return result;");
+                self.writeln("        }");
                 self.writeln("    }");
             }
-            
             self.writeln("    return beam.Beam.makeAtom(env, \"unknown_class\");");
             self.writeln("}");
             self.writeln("");
@@ -279,12 +303,32 @@ impl Codegen {
             self.writeln("ctx.pc = 0; ctx.arena = &arena; ctx._self = PID{ .node_id = 0, .local_id = 0 }; ctx.received_msg = null; ctx.await_result = null;");
             self.writeln("try cp_main(&ctx);");
             self.writeln("");
-            self.writeln("// Process scheduled tasks (Mock scheduler loop)");
-            self.writeln("while (queue_len > 0) {");
-            self.writeln("    const task = task_queue[0];");
-            self.writeln("    for (task_queue[1..queue_len], 0..) |t, j| { task_queue[j] = t; }");
-            self.writeln("    queue_len -= 1;");
-            self.writeln("    try task.run(task.ctx);");
+            self.writeln("// --- Native Reactor Loop ---");
+            self.writeln("while (true) {");
+            self.writeln("    // 1. Execute ready tasks");
+            self.writeln("    while (queue_len > 0) {");
+            self.writeln("        const task = task_queue[0];");
+            self.writeln("        for (task_queue[1..queue_len], 0..) |t, j| { task_queue[j] = t; }");
+            self.writeln("        queue_len -= 1;");
+            self.writeln("        try task.run(task.ctx);");
+            self.writeln("    }");
+            self.writeln("");
+            self.writeln("    // 2. Safely exit if no tasks and no active FDs");
+            self.writeln("    if (active_fds == 0) break;");
+            self.writeln("");
+            self.writeln("    // 3. Poll for I/O events");
+            self.writeln("    const ready_count = std.posix.poll(poll_fds[0..active_fds], 10) catch 0;");
+            self.writeln("    if (ready_count > 0) {");
+            self.writeln("        for (0..active_fds) |v_idx| {");
+            self.writeln("            if (poll_fds[v_idx].revents != 0) {");
+            self.writeln("                const fd = poll_fds[v_idx].fd;");
+            self.writeln("                const target_pid = poll_pid_map[v_idx];");
+            self.writeln("                mailboxes[target_pid.local_id].push(.{ .net_data = .{ .handle = fd, .data = &[_]u8{} } });");
+            self.writeln("                schedule(@ptrCast(&cp_main), @ptrCast(&ctx));");
+            self.writeln("                poll_fds[v_idx].revents = 0;");
+            self.writeln("            }");
+            self.writeln("        }");
+            self.writeln("    }");
             self.writeln("}");
             self.dedent();
             self.writeln("}");
@@ -314,41 +358,27 @@ impl Codegen {
         }
         self.dedent();
         self.writeln("};\n");
-        for m in &i.methods {
-            self.locals.clear();
-            self.locals.insert("self".to_string());
-            self.is_state_machine = false; self.current_fn_is_async = false;
-            let mut p_str = format!("self: *{}", i.target_name.sym);
-            for p in &m.params {
-                if p.ident.sym == "this" { continue; }
-                self.locals.insert(p.ident.sym.clone());
-                p_str.push_str(", "); p_str.push_str(&format!("{}: {}", p.ident.sym, self.map_type(&p.ty)));
-            }
-            self.extract_locals_simple(&m.body);
-            self.writeln(&format!("fn {}_{}({}) {} {{", i.target_name.sym, m.ident.sym, p_str, m.return_type.as_ref().map(|t| self.map_type(t)).unwrap_or("void".to_string())));
-            self.indent(); 
-            self.current_case_content.clear();
-            self.writeln("_ = self;");
-            for p in &m.params { if p.ident.sym != "this" { self.writeln(&format!("_ = {};", p.ident.sym)); } }
-            for stmt in &m.body.body { self.generate_stmt(stmt); }
-            let body_content = self.current_case_content.clone();
-            self.current_case_content.clear();
-            self.output.push_str(&body_content);
-            self.dedent(); self.writeln("}\n");
-        }
+        for m in &i.methods { self.generate_function_logic(m, Some(&i.target_name.sym)); }
     }
 
     fn generate_enum(&mut self, e: &EnumDecl) {
-        self.writeln(&format!("const {} = union(enum) {{", e.ident.sym));
+        let enum_type = if e.variants.iter().any(|v| v.value.is_some()) { "enum(u32)" } else { "enum" };
+        self.writeln(&format!("const {} = union({}) {{", e.ident.sym, enum_type));
         self.indent();
         for v in &e.variants {
+            let mut line = v.ident.sym.clone();
+            if let Some(val) = &v.value { line.push_str(" = "); line.push_str(&self.generate_expr(val)); }
             if let Some(fields) = &v.fields {
-                self.writeln(&format!("{}: struct {{", v.ident.sym));
+                line.push_str(": struct {");
+                self.writeln(&line);
                 self.indent();
                 for f in fields { self.writeln(&format!("{}: {},", f.ident.sym, self.map_type(&f.ty))); }
                 self.dedent();
                 self.writeln("},");
-            } else { self.writeln(&format!("{},", v.ident.sym)); }
+            } else {
+                line.push(',');
+                self.writeln(&line);
+            }
         }
         self.dedent(); self.writeln("};\n");
     }
@@ -369,77 +399,68 @@ impl Codegen {
     fn generate_class(&mut self, class: &Class) {
         writeln!(self.output, "const {} = struct {{", class.ident.sym).unwrap();
         self.indent();
-        
-        let is_agent = class.implements.iter().any(|i| i.sym == "Agent");
-        if is_agent {
+        if class.implements.iter().any(|i| i.sym == "Agent") {
             self.writeln("id: i32 = 0,");
             self.writeln("env: ?*beam.Env = null,");
         }
-        
         for f in &class.fields { self.writeln(&format!("{}: {},", f.ident.sym, self.map_type(&f.ty))); }
         self.writeln(&format!("\npub fn init(allocator: std.mem.Allocator) !*{} {{", class.ident.sym));
         self.indent();
-        self.writeln(&format!("const self = try allocator.create({}); return self;", class.ident.sym));
+        self.writeln(&format!("const self_ptr = try allocator.create({}); return self_ptr;", class.ident.sym));
         self.dedent(); self.writeln("}");
-        for m in &class.methods {
-            self.locals.clear();
-            self.locals.insert("self".to_string());
-            self.is_state_machine = false; self.current_fn_is_async = m.is_async;
-            let mut p_str = format!("self: *{}", class.ident.sym);
-            for p in &m.params {
-                if p.ident.sym == "this" { continue; }
-                self.locals.insert(p.ident.sym.clone());
-                p_str.push_str(", "); p_str.push_str(&format!("{}: {}", p.ident.sym, self.map_type(&p.ty)));
-            }
-            self.extract_locals_simple(&m.body);
-            self.writeln(&format!("pub fn {}({}) {} {{", m.ident.sym, p_str, m.return_type.as_ref().map(|t| self.map_type(t)).unwrap_or("void".to_string())));
-            self.indent(); self.writeln("_ = self;");
-            for p in &m.params { if p.ident.sym != "this" { self.writeln(&format!("_ = {};", p.ident.sym)); } }
-            for stmt in &m.body.body { self.generate_stmt(stmt); }
-            self.dedent(); self.writeln("}");
-        }
+        for m in &class.methods { self.generate_function_logic(m, Some(&class.ident.sym)); }
         self.dedent(); self.writeln("};\n");
     }
 
     fn generate_function(&mut self, func: &Function) {
-        let zig_name = if func.ident.sym == "main" { "cp_main" } else { &func.ident.sym };
-        self.current_zig_fn_name = zig_name.to_string();
+        self.generate_function_logic(func, None);
+    }
+
+    fn generate_function_logic(&mut self, func: &Function, class_name: Option<&String>) {
+        let zig_name = if func.ident.sym == "main" { "cp_main".to_string() } else { func.ident.sym.clone() };
+        self.current_zig_fn_name = zig_name.clone();
         let ret_ty = func.return_type.as_ref().map(|t| self.map_type(t)).unwrap_or("void".to_string());
-        
         self.current_fn_is_async = func.is_async;
 
         if !func.is_async && func.ident.sym != "main" {
             self.is_state_machine = false;
-            let zig_ret_ty = if ret_ty == "void" { "anyerror!void".to_string() } else if ret_ty.starts_with('!') { ret_ty.clone() } else { format!("anyerror!{}", ret_ty) };
+            let zig_ret_ty = if self.is_beam_mode { "anyerror!beam.Term".to_string() } else if ret_ty == "void" { "anyerror!void".to_string() } else if ret_ty.starts_with('!') { ret_ty.clone() } else { format!("anyerror!{}", ret_ty) };
             let mut params_str = String::new();
             self.locals.clear();
-            for (i, p) in func.params.iter().enumerate() {
+            if let Some(c) = class_name { self.locals.insert("self".to_string()); params_str.push_str(&format!("self: *{}", c)); }
+            for p in &func.params {
+                if p.ident.sym == "this" { continue; }
                 self.locals.insert(p.ident.sym.clone());
+                if !params_str.is_empty() { params_str.push_str(", "); }
                 params_str.push_str(&format!("{}: {}", p.ident.sym, self.map_type(&p.ty)));
-                if i < func.params.len() - 1 { params_str.push_str(", "); }
             }
             self.extract_locals_simple(&func.body);
+            
             writeln!(self.output, "\npub fn {}({}) {} {{", zig_name, params_str, zig_ret_ty).unwrap();
             self.indent();
             self.current_case_content.clear();
             for stmt in &func.body.body { self.generate_stmt(stmt); }
-            let body = self.current_case_content.clone();
+            let body_str = self.current_case_content.clone();
             self.current_case_content.clear();
-            self.output.push_str(&body);
+            self.output.push_str(&body_str);
+            if self.is_beam_mode { self.writeln("return beam.Beam.makeAtom(self.env.?, \"ok\");"); }
             self.dedent();
             self.writeln("}\n");
             return;
         }
 
         self.is_state_machine = true;
-        writeln!(self.output, "const {}_Context = struct {{", zig_name).unwrap();
+        let ctx_name = if let Some(c) = class_name { format!("{}_{}", c, zig_name) } else { zig_name.clone() };
+        
+        writeln!(self.output, "const {}_Context = struct {{", ctx_name).unwrap();
         self.indent();
         self.writeln("pc: u32 = 0,");
         self.writeln("_self: PID = PID{ .node_id = 0, .local_id = 0 },");
         self.writeln("arena: ?*std.heap.ArenaAllocator = null,");
         self.writeln("received_msg: ?Message = null,");
-        self.writeln("await_result: ?Message = null,"); 
-        for param in &func.params { self.writeln(&format!("{}: {},", param.ident.sym, self.map_type(&param.ty))); }
+        self.writeln("await_result: ?Message = null,");
+        if let Some(c) = class_name { self.writeln(&format!("self: *{},", c)); }
+        for param in &func.params { if param.ident.sym != "this" { self.writeln(&format!("{}: {},", param.ident.sym, self.map_type(&param.ty))); } }
         self.extract_local_vars(&func.body);
         self.dedent();
         self.writeln("};\n");
@@ -448,15 +469,29 @@ impl Codegen {
         for stmt in &func.body.body { self.generate_stmt(stmt); }
         self.emit_current_case();
         
-        if self.is_beam_mode { writeln!(self.output, "\nexport fn {}(ptr: *anyopaque) i32 {{", zig_name).unwrap(); } else { writeln!(self.output, "\npub fn {}(ptr: *anyopaque) anyerror!void {{", zig_name).unwrap(); }
+        if self.is_beam_mode && func.ident.sym == "main" { 
+            self.writeln("");
+            self.output.push_str(&format!("export fn {}(ptr: *anyopaque) void {{\n", zig_name));
+            self.indent();
+            self.writeln(&format!("{} (ptr) catch |err| {{ std.debug.print(\"[NIF Panic] Error: {{}}\\n\", .{{err}}); @panic(\"NIF Error\"); }};", zig_name));
+            self.dedent();
+            self.writeln("}");
+            self.writeln(&format!("fn {}_internal(ptr: *anyopaque) anyerror!void {{", zig_name));
+        } else if self.is_beam_mode {
+            writeln!(self.output, "\npub fn {}(ptr: *anyopaque) anyerror!beam.Term {{", zig_name).unwrap();
+        } else { 
+            writeln!(self.output, "\npub fn {}(ptr: *anyopaque) anyerror!void {{", zig_name).unwrap(); 
+        }
         self.indent();
-        self.writeln(&format!("const ctx: *{0}_Context = @ptrCast(@alignCast(ptr));", zig_name));
+        self.writeln(&format!("const ctx: *{0}_Context = @ptrCast(@alignCast(ptr));", ctx_name));
         self.writeln("while (true) { switch (ctx.pc) {");
         self.indent(); for case in &self.cases { self.output.push_str(case); }
-        if func.ident.sym == "main" { self.writeln("else => return,"); } 
+        if self.is_beam_mode { self.writeln("else => return beam.Beam.makeAtom(ctx.self.env.?, \"ok\"),"); }
+        else if func.ident.sym == "main" { self.writeln("else => return,"); }
         else { self.writeln("else => unreachable,"); }
         self.dedent(); self.writeln("} }");
-        self.dedent(); self.writeln("}\n");
+        self.dedent();
+        self.writeln("}\n");
     }
 
     fn emit_current_case(&mut self) {
@@ -464,9 +499,7 @@ impl Codegen {
         let indent = "    ".repeat(self.indent_level);
         writeln!(case_str, "{}{} => {{", indent, self.pc_counter).unwrap();
         case_str.push_str(&self.current_case_content);
-        if self.is_state_machine && !self.current_case_content.contains("return") && !self.current_case_content.contains("continue") { 
-            writeln!(case_str, "{}    return;", indent).unwrap(); 
-        }
+        if self.is_state_machine && !self.current_case_content.contains("return") && !self.current_case_content.contains("continue") { if self.is_beam_mode { writeln!(case_str, "{}    return beam.Beam.makeAtom(ctx.self.env.?, \"ok\");", indent).unwrap(); } else { writeln!(case_str, "{}    return;", indent).unwrap(); } }
         writeln!(case_str, "{}}},", indent).unwrap();
         self.cases.push(case_str); self.current_case_content.clear();
     }
@@ -492,14 +525,12 @@ impl Codegen {
                         }
                     },
                     Pattern::Tuple(elements) => {
-                        let mut struct_fields = String::new();
-                        for (i, _) in elements.iter().enumerate() { struct_fields.push_str(&format!("@\"{}\": i32, ", i)); }
                         let init_val = if is_try { format!("try {}", final_expr) } else { final_expr.clone() };
                         self.write_to_case(&format!("const _tmp_v{} = {};", tmp_id, init_val));
-                        for (i, el) in elements.iter().enumerate() {
+                        for (v_idx, el) in elements.iter().enumerate() {
                             if let Pattern::Ident(ident) = el {
                                 let lhs = if self.is_state_machine { format!("ctx.{}", ident.sym) } else { ident.sym.clone() };
-                                self.write_to_case(&format!("{} = _tmp_v{}.@\"{}\";", lhs, tmp_id, i));
+                                self.write_to_case(&format!("{} = _tmp_v{}.@\"{}\";", lhs, tmp_id, v_idx));
                             }
                         }
                     },
@@ -514,11 +545,87 @@ impl Codegen {
                 Expr::Zig(zig) => self.write_to_case(&format!("{}\n", zig.code)),
                 _ => { let e = self.generate_expr(expr); self.write_to_case(&format!("_ = {};", e)); }
             },
-            Stmt::Block(b) => for s in &b.body { self.generate_stmt(s); },
+            Stmt::Block(b) => for s in &b.body { self.generate_stmt(s); },            Stmt::If(i) => {
+                let test = self.generate_expr(&i.test);
+                if !self.is_state_machine {
+                    self.write_to_case(&format!("if ({}) {{", test));
+                    self.indent(); self.generate_stmt(&i.cons); self.dedent();
+                    if let Some(alt) = &i.alt {
+                        self.write_to_case("} else {");
+                        self.indent(); self.generate_stmt(alt); self.dedent();
+                    }
+                    self.write_to_case("}");
+                } else {
+                    let cons_pc = self.pc_counter + 1;
+                    let mut alt_pc = 0;
+                    let mut end_pc = 0;
+
+                    // Header
+                    if i.alt.is_some() {
+                        // We will determine alt_pc after generating cons
+                    }
+                    
+                    // We need a way to reserve PCs.
+                    // For now, let's use a simpler approach:
+                    // Just emit the if logic and let next_state handle the cases.
+                    
+                    self.write_to_case(&format!("if ({}) {{ ctx.pc = {}; continue; }}", test, cons_pc));
+                    if let Some(_alt) = &i.alt {
+                        // Placeholder for alt_pc
+                        self.write_to_case("else { ctx.pc = 999999; continue; }"); 
+                    } else {
+                        self.write_to_case("else { ctx.pc = 888888; continue; }");
+                    }
+                    
+                    self.next_state(); // This is cons_pc
+                    self.generate_stmt(&i.cons);
+                    // After cons, we need to jump to end
+                    self.write_to_case("ctx.pc = 888888; continue;");
+                    
+                    if let Some(alt) = &i.alt {
+                        alt_pc = self.next_state();
+                        self.generate_stmt(alt);
+                        self.write_to_case("ctx.pc = 888888; continue;");
+                    }
+                    
+                    end_pc = self.next_state();
+                    
+                    // Backpatch (hacky replacement in previous cases)
+                    let current_cases_len = self.cases.len();
+                    if alt_pc != 0 {
+                        self.cases[current_cases_len - end_pc as usize + cons_pc as usize - 2] = self.cases[current_cases_len - end_pc as usize + cons_pc as usize - 2].replace("999999", &alt_pc.to_string());
+                    }
+                    self.cases[current_cases_len - end_pc as usize + cons_pc as usize - 2] = self.cases[current_cases_len - end_pc as usize + cons_pc as usize - 2].replace("888888", &end_pc.to_string());
+                    for j in (current_cases_len - end_pc as usize + cons_pc as usize - 1)..(current_cases_len - 1) {
+                         self.cases[j] = self.cases[j].replace("888888", &end_pc.to_string());
+                    }
+                }
+            },
+            Stmt::While(w) => {
+                let test = self.generate_expr(&w.test);
+                if !self.is_state_machine {
+                    self.write_to_case(&format!("while ({}) {{", test));
+                    self.indent(); self.generate_stmt(&w.body); self.dedent();
+                    self.write_to_case("}");
+                } else {
+                    let start_pc = self.pc_counter;
+                    let body_pc = self.pc_counter + 1;
+                    self.write_to_case(&format!("if ({}) {{ ctx.pc = {}; continue; }} else {{ ctx.pc = 777777; continue; }}", test, body_pc));
+                    self.next_state();
+                    self.generate_stmt(&w.body);
+                    self.write_to_case(&format!("ctx.pc = {}; continue;", start_pc));
+                    let end_pc = self.next_state();
+                    let current_cases_len = self.cases.len();
+                    self.cases[current_cases_len - end_pc as usize + start_pc as usize - 1] = self.cases[current_cases_len - end_pc as usize + start_pc as usize - 1].replace("777777", &end_pc.to_string());
+                }
+            },
             Stmt::Return(ret) => {
                 if let Some(arg) = &ret.arg { 
                     let e = self.generate_expr(arg); 
-                    if self.current_fn_is_async { self.write_to_case(&format!("_ = {}; if (beam_mode) return 0 else return;", e)); } 
+                    if self.current_fn_is_async { 
+                        let ret_logic = if self.is_beam_mode { "if (true) return 0;" } else { "return;" };
+                        self.write_to_case(&format!("_ = {}; {}", e, ret_logic)); 
+                    } 
                     else { self.write_to_case(&format!("return {};", e)); }
                 } else { self.write_to_case("return;"); }
             },
@@ -530,7 +637,10 @@ impl Codegen {
         match expr {
             Expr::Lit(Lit::Int(v)) => v.to_string(),
             Expr::Lit(Lit::Str(s)) => format!("\"{}\"", s.replace("\"", "\\\"")),
-            Expr::Ident(i) => if i.sym == "true" || i.sym == "false" || i.sym == "null" || i.sym.starts_with('@') || i.sym.ends_with("_Context") || self.is_comptime || self.locals.contains(&i.sym) || self.globals.contains(&i.sym) { i.sym.clone() } 
+            Expr::Ident(i) => if i.sym == "this" || i.sym == "true" || i.sym == "false" || i.sym == "null" || i.sym.starts_with('@') || i.sym.ends_with("_Context") || self.is_comptime || self.locals.contains(&i.sym) || self.globals.contains(&i.sym) { 
+                                  if i.sym == "this" { if self.is_state_machine { "ctx.self".to_string() } else { "self".to_string() } }
+                                  else { i.sym.clone() }
+                              } 
                               else if self.is_state_machine { format!("ctx.{}", i.sym) } 
                               else { i.sym.clone() },
             Expr::Bin(bin) => {
@@ -541,103 +651,14 @@ impl Codegen {
             Expr::Call(call) => {
                 let callee = match &*call.callee { Expr::Ident(ident) => ident.sym.clone(), _ => self.generate_expr(&call.callee) };
                 let mut args = String::new();
-                for (i, arg) in call.args.iter().enumerate() { args.push_str(&self.generate_expr(arg)); if i < call.args.len() - 1 { args.push_str(", "); } }
+                for (v_idx, arg) in call.args.iter().enumerate() { args.push_str(&self.generate_expr(arg)); if v_idx < call.args.len() - 1 { args.push_str(", "); } }
                 format!("try {}({})", callee, args)
-            },
-            Expr::Array(elements) => {
-                let mut s = String::from(".{ ");
-                for (i, el) in elements.iter().enumerate() { s.push_str(&self.generate_expr(el)); if i < elements.len() - 1 { s.push_str(", "); } }
-                s.push_str(" }"); s
-            },
-            Expr::Object(fields) => {
-                let mut s = String::from(".{ ");
-                for (i, f) in fields.iter().enumerate() { s.push_str(&format!(".{} = {}", f.key.sym, self.generate_expr(&f.val))); if i < fields.len() - 1 { s.push_str(", "); } }
-                s.push_str(" }"); s
-            },
-            Expr::Receive(_) => {
-                if !self.is_state_machine { return "0".to_string(); }
-                let next_pc = self.pc_counter + 1;
-                self.write_to_case(&format!("if (mailboxes[ctx._self.local_id].pop()) |m| {{ ctx.received_msg = m; ctx.pc = {}; continue; }} else {{ schedule(@ptrCast(&{}), @ptrCast(ctx)); return; }}", next_pc, self.current_zig_fn_name));
-                self.next_state(); "ctx.received_msg.?".to_string()
-            },
-            Expr::Match(m) => {
-                let disc = self.generate_expr(&m.disc);
-                let mut match_code = format!("switch ({}) {{\n", disc);
-                let indent = "    ".repeat(self.indent_level + 2);
-                for arm in &m.arms {
-                    match &arm.pat {
-                        Pattern::Enum(ep) => {
-                            let has_fields = ep.fields.as_ref().map(|f| !f.is_empty()).unwrap_or(false);
-                            let old_locals = self.locals.clone();
-                            let mut binding_name = "_".to_string();
-                            if has_fields { 
-                                binding_name = ep.fields.as_ref().unwrap()[0].key.sym.clone();
-                                self.locals.insert(binding_name.clone()); 
-                            }
-                            match_code.push_str(&format!("{}.{} => |{}| {{\n", indent, ep.variant_name.sym, binding_name));
-                            let old_case = self.current_case_content.clone();
-                            self.current_case_content.clear();
-                            self.indent(); self.indent();
-                            self.generate_stmt(&arm.body);
-                            self.dedent(); self.dedent();
-                            match_code.push_str(&self.current_case_content);
-                            self.current_case_content = old_case;
-                            match_code.push_str(&format!("{}}},\n", indent));
-                            self.locals = old_locals;
-                        },
-                        Pattern::Wildcard => {
-                            match_code.push_str(&format!("{}else => {{\n", indent));
-                            let old_case = self.current_case_content.clone();
-                            self.current_case_content.clear();
-                            self.indent(); self.indent();
-                            self.generate_stmt(&arm.body);
-                            self.dedent(); self.dedent();
-                            match_code.push_str(&self.current_case_content);
-                            self.current_case_content = old_case;
-                            match_code.push_str(&format!("{}}},\n", indent));
-                        },
-                        _ => {}
-                    }
-                }
-                match_code.push_str(&format!("{}}}", "    ".repeat(self.indent_level + 1)));
-                self.write_to_case(&match_code);
-                "0".to_string()
-            },
-            Expr::Arrow(arrow) => {
-                let lambda_name = format!("lambda_{}", self.lambda_counter);
-                self.lambda_counter += 1;
-                let old_fn = self.current_zig_fn_name.clone();
-                self.current_zig_fn_name = lambda_name.clone();
-                let mut lambda_output = String::new();
-                let mut lambda_gen = Codegen::new();
-                lambda_gen.globals = self.globals.clone();
-                lambda_gen.is_state_machine = true;
-                lambda_gen.current_fn_is_async = true; 
-                lambda_gen.current_zig_fn_name = lambda_name.clone();
-                let ctx_name = format!("{}_Context", lambda_name);
-                writeln!(lambda_output, "const {} = struct {{", ctx_name).unwrap();
-                writeln!(lambda_output, "    pc: u32 = 0, _self: PID = PID{{ .node_id = 0, .local_id = 0 }}, arena: ?*std.heap.ArenaAllocator = null, received_msg: ?Message = null, await_result: ?Message = null,").unwrap();
-                lambda_gen.extract_local_vars_from_arrow(arrow, &mut lambda_output);
-                writeln!(lambda_output, "}};").unwrap();
-                writeln!(lambda_output, "pub fn {}(ptr: *anyopaque) anyerror!void {{", lambda_name).unwrap();
-                writeln!(lambda_output, "    const ctx: *{} = @ptrCast(@alignCast(ptr));", ctx_name).unwrap();
-                writeln!(lambda_output, "    while (true) {{ switch (ctx.pc) {{").unwrap();
-                lambda_gen.indent_level = 2;
-                match &*arrow.body {
-                    ArrowBody::Expr(e) => { let e_code = lambda_gen.generate_expr(e); lambda_gen.write_to_case(&format!("_ = {}; return;", e_code)); },
-                    ArrowBody::Block(b) => { for s in &b.body { lambda_gen.generate_stmt(s); } }
-                }
-                lambda_gen.emit_current_case();
-                for case in &lambda_gen.cases { lambda_output.push_str(case); }
-                writeln!(lambda_output, "        else => unreachable,\n    }} }} }}\n").unwrap();
-                self.lambda_funcs.push(lambda_output);
-                self.current_zig_fn_name = old_fn;
-                lambda_name
             },
             Expr::New(call) => {
                 let callee = match &*call.callee { Expr::Ident(id) => id.sym.clone(), _ => "Unknown".to_string() };
                 format!("try {}.init(std.heap.page_allocator)", callee)
             },
+            Expr::Await(inner) => self.generate_expr(inner),
             Expr::Member(member) => {
                 let obj = self.generate_expr(&member.obj);
                 let prop = match member.prop.sym.as_str() { "length" => "len", _ => &member.prop.sym };
@@ -647,17 +668,21 @@ impl Codegen {
                 "@print" => {
                     let fmt = self.generate_expr(&call.args[0]);
                     let mut args = String::from(".{ ");
-                    for i in 1..call.args.len() { args.push_str(&self.generate_expr(&call.args[i])); if i < call.args.len() - 1 { args.push_str(", "); } }
+                    for v_idx in 1..call.args.len() { args.push_str(&self.generate_expr(&call.args[v_idx])); if v_idx < call.args.len() - 1 { args.push_str(", "); } }
                     args.push_str(" }");
                     format!("std.debug.print({} ++ \"\\n\", {})", fmt, args)
                 },
                 "@spawn" => {
-                    let callee = self.generate_expr(&call.args[0]);
-                    format!("(blk: {{ const sub_ctx = ctx.arena.?.allocator().create({0}_Context) ; sub_ctx.* = undefined; sub_ctx.pc = 0; sub_ctx.arena = ctx.arena; const p = PID{{ .node_id = current_node_id, .local_id = next_local_id }}; next_local_id += 1; sub_ctx._self = p; schedule(@ptrCast(&{0}), @ptrCast(sub_ctx)); break :blk p; }})", callee)
+                    let callee = match &call.args[0] {
+                        Expr::Ident(id) => id.sym.clone(),
+                        Expr::Arrow(_) => self.generate_expr(&call.args[0]),
+                        _ => "Unknown".to_string()
+                    };
+                    format!("(blk: {{ const sub_ctx = ctx.arena.?.allocator().create({0}_Context) catch unreachable; sub_ctx.* = undefined; sub_ctx.pc = 0; sub_ctx.arena = ctx.arena; const p = PID{{ .node_id = current_node_id, .local_id = next_local_id }}; next_local_id += 1; sub_ctx._self = p; schedule(@ptrCast(&{0}), @ptrCast(sub_ctx)); break :blk p; }})", callee)
                 },
                 "@shared_tensor_init" => {
                     let shape = self.generate_expr(&call.args[0]);
-                    format!("(blk: {{ const t = Tensor.init(std.heap.page_allocator, &{0}) ; const rc = std.heap.page_allocator.create(std.atomic.Value(u32)) ; rc.* = std.atomic.Value(u32).init(1); break :blk SharedTensor{{ .data = t.data, .shape = t.shape, .ref_count = rc, .allocator = std.heap.page_allocator }}; }})", shape)
+                    format!("(blk: {{ const t = Tensor.init(std.heap.page_allocator, &{0}) catch unreachable; const rc = std.heap.page_allocator.create(std.atomic.Value(u32)) catch unreachable; rc.* = std.atomic.Value(u32).init(1); break :blk SharedTensor{{ .data = t.data, .shape = t.shape, .ref_count = rc, .allocator = std.heap.page_allocator }}; }})", shape)
                 },
                 "@reply" => {
                     let target = self.generate_expr(&call.args[0]);
@@ -675,14 +700,84 @@ impl Codegen {
                     self.write_to_case(&format!("if (mailboxes[ctx._self.local_id].pop()) |m| {{ ctx.received_msg = m; ctx.pc = {}; continue; }} else {{ schedule(@ptrCast(&{}), @ptrCast(ctx)); return; }}", next_pc, self.current_zig_fn_name));
                     self.next_state(); "ctx.received_msg.?".to_string()
                 },
+                "@net_read_async" => {
+                    if !self.is_state_machine { return "0".to_string(); }
+                    let handle = self.generate_expr(&call.args[0]);
+                    let next_pc = self.pc_counter + 1;
+                    let logic = if self.is_beam_mode {
+                        format!(
+                            "const h_val: u32 = @intCast({});
+                            const io_msg = try beam.Beam.makeFastMessage(ctx.self.env.?, 99990001, @intFromEnum(beam.SystemAction.NET_READ_REQ), std.mem.asBytes(h_val));
+                            ctx.pc = {};
+                            const ctx_bin = try beam.Beam.makeBinary(ctx.self.env.?, std.mem.asBytes(ctx));
+                            const atom_yield = beam.Beam.makeAtom(ctx.self.env.?, \"yield\");
+                            return beam.Beam.makeTuple(ctx.self.env.?, &[_]beam.Term{{ atom_yield, io_msg, ctx_bin }});",
+                            handle, next_pc
+                        )
+                    } else {
+                        format!(
+                            "const h: std.posix.fd_t = @intCast({});
+                            var buf = ctx.arena.?.allocator().alloc(u8, 4096) catch unreachable;
+                            if (std.posix.read(h, buf)) |bytes_read| {{
+                                if (bytes_read > 0) {{
+                                    ctx.received_msg = .{{ .string = buf[0..bytes_read] }};
+                                    ctx.pc = {};
+                                    continue;
+                                }} else {{
+                                    schedule(@ptrCast(&{}), @ptrCast(ctx));
+                                    return;
+                                }}
+                            }} else |err| switch (err) {{
+                                error.WouldBlock => {{
+                                    register_fd(h, ctx._self, std.posix.POLL.IN);
+                                    schedule(@ptrCast(&{}), @ptrCast(ctx));
+                                    return; // Yield to reactor
+                                }},
+                                else => {{}}, // Error
+                            }}", 
+                            handle, next_pc, self.current_zig_fn_name, self.current_zig_fn_name
+                        )
+                    };
+                    self.write_to_case(&logic);
+                    self.next_state();
+                    "ctx.received_msg.?.string".to_string()
+                },
+                "@fs_read_async" => {
+                    if !self.is_state_machine { return "0".to_string(); }
+                    let path = self.generate_expr(&call.args[0]);
+                    let next_pc = self.pc_counter + 1;
+                    let logic = if self.is_beam_mode {
+                        format!(
+                            "const io_msg = try beam.Beam.makeFastMessage(ctx.self.env.?, 99990001, @intFromEnum(beam.SystemAction.FS_READ_REQ), {});
+                            ctx.pc = {};
+                            const ctx_bin = try beam.Beam.makeBinary(ctx.self.env.?, std.mem.asBytes(ctx));
+                            const atom_yield = beam.Beam.makeAtom(ctx.self.env.?, \"yield\");
+                            return beam.Beam.makeTuple(ctx.self.env.?, &[_]beam.Term{{ atom_yield, io_msg, ctx_bin }});",
+                            path, next_pc
+                        )
+                    } else {
+                        format!(
+                            "const f = std.fs.cwd().openFile({}, .{{}}) catch unreachable;
+                            defer f.close();
+                            const data = f.readToEndAlloc(ctx.arena.?.allocator(), 10 * 1024 * 1024) catch unreachable;
+                            ctx.received_msg = .{{ .string = data }};
+                            ctx.pc = {};
+                            continue;",
+                            path, next_pc
+                        )
+                    };
+                    self.write_to_case(&logic);
+                    self.next_state();
+                    "ctx.received_msg.?.string".to_string()
+                },
                 "@fs_read_file" => {
                     let path = self.generate_expr(&call.args[0]);
-                    if self.is_state_machine { format!("(blk: {{ const f = std.fs.cwd().openFile({}, .{{}}); defer f.close(); break :blk f.readToEndAlloc(ctx.arena.?.allocator(), 10 * 1024 * 1024) ; }})", path) } else { format!("(blk: {{ const f = std.fs.cwd().openFile({}, .{{}}); defer f.close(); break :blk f.readToEndAlloc(std.heap.page_allocator, 10 * 1024 * 1024) ; }})", path) }
+                    if self.is_state_machine { format!("(blk: {{ const f = std.fs.cwd().openFile({}, .{{}}) catch unreachable; defer f.close(); break :blk f.readToEndAlloc(ctx.arena.?.allocator(), 10 * 1024 * 1024) catch unreachable; }})", path) } else { format!("(blk: {{ const f = std.fs.cwd().openFile({}, .{{}}); defer f.close(); break :blk try f.readToEndAlloc(std.heap.page_allocator, 10 * 1024 * 1024); }})", path) }
                 },
                 "@fs_write_file" => {
                     let path = self.generate_expr(&call.args[0]);
                     let data = self.generate_expr(&call.args[1]);
-                    format!("(blk: {{ std.fs.cwd().writeFile(.{{ .sub_path = {}, .data = {} }}); break :blk {{}}; }})", path, data)
+                    format!("(blk: {{ std.fs.cwd().writeFile(.{{ .sub_path = {}, .data = {} }}) catch unreachable; break :blk {{}}; }})", path, data)
                 },
                 "@fs_exists" => {
                     let path = self.generate_expr(&call.args[0]);
@@ -690,11 +785,11 @@ impl Codegen {
                 },
                 "@fs_mkdir" => {
                     let path = self.generate_expr(&call.args[0]);
-                    format!("(blk: {{ std.fs.cwd().makePath({}) ; break :blk {{}}; }})", path)
+                    format!("(blk: {{ std.fs.cwd().makePath({}) catch unreachable; break :blk {{}}; }})", path)
                 },
                 "@fs_remove" => {
                     let path = self.generate_expr(&call.args[0]);
-                    format!("(blk: {{ std.fs.cwd().deleteTree({}) ; break :blk {{}}; }})", path)
+                    format!("(blk: {{ std.fs.cwd().deleteTree({}) catch unreachable; break :blk {{}}; }})", path)
                 },
                 "@fs_copy" => {
                     let src = self.generate_expr(&call.args[0]);
@@ -704,12 +799,12 @@ impl Codegen {
                 "@net_connect" => {
                     let host = self.generate_expr(&call.args[0]);
                     let port = self.generate_expr(&call.args[1]);
-                    format!("(blk: {{ const address = std.net.Address.parseIp4({}, @as(u16, @intCast({}))) ; const stream = std.net.tcpConnectToAddress(address) ; break :blk stream.handle; }})", host, port)
+                    format!("(blk: {{ const address = std.net.Address.parseIp4({}, @as(u16, @intCast({}))) catch unreachable; const stream = std.net.tcpConnectToAddress(address) catch unreachable; break :blk stream.handle; }})", host, port)
                 },
                 "@net_send" => {
                     let handle = self.generate_expr(&call.args[0]);
                     let data = self.generate_expr(&call.args[1]);
-                    format!("(blk: {{ const stream = std.net.Stream {{ .handle = {} }}; stream.writeAll({}) ; break :blk {{}}; }})", handle, data)
+                    format!("(blk: {{ const stream = std.net.Stream {{ .handle = {} }}; stream.writeAll({}) catch unreachable; break :blk {{}}; }})", handle, data)
                 },
                 "@net_close" => {
                     let handle = self.generate_expr(&call.args[0]);
@@ -722,27 +817,40 @@ impl Codegen {
                 },
                 _ => "0".to_string(),
             },
+            Expr::Arrow(arrow) => {
+                let lambda_name = format!("lambda_{}", self.lambda_counter);
+                self.lambda_counter += 1;
+                let old_fn = self.current_zig_fn_name.clone();
+                let mut lambda_output = String::new();
+                let mut lambda_gen = Codegen::new();
+                lambda_gen.globals = self.globals.clone();
+                lambda_gen.is_state_machine = true;
+                lambda_gen.current_fn_is_async = true; 
+                lambda_gen.current_zig_fn_name = lambda_name.clone();
+                let ctx_name = format!("{}_Context", lambda_name);
+                writeln!(lambda_output, "const {} = struct {{", ctx_name).unwrap();
+                writeln!(lambda_output, "    pc: u32 = 0, _self: PID = PID{{ .node_id = 0, .local_id = 0 }}, arena: ?*std.heap.ArenaAllocator = null, received_msg: ?Message = null, await_result: ?Message = null,").unwrap();
+                if let ArrowBody::Block(b) = &*arrow.body {
+                    lambda_gen.extract_local_vars_to_str(b, &mut lambda_output);
+                }
+                writeln!(lambda_output, "}};").unwrap();
+                writeln!(lambda_output, "pub fn {}(ptr: *anyopaque) anyerror!void {{", lambda_name).unwrap();
+                writeln!(lambda_output, "    const ctx: *{} = @ptrCast(@alignCast(ptr));", ctx_name).unwrap();
+                writeln!(lambda_output, "    while (true) {{ switch (ctx.pc) {{").unwrap();
+                lambda_gen.indent_level = 2;
+                match &*arrow.body {
+                    ArrowBody::Expr(e) => { let e_code = lambda_gen.generate_expr(e); lambda_gen.write_to_case(&format!("_ = {}; return;", e_code)); },
+                    ArrowBody::Block(b) => { for s in &b.body { lambda_gen.generate_stmt(s); } }
+                }
+                lambda_gen.emit_current_case();
+                for case in &lambda_gen.cases { lambda_output.push_str(case); }
+                writeln!(lambda_output, "        else => unreachable,\n    }} }} }}\n").unwrap();
+                self.lambda_funcs.push(lambda_output);
+                self.current_zig_fn_name = old_fn;
+                lambda_name
+            },
             _ => "0".to_string(),
         }
-    }
-
-    fn extract_local_vars_from_arrow(&mut self, arrow: &ArrowExpr, output: &mut String) {
-        for param in &arrow.params { if let Pattern::Ident(ident) = param { writeln!(output, "    {}: Message,", ident.sym).unwrap(); } }
-        if let ArrowBody::Block(b) = &*arrow.body { self.extract_local_vars_to_str(b, output); }
-    }
-
-    fn extract_local_vars_to_str(&mut self, block: &BlockStmt, output: &mut String) {
-        for stmt in &block.body { match stmt {
-            Stmt::Var(var) => if let Pattern::Ident(ident) = &var.pat {
-                let mut ty_str = if let Some(t) = &var.ty { self.map_type(t) } else { "i32".to_string() };
-                if ident.sym == "st" { ty_str = "SharedTensor".to_string(); }
-                if ident.sym == "msg" { ty_str = "Message".to_string(); }
-                if ident.sym == "t" { ty_str = "SharedTensor".to_string(); }
-                writeln!(output, "    {}: {},", ident.sym, ty_str).unwrap();
-            },
-            Stmt::Block(b) => self.extract_local_vars_to_str(b, output),
-            _ => {}
-        } }
     }
 
     fn extract_locals_simple(&mut self, block: &BlockStmt) {
@@ -755,29 +863,38 @@ impl Codegen {
         } }
     }
 
-    fn extract_local_vars(&mut self, block: &BlockStmt) {
+    fn extract_local_vars_to_str(&mut self, block: &BlockStmt, output: &mut String) {
         for stmt in &block.body { match stmt {
             Stmt::Var(var) => if let Pattern::Ident(ident) = &var.pat {
                 let mut ty_str = if let Some(t) = &var.ty { self.map_type(t) } else { "i32".to_string() };
-                if ident.sym == "st" { ty_str = "SharedTensor".to_string(); }
+                if ident.sym == "st" || ident.sym == "t" { ty_str = "SharedTensor".to_string(); }
                 if ident.sym == "msg" { ty_str = "Message".to_string(); }
-                if ident.sym == "pid" || ident.sym == "handle" || ident.sym == "worker" || ident.sym.contains("pid") { 
-                    ty_str = "PID".to_string(); 
-                }
+                if ident.sym == "pid" || ident.sym == "worker" || ident.sym.contains("pid") || ident.sym.contains("worker") { ty_str = "PID".to_string(); }
                 if ident.sym == "shape" { ty_str = "[2]usize".to_string(); }
-                if ident.sym.contains("dir") || ident.sym.contains("file") || ident.sym.contains("path") || ident.sym.contains("content") || ident.sym == "s" || ident.sym == "fmt" {
+                if ident.sym.contains("dir") || ident.sym.contains("file") || ident.sym.contains("path") || ident.sym.contains("content") || ident.sym == "s" || ident.sym == "fmt" || ident.sym.contains("data") {
                     ty_str = "[]const u8".to_string();
                 }
-                
-                if ty_str == "PID" { 
-                    self.writeln(&format!("{}: PID = PID{{ .node_id = 0, .local_id = 0 }},", ident.sym)); 
-                } else { 
-                    self.writeln(&format!("{}: {},", ident.sym, ty_str)); 
-                }
+                if ident.sym.contains("socket") { ty_str = "*Socket".to_string(); }
+                if ty_str == "[]const u8" { writeln!(output, "    {}: []const u8 = &[_]u8{{}},", ident.sym).unwrap(); }
+                else if ty_str == "i32" { writeln!(output, "    {}: i32 = 0,", ident.sym).unwrap(); }
+                else if ty_str == "PID" { writeln!(output, "    {}: PID = PID{{ .node_id = 0, .local_id = 0 }},", ident.sym).unwrap(); }
+                else { writeln!(output, "    {}: {} = undefined,", ident.sym, ty_str).unwrap(); }
             },
-            Stmt::Block(b) => self.extract_local_vars(b),
+            Stmt::Block(b) => self.extract_local_vars_to_str(b, output),
             _ => {}
         } }
+    }
+
+    fn extract_local_vars(&mut self, block: &BlockStmt) {
+        let mut buf = String::new();
+        self.extract_local_vars_to_str(block, &mut buf);
+        for line in buf.lines() {
+            if line.contains(": PID,") {
+                self.writeln(&line.replace(": PID,", ": PID = PID{ .node_id = 0, .local_id = 0 },"));
+            } else {
+                self.writeln(line);
+            }
+        }
     }
 
     fn map_type(&self, ty: &Type) -> String {
@@ -786,6 +903,7 @@ impl Codegen {
             Type::Array(inner) => format!("[]const {}", self.map_type(inner)),
             Type::Ref(ident) => {
                 if ident.sym == "SharedTensor" { "SharedTensor".to_string() } 
+                else if ident.sym == "Socket" { "*Socket".to_string() }
                 else { format!("*{}", ident.sym) }
             },
             _ => "i32".to_string(),

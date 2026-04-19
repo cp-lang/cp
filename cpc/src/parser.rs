@@ -707,15 +707,20 @@ impl<'a> Parser<'a> {
             Some(Token::Star) => Some(BinaryOp::Mul),
             Some(Token::Slash) => Some(BinaryOp::Div),
             Some(Token::Assign) => Some(BinaryOp::Eq),
+            Some(Token::Eq) => Some(BinaryOp::Eq),
+            Some(Token::NotEq) => Some(BinaryOp::NotEq),
             Some(Token::Less) => Some(BinaryOp::Lt),
+            Some(Token::LessEq) => Some(BinaryOp::LtEq),
+            Some(Token::Greater) => Some(BinaryOp::Gt),
+            Some(Token::GreaterEq) => Some(BinaryOp::GtEq),
             _ => None,
         }
     }
 
     fn op_precedence(&self, op: &BinaryOp) -> u8 {
         match op {
-            BinaryOp::Eq => 1,
-            BinaryOp::Lt => 2,
+            BinaryOp::Eq | BinaryOp::NotEq => 1,
+            BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq => 2,
             BinaryOp::Add | BinaryOp::Sub => 3,
             BinaryOp::Mul | BinaryOp::Div => 4,
             _ => 0,

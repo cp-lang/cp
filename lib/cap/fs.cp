@@ -1,3 +1,6 @@
+// Note: Async functions currently require calling builtins directly or 
+// compiler support for nested CPS. Direct builtins are used here for clarity.
+
 export fn readFileSync(path: string): string {
     return @fs_read_file(path);
 }
