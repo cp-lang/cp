@@ -3,7 +3,7 @@ const std = @import("std");
 // --- 内部：引入 Erlang NIF C API 的纯 Zig 翻译版本 ---
 // 注意：通过直接引入纯 Zig 版本，CP 编译器在编译业务代码时
 // 完全不需要依赖任何 C 语言头文件 (erl_nif.h) 和 C 编译器环境！
-const erl = @import("./erl_nif.zig");
+const erl = @import("../src/erl_nif.zig");
 
 // --- 公共 API 类型别名 ---
 pub const Env = opaque {};
@@ -228,6 +228,27 @@ pub const SystemAction = enum(u32) {
     WAKE = 1,
     SLEEP = 2,
     STOP = 3,
+
+    // 网络 I/O (10-19)
+    NET_CONNECT_REQ = 10,
+    NET_CONNECT_RES = 11,
+    NET_WRITE_REQ = 12,
+    NET_READ_REQ = 13,
+    NET_READ_RES = 14,
+
+    // 文件 I/O (20-29)
+    FS_READ_REQ = 20,
+    FS_READ_RES = 21,
+    FS_WRITE_REQ = 22,
+    FS_WRITE_RES = 23,
+
+    // 高层 HTTP (30-39)
+    HTTP_FETCH_REQ = 30,
+    HTTP_FETCH_RES = 31,
+
+    // 系统级错误响应 (99)
+    // Payload 约定：前 4 字节为 ErrorCode (参考 HTTP, 如 404, 403, 500)
+    IO_ERROR = 99,
 };
 
 /// 暴露一个规范定义的统一 Native NIF 入口函数类型
@@ -235,15 +256,15 @@ pub const NativeDispatchFunc = fn (
     env: ?*erl.ErlNifEnv, 
     argc: c_int, 
     argv: [*c]const erl.ERL_NIF_TERM
-) callconv(.c) erl.ERL_NIF_TERM;
+) callconv(.C) erl.ERL_NIF_TERM;
 
 /// 辅助 CP 编译器一键生成供 BEAM 加载的 NifEntry 结构
 pub fn defineNifEntry(
     comptime name: []const u8,
     comptime funcs: []const NifFunc,
-    comptime load: ?*const fn (?*erl.ErlNifEnv, [*c]?*anyopaque, erl.ERL_NIF_TERM) callconv(.c) c_int,
-    comptime upgrade: ?*const fn (?*erl.ErlNifEnv, [*c]?*anyopaque, [*c]?*anyopaque, erl.ERL_NIF_TERM) callconv(.c) c_int,
-    comptime unload: ?*const fn (?*erl.ErlNifEnv, ?*anyopaque) callconv(.c) void,
+    comptime load: ?*const fn (?*erl.ErlNifEnv, [*c]?*anyopaque, erl.ERL_NIF_TERM) callconv(.C) c_int,
+    comptime upgrade: ?*const fn (?*erl.ErlNifEnv, [*c]?*anyopaque, [*c]?*anyopaque, erl.ERL_NIF_TERM) callconv(.C) c_int,
+    comptime unload: ?*const fn (?*erl.ErlNifEnv, ?*anyopaque) callconv(.C) void,
 ) NifEntry {
     return .{
         .major = ERL_NIF_MAJOR_VERSION,
