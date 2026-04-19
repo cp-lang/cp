@@ -154,10 +154,13 @@ export fn native_dispatch_nif(env: ?*erl.ErlNifEnv, argc: c_int, argv: [*c]const
 2. **`beam.zig` 库提供**：
    - 纯净的 SDK 文件已发布在 `/data/buns/bun/packages/bun-beam/sdk/beam.zig`，供 CP 编译器在生成产物时直接 `import`。
 3. **JS/TS 控制面映射**：
-   - 扩展 `BeamEngine` API，允许开发者在主脚本中优雅地注册和编排 Native 实体：
+   - 使用统一的 `Beam.Agent.register` API 编排 Native 实体。底座会自动识别字符串参数并剥离平台后缀（如 .so/.dll），利用 BEAM 的原生跨平台加载能力：
      ```typescript
-     engine.registerNative("CPTraderAgent", "./build/libcp_agents.so");
-     engine.spawn("CPTraderAgent", 999);
+     // 统一注册：如果是字符串，则视为 Native 库路径
+     Beam.Agent.register("CPTraderAgent", "./build/libcp_agents"); 
+     
+     // 统一启动
+     Beam.spawn("CPTraderAgent", 999);
      ```
 
 ## 5. 联调测试标准
@@ -167,3 +170,5 @@ export fn native_dispatch_nif(env: ?*erl.ErlNifEnv, argc: c_int, argv: [*c]const
 2. JS 主控发送一条 **8 字节极速广播** (Action: `MARKET_UPDATE`)。
 3. Erlang 调度器瞬间将 50万条消息推入 Bun Worker MPSC 队列，将另 50万条消息推入 `native_agent_loop` 进程。
 4. **JS Agent 内存隔离，Native Agent 原地拉起**，混合大军同时处理数据并相互通信。无死锁、无超时、延迟极低。
+
+
