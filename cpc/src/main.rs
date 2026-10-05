@@ -1,11 +1,11 @@
 use clap::{Parser, Subcommand};
 use cpc::ast::Module;
+use cpc::codegen::Codegen;
 use cpc::parser::Parser as CPParser;
 use cpc::sema::Analyzer;
-use cpc::codegen::Codegen;
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
-use std::collections::HashSet;
 
 use cpc::resolver::resolve_imports;
 
@@ -18,17 +18,23 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    Compile { 
-        input: PathBuf, 
-        #[arg(short = 'o', long)] 
-        output: Option<PathBuf>, 
-        #[arg(short = 'I', long)] 
+    Compile {
+        input: PathBuf,
+        #[arg(short = 'o', long)]
+        output: Option<PathBuf>,
+        #[arg(short = 'I', long)]
         include: Vec<PathBuf>,
         #[arg(short = 'b', long)]
-        beam: bool 
+        beam: bool,
     },
-    Check { input: PathBuf },
-    EmitTypes { input: PathBuf, #[arg(short = 'o', long)] output: Option<PathBuf> },
+    Check {
+        input: PathBuf,
+    },
+    EmitTypes {
+        input: PathBuf,
+        #[arg(short = 'o', long)]
+        output: Option<PathBuf>,
+    },
     Lsp,
 }
 
@@ -43,16 +49,26 @@ fn main() {
 
 fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Commands::Compile { input, output, include, beam } => {
+        Commands::Compile {
+            input,
+            output,
+            include,
+            beam,
+        } => {
             let mut all_items = Vec::new();
             let mut processed_sources = HashSet::new();
-            
+
             resolve_imports(&input, &include, &mut all_items, &mut processed_sources)?;
 
-            let module = Module { span: cpc::Span { start: 0, end: 0 }, body: all_items };
+            let module = Module {
+                span: cpc::Span { start: 0, end: 0 },
+                body: all_items,
+            };
 
             let mut analyzer = Analyzer::new();
-            analyzer.analyze_module(&module).map_err(|e| anyhow::anyhow!("Semantic Error: {}", e))?;
+            analyzer
+                .analyze_module(&module)
+                .map_err(|e| anyhow::anyhow!("Semantic Error: {}", e))?;
 
             let mut codegen = Codegen::new();
             codegen.is_beam_mode = beam;
@@ -66,7 +82,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Check { input } => {
             let code = fs::read_to_string(&input)?;
             let mut parser = CPParser::new(&code);
-            let module = parser.parse_module().map_err(|e| anyhow::anyhow!("Parse Error in {:?}: {}", input, e))?;
+            let module = parser
+                .parse_module()
+                .map_err(|e| anyhow::anyhow!("Parse Error in {:?}: {}", input, e))?;
             let mut analyzer = Analyzer::new();
             analyzer.analyze_module(&module)?;
             println!("Check successful");
@@ -74,10 +92,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::EmitTypes { input, output } => {
             let code = fs::read_to_string(&input)?;
             let mut parser = CPParser::new(&code);
-            let module = parser.parse_module().map_err(|e| anyhow::anyhow!("Parse Error in {:?}: {}", input, e))?;
+            let module = parser
+                .parse_module()
+                .map_err(|e| anyhow::anyhow!("Parse Error in {:?}: {}", input, e))?;
             let mut emitter = cpc::dcp::DcpEmitter::new();
             let type_defs = emitter.emit_module(&module);
-            
+
             let out_path = output.unwrap_or_else(|| input.with_extension("d.cp"));
             if let Some(parent) = out_path.parent() {
                 fs::create_dir_all(parent)?;

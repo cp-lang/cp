@@ -36,7 +36,8 @@ impl DcpEmitter {
                 self.output.push_str(", ");
             }
         }
-        self.output.push_str(&format!(" }} from \"{}\";\n", imp.source));
+        self.output
+            .push_str(&format!(" }} from \"{}\";\n", imp.source));
     }
 
     fn emit_decl(&mut self, decl: &Decl) {
@@ -48,7 +49,8 @@ impl DcpEmitter {
                 }
             }
             Decl::Class(c) => {
-                self.output.push_str(&format!("export class {} ", c.ident.sym));
+                self.output
+                    .push_str(&format!("export class {} ", c.ident.sym));
                 if !c.implements.is_empty() {
                     self.output.push_str("implements ");
                     for (i, imp) in c.implements.iter().enumerate() {
@@ -61,7 +63,11 @@ impl DcpEmitter {
                 }
                 self.output.push_str("{\n");
                 for field in &c.fields {
-                    self.output.push_str(&format!("    {}: {},\n", field.ident.sym, self.format_type(&field.ty)));
+                    self.output.push_str(&format!(
+                        "    {}: {},\n",
+                        field.ident.sym,
+                        self.format_type(&field.ty)
+                    ));
                 }
                 for method in &c.methods {
                     self.output.push_str("    ");
@@ -70,33 +76,40 @@ impl DcpEmitter {
                 self.output.push_str("}\n\n");
             }
             Decl::Trait(t) => {
-                self.output.push_str(&format!("export trait {} {{\n", t.ident.sym));
+                self.output
+                    .push_str(&format!("export trait {} {{\n", t.ident.sym));
                 for method in &t.methods {
-                    self.output.push_str(&format!("    fn {}(", method.ident.sym));
+                    self.output
+                        .push_str(&format!("    fn {}(", method.ident.sym));
                     self.emit_params(&method.params);
                     self.output.push_str(")");
                     if let Some(ret) = &method.return_type {
-                        self.output.push_str(&format!(": {}", self.format_type(ret)));
+                        self.output
+                            .push_str(&format!(": {}", self.format_type(ret)));
                     }
                     self.output.push_str(";\n");
                 }
                 self.output.push_str("}\n\n");
             }
             Decl::Interface(i) => {
-                self.output.push_str(&format!("export interface {} {{\n", i.ident.sym));
+                self.output
+                    .push_str(&format!("export interface {} {{\n", i.ident.sym));
                 for method in &i.methods {
-                    self.output.push_str(&format!("    fn {}(", method.ident.sym));
+                    self.output
+                        .push_str(&format!("    fn {}(", method.ident.sym));
                     self.emit_params(&method.params);
                     self.output.push_str(")");
                     if let Some(ret) = &method.return_type {
-                        self.output.push_str(&format!(": {}", self.format_type(ret)));
+                        self.output
+                            .push_str(&format!(": {}", self.format_type(ret)));
                     }
                     self.output.push_str(";\n");
                 }
                 self.output.push_str("}\n\n");
             }
             Decl::Enum(e) => {
-                self.output.push_str(&format!("export enum {} {{\n", e.ident.sym));
+                self.output
+                    .push_str(&format!("export enum {} {{\n", e.ident.sym));
                 for (i, variant) in e.variants.iter().enumerate() {
                     self.output.push_str(&format!("    {}", variant.ident.sym));
                     if let Some(val) = &variant.value {
@@ -110,7 +123,11 @@ impl DcpEmitter {
                     if let Some(fields) = &variant.fields {
                         self.output.push_str(" { ");
                         for (j, field) in fields.iter().enumerate() {
-                            self.output.push_str(&format!("{}: {}", field.ident.sym, self.format_type(&field.ty)));
+                            self.output.push_str(&format!(
+                                "{}: {}",
+                                field.ident.sym,
+                                self.format_type(&field.ty)
+                            ));
                             if j < fields.len() - 1 {
                                 self.output.push_str(", ");
                             }
@@ -126,7 +143,8 @@ impl DcpEmitter {
                 self.output.push_str("}\n\n");
             }
             Decl::ErrorSet(e) => {
-                self.output.push_str(&format!("export error {} {{ ", e.ident.sym));
+                self.output
+                    .push_str(&format!("export error {} {{ ", e.ident.sym));
                 for (i, variant) in e.variants.iter().enumerate() {
                     self.output.push_str(&variant.sym);
                     if i < e.variants.len() - 1 {
@@ -147,7 +165,8 @@ impl DcpEmitter {
         self.emit_params(&f.params);
         self.output.push_str(")");
         if let Some(ret) = &f.return_type {
-            self.output.push_str(&format!(": {}", self.format_type(ret)));
+            self.output
+                .push_str(&format!(": {}", self.format_type(ret)));
         }
         self.output.push_str(";\n");
     }
@@ -157,7 +176,8 @@ impl DcpEmitter {
             if p.is_comptime {
                 self.output.push_str("comptime ");
             }
-            self.output.push_str(&format!("{}: {}", p.ident.sym, self.format_type(&p.ty)));
+            self.output
+                .push_str(&format!("{}: {}", p.ident.sym, self.format_type(&p.ty)));
             if i < params.len() - 1 {
                 self.output.push_str(", ");
             }
@@ -194,7 +214,11 @@ impl DcpEmitter {
             Type::Object(fields) => {
                 let mut s = String::from("{ ");
                 for (i, field) in fields.iter().enumerate() {
-                    s.push_str(&format!("{}: {}", field.ident.sym, self.format_type(&field.ty)));
+                    s.push_str(&format!(
+                        "{}: {}",
+                        field.ident.sym,
+                        self.format_type(&field.ty)
+                    ));
                     if i < fields.len() - 1 {
                         s.push_str(", ");
                     }

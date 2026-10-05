@@ -1,13 +1,14 @@
-pub mod lexer;
 pub mod ast;
-pub mod parser;
-pub mod sema;
-pub mod resolver;
+pub mod ast_visitor;
 pub mod codegen;
 pub mod dcp;
+pub mod lexer;
 pub mod lsp;
+pub mod parser;
+pub mod resolver;
+pub mod sema;
 
-pub use lexer::{Token, Lexer};
+pub use lexer::{Lexer, Token};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Span {

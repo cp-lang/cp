@@ -1,9 +1,9 @@
-import { connect, listen } from "cap:net";
-import { print } from "cap:io";
+import { test, expect_eq } from "cap:test";
+import { listen } from "cap:net";
 
-fn main(): ?void {
-    @print("--- Network Module Compilation Test ---");
-    // Just test if it compiles and the classes are recognized
-    // We won't actually connect to anything that might fail
-    @print("Network module loaded successfully.");
+fn main(): void {
+    test("Net Server Listen", () => {
+        let server = listen(8080);
+        expect_eq(server.fd, 100);
+    });
 }

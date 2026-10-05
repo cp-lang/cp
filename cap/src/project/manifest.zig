@@ -48,36 +48,36 @@ pub const Manifest = struct {
     }
 
     pub fn save(self: *Manifest, allocator: std.mem.Allocator, path: []const u8) !void {
-        var out_file = try std.fs.cwd().createFile(path, .{});
-        defer out_file.close();
+        var out_file = try @import("../main.zig").fs_shim.cwd().createFile(path, .{});
+        defer out_file.close(@import("../main.zig").global_io);
 
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
         const aa = arena.allocator();
 
-        var root = std.json.Value{ .object = std.json.ObjectMap.init(aa) };
-        try root.object.put("name", std.json.Value{ .string = self.name });
-        try root.object.put("version", std.json.Value{ .string = self.version });
+        var root = std.json.Value{ .object = std.json.ObjectMap.init(aa, &.{}, &.{}) catch unreachable };
+        try root.object.put(aa, "name", std.json.Value{ .string = self.name });
+        try root.object.put(aa, "version", std.json.Value{ .string = self.version });
         if (self.main) |m| {
-            try root.object.put("main", std.json.Value{ .string = m });
+            try root.object.put(aa, "main", std.json.Value{ .string = m });
         }
 
-        var scripts_map = std.json.ObjectMap.init(aa);
+        var scripts_map = std.json.ObjectMap.init(aa, &.{}, &.{}) catch unreachable;
         var script_iter = self.scripts.iterator();
         while (script_iter.next()) |entry| {
-            try scripts_map.put(entry.key_ptr.*, std.json.Value{ .string = entry.value_ptr.* });
+            try scripts_map.put(aa, entry.key_ptr.*, std.json.Value{ .string = entry.value_ptr.* });
         }
-        try root.object.put("scripts", std.json.Value{ .object = scripts_map });
+        try root.object.put(aa, "scripts", std.json.Value{ .object = scripts_map });
 
-        var deps_map = std.json.ObjectMap.init(aa);
+        var deps_map = std.json.ObjectMap.init(aa, &.{}, &.{}) catch unreachable;
         var dep_iter = self.dependencies.iterator();
         while (dep_iter.next()) |entry| {
-            try deps_map.put(entry.key_ptr.*, std.json.Value{ .string = entry.value_ptr.* });
+            try deps_map.put(aa, entry.key_ptr.*, std.json.Value{ .string = entry.value_ptr.* });
         }
-        try root.object.put("dependencies", std.json.Value{ .object = deps_map });
+        try root.object.put(aa, "dependencies", std.json.Value{ .object = deps_map });
 
         var buf: [4096]u8 = undefined;
-        var writer = out_file.writer(&buf);
+        var writer = out_file.writer(@import("../main.zig").global_io, &buf);
         try std.json.Stringify.value(root, .{ .whitespace = .indent_2 }, &writer.interface);
         try writer.end();
     }

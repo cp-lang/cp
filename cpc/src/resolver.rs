@@ -1,10 +1,10 @@
 use crate::ast::ModuleItem;
 use crate::parser::Parser as CPParser;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::collections::HashSet;
 
-pub fn resolve_file_or_dir(base: &Path) -> Option<PathBuf> { 
+pub fn resolve_file_or_dir(base: &Path) -> Option<PathBuf> {
     // 1. Check <base>.d.cp
     let dcp_file = base.with_extension("d.cp");
     if dcp_file.exists() {
@@ -41,12 +41,18 @@ pub fn resolve_file_or_dir(base: &Path) -> Option<PathBuf> {
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
                     if let Some(main_file) = json.get("main").and_then(|v| v.as_str()) {
                         let m_path = PathBuf::from(main_file);
-                        let m_base = base.join(m_path.parent().unwrap_or(Path::new(""))).join(m_path.file_stem().unwrap_or(std::ffi::OsStr::new("")));
-                        
+                        let m_base = base
+                            .join(m_path.parent().unwrap_or(Path::new("")))
+                            .join(m_path.file_stem().unwrap_or(std::ffi::OsStr::new("")));
+
                         let dcp = m_base.with_extension("d.cp");
-                        if dcp.exists() { return Some(dcp); }
+                        if dcp.exists() {
+                            return Some(dcp);
+                        }
                         let cp = m_base.with_extension("cp");
-                        if cp.exists() { return Some(cp); }
+                        if cp.exists() {
+                            return Some(cp);
+                        }
                     }
                 }
             }
@@ -66,7 +72,9 @@ pub fn resolve_dependencies(
 
     let code = fs::read_to_string(path)?;
     let mut parser = CPParser::new(&code);
-    let module = parser.parse_module().map_err(|e| anyhow::anyhow!("Parse Error in {:?}: {}", path, e))?;
+    let module = parser
+        .parse_module()
+        .map_err(|e| anyhow::anyhow!("Parse Error in {:?}: {}", path, e))?;
 
     for item in module.body {
         match item {
@@ -78,10 +86,14 @@ pub fn resolve_dependencies(
 
                 let mut resolved_path = None;
 
-                if search_source.starts_with("./") || search_source.starts_with("../") || search_source.starts_with("/") || search_source.starts_with("cap/") {
+                if search_source.starts_with("./")
+                    || search_source.starts_with("../")
+                    || search_source.starts_with("/")
+                    || search_source.starts_with("cap/")
+                {
                     let base_path = path.parent().unwrap().join(&search_source);
                     resolved_path = resolve_file_or_dir(&base_path);
-                    
+
                     if resolved_path.is_none() {
                         for inc in include_paths {
                             let p = inc.join(&search_source);
@@ -107,8 +119,12 @@ pub fn resolve_dependencies(
                     }
 
                     if resolved_path.is_none() {
-                        let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| String::from("~"));
-                        let global_path = PathBuf::from(&home).join(".cap/global/cap_modules").join(&search_source);
+                        let home = std::env::var("HOME")
+                            .or_else(|_| std::env::var("USERPROFILE"))
+                            .unwrap_or_else(|_| String::from("~"));
+                        let global_path = PathBuf::from(&home)
+                            .join(".cap/global/cap_modules")
+                            .join(&search_source);
                         resolved_path = resolve_file_or_dir(&global_path);
                     }
                 }
@@ -132,7 +148,6 @@ pub fn resolve_imports(
     all_items: &mut Vec<ModuleItem>,
     processed: &mut HashSet<PathBuf>,
 ) -> anyhow::Result<()> {
-    
     let abs_path = fs::canonicalize(path)?;
     if processed.contains(&abs_path) {
         return Ok(());
@@ -141,7 +156,9 @@ pub fn resolve_imports(
 
     let code = fs::read_to_string(path)?;
     let mut parser = CPParser::new(&code);
-    let module = parser.parse_module().map_err(|e| anyhow::anyhow!("Parse Error in {:?}: {}", path, e))?;
+    let module = parser
+        .parse_module()
+        .map_err(|e| anyhow::anyhow!("Parse Error in {:?}: {}", path, e))?;
 
     for item in module.body {
         match item {
@@ -153,11 +170,15 @@ pub fn resolve_imports(
 
                 let mut resolved_path = None;
 
-                if search_source.starts_with("./") || search_source.starts_with("../") || search_source.starts_with("/") || search_source.starts_with("cap/") {
+                if search_source.starts_with("./")
+                    || search_source.starts_with("../")
+                    || search_source.starts_with("/")
+                    || search_source.starts_with("cap/")
+                {
                     // Relative, absolute or cap: import
                     let base_path = path.parent().unwrap().join(&search_source);
                     resolved_path = resolve_file_or_dir(&base_path);
-                    
+
                     // Fallback for include paths if still not found (legacy behavior)
                     if resolved_path.is_none() {
                         for inc in include_paths {
@@ -186,8 +207,12 @@ pub fn resolve_imports(
 
                     // Fallback to global installation
                     if resolved_path.is_none() {
-                        let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| String::from("~"));
-                        let global_path = PathBuf::from(&home).join(".cap/global/cap_modules").join(&search_source);
+                        let home = std::env::var("HOME")
+                            .or_else(|_| std::env::var("USERPROFILE"))
+                            .unwrap_or_else(|_| String::from("~"));
+                        let global_path = PathBuf::from(&home)
+                            .join(".cap/global/cap_modules")
+                            .join(&search_source);
                         resolved_path = resolve_file_or_dir(&global_path);
                     }
                 }

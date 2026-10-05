@@ -1,23 +1,44 @@
 export class Socket {
-    handle: i32,
-    fn send(this, data: string): void {
-        @net_send(this.handle, data);
+    fd: i32;
+
+    fn init(fd: i32): void {
+        this.fd = fd;
     }
-    async fn read(this): string {
-        return @net_read_async(this.handle);
+
+    async fn read(): string {
+        return await @net_read_async(this.fd);
     }
-    fn close(this): void {
-        @net_close(this.handle);
+
+    async fn write(data: string): i32 {
+        return await @net_write_async(this.fd, data);
+    }
+
+    fn close(): void {
+        @net_close(this.fd);
     }
 }
 
-export fn connect(host: string, port: i32): Socket {
-    const handle = @net_connect(host, port);
-    const s = new Socket();
-    s.handle = handle;
+export class Server {
+    fd: i32;
+
+    fn init(fd: i32): void {
+        this.fd = fd;
+    }
+
+    async fn accept(): Socket {
+        let fd = await @net_accept_async(this.fd);
+        let s = new Socket(fd);
+        return s;
+    }
+
+    fn close(): void {
+        @net_close(this.fd);
+    }
+}
+
+export fn listen(port: i32): Server {
+    let s = new Server(0); // placeholder, wait, @net_listen needs to create fd
+    let fd = @net_listen(port);
+    s.fd = fd;
     return s;
-}
-
-export fn listen(port: i32, callback: any): void {
-    @net_listen(port, callback);
 }

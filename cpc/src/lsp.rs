@@ -1,14 +1,14 @@
+use crate::ast::{Module, Type};
+use crate::parser::Parser;
+use crate::resolver::resolve_dependencies;
+use crate::sema::{Analyzer, SymbolKind};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-use crate::parser::Parser;
-use crate::sema::{Analyzer, SymbolKind};
-use crate::resolver::resolve_dependencies;
-use crate::ast::{Module, Type};
-use tokio::sync::Mutex;
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::path::PathBuf;
 
 pub struct Backend {
     client: Client,
@@ -43,17 +43,22 @@ impl LanguageServer for Backend {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        self.on_change(params.text_document.uri, params.text_document.text).await;
+        self.on_change(params.text_document.uri, params.text_document.text)
+            .await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
-        self.on_change(params.text_document.uri, params.content_changes[0].text.clone()).await;
+        self.on_change(
+            params.text_document.uri,
+            params.content_changes[0].text.clone(),
+        )
+        .await;
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
-        
+
         let state = self.state.lock().await;
         if let Some((text, analyzer)) = state.get(&uri) {
             if let Some(offset) = position_to_offset(text, position) {
@@ -69,7 +74,7 @@ impl LanguageServer for Backend {
                 }
             }
         }
-        
+
         Ok(None)
     }
 
@@ -86,8 +91,14 @@ impl LanguageServer for Backend {
             CompletionItem::new_simple("error".to_string(), "Error set definition".to_string()),
             CompletionItem::new_simple("match".to_string(), "Pattern matching".to_string()),
             CompletionItem::new_simple("defer".to_string(), "Defer execution".to_string()),
-            CompletionItem::new_simple("errdefer".to_string(), "Defer execution on error".to_string()),
-            CompletionItem::new_simple("await".to_string(), "Await asynchronous operation".to_string()),
+            CompletionItem::new_simple(
+                "errdefer".to_string(),
+                "Defer execution on error".to_string(),
+            ),
+            CompletionItem::new_simple(
+                "await".to_string(),
+                "Await asynchronous operation".to_string(),
+            ),
             CompletionItem::new_simple("async".to_string(), "Asynchronous function".to_string()),
             CompletionItem::new_simple("@spawn".to_string(), "Spawn a new actor".to_string()),
             CompletionItem::new_simple("@receive".to_string(), "Receive message".to_string()),
@@ -95,8 +106,14 @@ impl LanguageServer for Backend {
             CompletionItem::new_simple("@print".to_string(), "Print to console".to_string()),
             CompletionItem::new_simple("@self".to_string(), "Get current PID".to_string()),
             CompletionItem::new_simple("cap:io".to_string(), "Standard IO library".to_string()),
-            CompletionItem::new_simple("cap:mem".to_string(), "Standard Memory library".to_string()),
-            CompletionItem::new_simple("cap:actor".to_string(), "Standard Actor library".to_string()),
+            CompletionItem::new_simple(
+                "cap:mem".to_string(),
+                "Standard Memory library".to_string(),
+            ),
+            CompletionItem::new_simple(
+                "cap:actor".to_string(),
+                "Standard Actor library".to_string(),
+            ),
         ])))
     }
 }
@@ -121,18 +138,28 @@ fn position_to_offset(text: &str, position: Position) -> Option<usize> {
 fn format_symbol_kind(kind: &SymbolKind) -> String {
     match kind {
         SymbolKind::Var { ty, .. } => format!("(variable) {}", format_type(ty)),
-        SymbolKind::Func { params, ret, is_async } => {
-            let mut s = if *is_async { "async fn (".to_string() } else { "fn (".to_string() };
+        SymbolKind::Func {
+            params,
+            ret,
+            is_async,
+        } => {
+            let mut s = if *is_async {
+                "async fn (".to_string()
+            } else {
+                "fn (".to_string()
+            };
             for (i, p) in params.iter().enumerate() {
                 s.push_str(&format_type(p));
-                if i < params.len() - 1 { s.push_str(", "); }
+                if i < params.len() - 1 {
+                    s.push_str(", ");
+                }
             }
             s.push_str(")");
             if let Some(r) = ret {
                 s.push_str(&format!(": {}", format_type(r)));
             }
             s
-        },
+        }
         SymbolKind::Class(c) => format!("class {}", c.ident.sym),
         SymbolKind::Trait(t) => format!("trait {}", t.ident.sym),
         SymbolKind::Enum(e) => format!("enum {}", e.ident.sym),
@@ -161,7 +188,7 @@ fn format_type(ty: &Type) -> String {
 
 impl Backend {
     pub fn new(client: Client) -> Self {
-        Self { 
+        Self {
             client,
             state: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -178,25 +205,35 @@ impl Backend {
                 if let Ok(path) = uri.to_file_path() {
                     let mut items = Vec::new();
                     let mut processed = HashSet::new();
-                    
-                    // We don't want to resolve the current file from disk, 
+
+                    // We don't want to resolve the current file from disk,
                     // we already have it in memory.
                     // But we want to resolve its dependencies.
                     let include_paths = vec![
-                        PathBuf::from("/data/cps/cap/cap_modules"),
-                        PathBuf::from("/data/cps/lib"),
+                        PathBuf::from("/data/dev/cp/cap/cap_modules"),
+                        PathBuf::from("/data/dev/cp/lib"),
                     ];
-                    
-                    if let Err(e) = resolve_dependencies(&path, &include_paths, &mut items, &mut processed) {
-                         self.client.log_message(MessageType::LOG, format!("Dependency resolution failed: {}", e)).await;
+
+                    if let Err(e) =
+                        resolve_dependencies(&path, &include_paths, &mut items, &mut processed)
+                    {
+                        self.client
+                            .log_message(
+                                MessageType::LOG,
+                                format!("Dependency resolution failed: {}", e),
+                            )
+                            .await;
                     }
 
                     // Pre-fill analyzer with dependency items
-                    let dep_module = Module { span: crate::Span { start: 0, end: 0 }, body: items };
+                    let dep_module = Module {
+                        span: crate::Span { start: 0, end: 0 },
+                        body: items,
+                    };
                     if let Err(_e) = analyzer.analyze_module(&dep_module) {
-                         // Some dependency analysis errors, maybe log?
+                        // Some dependency analysis errors, maybe log?
                     }
-                    
+
                     // Now analyze the current file's items
                     if let Err(e) = analyzer.analyze_module(&module) {
                         diagnostics.push(Diagnostic {
@@ -226,7 +263,9 @@ impl Backend {
             state.insert(uri.clone(), (text, analyzer));
         }
 
-        self.client.publish_diagnostics(uri, diagnostics, None).await;
+        self.client
+            .publish_diagnostics(uri, diagnostics, None)
+            .await;
     }
 }
 

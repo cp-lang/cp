@@ -1,18 +1,72 @@
 const std = @import("std");
+
+pub var global_io: std.Io = undefined;
+pub var global_env: *std.process.Environ.Map = undefined;
+
+pub const fs_shim = struct {
+    pub fn cwd() CwdShim {
+        return CwdShim{};
+    }
+};
+
+pub const CwdShim = struct {
+    pub fn statFile(self: CwdShim, sub_path: []const u8) !std.Io.Dir.Stat {
+        _ = self;
+        return std.Io.Dir.statFile(.cwd(), global_io, sub_path, .{});
+    }
+    pub fn openDir(self: CwdShim, sub_path: []const u8, options: std.Io.Dir.OpenOptions) !std.Io.Dir {
+        _ = self;
+        return std.Io.Dir.openDir(.cwd(), global_io, sub_path, options);
+    }
+    pub fn openFile(self: CwdShim, sub_path: []const u8, options: std.Io.Dir.OpenFileOptions) !std.Io.File {
+        _ = self;
+        return std.Io.Dir.openFile(.cwd(), global_io, sub_path, options);
+    }
+    pub fn createDirPath(self: CwdShim, io: std.Io, sub_path: []const u8) !void {
+        _ = io;
+        _ = self;
+        return std.Io.Dir.createDirPath(.cwd(), global_io, sub_path);
+    }
+    pub fn deleteFile(self: CwdShim, sub_path: []const u8) !void {
+        _ = self;
+        return std.Io.Dir.deleteFile(.cwd(), global_io, sub_path);
+    }
+    pub fn deleteTree(self: CwdShim, sub_path: []const u8) !void {
+        _ = self;
+        return std.Io.Dir.deleteTree(.cwd(), global_io, sub_path);
+    }
+    pub fn realpathAlloc(self: CwdShim, allocator: std.mem.Allocator, sub_path: []const u8) ![]u8 {
+        _ = self;
+        return std.Io.Dir.realPathFileAlloc(.cwd(), global_io, sub_path, allocator);
+    }
+    pub fn readFileAlloc(self: CwdShim, allocator: std.mem.Allocator, sub_path: []const u8, max_bytes: usize) ![]u8 {
+        _ = self;
+        return std.Io.Dir.readFileAlloc(.cwd(), global_io, sub_path, allocator, @enumFromInt(max_bytes));
+    }
+
+    pub fn createFile(self: CwdShim, sub_path: []const u8, options: std.Io.Dir.CreateFileOptions) !std.Io.File {
+        _ = self;
+        return std.Io.Dir.createFile(.cwd(), global_io, sub_path, options);
+    }
+};
 const process = std.process;
 const builtin = @import("builtin");
 const manifest = @import("project/manifest.zig");
 const semver = @import("project/semver.zig");
 
-const REGISTRY_PATH = "/data/cps/mock_registry";
+const REGISTRY_PATH = "/data/dev/cp/mock_registry";
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    global_io = init.io;
+    global_env = init.environ_map;
+    const allocator = init.arena.allocator();
 
-    const args = try process.argsAlloc(allocator);
-    defer process.argsFree(allocator, args);
+    var args_iter = std.process.Args.iterate(init.minimal.args);
+    var args_list: std.ArrayList([]const u8) = .empty;
+    while (args_iter.next()) |arg| {
+        try args_list.append(allocator, arg);
+    }
+    const args = args_list.items;
 
     if (args.len < 2) { usage(); return; }
 
@@ -28,7 +82,7 @@ pub fn main() !void {
         if (std.mem.endsWith(u8, cmd, ".cp")) {
             try runFile(allocator, cmd);
         } else {
-            const stat = std.fs.cwd().statFile(cmd) catch null;
+            const stat = fs_shim.cwd().statFile(cmd) catch null;
             if (stat != null and stat.?.kind == .directory) {
                 if (try resolveDirectoryMain(allocator, cmd)) |main_file| {
                     defer allocator.free(main_file);
@@ -47,23 +101,23 @@ pub fn main() !void {
 }
 
 fn resolveDirectoryMain(allocator: std.mem.Allocator, dir_path: []const u8) !?[]const u8 {
-    var dir = std.fs.cwd().openDir(dir_path, .{}) catch return null;
-    defer dir.close();
+    var dir = fs_shim.cwd().openDir(dir_path, .{}) catch return null;
+    defer dir.close(global_io);
 
     // 1. Check main.cp
-    if (dir.statFile("main.cp")) |_| {
+    if (dir.statFile(global_io, "main.cp", .{})) |_| {
         return try std.fmt.allocPrint(allocator, "{s}/main.cp", .{dir_path});
     } else |_| {}
 
     // 2. Check index.cp
-    if (dir.statFile("index.cp")) |_| {
+    if (dir.statFile(global_io, "index.cp", .{})) |_| {
         return try std.fmt.allocPrint(allocator, "{s}/index.cp", .{dir_path});
     } else |_| {}
 
     // 3. Check cap.json main
-    if (dir.openFile("cap.json", .{})) |file| {
-        defer file.close();
-        const content = try file.readToEndAlloc(allocator, 1024 * 1024);
+    if (std.Io.Dir.readFileAlloc(dir, global_io, "cap.json", allocator, @enumFromInt(1024 * 1024))) |content| {
+        
+        
         defer allocator.free(content);
         var mf = manifest.Manifest.parse(allocator, content) catch return null;
         defer mf.deinit(allocator);
@@ -98,11 +152,11 @@ fn usage() void {
 fn handleRun(allocator: std.mem.Allocator, args: []const []const u8) !bool {
     if (args.len == 0) return false;
     const script_name = args[0];
-    const file = std.fs.cwd().openFile("cap.json", .{}) catch {
+    const content = fs_shim.cwd().readFileAlloc(allocator, "cap.json", 1024 * 1024) catch {
         return false;
     };
-    defer file.close();
-    const content = try file.readToEndAlloc(allocator, 1024 * 1024);
+    
+    
     defer allocator.free(content);
     var mf = try manifest.Manifest.parse(allocator, content);
     defer mf.deinit(allocator);
@@ -117,8 +171,8 @@ fn handleRun(allocator: std.mem.Allocator, args: []const []const u8) !bool {
         var it = std.mem.tokenizeAny(u8, script_cmd, " ");
         var i: usize = 0;
         while (it.next()) |token| { cmd_list[i] = token; i += 1; }
-        var child = std.process.Child.init(cmd_list, allocator);
-        _ = try child.spawnAndWait();
+        var child = try std.process.spawn(global_io, .{ .argv = cmd_list });
+        _ = try child.wait(global_io);
         return true;
     }
     return false;
@@ -151,12 +205,12 @@ fn handleAdd(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return;
     }
 
-    const file = std.fs.cwd().openFile("cap.json", .{ .mode = .read_write }) catch {
+    const content = fs_shim.cwd().readFileAlloc(allocator, "cap.json", 1024 * 1024) catch {
         std.debug.print("Error: cap.json not found.\n", .{});
         return;
     };
-    defer file.close();
-    const content = try file.readToEndAlloc(allocator, 1024 * 1024);
+    
+    
     defer allocator.free(content);
     var mf = manifest.Manifest.parse(allocator, content) catch return;
     defer mf.deinit(allocator);
@@ -169,12 +223,12 @@ fn handleAdd(allocator: std.mem.Allocator, args: []const []const u8) !void {
 }
 
 fn handleInstall(allocator: std.mem.Allocator) !void {
-    const file = std.fs.cwd().openFile("cap.json", .{}) catch {
+    const content = fs_shim.cwd().readFileAlloc(allocator, "cap.json", 1024 * 1024) catch {
         std.debug.print("Error: cap.json not found.\n", .{});
         return;
     };
-    defer file.close();
-    const content = try file.readToEndAlloc(allocator, 1024 * 1024);
+    
+    
     defer allocator.free(content);
     var mf = try manifest.Manifest.parse(allocator, content);
     defer mf.deinit(allocator);
@@ -191,14 +245,14 @@ fn handleInstall(allocator: std.mem.Allocator) !void {
 }
 
 fn resolveBestVersion(_: std.mem.Allocator, name: []const u8, range: semver.VersionRange) !semver.Version {
-    var reg_dir = try std.fs.openDirAbsolute(REGISTRY_PATH, .{ .iterate = true });
-    defer reg_dir.close();
-    var pkg_dir = try reg_dir.openDir(name, .{ .iterate = true });
-    defer pkg_dir.close();
+    var reg_dir = try std.Io.Dir.openDirAbsolute(global_io, REGISTRY_PATH, .{ .iterate = true });
+    defer reg_dir.close(global_io);
+    var pkg_dir = try reg_dir.openDir(global_io, name, .{ .iterate = true });
+    defer pkg_dir.close(global_io);
 
     var best: ?semver.Version = null;
     var it = pkg_dir.iterate();
-    while (try it.next()) |entry| {
+    while (try it.next(global_io)) |entry| {
         if (entry.kind == .directory) {
             const v = semver.Version.parse(entry.name) catch continue;
             if (range.satisfies(v)) {
@@ -217,19 +271,19 @@ fn fetchAndLinkGlobal(allocator: std.mem.Allocator, name: []const u8, version: s
     const v_str = try version.format(allocator);
     defer allocator.free(v_str);
 
-    const home = process.getEnvVarOwned(allocator, "HOME") catch try allocator.dupe(u8, "/root");
+    const home = global_env.get("HOME") orelse "/root";
     defer allocator.free(home);
-    const global_root = try std.fs.path.join(allocator, &[_][]const u8{ home, ".cap", "global", "cap_modules" });
+    const global_root = try std.Io.Dir.path.join(allocator, &[_][]const u8{ home, ".cap", "global", "cap_modules" });
     defer allocator.free(global_root);
-    try std.fs.cwd().makePath(global_root);
+    try fs_shim.cwd().createDirPath(global_io, global_root);
     
-    const global_pkg_path = try std.fs.path.join(allocator, &[_][]const u8{ global_root, name });
+    const global_pkg_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ global_root, name });
     defer allocator.free(global_pkg_path);
     
-    std.fs.cwd().deleteFile(global_pkg_path) catch {};
-    std.fs.cwd().deleteTree(global_pkg_path) catch {};
+    fs_shim.cwd().deleteFile(global_pkg_path) catch {};
+    fs_shim.cwd().deleteTree(global_pkg_path) catch {};
 
-    const reg_pkg_path = try std.fs.path.join(allocator, &[_][]const u8{ REGISTRY_PATH, name, v_str });
+    const reg_pkg_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ REGISTRY_PATH, name, v_str });
     defer allocator.free(reg_pkg_path);
         
     try copyDir(reg_pkg_path, global_pkg_path);
@@ -240,59 +294,59 @@ fn fetchAndLink(allocator: std.mem.Allocator, name: []const u8, version: semver.
     defer allocator.free(v_str);
 
     // 1. Mock Global Cache (~/.cap/cache)
-    const home = process.getEnvVarOwned(allocator, "HOME") catch try allocator.dupe(u8, "/root");
+    const home = global_env.get("HOME") orelse "/root";
     defer allocator.free(home);
-    const cache_root = try std.fs.path.join(allocator, &[_][]const u8{ home, ".cap", "cache" });
+    const cache_root = try std.Io.Dir.path.join(allocator, &[_][]const u8{ home, ".cap", "cache" });
     defer allocator.free(cache_root);
-    try std.fs.cwd().makePath(cache_root);
+    try fs_shim.cwd().createDirPath(global_io, cache_root);
 
-    const cache_pkg_path = try std.fs.path.join(allocator, &[_][]const u8{ cache_root, name, v_str });
+    const cache_pkg_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ cache_root, name, v_str });
     defer allocator.free(cache_pkg_path);
 
     // Make sure parent directory exists (~/.cap/cache/<name>)
-    const cache_pkg_parent = std.fs.path.dirname(cache_pkg_path).?;
+    const cache_pkg_parent = std.Io.Dir.path.dirname(cache_pkg_path).?;
     {
-        var root_dir = try std.fs.openDirAbsolute("/", .{});
-        defer root_dir.close();
-        try root_dir.makePath(cache_pkg_parent[1..]);
+        var root_dir = try std.Io.Dir.openDirAbsolute(global_io, "/", .{});
+        defer root_dir.close(global_io);
+        try root_dir.createDirPath(global_io, cache_pkg_parent[1..]);
     }
 
     var cache_exists = true;
-    var d = std.fs.openDirAbsolute(cache_pkg_path, .{}) catch blk: {
+    var d = std.Io.Dir.openDirAbsolute(global_io, cache_pkg_path, .{}) catch blk: {
         cache_exists = false;
-        break :blk std.fs.cwd();
+        break :blk std.Io.Dir.cwd();
     };
     if (cache_exists) {
-        d.close();
+        d.close(global_io);
     } else {
         std.debug.print("Fetching {s}@{s} to cache...\n", .{name, v_str});
-        const reg_pkg_path = try std.fs.path.join(allocator, &[_][]const u8{ REGISTRY_PATH, name, v_str });
+        const reg_pkg_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ REGISTRY_PATH, name, v_str });
         defer allocator.free(reg_pkg_path);
         
         try copyDir(reg_pkg_path, cache_pkg_path);
     }
 
     // 2. Link to cap_modules/
-    try std.fs.cwd().makePath("cap_modules");
-    const link_path = try std.fs.path.join(allocator, &[_][]const u8{ "cap_modules", name });
+    try fs_shim.cwd().createDirPath(global_io, "cap_modules");
+    const link_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ "cap_modules", name });
     defer allocator.free(link_path);
 
     // Remove existing link/file if any
-    std.fs.cwd().deleteFile(link_path) catch {};
-    std.fs.cwd().deleteTree(link_path) catch {};
+    fs_shim.cwd().deleteFile(link_path) catch {};
+    fs_shim.cwd().deleteTree(link_path) catch {};
 
     std.debug.print("Linking {s}@{s} -> cap_modules/{s}\n", .{name, v_str, name});
     if (@import("builtin").os.tag == .windows) {
         try copyDir(cache_pkg_path, link_path);
     } else {
-        try std.posix.symlink(cache_pkg_path, link_path);
+        try std.Io.Dir.symLinkAbsolute(global_io, cache_pkg_path, link_path, .{});
     }
 }
 
 fn copyDir(src: []const u8, dest: []const u8) !void {
     const argv = &[_][]const u8{ "cp", "-r", src, dest };
-    var child = std.process.Child.init(argv, std.heap.page_allocator);
-    _ = try child.spawnAndWait();
+    var child = try std.process.spawn(global_io, .{ .argv = argv });
+    _ = try child.wait(global_io);
 }
 
 fn runFile(allocator: std.mem.Allocator, filename: []const u8) !void {
@@ -302,32 +356,32 @@ fn runFile(allocator: std.mem.Allocator, filename: []const u8) !void {
     const zig_file = try std.fmt.allocPrint(allocator, ".cap/zig/{s}.zig", .{full_base_name});
     defer allocator.free(zig_file);
     
-    if (std.fs.path.dirname(zig_file)) |dirname| {
-        std.fs.cwd().makePath(dirname) catch {};
+    if (std.Io.Dir.path.dirname(zig_file)) |dirname| {
+        fs_shim.cwd().createDirPath(global_io, dirname) catch {};
         if (false) {
-            copyDir("/data/cps/sdk/beam.zig", dirname) catch {};
-            copyDir("/data/cps/sdk/erl_nif.zig", dirname) catch {};
+            copyDir("/data/dev/cp/sdk/beam.zig", dirname) catch {};
+            copyDir("/data/dev/cp/sdk/erl_nif.zig", dirname) catch {};
         }
     }
 
     var cpc_args_buf: [15][]const u8 = undefined;
     var cpc_argc: usize = 0;
-    cpc_args_buf[cpc_argc] = "/data/cps/cpc/target/release/cpc"; cpc_argc += 1;
+    cpc_args_buf[cpc_argc] = "/data/dev/cp/cpc/target/release/cpc"; cpc_argc += 1;
     cpc_args_buf[cpc_argc] = "compile"; cpc_argc += 1;
     cpc_args_buf[cpc_argc] = filename; cpc_argc += 1;
     cpc_args_buf[cpc_argc] = "--output"; cpc_argc += 1;
     cpc_args_buf[cpc_argc] = zig_file; cpc_argc += 1;
     cpc_args_buf[cpc_argc] = "-I"; cpc_argc += 1;
-    cpc_args_buf[cpc_argc] = "/data/cps/cap/cap_modules"; cpc_argc += 1;
+    cpc_args_buf[cpc_argc] = "/data/dev/cp/cap/cap_modules"; cpc_argc += 1;
     cpc_args_buf[cpc_argc] = "-I"; cpc_argc += 1;
-    cpc_args_buf[cpc_argc] = "/data/cps/lib"; cpc_argc += 1;
+    cpc_args_buf[cpc_argc] = "/data/dev/cp/lib"; cpc_argc += 1;
     if (false) {
         cpc_args_buf[cpc_argc] = "-b"; cpc_argc += 1;
     }
     
-    var compile_child = std.process.Child.init(cpc_args_buf[0..cpc_argc], allocator);
-    const compile_res = try compile_child.spawnAndWait();
-    if (compile_res.Exited != 0) return error.CompileFailed;
+    var compile_child = try std.process.spawn(global_io, .{ .argv = cpc_args_buf[0..cpc_argc] });
+    const compile_res = try compile_child.wait(global_io);
+    if (compile_res.exited != 0) return error.CompileFailed;
 
     var bin_subpath: []const u8 = full_base_name;
     if (std.mem.startsWith(u8, full_base_name, "src/")) {
@@ -337,9 +391,9 @@ fn runFile(allocator: std.mem.Allocator, filename: []const u8) !void {
     {
         const type_out_path = try std.fmt.allocPrint(allocator, "bin/{s}.d.cp", .{bin_subpath});
         defer allocator.free(type_out_path);
-        const emit_types_args = &[_][]const u8{ "/data/cps/cpc/target/release/cpc", "emit-types", filename, "--output", type_out_path };
-        var emit_types_child = std.process.Child.init(emit_types_args, allocator);
-        _ = try emit_types_child.spawnAndWait();
+        const emit_types_args = &[_][]const u8{ "/data/dev/cp/cpc/target/release/cpc", "emit-types", filename, "--output", type_out_path };
+        var emit_types_child = try std.process.spawn(global_io, .{ .argv = emit_types_args });
+        _ = try emit_types_child.wait(global_io);
     }
 
     std.debug.print("Linking: {s}...\n", .{zig_file});
@@ -349,21 +403,21 @@ fn runFile(allocator: std.mem.Allocator, filename: []const u8) !void {
     const run_path = try std.fmt.allocPrint(allocator, "bin/{s}", .{bin_subpath});
     defer allocator.free(run_path);
     
-    if (std.fs.path.dirname(run_path)) |dirname| {
-        std.fs.cwd().makePath(dirname) catch {};
+    if (std.Io.Dir.path.dirname(run_path)) |dirname| {
+        fs_shim.cwd().createDirPath(global_io, dirname) catch {};
     }
 
     const emit_bin_arg = try std.fmt.allocPrint(allocator, "-femit-bin={s}", .{run_path});
     defer allocator.free(emit_bin_arg);
-    std.fs.cwd().makePath(".cap/zig-cache") catch {};
+    fs_shim.cwd().createDirPath(global_io, ".cap/zig-cache") catch {};
     const build_args = &[_][]const u8{ "zig", "build-exe", zig_file, emit_bin_arg, "--cache-dir", ".cap/zig-cache" };
-    var build_child = std.process.Child.init(build_args, allocator);
-    const build_res = try build_child.spawnAndWait();
-    if (build_res.Exited != 0) return error.BuildFailed;
+    var build_child = try std.process.spawn(global_io, .{ .argv = build_args });
+    const build_res = try build_child.wait(global_io);
+    if (build_res.exited != 0) return error.BuildFailed;
 
     std.debug.print("Executing: {s}...\n", .{run_path});
-    var run_child = std.process.Child.init(&[_][]const u8{run_path}, allocator);
-    _ = try run_child.spawnAndWait();
+    var run_child = try std.process.spawn(global_io, .{ .argv = &[_][]const u8{run_path} });
+    _ = try run_child.wait(global_io);
 }
 
 fn sniffHardware() !void {
@@ -414,10 +468,10 @@ fn buildPackage(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     if (!has_target) {
-        if (std.fs.cwd().statFile("src")) |_| {
+        if (fs_shim.cwd().statFile("src")) |_| {
             if (targets_len < 100) { targets_to_build[targets_len] = "src"; targets_len += 1; }
         } else |_| {}
-        if (std.fs.cwd().statFile("test")) |_| {
+        if (fs_shim.cwd().statFile("test")) |_| {
             if (targets_len < 100) { targets_to_build[targets_len] = "test"; targets_len += 1; }
         } else |_| {}
     }
@@ -429,13 +483,13 @@ fn buildPackage(allocator: std.mem.Allocator, args: []const []const u8) !void {
 }
 
 fn buildTarget(allocator: std.mem.Allocator, target_path: []const u8, is_release: bool, is_beam: bool, optimize_mode: []const u8, build_type: []const u8, zig_args: []const []const u8) !void {
-    const stat = std.fs.cwd().statFile(target_path) catch return;
+    const stat = fs_shim.cwd().statFile(target_path) catch return;
     if (stat.kind == .directory) {
-        var dir = try std.fs.cwd().openDir(target_path, .{ .iterate = true });
-        defer dir.close();
+        var dir = try fs_shim.cwd().openDir(target_path, .{ .iterate = true });
+        defer dir.close(global_io);
         var it = dir.iterate();
-        while (try it.next()) |entry| {
-            const child_path = try std.fs.path.join(allocator, &[_][]const u8{ target_path, entry.name });
+        while (try it.next(global_io)) |entry| {
+            const child_path = try std.Io.Dir.path.join(allocator, &[_][]const u8{ target_path, entry.name });
             defer allocator.free(child_path);
             try buildTarget(allocator, child_path, is_release, is_beam, optimize_mode, build_type, zig_args);
         }
@@ -451,32 +505,32 @@ fn compileSingleFile(allocator: std.mem.Allocator, filename: []const u8, is_rele
     const zig_file = try std.fmt.allocPrint(allocator, ".cap/zig/{s}.zig", .{base_name});
     defer allocator.free(zig_file);
     
-    if (std.fs.path.dirname(zig_file)) |dirname| {
-        std.fs.cwd().makePath(dirname) catch {};
+    if (std.Io.Dir.path.dirname(zig_file)) |dirname| {
+        fs_shim.cwd().createDirPath(global_io, dirname) catch {};
         if (is_beam) {
-            copyDir("/data/cps/sdk/beam.zig", dirname) catch {};
-            copyDir("/data/cps/sdk/erl_nif.zig", dirname) catch {};
+            copyDir("/data/dev/cp/sdk/beam.zig", dirname) catch {};
+            copyDir("/data/dev/cp/sdk/erl_nif.zig", dirname) catch {};
         }
     }
 
     var cpc_args_buf: [15][]const u8 = undefined;
     var cpc_argc: usize = 0;
-    cpc_args_buf[cpc_argc] = "/data/cps/cpc/target/release/cpc"; cpc_argc += 1;
+    cpc_args_buf[cpc_argc] = "/data/dev/cp/cpc/target/release/cpc"; cpc_argc += 1;
     cpc_args_buf[cpc_argc] = "compile"; cpc_argc += 1;
     cpc_args_buf[cpc_argc] = filename; cpc_argc += 1;
     cpc_args_buf[cpc_argc] = "--output"; cpc_argc += 1;
     cpc_args_buf[cpc_argc] = zig_file; cpc_argc += 1;
     cpc_args_buf[cpc_argc] = "-I"; cpc_argc += 1;
-    cpc_args_buf[cpc_argc] = "/data/cps/cap/cap_modules"; cpc_argc += 1;
+    cpc_args_buf[cpc_argc] = "/data/dev/cp/cap/cap_modules"; cpc_argc += 1;
     cpc_args_buf[cpc_argc] = "-I"; cpc_argc += 1;
-    cpc_args_buf[cpc_argc] = "/data/cps/lib"; cpc_argc += 1;
+    cpc_args_buf[cpc_argc] = "/data/dev/cp/lib"; cpc_argc += 1;
     if (is_beam) {
         cpc_args_buf[cpc_argc] = "-b"; cpc_argc += 1;
     }
     
-    var compile_child = std.process.Child.init(cpc_args_buf[0..cpc_argc], allocator);
-    const compile_res = try compile_child.spawnAndWait();
-    if (compile_res.Exited != 0) return error.CompileFailed;
+    var compile_child = try std.process.spawn(global_io, .{ .argv = cpc_args_buf[0..cpc_argc] });
+    const compile_res = try compile_child.wait(global_io);
+    if (compile_res.exited != 0) return error.CompileFailed;
 
     var bin_subpath: []const u8 = base_name;
     if (std.mem.startsWith(u8, base_name, "src/")) {
@@ -486,12 +540,12 @@ fn compileSingleFile(allocator: std.mem.Allocator, filename: []const u8, is_rele
     {
         const type_out_path = try std.fmt.allocPrint(allocator, "bin/{s}.d.cp", .{bin_subpath});
         defer allocator.free(type_out_path);
-        const emit_types_args = &[_][]const u8{ "/data/cps/cpc/target/release/cpc", "emit-types", filename, "--output", type_out_path };
-        var emit_types_child = std.process.Child.init(emit_types_args, allocator);
-        _ = try emit_types_child.spawnAndWait();
+        const emit_types_args = &[_][]const u8{ "/data/dev/cp/cpc/target/release/cpc", "emit-types", filename, "--output", type_out_path };
+        var emit_types_child = try std.process.spawn(global_io, .{ .argv = emit_types_args });
+        _ = try emit_types_child.wait(global_io);
     }
 
-    std.fs.cwd().makePath(".cap/zig-cache") catch {};
+    fs_shim.cwd().createDirPath(global_io, ".cap/zig-cache") catch {};
 
     const Target = struct { name: []const u8, triple: []const u8, ext: []const u8 };
     var target_count: usize = 1;
@@ -519,14 +573,14 @@ fn compileSingleFile(allocator: std.mem.Allocator, filename: []const u8, is_rele
         if (!std.mem.eql(u8, t.name, "Native")) {
             dir_path = try std.fmt.allocPrint(allocator, "bin/{s}", .{t.name});
             out_dir = dir_path.?;
-            std.fs.cwd().makePath(out_dir) catch {};
+            fs_shim.cwd().createDirPath(global_io, out_dir) catch {};
         }
 
         const out_file_path = try std.fmt.allocPrint(allocator, "{s}/{s}{s}{s}", .{out_dir, bin_subpath, base_ext, t.ext});
         defer allocator.free(out_file_path);
 
-        if (std.fs.path.dirname(out_file_path)) |dirname| {
-            std.fs.cwd().makePath(dirname) catch {};
+        if (std.Io.Dir.path.dirname(out_file_path)) |dirname| {
+            fs_shim.cwd().createDirPath(global_io, dirname) catch {};
         }
         
         var emit_flag: []const u8 = "-femit-bin=";
@@ -560,9 +614,9 @@ fn compileSingleFile(allocator: std.mem.Allocator, filename: []const u8, is_rele
             child_args[argc] = za; argc += 1;
         }
 
-        var build_child = std.process.Child.init(child_args[0..argc], allocator);
-        const build_res = try build_child.spawnAndWait();
-        if (build_res.Exited != 0) {
+        var build_child = try std.process.spawn(global_io, .{ .argv = child_args[0..argc] });
+        const build_res = try build_child.wait(global_io);
+        if (build_res.exited != 0) {
             std.debug.print("Failed to build for {s}\n", .{t.name});
         }
     }
@@ -572,41 +626,41 @@ fn handleInit(allocator: std.mem.Allocator) !void {
     std.debug.print("Welcome to CAP (Concurrent Agent Packager)!\n\n", .{});
     
     // Create src directory
-    std.fs.cwd().makePath("src") catch {};
+    fs_shim.cwd().createDirPath(global_io, "src") catch {};
 
     // Create cap.json if it doesn't exist
-    if (std.fs.cwd().statFile("cap.json")) |_| {
+    if (fs_shim.cwd().statFile("cap.json")) |_| {
         std.debug.print("cap.json already exists.\n", .{});
     } else |_| {
-        const cwd_path = try std.fs.cwd().realpathAlloc(allocator, ".");
+        const cwd_path = try fs_shim.cwd().realpathAlloc(allocator, ".");
         defer allocator.free(cwd_path);
-        const basename = std.fs.path.basename(cwd_path);
+        const basename = std.Io.Dir.path.basename(cwd_path);
         
-        var file = try std.fs.cwd().createFile("cap.json", .{});
-        defer file.close();
+        var file = try fs_shim.cwd().createFile("cap.json", .{});
+        
         const json_content = try std.fmt.allocPrint(allocator, "{{\n  \"name\": \"{s}\",\n  \"version\": \"0.1.0\",\n  \"main\": \"src/main.cp\",\n  \"scripts\": {{\n    \"start\": \"cap src/main.cp\"\n  }},\n  \"dependencies\": {{}}\n}}\n", .{basename});
         defer allocator.free(json_content);
-        try file.writeAll(json_content);
+        try file.writeStreamingAll(global_io, json_content);
         std.debug.print("Created cap.json\n", .{});
     }
 
     // Create src/main.cp if it doesn't exist
-    if (std.fs.cwd().statFile("src/main.cp")) |_| {
+    if (fs_shim.cwd().statFile("src/main.cp")) |_| {
         std.debug.print("src/main.cp already exists.\n", .{});
     } else |_| {
-        var file = try std.fs.cwd().createFile("src/main.cp", .{});
-        defer file.close();
-        try file.writeAll("import { print } from \"cap:io\";\n\nfn main(): ?void {\n    @print(\"Hello from CP! 🚀\");\n}\n");
+        var file = try fs_shim.cwd().createFile("src/main.cp", .{});
+        
+        try file.writeStreamingAll(global_io, "import { print } from \"cap:io\";\n\nfn main(): ?void {\n    @print(\"Hello from CP! 🚀\");\n}\n");
         std.debug.print("Created src/main.cp\n", .{});
     }
 
     // Create .gitignore if it doesn't exist
-    if (std.fs.cwd().statFile(".gitignore")) |_| {
+    if (fs_shim.cwd().statFile(".gitignore")) |_| {
         std.debug.print(".gitignore already exists.\n", .{});
     } else |_| {
-        var file = try std.fs.cwd().createFile(".gitignore", .{});
-        defer file.close();
-        try file.writeAll(".cap/\nbin/\ncap_modules/\n*.cp.zig\n");
+        var file = try fs_shim.cwd().createFile(".gitignore", .{});
+        
+        try file.writeStreamingAll(global_io, ".cap/\nbin/\ncap_modules/\n*.cp.zig\n");
         std.debug.print("Created .gitignore\n", .{});
     }
 

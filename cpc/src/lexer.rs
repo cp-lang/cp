@@ -18,10 +18,9 @@ pub enum Token {
     While,
     #[token("return")]
     Return,
-    #[token("spawn")]
-    Spawn,
-    #[token("receive")]
-    Receive,
+    #[token("move")]
+    Move,
+
     #[token("export")]
     Export,
     #[token("import")]
@@ -95,6 +94,11 @@ pub enum Token {
         s[1..s.len()-1].to_string()
     })]
     StringLiteral(String),
+    #[regex(r#"`([^`\\]|\\.)*`"#, |lex| {
+        let s = lex.slice();
+        s[1..s.len()-1].to_string()
+    })]
+    TemplateStringRaw(String),
 
     // --- Operators & Punctuation ---
     #[token("=")]
@@ -124,7 +128,7 @@ pub enum Token {
     #[token("!")]
     Bang,
     #[token("..")]
-    DotDot,   // Slices
+    DotDot, // Slices
     #[token("=>")]
     FatArrow,
     #[token("->")]
@@ -185,9 +189,13 @@ impl<'a> Iterator for Lexer<'a> {
         let token = match token_result {
             Ok(t) => t,
             Err(_) => {
-                eprintln!("Lexer Error: Unknown slice '{s}' at {span:?}", s = self.inner.slice(), span = self.inner.span());
+                eprintln!(
+                    "Lexer Error: Unknown slice '{s}' at {span:?}",
+                    s = self.inner.slice(),
+                    span = self.inner.span()
+                );
                 Token::Error
-            },
+            }
         };
         Some((token, self.inner.span()))
     }
@@ -201,7 +209,7 @@ mod tests {
     fn test_basic_lexing() {
         let input = "let x: i32 = 42;";
         let mut lexer = Lexer::new(input);
-        
+
         assert_eq!(lexer.next().unwrap().0, Token::Let);
         assert_eq!(lexer.next().unwrap().0, Token::Ident("x".to_string()));
         assert_eq!(lexer.next().unwrap().0, Token::Colon);
@@ -215,10 +223,10 @@ mod tests {
     fn test_rfc_features() {
         let input = "spawn aiWorker(); match result { Ok(v) => reply(v), Err(_) => ? }";
         let lexer = Lexer::new(input);
-        
+
         // Simplified check
         let tokens: Vec<Token> = lexer.map(|(t, _)| t).collect();
-        assert!(tokens.contains(&Token::Spawn));
+
         assert!(tokens.contains(&Token::Match));
         assert!(tokens.contains(&Token::FatArrow));
         assert!(tokens.contains(&Token::Question));

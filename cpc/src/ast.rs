@@ -137,7 +137,7 @@ pub enum Pattern {
     Array(Vec<Pattern>),
     Tuple(Vec<Pattern>),
     Object(Vec<ObjectPatProp>),
-    Enum(EnumPattern), 
+    Enum(EnumPattern),
     Lit(Lit),
     Rest(Box<Pattern>),
     Wildcard,
@@ -148,7 +148,7 @@ pub struct EnumPattern {
     pub span: Span,
     pub enum_name: Ident,
     pub variant_name: Ident,
-    pub fields: Option<Vec<ObjectPatProp>>, 
+    pub fields: Option<Vec<ObjectPatProp>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -193,11 +193,12 @@ pub enum Expr {
     Zig(ZigEscapeExpr),
     Question(Box<Expr>),
     Array(Vec<Expr>),
-    Object(Vec<ObjectField>), 
+    Object(Vec<ObjectField>),
     Arrow(Box<ArrowExpr>),
     EnumInit(EnumInitExpr),
     Template(TemplateLit),
-    Await(Box<Expr>), 
+    Await(Box<Expr>),
+    Move(Box<Expr>),
     Builtin(BuiltinCall),
 }
 
@@ -273,7 +274,17 @@ pub struct BinExpr {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum BinaryOp {
-    Add, Sub, Mul, Div, Eq, NotEq, Lt, Gt, LtEq, GtEq,
+    Assign,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Eq,
+    NotEq,
+    Lt,
+    Gt,
+    LtEq,
+    GtEq,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -328,15 +339,24 @@ pub struct ZigEscapeExpr {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Type {
-    I32, U32, U64, F32, F64, USize, Bool, String, Void, Any,
+    I32,
+    U32,
+    U64,
+    F32,
+    F64,
+    USize,
+    Bool,
+    String,
+    Void,
+    Any,
     Array(Box<Type>),
     Map(Box<Type>, Box<Type>),
-    Tuple(Vec<Type>), // [T1, T2]
+    Tuple(Vec<Type>),   // [T1, T2]
     Object(Vec<Field>), // {k: T}
-    Ref(Ident), 
-    Fn(Vec<Type>, Box<Type>), 
-    PID, 
-    Unknown, 
+    Ref(Ident),
+    Fn(Vec<Type>, Box<Type>),
+    PID,
+    Unknown,
     ErrorUnion(Box<Type>),
     Optional(Box<Type>),
 }

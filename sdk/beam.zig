@@ -230,20 +230,20 @@ pub const SystemAction = enum(u32) {
     STOP = 3,
 
     // 网络 I/O (10-19)
-    NET_CONNECT_REQ = 10,
+    NET_CONNECT = 10,
     NET_CONNECT_RES = 11,
-    NET_WRITE_REQ = 12,
-    NET_READ_REQ = 13,
+    NET_WRITE = 12,
+    NET_READ = 13,
     NET_READ_RES = 14,
 
     // 文件 I/O (20-29)
-    FS_READ_REQ = 20,
+    FS_READ = 20,
     FS_READ_RES = 21,
-    FS_WRITE_REQ = 22,
+    FS_WRITE = 22,
     FS_WRITE_RES = 23,
 
     // 高层 HTTP (30-39)
-    HTTP_FETCH_REQ = 30,
+    HTTP_FETCH = 30,
     HTTP_FETCH_RES = 31,
 
     // 系统级错误响应 (99)
