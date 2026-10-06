@@ -2095,3 +2095,8 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
   4. 随后再次汇报剩余的约 49 个 `.zig` 及其生成的巨型无后缀编译体。这些皆为底层 Zig Syscall、JSON 等特性的探索原型。
   5. 大师再次回复：“同意”。
   6. 彻底执行文件系统的安全抹除动作，清理了上百个垃圾文件，根目录重新恢复整洁。更新所有操作日志。
+
+- **User Instruction**: 同意删除 `fix_*.py` 与 `fix_*.sh` 文件，并立下新规：以后此类临时文件必须放入 `temp` 目录，用完即删。
+- **Agent Action**:
+  1. 彻底清除了根目录下残留的 11 个 `fix_` 补丁脚本。
+  2. 将大师的新规正式写入项目法则库 `GEMINI.md`（新增第 7 点：临时文件与清理规范），确保未来的 Agent 严格遵循不污染根目录的开发操守。

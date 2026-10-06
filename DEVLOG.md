@@ -297,3 +297,8 @@ To align `cp` language with TypeScript semantics as requested, we implemented fu
 1. 将发现的废弃草稿（如 `test_close.zig`, `test_channel.zig`）分批次向大师汇报，并请求删除权限。
 2. 得到同意后，清理了包含过期二进制的 `test_project` 目录、约 54 个 `.zig` 草稿文件、约 54 个残留 ELF 编译文件，以及残余的 `test_*.txt` 输出数据。
 3. 根目录现在恢复了极度的清爽，只剩下核心架构目录和文档。
+
+## 2026-10-06 晚间 - 废弃补丁脚本清理与立规
+**背景与执行**:
+大师同意删除了根目录下残留的 11 个 `fix_*.py` 和 `fix_*.sh` 补丁脚本。
+同时，大师确立了一项极其重要的工程整洁性法则：未来的任何临时草稿或验证脚本，只能放入 `temp/` 目录，并在使命完成后立即销毁。我已将该法则永久固化至 `GEMINI.md` 核心架构规约中。

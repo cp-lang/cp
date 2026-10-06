@@ -3,7 +3,7 @@
 ## 1. Code Editing Rules (CRITICAL)
 
 - **Always use internal file editing tools** (`replace_file_content` / `write_file`) for modifying code.
-- **Strictly FORBIDDEN in Bash**: DO NOT use `sed`, `awk`, `perl`, `cat << 'EOF'`, or file redirection (`>`, `>>`) to edit existing source files.
+- **Strictly FORBIDDEN in Bash**: DO NOT use `sed`, `cat`, `awk`, `perl`, `cat << 'EOF'`, or file redirection (`>`, `>>`) to edit existing source files.
 - Bash is reserved **strictly** for:
   - Compiling & Building (`zig build`, `cargo build`)
   - Running test suites (`zig test`, `cargo test`)
@@ -570,3 +570,8 @@ beam_api.zig 的原生链接。 这将是两股力量真正的胜利会师！
 - ✅ bin/test/test_agent.so：可供 Bun-BEAM 直接加载的原生机器码。
 
 大师，现在战舰的发动机已经点火。您可以直接在业务代码里继承 Agent，像写 TypeScript 一样轻松编写能够处理百万级并发消息的 Native 智能体了！
+
+
+## 7. 临时文件与清理规范 (Temporary Files & Cleanup)
+- 任何用于打补丁、测试、验证的临时脚本文件（如 `fix_*.py`, `fix_*.sh`, `test_*.zig`），**必须放置在专门的 `temp/` 目录中**。
+- 用完且知识吸收完毕后，必须**立即删除**这些临时文件及 `temp/` 目录，绝不允许将其散落在项目根目录。
