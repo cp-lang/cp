@@ -1010,6 +1010,7 @@ impl<'a> Parser<'a> {
                 Ok(Expr::Move(Box::new(expr)))
             }
             Token::IntLiteral(v) => Ok(Expr::Lit(Lit::Int(v))),
+            Token::FloatLiteral(v) => Ok(Expr::Lit(Lit::Float(v))),
             Token::StringLiteral(s) => Ok(Expr::Lit(Lit::Str(s))),
             Token::TemplateStringRaw(s) => {
                 let start = span.start;

@@ -73,6 +73,7 @@ impl Codegen {
                 self.globals.insert(t.ident.sym.clone());
             }
         }
+        self.globals.insert("Math".to_string());
         self.globals.insert("PID".to_string());
         self.globals.insert("Message".to_string());
         self.globals.insert("Mailbox".to_string());
@@ -145,6 +146,11 @@ impl Codegen {
         self.writeln("");
         self.writeln("fn is_string_like(comptime T: type) bool { if (T == []const u8 or T == []u8) return true; if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }");
         self.writeln("fn to_string_slice(v: anytype) []const u8 { const T = @TypeOf(v); if (T == []const u8 or T == []u8) return v; const slice: []const u8 = v; return slice; }");
+        
+        self.writeln("fn cp_math_random() f32 {");
+        self.writeln("    return 0.5; // Stub");
+        self.writeln("}");
+
         self.writeln("fn cp_eq(a: anytype, b: anytype) bool {");
         self.writeln("    const Ta = @TypeOf(a); const Tb = @TypeOf(b);");
         self.writeln("    if (comptime Ta == Message and is_string_like(Tb)) { return switch (a) { .string => |s| std.mem.eql(u8, s, to_string_slice(b)), else => false, }; }");
@@ -152,7 +158,8 @@ impl Codegen {
         self.writeln("    if (comptime Ta == Message and (Tb == i32 or Tb == comptime_int)) { return switch (a) { .int => |i| i == b, else => false, }; }");
         self.writeln("    if (comptime Tb == Message and (Ta == i32 or Ta == comptime_int)) { return switch (b) { .int => |i| a == i, else => false, }; }");
         self.writeln("    if (comptime is_string_like(Ta) and is_string_like(Tb)) { return std.mem.eql(u8, to_string_slice(a), to_string_slice(b)); }");
-        self.writeln("    if (comptime (@typeInfo(Ta) == .int or Ta == comptime_int) and (@typeInfo(Tb) == .int or Tb == comptime_int)) { return a == b; }");
+        self.writeln("        if (comptime (@typeInfo(Ta) == .int or Ta == comptime_int) and (@typeInfo(Tb) == .int or Tb == comptime_int)) { return a == b; }
+    if (comptime (@typeInfo(Ta) == .float or Ta == comptime_float) and (@typeInfo(Tb) == .float or Tb == comptime_float)) { return a == b; }");
         self.writeln("    if (comptime Ta != Tb) return false;");
         self.writeln("    return a == b;");
         self.writeln("}");
@@ -939,7 +946,7 @@ impl Codegen {
 
     fn generate_expr(&mut self, expr: &Expr) -> String {
         match expr {
-            Expr::Lit(Lit::Int(v)) => v.to_string(), Expr::Lit(Lit::Float(f)) => f.to_string(), Expr::Lit(Lit::Str(s)) => format!("\"{}\"", s.replace("\"", "\\\"")), Expr::Lit(Lit::Bool(b)) => if *b { "true".to_string() } else { "false".to_string() }, Expr::Lit(Lit::Null) => "null".to_string(), Expr::Lit(Lit::Undefined) => "undefined".to_string(),
+            Expr::Lit(Lit::Int(v)) => v.to_string(), Expr::Lit(Lit::Float(f)) => { let s = f.to_string(); if s.contains(".") { s } else { format!("{}.0", s) } }, Expr::Lit(Lit::Str(s)) => format!("\"{}\"", s.replace("\"", "\\\"")), Expr::Lit(Lit::Bool(b)) => if *b { "true".to_string() } else { "false".to_string() }, Expr::Lit(Lit::Null) => "null".to_string(), Expr::Lit(Lit::Undefined) => "undefined".to_string(),
             Expr::Ident(i) => {
                 if self.moved_vars.contains(&i.sym) { panic!("CP Compile Error: Use of moved value '{}'", i.sym); }
                 if self.uninitialized_vars.contains(&i.sym) { panic!("CP Compile Error: Variable '{}' read before initialization", i.sym); }
@@ -1032,6 +1039,36 @@ impl Codegen {
                         return format!("{}.exec({})", obj, arg);
                     }
                 }
+                
+                if let Expr::Member(mem) = &*call.callee {
+                    if let Expr::Ident(id) = &*mem.obj {
+                        if id.sym == "Math" {
+                            let prop = mem.prop.sym.as_str();
+                            if prop == "abs" { return format!("@abs({})", self.generate_expr(&call.args[0])); }
+                            if prop == "ceil" { return format!("@ceil({})", self.generate_expr(&call.args[0])); }
+                            if prop == "floor" { return format!("@floor({})", self.generate_expr(&call.args[0])); }
+                            if prop == "round" { return format!("@round({})", self.generate_expr(&call.args[0])); }
+                            if prop == "trunc" { return format!("@trunc({})", self.generate_expr(&call.args[0])); }
+                            if prop == "max" { return format!("@max({}, {})", self.generate_expr(&call.args[0]), self.generate_expr(&call.args[1])); }
+                            if prop == "min" { return format!("@min({}, {})", self.generate_expr(&call.args[0]), self.generate_expr(&call.args[1])); }
+                            if prop == "sqrt" { return format!("@sqrt({})", self.generate_expr(&call.args[0])); }
+                            if prop == "sin" { return format!("@sin({})", self.generate_expr(&call.args[0])); }
+                            if prop == "cos" { return format!("@cos({})", self.generate_expr(&call.args[0])); }
+                            if prop == "tan" { return format!("@tan({})", self.generate_expr(&call.args[0])); }
+                            if prop == "exp" { return format!("@exp({})", self.generate_expr(&call.args[0])); }
+                            if prop == "log" { return format!("@log({})", self.generate_expr(&call.args[0])); }
+                            if prop == "log10" { return format!("@log10({})", self.generate_expr(&call.args[0])); }
+                            if prop == "log2" { return format!("@log2({})", self.generate_expr(&call.args[0])); }
+                            if prop == "pow" { return format!("@import(\"std\").math.pow(f32, {}, {})", self.generate_expr(&call.args[0]), self.generate_expr(&call.args[1])); }
+                            if prop == "asin" { return format!("@import(\"std\").math.asin({})", self.generate_expr(&call.args[0])); }
+                            if prop == "acos" { return format!("@import(\"std\").math.acos({})", self.generate_expr(&call.args[0])); }
+                            if prop == "atan" { return format!("@import(\"std\").math.atan({})", self.generate_expr(&call.args[0])); }
+                            if prop == "atan2" { return format!("@import(\"std\").math.atan2({}, {})", self.generate_expr(&call.args[0]), self.generate_expr(&call.args[1])); }
+                            if prop == "random" { return format!("cp_math_random()"); }
+                        }
+                    }
+                }
+
                 let callee = match &*call.callee { Expr::Ident(ident) => ident.sym.clone(), _ => self.generate_expr(&call.callee) };
                 if callee == "test" && call.args.len() == 2 {
                     let name = self.generate_expr(&call.args[0]);
@@ -1078,11 +1115,7 @@ impl Codegen {
                     if self.is_state_machine {
                         let (callee_init, callee_fn) = match &*call.callee { 
                             Expr::Ident(id) => (id.sym.clone(), id.sym.clone()), 
-                                            Expr::Member(mem) => {
-                    if mem.prop.sym == "length" {
-                        let obj = self.generate_expr(&mem.obj);
-                        return format!("@as(i32, @intCast({}.len))", obj);
-                    }
+                            Expr::Member(mem) => {
                                 let obj_type = self.infer_zig_type(None, Some(&mem.obj));
                                 let base = obj_type.trim_start_matches('*');
                                 let prop = &mem.prop;
@@ -1132,7 +1165,15 @@ impl Codegen {
                     self.generate_expr(inner)
                 }
             },
-            Expr::Member(member) => { let obj = self.generate_expr(&member.obj); let prop = match member.prop.sym.as_str() { "length" => "len", _ => &member.prop.sym }; format!("{}.{}", obj, prop) },
+            Expr::Member(member) => { 
+                if let Expr::Ident(id) = &*member.obj {
+                    if id.sym == "Math" {
+                        if member.prop.sym == "PI" { return "@import(\"std\").math.pi".to_string(); }
+                        if member.prop.sym == "E" { return "@import(\"std\").math.e".to_string(); }
+                    }
+                }
+                let obj = self.generate_expr(&member.obj); let prop = match member.prop.sym.as_str() { "length" => "len", _ => &member.prop.sym }; format!("{}.{}", obj, prop) 
+            },
             Expr::Builtin(call) => match call.name.as_str() {
                 "@print" => { let fmt = self.generate_expr(&call.args[0]); let mut args = String::from(".{ "); for idx in 1..call.args.len() { args.push_str(&self.generate_expr(&call.args[idx])); if idx < call.args.len() - 1 { args.push_str(", "); } } args.push_str(" }"); format!("std.debug.print({} ++ \"\\n\", {})", fmt, args) },
                 "@spawn" => { 
@@ -1557,7 +1598,15 @@ impl Codegen {
                             return "[]const u8".to_string();
                         }
                     }
+                    if let Expr::Member(mem) = &*call.callee {
+                        if let Expr::Ident(id) = &*mem.obj {
+                            if id.sym == "Math" {
+                                return "f32".to_string();
+                            }
+                        }
+                    }
                 }
+
                 Expr::Builtin(call) => {
                     if call.name == "@self"
                         || call.name == "@sender"
@@ -1612,6 +1661,11 @@ impl Codegen {
                     }
                 }
                 Expr::Member(mem) => {
+                    if let Expr::Ident(id) = &*mem.obj {
+                        if id.sym == "Math" {
+                            return "f32".to_string();
+                        }
+                    }
                     if mem.prop.sym == "node_id" || mem.prop.sym == "local_id" {
                         return "u32".to_string();
                     }

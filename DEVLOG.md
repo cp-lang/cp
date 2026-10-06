@@ -307,3 +307,8 @@ To align `cp` language with TypeScript semantics as requested, we implemented fu
   - Injected `regex_t` POSIX struct and `RegExp` zig wrapper into `cpc/src/codegen.rs`.
   - Added semantic analysis mock for `RegExp` class in `cpc/src/sema.rs`.
   - Implemented all String methods, fixing `test_string.cp` functionality.
+- 2026-10-06: Executed encapsulation of the ES6 `Math` object.
+  - Intercepted `Math.*` calls in `codegen.rs` and translated them to `std.math` or native Zig `@` built-ins.
+  - Implemented `cp_math_random` stub to bypass Zig 0.17 PRNG breakage.
+  - Fixed a critical parser bug where `FloatLiteral` was not included in expression parsing.
+  - Updated `cp_eq` to correctly typecast and compare `comptime_float` with `f32`.
