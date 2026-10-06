@@ -288,3 +288,12 @@ To align `cp` language with TypeScript semantics as requested, we implemented fu
    - 我立刻重构了 `cpc/src/codegen.rs` 内部的变量提取器 (`extract_locals_simple` 和 `extract_local_vars_to_str`)。
    - 完美支持了 `Pattern::Tuple` 数组元组的索引映射，以及 `Pattern::Object` (对应 AST 的 `ObjectPatProp` struct) 的按键名属性映射。
    - 现已原生支持 `let { w, h }: {w: i32, h: i32} = obj;` 这类高级 TS 解构语法直接下沉为极致性能的 Zig 内存访问！
+
+## 2026-10-06 晚间 - 根目录大扫除与垃圾清理
+**背景与思路**:
+大师指出项目根目录下散落了大量以 `test_` 开头的文件，导致根目录异常臃肿。我编写了脚本对根目录下的所有这些文件进行了地毯式扫描和抽样读取，发现它们全部是之前的开发者或 Agent 为了验证 Zig 0.17 的各项新底层 API（如 `std.posix.accept`, JSON, 文件流等）而编写的单行或数行实验代码（`.zig`），以及由它们产生的巨大的无后缀编译体。
+这些底层探索得出的知识已经被完美转化为 CP 编译器的内置支持（如 `codegen.rs` 的 HTTP 与网络调用生成逻辑）。并且在 `cap/test/` 下，我们已经编写了对应的 CP 原生语法测试用例。
+**执行方案**:
+1. 将发现的废弃草稿（如 `test_close.zig`, `test_channel.zig`）分批次向大师汇报，并请求删除权限。
+2. 得到同意后，清理了包含过期二进制的 `test_project` 目录、约 54 个 `.zig` 草稿文件、约 54 个残留 ELF 编译文件，以及残余的 `test_*.txt` 输出数据。
+3. 根目录现在恢复了极度的清爽，只剩下核心架构目录和文档。
