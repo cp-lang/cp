@@ -65,6 +65,14 @@ impl Analyzer {
         };
         self.classes.insert("RegExp".to_string(), regex_class.clone());
         self.scopes[0].insert("RegExp".to_string(), SymbolKind::Class(regex_class));
+        let set_class = crate::ast::Class { span: mock_span.clone(), ident: crate::ast::Ident { span: mock_span.clone(), sym: "Set".to_string() }, fields: vec![], methods: vec![], implements: vec![] };
+        self.classes.insert("Set".to_string(), set_class.clone());
+        self.scopes[0].insert("Set".to_string(), SymbolKind::Class(set_class));
+
+        let map_class = crate::ast::Class { span: mock_span.clone(), ident: crate::ast::Ident { span: mock_span.clone(), sym: "Map".to_string() }, fields: vec![], methods: vec![], implements: vec![] };
+        self.classes.insert("Map".to_string(), map_class.clone());
+        self.scopes[0].insert("Map".to_string(), SymbolKind::Class(map_class));
+
 
         for item in &module.body {
             match item {

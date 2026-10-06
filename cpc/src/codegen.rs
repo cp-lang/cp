@@ -74,6 +74,8 @@ impl Codegen {
             }
         }
         self.globals.insert("Math".to_string());
+        self.globals.insert("Map".to_string());
+        self.globals.insert("Set".to_string());
         self.globals.insert("PID".to_string());
         self.globals.insert("Message".to_string());
         self.globals.insert("Mailbox".to_string());
@@ -102,7 +104,7 @@ impl Codegen {
         self.writeln("extern \"c\" fn regfree(preg: *regex_t) void;");
         self.writeln("pub const RegExp = struct {");
         self.writeln("    preg: regex_t, source: []const u8,");
-        self.writeln("    pub fn _create(allocator: std.mem.Allocator) !*RegExp { return allocator.create(RegExp); }");
+        self.writeln("    pub fn _create(allocator: std.mem.Allocator) !*RegExp { const p = try allocator.create(RegExp); p.* = undefined; return p; }");
         self.writeln("    pub fn init(self: *RegExp, pattern: []const u8, flags: []const u8) void {");
         self.writeln("        _ = flags; self.source = pattern; const c_pattern = std.heap.page_allocator.allocSentinel(u8, pattern.len, 0) catch unreachable; @import(\"std\").mem.copyForwards(u8, c_pattern, pattern); defer std.heap.page_allocator.free(c_pattern);");
         self.writeln("        if (regcomp(&self.preg, c_pattern.ptr, 1) != 0) { std.debug.print(\"Regex Compilation Failed\\n\", .{}); @panic(\"Invalid RegExp\"); }");
@@ -121,12 +123,129 @@ impl Codegen {
         self.writeln("    pub fn release(self: *RegExp) void { regfree(&self.preg); }");
         self.writeln("};");
 
+                self.writeln("");
+        self.writeln("const MessageContext = struct {");
+        self.writeln("    pub fn hash(self: @This(), m: Message) u64 {");
+        self.writeln("        _ = self;");
+        self.writeln("        var hasher = std.hash.Wyhash.init(0);");
+        self.writeln("        switch (m) {");
+        self.writeln("            .int => |i| std.hash.autoHash(&hasher, i),");
+        self.writeln("            .float => |f| std.hash.autoHash(&hasher, @as(u32, @bitCast(f))),");
+        self.writeln("            .string => |s| hasher.update(s),");
+        self.writeln("            .boolean => |bl| std.hash.autoHash(&hasher, bl),");
+        self.writeln("            .any => |a| std.hash.autoHash(&hasher, @intFromPtr(a)),");
+        self.writeln("        }");
+        self.writeln("        return hasher.final();");
+        self.writeln("    }");
+        self.writeln("    pub fn eql(self: @This(), a: Message, b: Message) bool {");
+        self.writeln("        _ = self;");
+        self.writeln("        const Ta = std.meta.activeTag(a);");
+        self.writeln("        const Tb = std.meta.activeTag(b);");
+        self.writeln("        if (Ta != Tb) return false;");
+        self.writeln("        return switch (a) {");
+        self.writeln("            .int => |i| i == b.int,");
+        self.writeln("            .float => |f| f == b.float,");
+        self.writeln("            .string => |s| std.mem.eql(u8, s, b.string),");
+        self.writeln("            .boolean => |bl| bl == b.boolean,");
+        self.writeln("            .any => |ptr| ptr == b.any,");
+        self.writeln("        };");
+        self.writeln("    }");
+        self.writeln("};");
+        self.writeln("");
+        self.writeln("const Map = struct {");
+        self.writeln("    allocator: std.mem.Allocator,");
+        self.writeln("    _map: std.HashMap(Message, Message, MessageContext, std.hash_map.default_max_load_percentage),");
+        self.writeln("    size: i32,");
+        self.writeln("");
+        self.writeln("    pub fn _create(allocator: std.mem.Allocator) !*Map {");
+        self.writeln("        const self = try allocator.create(Map);");
+        self.writeln("        self.* = .{");
+        self.writeln("            .allocator = allocator,");
+        self.writeln("            ._map = std.HashMap(Message, Message, MessageContext, std.hash_map.default_max_load_percentage).init(allocator),");
+        self.writeln("            .size = 0,");
+        self.writeln("        };");
+        self.writeln("        return self;");
+        self.writeln("    }");
+        self.writeln("    ");
+        self.writeln("    pub fn init(self: *Map) void {");
+        self.writeln("        _ = self;");
+        self.writeln("    }");
+        self.writeln("    ");
+        self.writeln("    pub fn set(self: *Map, key: anytype, value: anytype) *Map {");
+        self.writeln("        self._map.put(cp_message_from(key), cp_message_from(value)) catch unreachable;");
+        self.writeln("        self.size = @intCast(self._map.count());");
+        self.writeln("        return self;");
+        self.writeln("    }");
+        self.writeln("    ");
+        self.writeln("    pub fn get(self: *Map, key: anytype) Message {");
+        self.writeln("        if (self._map.get(cp_message_from(key))) |v| return v;");
+        self.writeln("        return .{ .any = undefined };");
+        self.writeln("    }");
+        self.writeln("    ");
+        self.writeln("    pub fn has(self: *Map, key: anytype) bool {");
+        self.writeln("        return self._map.contains(cp_message_from(key));");
+        self.writeln("    }");
+        self.writeln("    ");
+        self.writeln("    pub fn delete(self: *Map, key: anytype) bool {");
+        self.writeln("        const removed = self._map.remove(cp_message_from(key));");
+        self.writeln("        self.size = @intCast(self._map.count());");
+        self.writeln("        return removed;");
+        self.writeln("    }");
+        self.writeln("    ");
+        self.writeln("    pub fn clear(self: *Map) void {");
+        self.writeln("        self._map.clearRetainingCapacity();");
+        self.writeln("        self.size = 0;");
+        self.writeln("    }");
+        self.writeln("};");
+        self.writeln("");
+        self.writeln("const Set = struct {");
+        self.writeln("    allocator: std.mem.Allocator,");
+        self.writeln("    _map: std.HashMap(Message, void, MessageContext, std.hash_map.default_max_load_percentage),");
+        self.writeln("    size: i32,");
+        self.writeln("");
+        self.writeln("    pub fn _create(allocator: std.mem.Allocator) !*Set {");
+        self.writeln("        const self = try allocator.create(Set);");
+        self.writeln("        self.* = .{");
+        self.writeln("            .allocator = allocator,");
+        self.writeln("            ._map = std.HashMap(Message, void, MessageContext, std.hash_map.default_max_load_percentage).init(allocator),");
+        self.writeln("            .size = 0,");
+        self.writeln("        };");
+        self.writeln("        return self;");
+        self.writeln("    }");
+        self.writeln("    ");
+        self.writeln("    pub fn init(self: *Set) void {");
+        self.writeln("        _ = self;");
+        self.writeln("    }");
+        self.writeln("    ");
+        self.writeln("    pub fn add(self: *Set, value: anytype) *Set {");
+        self.writeln("        self._map.put(cp_message_from(value), {}) catch unreachable;");
+        self.writeln("        self.size = @intCast(self._map.count());");
+        self.writeln("        return self;");
+        self.writeln("    }");
+        self.writeln("    ");
+        self.writeln("    pub fn has(self: *Set, value: anytype) bool {");
+        self.writeln("        return self._map.contains(cp_message_from(value));");
+        self.writeln("    }");
+        self.writeln("    ");
+        self.writeln("    pub fn delete(self: *Set, value: anytype) bool {");
+        self.writeln("        const removed = self._map.remove(cp_message_from(value));");
+        self.writeln("        self.size = @intCast(self._map.count());");
+        self.writeln("        return removed;");
+        self.writeln("    }");
+        self.writeln("    ");
+        self.writeln("    pub fn clear(self: *Set) void {");
+        self.writeln("        self._map.clearRetainingCapacity();");
+        self.writeln("        self.size = 0;");
+        self.writeln("    }");
+        self.writeln("};");
+        self.writeln("");
         self.writeln("const PID = struct { node_id: u32, local_id: u32 };");
-        self.writeln("const Message = union(enum) { int: i32, float: f32, string: []const u8, any: *anyopaque, pub fn to_string(self: Message) []const u8 { return switch (self) { .string => |s| s, else => \"\", }; } pub fn to_int(self: Message) i32 { return switch (self) { .int => |i| i, else => 0, }; } };");
+        self.writeln("const Message = union(enum) { int: i32, float: f32, string: []const u8, boolean: bool, any: *anyopaque, pub fn to_string(self: Message) []const u8 { return switch (self) { .string => |s| s, else => \"\", }; } pub fn to_int(self: Message) i32 { return switch (self) { .int => |i| i, else => 0, }; } };");
         self.writeln("fn cp_message_from(v: anytype) Message {");
         self.writeln("    const T = @TypeOf(v);");
         self.writeln("    if (T == Message) return v;");
-        self.writeln("    if (T == i32 or T == comptime_int) return .{ .int = @intCast(v) };");
+        self.writeln("    if (T == i32 or T == comptime_int) return .{ .int = @intCast(v) };
+    if (T == bool) return .{ .boolean = v };");
         self.writeln(
             "    if (T == f32 or T == comptime_float) return .{ .float = @floatCast(v) };",
         );
@@ -506,7 +625,7 @@ impl Codegen {
         for f in &class.fields {
             self.writeln(&format!("{}: {},", f.ident.sym, self.map_type(&f.ty)));
         }
-        self.writeln(&format!("\npub fn _create(allocator: std.mem.Allocator) !*{} {{ const self_ptr = try allocator.create({}); return self_ptr; }}", class.ident.sym, class.ident.sym));
+        self.writeln(&format!("\npub fn _create(allocator: std.mem.Allocator) !*{} {{ const self_ptr = try allocator.create({}); self_ptr.* = undefined; return self_ptr; }}", class.ident.sym, class.ident.sym));
         for m in &class.methods {
             self.generate_function_logic(m, Some(&class.ident.sym));
         }
@@ -1108,7 +1227,7 @@ impl Codegen {
                     args.push_str(&self.generate_expr(arg));
                     if idx < call.args.len() - 1 { args.push_str(", "); }
                 }
-                format!("(blk: {{ const _obj = {}._create(std.heap.page_allocator) catch unreachable; _obj.* = undefined; if (@hasDecl({}, \"init\")) {{ const RType = @typeInfo(@TypeOf({}.init)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _obj.init({}) catch unreachable; }} else {{ _obj.init({}); }} }} break :blk _obj; }})", class_name, class_name, class_name, args, args)
+                format!("(blk: {{ const _obj = {}._create(std.heap.page_allocator) catch unreachable; if (@hasDecl({}, \"init\")) {{ const RType = @typeInfo(@TypeOf({}.init)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _obj.init({}) catch unreachable; }} else {{ _obj.init({}); }} }} break :blk _obj; }})", class_name, class_name, class_name, args, args)
             },
             Expr::Await(inner) => {
                 if let Expr::Call(call) = &**inner {
@@ -1593,6 +1712,15 @@ impl Codegen {
                         }
                         if mem.prop.sym == "accept" {
                             return "*Socket".to_string();
+                        }
+                                                if mem.prop.sym == "get" {
+                            return "Message".to_string();
+                        }
+                        if mem.prop.sym == "has" || mem.prop.sym == "delete" {
+                            return "bool".to_string();
+                        }
+                        if mem.prop.sym == "size" {
+                            return "i32".to_string();
                         }
                         if mem.prop.sym == "read" {
                             return "[]const u8".to_string();

@@ -312,3 +312,8 @@ To align `cp` language with TypeScript semantics as requested, we implemented fu
   - Implemented `cp_math_random` stub to bypass Zig 0.17 PRNG breakage.
   - Fixed a critical parser bug where `FloatLiteral` was not included in expression parsing.
   - Updated `cp_eq` to correctly typecast and compare `comptime_float` with `f32`.
+- 2026-10-06: Implemented Map and Set capabilities via AST code generation in `codegen.rs`.
+  - Defined `CP_Map` and `CP_Set` natively in the Zig preamble using `std.HashMap` and a custom `MessageContext`.
+  - Added `bool` support to the `Message` union to cleanly support JS boolean maps/sets.
+  - Rectified a `self.pointer_stability` runtime panic from Zig `std.HashMap` by fixing `_create` behavior for `Expr::New` so it no longer zero-stamps initialized objects.
+  - Populated Semantic analyzer (`sema.rs`) with `Map` and `Set` type knowledge so the static checker passes AST generation.
