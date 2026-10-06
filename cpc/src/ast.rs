@@ -255,6 +255,7 @@ pub enum Lit {
     Str(String),
     Bool(bool),
     Null,
+    Undefined,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

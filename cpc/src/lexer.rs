@@ -23,6 +23,8 @@ pub enum Token {
 
     #[token("export")]
     Export,
+    #[token("undefined")]
+    Undefined,
     #[token("import")]
     Import,
     #[token("from")]

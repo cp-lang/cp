@@ -894,6 +894,7 @@ impl<'a> Parser<'a> {
     fn parse_primary_expr(&mut self) -> ParseResult<Expr> {
         let (token, span) = self.bump()?;
         match token {
+            Token::Undefined => Ok(Expr::Lit(Lit::Undefined)),
             Token::Ident(sym) => {
                 if sym.starts_with('@') {
                     if sym == "@is_beam" {

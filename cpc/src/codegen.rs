@@ -23,6 +23,7 @@ pub struct Codegen {
     is_class_method: bool,
     is_main: bool,
     moved_vars: HashSet<String>,
+    uninitialized_vars: HashSet<String>,
     pub captured_vars: HashMap<String, Vec<(String, String)>>,
 }
 
@@ -48,6 +49,7 @@ impl Codegen {
             is_class_method: false,
             is_main: false,
             moved_vars: HashSet::new(),
+            uninitialized_vars: HashSet::new(),
             captured_vars: HashMap::new(),
         }
     }
@@ -745,6 +747,9 @@ impl Codegen {
                     };
                     match &var.pat {
                         Pattern::Ident(ident) => {
+                            if expr_code == "undefined" {
+                                self.uninitialized_vars.insert(ident.sym.clone());
+                            }
                             let lhs = if self.is_state_machine {
                                 format!("ctx.{}", ident.sym)
                             } else {
@@ -799,8 +804,11 @@ impl Codegen {
             }
             Stmt::Expr(expr) => match expr {
                 Expr::Bin(bin) if bin.op == BinaryOp::Assign => {
-                    let l = self.generate_expr(&bin.left);
+                    if let Expr::Ident(id) = &*bin.left {
+                        self.uninitialized_vars.remove(&id.sym);
+                    }
                     let r = self.generate_expr(&bin.right);
+                    let l = self.generate_expr(&bin.left);
                     self.write_to_case(&format!("{} = {};", l, r));
                 }
                 Expr::Zig(zig) => self.write_to_case(&format!("{}\n", zig.code)),
@@ -826,6 +834,7 @@ impl Codegen {
             }
             Stmt::If(i) => {
                 let test = self.generate_expr(&i.test);
+                let old_uninit = self.uninitialized_vars.clone();
                 if test == "true" {
                     self.generate_stmt(&i.cons);
                 } else if test == "false" {
@@ -837,22 +846,39 @@ impl Codegen {
                     self.indent();
                     self.generate_stmt(&i.cons);
                     self.dedent();
+                    let uninit_cons = self.uninitialized_vars.clone();
+                    self.uninitialized_vars = old_uninit.clone();
+                    
                     if let Some(alt) = &i.alt {
                         self.write_to_case("} else {");
                         self.indent();
                         self.generate_stmt(alt);
                         self.dedent();
+                        let uninit_alt = self.uninitialized_vars.clone();
+                        // Union of uninitialized variables
+                        self.uninitialized_vars = uninit_cons;
+                        self.uninitialized_vars.extend(uninit_alt);
+                    } else {
+                        self.write_to_case("}");
+                        // If there is no else, the var could remain uninitialized
+                        let uninit_cons = self.uninitialized_vars.clone();
+                        self.uninitialized_vars = old_uninit;
+                        self.uninitialized_vars.extend(uninit_cons);
                     }
-                    self.write_to_case("}");
                 }
             }
             Stmt::While(w) => {
                 let test = self.generate_expr(&w.test);
+                let old_uninit = self.uninitialized_vars.clone();
                 self.write_to_case(&format!("while ({}) {{", test));
                 self.indent();
                 self.generate_stmt(&w.body);
                 self.dedent();
                 self.write_to_case("}");
+                // The loop might not execute, so variables could remain uninitialized
+                let uninit_body = self.uninitialized_vars.clone();
+                self.uninitialized_vars = old_uninit;
+                self.uninitialized_vars.extend(uninit_body);
             }
             Stmt::Return(ret) => {
                 if let Some(arg) = &ret.arg {
@@ -886,9 +912,10 @@ impl Codegen {
 
     fn generate_expr(&mut self, expr: &Expr) -> String {
         match expr {
-            Expr::Lit(Lit::Int(v)) => v.to_string(), Expr::Lit(Lit::Str(s)) => format!("\"{}\"", s.replace("\"", "\\\"")),
+            Expr::Lit(Lit::Int(v)) => v.to_string(), Expr::Lit(Lit::Float(f)) => f.to_string(), Expr::Lit(Lit::Str(s)) => format!("\"{}\"", s.replace("\"", "\\\"")), Expr::Lit(Lit::Bool(b)) => if *b { "true".to_string() } else { "false".to_string() }, Expr::Lit(Lit::Null) => "null".to_string(), Expr::Lit(Lit::Undefined) => "undefined".to_string(),
             Expr::Ident(i) => {
                 if self.moved_vars.contains(&i.sym) { panic!("CP Compile Error: Use of moved value '{}'", i.sym); }
+                if self.uninitialized_vars.contains(&i.sym) { panic!("CP Compile Error: Variable '{}' read before initialization", i.sym); }
                 if i.sym == "@is_beam" { return if self.is_beam_mode { "true".to_string() } else { "false".to_string() }; }
                 if i.sym == "@self" { return if self.is_state_machine { "ctx._self".to_string() } else { "PID{ .node_id = current_node_id, .local_id = 1 }".to_string() }; }
                 if i.sym == "@sender" { return if self.is_state_machine { "ctx.received_sender.?".to_string() } else { "PID{ .node_id = 0, .local_id = 0 }".to_string() }; }

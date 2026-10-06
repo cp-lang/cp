@@ -416,6 +416,7 @@ impl Analyzer {
                 Lit::Bool(_) => Ok(Type::Bool),
                 Lit::Str(_) => Ok(Type::String),
                 Lit::Null => Ok(Type::Unknown),
+                Lit::Undefined => Ok(Type::Any),
             },
             Expr::Ident(ident) => {
                 if ident.sym == "true" || ident.sym == "false" {
