@@ -259,3 +259,12 @@ To align `cp` language with TypeScript semantics as requested, we implemented fu
 ## 2026-10-05 模板字符串设计
 - 方案：在词法层整体捕获反引号内容，解析器手动切分 `${}`（花括号深度计数）并用子 Parser 解析表达式，codegen 降级为 `std.fmt.allocPrint`，使用 Actor arena 分配以零成本回收。
 - 格式符：由简易类型推断决定 `{s}`（字符串）或 `{any}`。目前推断基于标识符启发式，后续应接入 Sema 的真实类型。
+## 2026-10-06 修复 `cpc` 编译器 120GB 内存泄露与死循环问题 (CRITICAL BUG FIX)
+
+- **定位故障**: 用户报告 `cpc` 进程占用高达 121.6GB 内存（97.3% CPU）并且无限阻塞挂起。经 `strace` 与底层逻辑追踪，排除了前端解析器（Parser）与包查找机制（Resolver）的死循环可能，最终定位到后端代码生成器 `codegen.rs`。
+- **根本原因**: 在之前实现 `cap:test` Bun 风格测试输出框架时，注入代码阶段由于 `}` 括号闭合逻辑和手动推栈导致了双重 `dedent()` 降级。`dedent()` 函数存在 `usize` 类型溢出漏洞（没有安全判断 `> 0`），导致 `indent_level` 在特定情况下由 `0` 减 `1` 下溢为 `usize::MAX` (18446744073709551615)。随后的 `writeln` 在尝试分配和写入缩进空格时，进入了无限扩张的内存分配死循环。
+- **解决方案**:
+  1. 重构了 `codegen.rs` 内针对 `pub fn main` 及多重事件循环（`while (true)`）的 Zig AST 注入逻辑。
+  2. 精准修复了 AST 树形结构的缩进栈，确保 `if (__cap_test_total > 0)` 报告系统安全地运行在主循环跳出后、且在 `main` 退出前。
+  3. 通过压力测试，验证内存泄露与挂起彻底消失。
+- **结果**: `cap build cap/test` 现已完全恢复健康！即使存在语法错误的 `.cp` 测试文件，编译器也会干净利落地识别、跳过，并正确抛出 `CompileFailed`，整个包管理器流水线再次畅通无阻！
