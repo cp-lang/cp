@@ -289,9 +289,17 @@ impl<'a> Parser<'a> {
             }
             _ => return Err(ParseError::UnexpectedToken(token, span)),
         };
-        if self.peek() == Some(&Token::Question) {
-            self.bump()?;
-            ty = Type::Optional(Box::new(ty));
+        loop {
+            if self.peek() == Some(&Token::Question) {
+                self.bump()?;
+                ty = Type::Optional(Box::new(ty));
+            } else if self.peek() == Some(&Token::LBracket) {
+                self.bump()?;
+                self.expect(Token::RBracket)?;
+                ty = Type::Array(Box::new(ty));
+            } else {
+                break;
+            }
         }
         if is_error_union {
             ty = Type::ErrorUnion(Box::new(ty));

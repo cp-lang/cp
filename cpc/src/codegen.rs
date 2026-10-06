@@ -490,7 +490,11 @@ impl Codegen {
         } else {
             func.ident.sym.clone()
         };
-        self.current_zig_fn_name = zig_name.clone();
+        self.current_zig_fn_name = if let Some(c) = class_name {
+            format!("{}_{}", c, zig_name)
+        } else {
+            zig_name.clone()
+        };
         self.is_class_method = class_name.is_some();
         self.is_main = func.ident.sym == "main";
         let ret_ty = func
@@ -982,7 +986,7 @@ impl Codegen {
                             args_str.push_str(&self.generate_expr(arg));
                         }
                         let next_pc = self.pc_counter + 1;
-                        let current_fn = if self.is_class_method { format!("_{}", self.current_zig_fn_name) } else { self.current_zig_fn_name.clone() };
+                        let current_fn = self.current_zig_fn_name.clone();
                         let logic = format!(
                             "const child_ctx = {}_init(ctx.arena.?, @ptrCast(ctx), @ptrCast(&{}){}); \
                             schedule(@ptrCast(&{}), @ptrCast(child_ctx)); \
@@ -1002,6 +1006,8 @@ impl Codegen {
                             "@intCast(ctx.await_result.?.int)".to_string()
                         } else if inferred.starts_with('*') {
                             format!("@as({}, @ptrCast(@alignCast(ctx.await_result.?.any)))", inferred)
+                        } else if inferred.starts_with("struct {") {
+                            format!("@as(*{}, @ptrCast(@alignCast(ctx.await_result.?.any))).*", inferred)
                         } else {
                             "ctx.await_result".to_string()
                         }
