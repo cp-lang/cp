@@ -6,7 +6,7 @@ import { Agent } from "cap:beam";
 class ComplexAgent extends Agent {
     async fn onMessage(this, action_id: u32, payload: any): void {
         __zig__ { _ = ctx.payload; }
-        console.log("Agent received action {d}", action_id);
+        @print("Agent received action {d}", action_id);
         
         await writeFile("./test.txt", "Production-grade CP-BEAM");
         const data = await readFile("./test.txt");

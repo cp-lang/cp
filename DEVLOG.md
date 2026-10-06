@@ -268,3 +268,23 @@ To align `cp` language with TypeScript semantics as requested, we implemented fu
   2. 精准修复了 AST 树形结构的缩进栈，确保 `if (__cap_test_total > 0)` 报告系统安全地运行在主循环跳出后、且在 `main` 退出前。
   3. 通过压力测试，验证内存泄露与挂起彻底消失。
 - **结果**: `cap build cap/test` 现已完全恢复健康！即使存在语法错误的 `.cp` 测试文件，编译器也会干净利落地识别、跳过，并正确抛出 `CompileFailed`，整个包管理器流水线再次畅通无阻！
+
+## 2026-10-06 升级测试用例与增强编译器元组/对象推断 (Test Suite Upgrade)
+
+**大师指令:**
+把刚才报出来的那些 `.cp` 老语法用例给升级兼容一下，确保 `cap build cap/test` 能够全绿通过。
+
+**执行日志:**
+1. **老用例全方位升级**:
+   - `test_actor.cp`: 修复了 PID 结构体的格式化打印问题，将 `{d}` 改为更泛型的 `{any}` 以兼容 Zig 0.17 标准。
+   - `test_advanced.cp`: 为 `len = msg.length` 增加了显式的 `: i32` 类型约束，避免被编译器回退到 `*anyopaque` 导致类型不匹配。
+   - `test_agent.cp` 与 `test_agent_io.cp`: 补齐了缺省的 `fn main(): void {}` 执行入口，消除了 `cp_main_Context` 找不到的致命错误。
+   - `test_all_libs.cp`: 移除了过时的 JS 风格 `console.log`，统一迁移至 CP 标准内置的 `@print` 宏。
+   - `test_builtins.cp`: 为数组推导增加了明确的类型签名 `[i32]`。
+   - `test_comptime.cp`: 将不再被解析器首选支持的 `!{` 块替换成了等价且更底层的 `__zig__ {` 内联执行块。
+
+2. **编译器核心能力进阶 (Tuple & Object Destructuring)**:
+   - 在修复测试时，我发现 `test_async_tuple.cp` 中存在无法正确解构元组的底层漏洞（编译器一直将元组元素推断为 `i32`）。
+   - 我立刻重构了 `cpc/src/codegen.rs` 内部的变量提取器 (`extract_locals_simple` 和 `extract_local_vars_to_str`)。
+   - 完美支持了 `Pattern::Tuple` 数组元组的索引映射，以及 `Pattern::Object` (对应 AST 的 `ObjectPatProp` struct) 的按键名属性映射。
+   - 现已原生支持 `let { w, h }: {w: i32, h: i32} = obj;` 这类高级 TS 解构语法直接下沉为极致性能的 Zig 内存访问！

@@ -1510,9 +1510,32 @@ impl Codegen {
                             self.locals.insert(i.sym.clone(), ty_str);
                         }
                         Pattern::Tuple(el) => {
-                            for p in el {
-                                if let Pattern::Ident(i) = p {
-                                    self.locals.insert(i.sym.clone(), ty_str.clone());
+                            if let Some(Type::Tuple(tys)) = v.ty.as_ref() {
+                                for (idx, p) in el.iter().enumerate() {
+                                    if let Pattern::Ident(i) = p {
+                                        let t_str = if idx < tys.len() { self.map_type(&tys[idx]) } else { "i32".to_string() };
+                                        self.locals.insert(i.sym.clone(), t_str);
+                                    }
+                                }
+                            } else {
+                                for p in el {
+                                    if let Pattern::Ident(i) = p {
+                                        self.locals.insert(i.sym.clone(), "i32".to_string());
+                                    }
+                                }
+                            }
+                        }
+                        Pattern::Object(fields) => {
+                            if let Some(Type::Object(tys)) = v.ty.as_ref() {
+                                for p in fields {
+                                    let ident = if let Some(Pattern::Ident(i)) = &p.val { i } else { &p.key };
+                                    let t_str = tys.iter().find(|t| t.ident.sym == p.key.sym).map(|t| self.map_type(&t.ty)).unwrap_or_else(|| "i32".to_string());
+                                    self.locals.insert(ident.sym.clone(), t_str);
+                                }
+                            } else {
+                                for p in fields {
+                                    let ident = if let Some(Pattern::Ident(i)) = &p.val { i } else { &p.key };
+                                    self.locals.insert(ident.sym.clone(), "i32".to_string());
                                 }
                             }
                         }
@@ -1544,10 +1567,34 @@ impl Codegen {
         for stmt in &block.body {
             match stmt {
                 Stmt::Var(var) => {
-                    if let Pattern::Ident(ident) = &var.pat {
-                        let ty_str = self.infer_zig_type(var.ty.as_ref(), var.init.as_ref());
-                        self.locals.insert(ident.sym.clone(), ty_str.clone());
-                        writeln!(output, "    {}: {},", ident.sym, ty_str).unwrap();
+                    let ty_str = self.infer_zig_type(var.ty.as_ref(), var.init.as_ref());
+                    match &var.pat {
+                        Pattern::Ident(ident) => {
+                            self.locals.insert(ident.sym.clone(), ty_str.clone());
+                            writeln!(output, "    {}: {},", ident.sym, ty_str).unwrap();
+                        }
+                        Pattern::Tuple(el) => {
+                            if let Some(Type::Tuple(tys)) = var.ty.as_ref() {
+                                for (idx, p) in el.iter().enumerate() {
+                                    if let Pattern::Ident(ident) = p {
+                                        let t_str = if idx < tys.len() { self.map_type(&tys[idx]) } else { "i32".to_string() };
+                                        self.locals.insert(ident.sym.clone(), t_str.clone());
+                                        writeln!(output, "    {}: {},", ident.sym, t_str).unwrap();
+                                    }
+                                }
+                            }
+                        }
+                        Pattern::Object(fields) => {
+                            if let Some(Type::Object(tys)) = var.ty.as_ref() {
+                                for p in fields {
+                                    let ident = if let Some(Pattern::Ident(i)) = &p.val { i } else { &p.key };
+                                    let t_str = tys.iter().find(|t| t.ident.sym == p.key.sym).map(|t| self.map_type(&t.ty)).unwrap_or_else(|| "i32".to_string());
+                                    self.locals.insert(ident.sym.clone(), t_str.clone());
+                                    writeln!(output, "    {}: {},", ident.sym, t_str).unwrap();
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 Stmt::Block(b) => self.extract_local_vars_to_str(b, output),
@@ -1597,6 +1644,17 @@ impl Codegen {
             }
             Type::Optional(inner) => format!("?{}", self.map_type(inner)),
             Type::ErrorUnion(inner) => format!("anyerror!{}", self.map_type(inner)),
+            Type::Tuple(types) => {
+                let mapped: Vec<String> = types.iter().map(|t| self.map_type(t)).collect();
+                format!("struct {{ {} }}", mapped.join(", "))
+            }
+            Type::Object(fields) => {
+                let mapped: Vec<String> = fields
+                    .iter()
+                    .map(|f| format!("{}: {}", f.ident.sym, self.map_type(&f.ty)))
+                    .collect();
+                format!("struct {{ {} }}", mapped.join(", "))
+            }
             _ => "i32".to_string(),
         }
     }

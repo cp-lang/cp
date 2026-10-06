@@ -7,3 +7,5 @@ class IoAgent extends Agent {
         @print("IoAgent: File read complete. Content: {s}", data);
     }
 }
+
+fn main(): void {}

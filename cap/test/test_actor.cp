@@ -6,7 +6,7 @@ fn main(): ?void {
     let worker = @spawn((msg) => {
         match (msg) {
             .ping |sender| => {
-                @print("Worker: Received ping from {d}, replying pong...", sender);
+                @print("Worker: Received ping from {any}, replying pong...", sender);
                 @reply(sender, { pong: @self() });
             }
             ! => {
@@ -15,7 +15,7 @@ fn main(): ?void {
         }
     });
 
-    @print("Main: Sending ping to worker {d}...", worker);
+    @print("Main: Sending ping to worker {any}...", worker);
     @reply(worker, { ping: @self() });
 
     @print("Main: Waiting for reply...");
@@ -23,7 +23,7 @@ fn main(): ?void {
     
     match (response) {
         .pong |pid| => {
-            @print("Main: Received pong from worker {d}", pid);
+            @print("Main: Received pong from worker {any}", pid);
         }
         ! => {
             @print("Main: Unknown reply");
