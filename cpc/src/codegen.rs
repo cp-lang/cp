@@ -93,6 +93,33 @@ impl Codegen {
             }
         }
 
+        
+        self.writeln("pub const regex_t = extern struct { __space: [64]usize = undefined, };");
+        self.writeln("pub const regmatch_t = extern struct { rm_so: i32, rm_eo: i32, };");
+        self.writeln("extern \"c\" fn regcomp(preg: *regex_t, regex: [*:0]const u8, cflags: i32) i32;");
+        self.writeln("extern \"c\" fn regexec(preg: *const regex_t, string: [*:0]const u8, nmatch: usize, pmatch: [*]regmatch_t, eflags: i32) i32;");
+        self.writeln("extern \"c\" fn regfree(preg: *regex_t) void;");
+        self.writeln("pub const RegExp = struct {");
+        self.writeln("    preg: regex_t, source: []const u8,");
+        self.writeln("    pub fn _create(allocator: std.mem.Allocator) !*RegExp { return allocator.create(RegExp); }");
+        self.writeln("    pub fn init(self: *RegExp, pattern: []const u8, flags: []const u8) void {");
+        self.writeln("        _ = flags; self.source = pattern; const c_pattern = std.heap.page_allocator.allocSentinel(u8, pattern.len, 0) catch unreachable; @import(\"std\").mem.copyForwards(u8, c_pattern, pattern); defer std.heap.page_allocator.free(c_pattern);");
+        self.writeln("        if (regcomp(&self.preg, c_pattern.ptr, 1) != 0) { std.debug.print(\"Regex Compilation Failed\\n\", .{}); @panic(\"Invalid RegExp\"); }");
+        self.writeln("    }");
+        self.writeln("    pub fn @\"test\"(self: *RegExp, str: []const u8) bool {");
+        self.writeln("        const c_str = std.heap.page_allocator.allocSentinel(u8, str.len, 0) catch unreachable; @import(\"std\").mem.copyForwards(u8, c_str, str); defer std.heap.page_allocator.free(c_str);");
+        self.writeln("        var pmatch: [1]regmatch_t = undefined;");
+        self.writeln("        return regexec(&self.preg, c_str.ptr, 1, &pmatch, 0) == 0;");
+        self.writeln("    }");
+        self.writeln("    pub fn exec(self: *RegExp, str: []const u8) []const u8 {");
+        self.writeln("        const c_str = std.heap.page_allocator.allocSentinel(u8, str.len, 0) catch unreachable; @import(\"std\").mem.copyForwards(u8, c_str, str); defer std.heap.page_allocator.free(c_str);");
+        self.writeln("        var pmatch: [1]regmatch_t = undefined;");
+        self.writeln("        if (regexec(&self.preg, c_str.ptr, 1, &pmatch, 0) == 0) { const start: usize = @intCast(pmatch[0].rm_so); const end: usize = @intCast(pmatch[0].rm_eo); return str[start..end]; }");
+        self.writeln("        return \"\";");
+        self.writeln("    }");
+        self.writeln("    pub fn release(self: *RegExp) void { regfree(&self.preg); }");
+        self.writeln("};");
+
         self.writeln("const PID = struct { node_id: u32, local_id: u32 };");
         self.writeln("const Message = union(enum) { int: i32, float: f32, string: []const u8, any: *anyopaque, pub fn to_string(self: Message) []const u8 { return switch (self) { .string => |s| s, else => \"\", }; } pub fn to_int(self: Message) i32 { return switch (self) { .int => |i| i, else => 0, }; } };");
         self.writeln("fn cp_message_from(v: anytype) Message {");
@@ -948,7 +975,63 @@ impl Codegen {
                     }
                 } 
             },
-            Expr::Call(call) => {
+                        Expr::Call(call) => {
+                if let Expr::Member(mem) = &*call.callee {
+                    let prop = mem.prop.sym.as_str();
+                    if prop == "indexOf" {
+                        let obj = self.generate_expr(&mem.obj);
+                        let arg = self.generate_expr(&call.args[0]);
+                        return format!("(if (@import(\"std\").mem.indexOf(u8, {}, {})) |i| @as(i32, @intCast(i)) else @as(i32, -1))", obj, arg);
+                    } else if prop == "lastIndexOf" {
+                        let obj = self.generate_expr(&mem.obj);
+                        let arg = self.generate_expr(&call.args[0]);
+                        return format!("(if (@import(\"std\").mem.lastIndexOf(u8, {}, {})) |i| @as(i32, @intCast(i)) else @as(i32, -1))", obj, arg);
+                    } else if prop == "includes" {
+                        let obj = self.generate_expr(&mem.obj);
+                        let arg = self.generate_expr(&call.args[0]);
+                        return format!("(@import(\"std\").mem.indexOf(u8, {}, {}) != null)", obj, arg);
+                    } else if prop == "startsWith" {
+                        let obj = self.generate_expr(&mem.obj);
+                        let arg = self.generate_expr(&call.args[0]);
+                        return format!("@import(\"std\").mem.startsWith(u8, {}, {})", obj, arg);
+                    } else if prop == "endsWith" {
+                        let obj = self.generate_expr(&mem.obj);
+                        let arg = self.generate_expr(&call.args[0]);
+                        return format!("@import(\"std\").mem.endsWith(u8, {}, {})", obj, arg);
+                    } else if prop == "slice" || prop == "substring" {
+                        let obj = self.generate_expr(&mem.obj);
+                        let start = self.generate_expr(&call.args[0]);
+                        let end = self.generate_expr(&call.args[1]);
+                        return format!("{}[@intCast({})..@intCast({})]", obj, start, end);
+                    } else if prop == "toLowerCase" {
+                        let obj = self.generate_expr(&mem.obj);
+                        return format!("(blk: {{ var out = std.heap.page_allocator.alloc(u8, {}.len) catch unreachable; for ({}, 0..) |c, i| out[i] = @import(\"std\").ascii.toLower(c); break :blk out; }})", obj, obj);
+                    } else if prop == "toUpperCase" {
+                        let obj = self.generate_expr(&mem.obj);
+                        return format!("(blk: {{ var out = std.heap.page_allocator.alloc(u8, {}.len) catch unreachable; for ({}, 0..) |c, i| out[i] = @import(\"std\").ascii.toUpper(c); break :blk out; }})", obj, obj);
+                    } else if prop == "replace" {
+                        let obj = self.generate_expr(&mem.obj);
+                        let arg = self.generate_expr(&call.args[0]);
+                        let replacement = self.generate_expr(&call.args[1]);
+                        return format!("@import(\"std\").mem.replaceOwned(u8, std.heap.page_allocator, {}, {}, {}) catch unreachable", obj, arg, replacement);
+                    } else if prop == "charCodeAt" {
+                        let obj = self.generate_expr(&mem.obj);
+                        let arg = self.generate_expr(&call.args[0]);
+                        return format!("@as(i32, @intCast({}[@intCast({})]))", obj, arg);
+                    } else if prop == "match" {
+                        let obj = self.generate_expr(&mem.obj);
+                        let arg = self.generate_expr(&call.args[0]);
+                        return format!("{}.exec({})", arg, obj);
+                    } else if prop == "test" {
+                        let obj = self.generate_expr(&mem.obj);
+                        let arg = self.generate_expr(&call.args[0]);
+                        return format!("{}.@\"test\"({})", obj, arg);
+                    } else if prop == "exec" {
+                        let obj = self.generate_expr(&mem.obj);
+                        let arg = self.generate_expr(&call.args[0]);
+                        return format!("{}.exec({})", obj, arg);
+                    }
+                }
                 let callee = match &*call.callee { Expr::Ident(ident) => ident.sym.clone(), _ => self.generate_expr(&call.callee) };
                 if callee == "test" && call.args.len() == 2 {
                     let name = self.generate_expr(&call.args[0]);
@@ -969,7 +1052,7 @@ impl Codegen {
                         r#"(blk: {{
     const _val = {};
     const _fmt = if (@typeInfo(@TypeOf(_val)) == .pointer) _val.* else _val;
-    const _raw_json = @import("std").fmt.allocPrint(std.heap.page_allocator, "{{f}}", .{{@import("std").json.fmt(_fmt, .{{}})}}) catch unreachable;
+    const _raw_json = @import(\"std\").fmt.allocPrint(std.heap.page_allocator, "{{f}}", .{{@import(\"std\").json.fmt(_fmt, .{{}})}}) catch unreachable;
     const _res = Response._create(std.heap.page_allocator) catch unreachable;
     _res.init(_raw_json);
     _res.contentType = "application/json";
@@ -995,7 +1078,11 @@ impl Codegen {
                     if self.is_state_machine {
                         let (callee_init, callee_fn) = match &*call.callee { 
                             Expr::Ident(id) => (id.sym.clone(), id.sym.clone()), 
-                            Expr::Member(mem) => {
+                                            Expr::Member(mem) => {
+                    if mem.prop.sym == "length" {
+                        let obj = self.generate_expr(&mem.obj);
+                        return format!("@as(i32, @intCast({}.len))", obj);
+                    }
                                 let obj_type = self.infer_zig_type(None, Some(&mem.obj));
                                 let base = obj_type.trim_start_matches('*');
                                 let prop = &mem.prop;
@@ -1331,7 +1418,7 @@ impl Codegen {
         format!(
             r#"(blk: {{
     const _port: u16 = @intCast({});
-    const _addr = @import("std").Io.net.IpAddress.parse("0.0.0.0", _port) catch unreachable;
+    const _addr = @import(\"std\").Io.net.IpAddress.parse("0.0.0.0", _port) catch unreachable;
     const _listener = _addr.listen(global_io, .{{ .reuse_address = true }}) catch unreachable;
     const _s_fd: i32 = @intCast(_listener.socket.handle);
     const _HttpState = struct {{
@@ -1455,6 +1542,14 @@ impl Codegen {
                             return "void".to_string();
                         }
                     } else if let Expr::Member(mem) = &*call.callee {
+                        let prop = mem.prop.sym.as_str();
+                        if prop == "indexOf" || prop == "lastIndexOf" || prop == "charCodeAt" {
+                            return "i32".to_string();
+                        } else if prop == "includes" || prop == "startsWith" || prop == "endsWith" || prop == "test" {
+                            return "bool".to_string();
+                        } else if prop == "slice" || prop == "substring" || prop == "toLowerCase" || prop == "toUpperCase" || prop == "replace" || prop == "match" || prop == "exec" {
+                            return "[]const u8".to_string();
+                        }
                         if mem.prop.sym == "accept" {
                             return "*Socket".to_string();
                         }

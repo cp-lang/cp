@@ -2100,3 +2100,4 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 - **Agent Action**:
   1. 彻底清除了根目录下残留的 11 个 `fix_` 补丁脚本。
   2. 将大师的新规正式写入项目法则库 `GEMINI.md`（新增第 7 点：临时文件与清理规范），确保未来的 Agent 严格遵循不污染根目录的开发操守。
+- 2026-10-06: Task "参照 es6, 实现 正则表达式 功能" (Implement regular expression features referencing ES6). Successfully implemented native RegExp and corresponding String methods using Zig/POSIX backend. Checked `cap/test/test_regex.cp` and `cap/test/test_string.cp` successfully.

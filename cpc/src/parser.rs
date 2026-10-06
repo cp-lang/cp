@@ -1112,6 +1112,7 @@ impl<'a> Parser<'a> {
         let sym = match token {
             Token::Ident(s) => s,
 
+            Token::Match => "match".to_string(),
             Token::Await => "await".to_string(),
             Token::Async => "async".to_string(),
             Token::If => "if".to_string(),

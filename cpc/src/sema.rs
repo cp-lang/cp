@@ -55,6 +55,17 @@ impl Analyzer {
     }
 
     pub fn analyze_module(&mut self, module: &Module) -> SemaResult<()> {
+        let mock_span = Span { start: 0, end: 0 };
+        let regex_class = crate::ast::Class {
+            span: mock_span.clone(),
+            ident: crate::ast::Ident { span: mock_span.clone(), sym: "RegExp".to_string() },
+            fields: vec![],
+            methods: vec![],
+            implements: vec![]
+        };
+        self.classes.insert("RegExp".to_string(), regex_class.clone());
+        self.scopes[0].insert("RegExp".to_string(), SymbolKind::Class(regex_class));
+
         for item in &module.body {
             match item {
                 ModuleItem::Decl(Decl::Class(c)) => {

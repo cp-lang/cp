@@ -381,7 +381,10 @@ fn runFile(allocator: std.mem.Allocator, filename: []const u8) !void {
     
     var compile_child = try std.process.spawn(global_io, .{ .argv = cpc_args_buf[0..cpc_argc] });
     const compile_res = try compile_child.wait(global_io);
-    if (compile_res.exited != 0) return error.CompileFailed;
+    switch (compile_res) {
+        .exited => |code| if (code != 0) return error.CompileFailed,
+        else => return error.CompileFailed,
+    }
 
     var bin_subpath: []const u8 = full_base_name;
     if (std.mem.startsWith(u8, full_base_name, "src/")) {
@@ -410,7 +413,7 @@ fn runFile(allocator: std.mem.Allocator, filename: []const u8) !void {
     const emit_bin_arg = try std.fmt.allocPrint(allocator, "-femit-bin={s}", .{run_path});
     defer allocator.free(emit_bin_arg);
     fs_shim.cwd().createDirPath(global_io, ".cap/zig-cache") catch {};
-    const build_args = &[_][]const u8{ "zig", "build-exe", zig_file, emit_bin_arg, "--cache-dir", ".cap/zig-cache" };
+    const build_args = &[_][]const u8{ "zig", "build-exe", zig_file, emit_bin_arg, "--cache-dir", ".cap/zig-cache", "-lc" };
     var build_child = try std.process.spawn(global_io, .{ .argv = build_args });
     const build_res = try build_child.wait(global_io);
     if (build_res.exited != 0) return error.BuildFailed;
@@ -530,7 +533,10 @@ fn compileSingleFile(allocator: std.mem.Allocator, filename: []const u8, is_rele
     
     var compile_child = try std.process.spawn(global_io, .{ .argv = cpc_args_buf[0..cpc_argc] });
     const compile_res = try compile_child.wait(global_io);
-    if (compile_res.exited != 0) return error.CompileFailed;
+    switch (compile_res) {
+        .exited => |code| if (code != 0) return error.CompileFailed,
+        else => return error.CompileFailed,
+    }
 
     var bin_subpath: []const u8 = base_name;
     if (std.mem.startsWith(u8, base_name, "src/")) {
@@ -604,6 +610,7 @@ fn compileSingleFile(allocator: std.mem.Allocator, filename: []const u8, is_rele
         child_args[argc] = ".cap/zig-cache"; argc += 1;
         child_args[argc] = "-O"; argc += 1;
         child_args[argc] = optimize_mode; argc += 1;
+        child_args[argc] = "-lc"; argc += 1;
         
         if (!std.mem.eql(u8, t.name, "Native")) {
             child_args[argc] = "-target"; argc += 1;

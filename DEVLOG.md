@@ -302,3 +302,8 @@ To align `cp` language with TypeScript semantics as requested, we implemented fu
 **背景与执行**:
 大师同意删除了根目录下残留的 11 个 `fix_*.py` 和 `fix_*.sh` 补丁脚本。
 同时，大师确立了一项极其重要的工程整洁性法则：未来的任何临时草稿或验证脚本，只能放入 `temp/` 目录，并在使命完成后立即销毁。我已将该法则永久固化至 `GEMINI.md` 核心架构规约中。
+- 2026-10-06: Designed and implemented ES6-style RegExp support in CP.
+  - Linked `-lc` natively in `cap/src/main.zig`.
+  - Injected `regex_t` POSIX struct and `RegExp` zig wrapper into `cpc/src/codegen.rs`.
+  - Added semantic analysis mock for `RegExp` class in `cpc/src/sema.rs`.
+  - Implemented all String methods, fixing `test_string.cp` functionality.
