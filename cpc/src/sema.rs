@@ -17,6 +17,13 @@ pub enum SemaError {
     InvalidAwait(Span),
     #[error("Await can only be used in async functions at {0:?}")]
     AwaitOutsideAsync(Span),
+    #[error("Use of moved value '{0}' at {1:?}")]
+    UseOfMovedValue(String, Span),
+    #[error("Cannot mutate a read-only borrow '{0}' at {1:?}")]
+    CannotMutateReadOnlyBorrow(String, Span),
+    #[error("Cannot borrow '{0}' as mutable because it is also borrowed as immutable in the current scope at {1:?}")]
+    MutableBorrowConflict(String, Span),
+
 }
 
 pub type SemaResult<T> = Result<T, SemaError>;

@@ -18,6 +18,8 @@ pub enum Token {
     While,
     #[token("return")]
     Return,
+    #[token("mut")]
+    Mut,
     #[token("move")]
     Move,
 

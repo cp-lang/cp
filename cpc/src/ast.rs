@@ -368,6 +368,8 @@ pub struct Param {
     pub ident: Ident,
     pub ty: Type,
     pub is_comptime: bool,
+    pub is_mut: bool,
+    pub is_move: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

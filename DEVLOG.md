@@ -317,3 +317,10 @@ To align `cp` language with TypeScript semantics as requested, we implemented fu
   - Added `bool` support to the `Message` union to cleanly support JS boolean maps/sets.
   - Rectified a `self.pointer_stability` runtime panic from Zig `std.HashMap` by fixing `_create` behavior for `Expr::New` so it no longer zero-stamps initialized objects.
   - Populated Semantic analyzer (`sema.rs`) with `Map` and `Set` type knowledge so the static checker passes AST generation.
+
+## 2026-10-11 - 内存安全模型实现（所有权、Move 与自动 Drop）
+- **思路与原理**:
+  - 核心诉求是既要 Rust 的内存安全，又要保留 TypeScript 的开发心智。因此废弃了局部变量的 `let mut`，要求所有局部变量默认可变，通过编译器前端的静态分析来捕捉悬垂引用和数据竞争。
+  - **Move 语义**: 当执行 `let b = a;` 时，`a` 的所有权转移给 `b`。编译器前端（`cpc/src/codegen.rs`）在生成 Zig 代码时，跟踪局部变量字典。一旦检测到赋值操作的右值是类/指针（类型以 `*` 开头），则将该标识符加入 `self.moved_vars` 集合中。后续如果在表达式中再次遇到该标识符，直接抛出 `CP Compile Error: Use of moved value`。
+  - **Auto-Drop 机制 (RAII)**: CP 的面向对象支持 `init()` 和 `release()`。为了实现变量在离开作用域时自动调用析构函数，编译器在声明指针变量时，会在 Zig 代码中生成：`var __a_moved = false;` 和一段 `defer` 代码块。如果变量没有被 move（`!__a_moved`），则通过 Zig 的反射 API (`@hasDecl(Child, "release")`) 判断目标结构体是否具有 `release` 方法，并在作用域结束时自动调用。
+- **执行与测试**: 运行 `cpc compile` 测试文件时，精确拦截并引发了预期的编译期 Panic。运行正向测试用例时，编译输出的 Zig 码成功执行并打印出了 `release called`，无缝闭环了整个设计。

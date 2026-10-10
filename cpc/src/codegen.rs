@@ -906,7 +906,11 @@ impl Codegen {
                             let lhs = if self.is_state_machine {
                                 format!("ctx.{}", ident.sym)
                             } else {
-                                format!("var {}", ident.sym)
+                                let keyword = match var.kind {
+                                    crate::ast::VarDeclKind::Const => "const",
+                                    _ => "var",
+                                };
+                                format!("{} {}", keyword, ident.sym)
                             };
                             self.write_to_case(&format!(
                                 "{} = {};",
@@ -923,6 +927,19 @@ impl Codegen {
                                     ident.sym, ident.sym
                                 ));
                                 self.write_to_case(&format!("defer if (!__{}_moved) {{ const T = @TypeOf({}); if (@typeInfo(T) == .pointer) {{ const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@\"struct\" and @hasDecl(Child, \"release\")) {{ const RType = @typeInfo(@TypeOf(Child.release)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _ = {}.release() catch {{}}; }} else {{ {}.release(); }} }} }} }};", ident.sym, ident.sym, ident.sym, ident.sym));
+                            }
+                            println!("[DEBUG] init is {:?}", init);
+                            if let Expr::Ident(id) = init {
+                                println!("[DEBUG] init is Ident {} with type {:?}", id.sym, self.locals.get(&id.sym));
+                                if self.locals.contains_key(&id.sym) {
+                                    let ty_str = &self.locals[&id.sym];
+                                    if ty_str.starts_with('*') && ty_str != "*anyopaque" {
+                                        self.moved_vars.insert(id.sym.clone());
+                                        if !self.is_state_machine {
+                                            self.write_to_case(&format!("__{}_moved = true;", id.sym));
+                                        }
+                                    }
+                                }
                             }
                         }
                         Pattern::Tuple(elements) => {
@@ -963,6 +980,20 @@ impl Codegen {
                     let r = self.generate_expr(&bin.right);
                     let l = self.generate_expr(&bin.left);
                     self.write_to_case(&format!("{} = {};", l, r));
+                    
+                    if let Expr::Ident(id) = &*bin.right {
+                        // If it's a class/pointer, we track ownership transfer statically and dynamically
+                        if self.locals.contains_key(&id.sym) {
+                                    println!("[DEBUG] local {} has ty_str {}", id.sym, self.locals[&id.sym]);
+                            let ty_str = &self.locals[&id.sym];
+                            if ty_str.starts_with('*') && ty_str != "*anyopaque" {
+                                self.moved_vars.insert(id.sym.clone());
+                                if !self.is_state_machine {
+                                    self.write_to_case(&format!("__{}_moved = true;", id.sym));
+                                }
+                            }
+                        }
+                    }
                 }
                 Expr::Zig(zig) => self.write_to_case(&format!("{}\n", zig.code)),
                 _ => {
@@ -1357,6 +1388,13 @@ impl Codegen {
                 "@http_fetch" => { if !self.is_state_machine { return "0".to_string(); } let url = self.generate_expr(&call.args[0]); let next_pc = self.pc_counter + 1; let logic = if self.is_beam_mode { format!("const payload_bin = try beam.Beam.makeBinary(ctx.self.env.?, {}); const io_msg = try beam.Beam.makeFastMessage(ctx.self.env.?, 99990001, @intFromEnum(beam.SystemAction.HTTP_FETCH), payload_bin); ctx.pc = {}; const ctx_bin = try beam.Beam.makeBinary(ctx.self.env.?, std.mem.asBytes(ctx)); return beam.Beam.makeTuple(ctx.self.env.?, &[_]beam.Term{{ beam.Beam.makeAtom(ctx.self.env.?, \"yield\"), io_msg, ctx_bin }});", url, next_pc) } else { format!("ctx.received_msg = .{{ .string = \"Mock HTTP Res\" }}; ctx.pc = {}; continue;", next_pc) }; self.write_to_case(&logic); self.next_state(); "ctx.received_msg.?.string".to_string() },
                 "@fs_write_file" => { let p = self.generate_expr(&call.args[0]); let d = self.generate_expr(&call.args[1]); format!("(blk: {{ const file_out = @import(\"std\").Io.Dir.createFile(.cwd(), global_io, {}, .{{}}) catch unreachable; defer @import(\"std\").Io.File.close(file_out, global_io); @import(\"std\").Io.File.writeStreamingAll(file_out, global_io, {}) catch unreachable; break :blk {{}}; }})", p, d) },
                 "@fs_mkdir" => { let p = self.generate_expr(&call.args[0]); format!("(blk: {{ @import(\"std\").Io.Dir.createDirPath(.cwd(), global_io, {}) catch unreachable; break :blk {{}}; }})", p) },
+                                "@fs_stat_size" => { let p = self.generate_expr(&call.args[0]); format!("(blk: {{ const stat = @import(\"std\").Io.Dir.statFile(.cwd(), global_io, {}, .{{}}) catch unreachable; break :blk @as(i32, @intCast(stat.size)); }})", p) },
+                "@fs_is_dir" => { let p = self.generate_expr(&call.args[0]); format!("(blk: {{ const stat = @import(\"std\").Io.Dir.statFile(.cwd(), global_io, {}, .{{}}) catch unreachable; break :blk stat.kind == .directory; }})", p) },
+                "@fs_remove" => { let p = self.generate_expr(&call.args[0]); format!("(blk: {{ @import(\"std\").Io.Dir.deleteFile(.cwd(), global_io, {}) catch unreachable; break :blk {{}}; }})", p) },
+                "@fs_rmdir" => { let p = self.generate_expr(&call.args[0]); format!("(blk: {{ @import(\"std\").Io.Dir.deleteDir(.cwd(), global_io, {}) catch unreachable; break :blk {{}}; }})", p) },
+                "@fs_rename" => { let old_p = self.generate_expr(&call.args[0]); let new_p = self.generate_expr(&call.args[1]); format!("(blk: {{ @import(\"std\").Io.Dir.rename(.cwd(), {}, .cwd(), {}, global_io) catch unreachable; break :blk {{}}; }})", old_p, new_p) },
+                "@fs_copy_file" => { let src = self.generate_expr(&call.args[0]); let dest = self.generate_expr(&call.args[1]); format!("(blk: {{ @import(\"std\").Io.Dir.copyFile(.cwd(), {}, .cwd(), {}, global_io, .{{}}) catch unreachable; break :blk {{}}; }})", src, dest) },
+
                 "@fs_exists" => { let p = self.generate_expr(&call.args[0]); format!("(blk: {{ const is_exists = if (@import(\"std\").Io.Dir.statFile(.cwd(), global_io, {}, .{{}})) |_| true else |err| if (err == error.FileNotFound) false else unreachable; break :blk is_exists; }})", p) },
                 "@crypto_uuid" => {
                     let allocator = if self.is_state_machine { "ctx.arena.?.allocator()" } else { "std.heap.page_allocator" };

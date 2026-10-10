@@ -210,6 +210,17 @@ impl<'a> Parser<'a> {
         self.expect(Token::LParen)?;
         let mut params = Vec::new();
         while self.peek() != Some(&Token::RParen) {
+            let mut is_mut = false;
+            let mut is_move = false;
+            
+            if self.peek() == Some(&Token::Mut) {
+                self.bump()?;
+                is_mut = true;
+            } else if self.peek() == Some(&Token::Move) {
+                self.bump()?;
+                is_move = true;
+            }
+            
             let p_ident = self.parse_ident()?;
             let ty = if p_ident.sym == "this" && self.peek() != Some(&Token::Colon) {
                 Type::Any
@@ -222,6 +233,8 @@ impl<'a> Parser<'a> {
                 ident: p_ident,
                 ty,
                 is_comptime: false,
+                is_mut,
+                is_move,
             });
             if self.peek() == Some(&Token::Comma) {
                 self.bump()?;
@@ -371,6 +384,7 @@ impl<'a> Parser<'a> {
             Token::Const => VarDeclKind::Const,
             _ => unreachable!(),
         };
+
         let pat = self.parse_pattern()?;
         let mut ty = None;
         if self.peek() == Some(&Token::Colon) {

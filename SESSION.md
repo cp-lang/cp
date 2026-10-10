@@ -2103,3 +2103,7 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 - 2026-10-06: Task "参照 es6, 实现 正则表达式 功能" (Implement regular expression features referencing ES6). Successfully implemented native RegExp and corresponding String methods using Zig/POSIX backend. Checked `cap/test/test_regex.cp` and `cap/test/test_string.cp` successfully.
 - 2026-10-06: Task "先封装 Math 对象" (Encapsulate Math object). Successfully mapped ES6 Math API (constants, trig, rounding, min/max, exp/log, random) to Zig std.math equivalents. Repaired floating-point expression parsing and comparison. Tested via `cap/test/test_math.cp`.
 - 2026-10-06: Task "实现高级数据结构 (Map/Set)" (Implement Map/Set). Successfully mapped ES6 Map and Set objects natively to Zig's `std.HashMap` via a custom dynamic hash context. Fully verified behavior using `test_map_set.cp`. Fixed an underlying memory initialization bug.
+
+## 2026-10-11 - 内存安全模型：变量所有权与自动释放
+- **用户指令**: 完善 CP 语言设计，实现类似 Rust 的变量所有权机制（创建者拥有、赋值时 move、生命周期结束自动释放），并编写测试用例验证 "Use-After-Move" 编译期报错，以及自动调用释放函数。
+- **执行结果**: 成功在 `cpc` 编译器中实现了变量借用分析与所有权跟踪。`test_ownership_fail.cp` 成功在编译期拦截 Use-After-Move 并报错，`test_ownership_pass.cp` 成功在作用域结束时利用 Zig 的 `defer` 机制自动调用了类的 `release()` 方法。
