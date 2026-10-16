@@ -112,6 +112,8 @@ impl<'a> Parser<'a> {
             Some(Token::Import) => Ok(ModuleItem::Import(self.parse_import_stmt()?)),
             Some(Token::Fn)
             | Some(Token::Class)
+            | Some(Token::Struct)
+            | Some(Token::Ref)
             | Some(Token::Interface)
             | Some(Token::ErrorKw)
             | Some(Token::Trait)
@@ -158,7 +160,9 @@ impl<'a> Parser<'a> {
     fn parse_decl(&mut self) -> ParseResult<Decl> {
         match self.peek() {
             Some(Token::Fn) | Some(Token::Async) => Ok(Decl::Func(self.parse_function()?)),
-            Some(Token::Class) => Ok(Decl::Class(self.parse_class()?)),
+            Some(Token::Class) | Some(Token::Struct) | Some(Token::Ref) => {
+                Ok(Decl::Class(self.parse_class()?))
+            }
             Some(Token::Trait) => Ok(Decl::Trait(self.parse_trait()?)),
             Some(Token::Impl) => Ok(Decl::Impl(self.parse_impl()?)),
             Some(Token::Enum) => Ok(Decl::Enum(self.parse_enum()?)),
@@ -181,7 +185,7 @@ impl<'a> Parser<'a> {
         let ident = self.parse_ident()?;
         let params = self.parse_params()?;
         let mut return_type = None;
-        if self.peek() == Some(&Token::Colon) {
+        if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Arrow) {
             self.bump()?;
             return_type = Some(self.parse_type()?);
         }
@@ -212,7 +216,7 @@ impl<'a> Parser<'a> {
         while self.peek() != Some(&Token::RParen) {
             let mut is_mut = false;
             let mut is_move = false;
-            
+
             if self.peek() == Some(&Token::Mut) {
                 self.bump()?;
                 is_mut = true;
@@ -220,7 +224,7 @@ impl<'a> Parser<'a> {
                 self.bump()?;
                 is_move = true;
             }
-            
+
             let p_ident = self.parse_ident()?;
             let ty = if p_ident.sym == "this" && self.peek() != Some(&Token::Colon) {
                 Type::Any
@@ -244,7 +248,82 @@ impl<'a> Parser<'a> {
         Ok(params)
     }
 
+    fn is_type_start(t: &Token) -> bool {
+        matches!(
+            t,
+            Token::I32
+                | Token::U32
+                | Token::U64
+                | Token::F32
+                | Token::F64
+                | Token::USize
+                | Token::String
+                | Token::Void
+                | Token::Any
+                | Token::Bool
+                | Token::Ident(_)
+                | Token::LBracket
+                | Token::LBrace
+                | Token::Ampersand
+        )
+    }
+
     fn parse_type(&mut self) -> ParseResult<Type> {
+        if self.peek() == Some(&Token::Ampersand) {
+            self.bump()?;
+            let mut is_mut = false;
+            let mut lifetimes = Vec::new();
+            if self.peek() == Some(&Token::Mut) {
+                self.bump()?;
+                is_mut = true;
+            }
+            if self.peek() == Some(&Token::LParen) {
+                self.bump()?;
+                while self.peek() != Some(&Token::RParen) && self.peek().is_some() {
+                    let id = self.parse_ident()?;
+                    lifetimes.push(id.sym);
+                    if self.peek() == Some(&Token::Pipe) {
+                        self.bump()?;
+                    }
+                }
+                self.expect(Token::RParen)?;
+                if self.peek() == Some(&Token::Mut) {
+                    self.bump()?;
+                    is_mut = true;
+                }
+            } else if let Some(Token::Ident(_)) = self.peek() {
+                let checkpoint = self.lexer.clone();
+                let peeked_checkpoint = self.peeked.clone();
+                let first_ident = self.parse_ident()?;
+                if self.peek() == Some(&Token::Mut) {
+                    self.bump()?;
+                    is_mut = true;
+                    lifetimes.push(first_ident.sym);
+                } else if matches!(
+                    self.peek(),
+                    Some(Token::Ident(_))
+                        | Some(Token::String)
+                        | Some(Token::I32)
+                        | Some(Token::U32)
+                        | Some(Token::U64)
+                        | Some(Token::F32)
+                        | Some(Token::F64)
+                        | Some(Token::USize)
+                        | Some(Token::Bool)
+                ) {
+                    lifetimes.push(first_ident.sym);
+                } else {
+                    self.lexer = checkpoint;
+                    self.peeked = peeked_checkpoint;
+                }
+            }
+            let inner = self.parse_type()?;
+            return Ok(Type::BorrowType {
+                inner: Box::new(inner),
+                is_mut,
+                lifetimes,
+            });
+        }
         if self.peek() == Some(&Token::LBracket) {
             self.bump()?;
             let mut elements = Vec::new();
@@ -276,18 +355,20 @@ impl<'a> Parser<'a> {
             self.expect(Token::RBrace)?;
             return Ok(Type::Object(fields));
         }
-        let is_error_union = if self.peek() == Some(&Token::Question) {
-            self.bump()?;
-            true
-        } else {
-            false
-        };
+        let is_error_union =
+            if self.peek() == Some(&Token::Question) || self.peek() == Some(&Token::Bang) {
+                self.bump()?;
+                true
+            } else {
+                false
+            };
         let (token, span) = self.bump()?;
         let mut ty = match token {
             Token::I32 => Type::I32,
             Token::U32 => Type::U32,
             Token::U64 => Type::U64,
             Token::F32 => Type::F32,
+            Token::F64 => Type::F64,
             Token::USize => Type::USize,
             Token::String => Type::String,
             Token::Void => Type::Void,
@@ -296,6 +377,11 @@ impl<'a> Parser<'a> {
             Token::Ident(sym) => {
                 if sym == "pid" {
                     Type::PID
+                } else if sym == "Shared" && self.peek() == Some(&Token::Less) {
+                    self.bump()?;
+                    let inner = self.parse_type()?;
+                    self.expect(Token::Greater)?;
+                    Type::Shared(Box::new(inner))
                 } else {
                     Type::Ref(Ident { span, sym })
                 }
@@ -391,8 +477,12 @@ impl<'a> Parser<'a> {
             self.bump()?;
             ty = Some(self.parse_type()?);
         }
-        self.expect(Token::Assign)?;
-        let init = Some(self.parse_expr()?);
+        let init = if self.peek() == Some(&Token::Assign) {
+            self.bump()?;
+            Some(self.parse_expr()?)
+        } else {
+            Some(Expr::Lit(Lit::Undefined))
+        };
         self.expect(Token::Semicolon)?;
         let end = self.peek_span().end;
         Ok(VarDecl {
@@ -554,11 +644,21 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_class(&mut self) -> ParseResult<Class> {
-        let start = self.expect(Token::Class)?.start;
+        let start = self.peek_span().start;
+        let mut is_ref = false;
+        if self.peek() == Some(&Token::Ref) {
+            self.bump()?;
+            is_ref = true;
+        }
+        if self.peek() == Some(&Token::Struct) {
+            self.bump()?;
+        } else {
+            self.expect(Token::Class)?;
+        }
         let ident = self.parse_ident()?;
 
         let mut implements = Vec::new();
-        if self.peek() == Some(&Token::Extends) {
+        if self.peek() == Some(&Token::Extends) || self.peek() == Some(&Token::Implements) {
             self.bump()?;
             implements.push(self.parse_ident()?);
         }
@@ -573,6 +673,9 @@ impl<'a> Parser<'a> {
                 let f_ident = self.parse_ident()?;
                 self.expect(Token::Colon)?;
                 let ty = self.parse_type()?;
+                if matches!(ty, Type::BorrowType { .. }) {
+                    is_ref = true;
+                }
                 if self.peek() == Some(&Token::Comma) || self.peek() == Some(&Token::Semicolon) {
                     self.bump()?;
                 }
@@ -590,6 +693,7 @@ impl<'a> Parser<'a> {
             fields,
             methods,
             implements,
+            is_ref,
         })
     }
 
@@ -604,7 +708,7 @@ impl<'a> Parser<'a> {
             let m_ident = self.parse_ident()?;
             let params = self.parse_params()?;
             let mut return_type = None;
-            if self.peek() == Some(&Token::Colon) {
+            if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Arrow) {
                 self.bump()?;
                 return_type = Some(self.parse_type()?);
             }
@@ -1023,6 +1127,15 @@ impl<'a> Parser<'a> {
                 let expr = self.parse_expr()?;
                 Ok(Expr::Move(Box::new(expr)))
             }
+            Token::Ampersand => {
+                let mut is_mut = false;
+                if self.peek() == Some(&Token::Mut) {
+                    self.bump()?;
+                    is_mut = true;
+                }
+                let expr = self.parse_expr()?;
+                Ok(Expr::Borrow(Box::new(expr), is_mut))
+            }
             Token::IntLiteral(v) => Ok(Expr::Lit(Lit::Int(v))),
             Token::FloatLiteral(v) => Ok(Expr::Lit(Lit::Float(v))),
             Token::StringLiteral(s) => Ok(Expr::Lit(Lit::Str(s))),
@@ -1034,25 +1147,36 @@ impl<'a> Parser<'a> {
                 let chars: Vec<char> = s.chars().collect();
                 let mut i = 0;
                 while i < chars.len() {
-                    if chars[i] == '$' && i + 1 < chars.len() && chars[i+1] == '{' {
+                    if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '{' {
                         quasis.push(current_quasi.clone());
                         current_quasi.clear();
                         i += 2;
                         let mut brace_depth = 1;
                         let mut expr_str = String::new();
                         while i < chars.len() {
-                            if chars[i] == '{' { brace_depth += 1; }
-                            else if chars[i] == '}' { brace_depth -= 1; }
-                            
-                            if brace_depth == 0 { break; }
+                            if chars[i] == '{' {
+                                brace_depth += 1;
+                            } else if chars[i] == '}' {
+                                brace_depth -= 1;
+                            }
+
+                            if brace_depth == 0 {
+                                break;
+                            }
                             expr_str.push(chars[i]);
                             i += 1;
                         }
                         if brace_depth != 0 {
-                            return Err(ParseError::UnexpectedToken(Token::Error, Span { start, end: span.end }));
+                            return Err(ParseError::UnexpectedToken(
+                                Token::Error,
+                                Span {
+                                    start,
+                                    end: span.end,
+                                },
+                            ));
                         }
                         i += 1;
-                        
+
                         let mut sub_parser = Parser::new(&expr_str);
                         let expr = sub_parser.parse_expr()?;
                         expressions.push(expr);
@@ -1062,7 +1186,14 @@ impl<'a> Parser<'a> {
                     }
                 }
                 quasis.push(current_quasi);
-                Ok(Expr::Template(TemplateLit { span: Span { start, end: span.end }, quasis, expressions }))
+                Ok(Expr::Template(TemplateLit {
+                    span: Span {
+                        start,
+                        end: span.end,
+                    },
+                    quasis,
+                    expressions,
+                }))
             }
             Token::New => {
                 let callee_expr = self.parse_primary_expr()?;
@@ -1135,6 +1266,8 @@ impl<'a> Parser<'a> {
             Token::For => "for".to_string(),
             Token::Return => "return".to_string(),
             Token::Class => "class".to_string(),
+            Token::Struct => "struct".to_string(),
+            Token::Ref => "ref".to_string(),
             Token::Trait => "trait".to_string(),
             Token::Enum => "enum".to_string(),
             Token::Impl => "impl".to_string(),
@@ -1188,7 +1321,6 @@ impl<'a> Parser<'a> {
             BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq => 3,
             BinaryOp::Add | BinaryOp::Sub => 4,
             BinaryOp::Mul | BinaryOp::Div => 5,
-            _ => 0,
         }
     }
 }
@@ -1214,6 +1346,7 @@ fn left_span(expr: &Expr) -> Span {
         Expr::Template(t) => t.span,
         Expr::Await(e) => left_span(e),
         Expr::Move(e) => left_span(e),
+        Expr::Borrow(e, _) => left_span(e),
         Expr::Builtin(b) => b.span,
     }
 }
@@ -1245,6 +1378,7 @@ fn right_span(expr: &Expr) -> Span {
         Expr::Template(t) => t.span,
         Expr::Await(e) => right_span(e),
         Expr::Move(e) => right_span(e),
+        Expr::Borrow(e, _) => right_span(e),
         Expr::Builtin(b) => b.span,
     }
 }

@@ -22,6 +22,10 @@ pub enum Token {
     Mut,
     #[token("move")]
     Move,
+    #[token("ref")]
+    Ref,
+    #[token("struct")]
+    Struct,
 
     #[token("export")]
     Export,

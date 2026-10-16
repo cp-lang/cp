@@ -77,6 +77,9 @@ pub fn find_referenced_vars_in_expr(expr: &Expr, vars: &mut HashSet<String>) {
         Expr::Move(m) => {
             find_referenced_vars_in_expr(m, vars);
         }
+        Expr::Borrow(b, _) => {
+            find_referenced_vars_in_expr(b, vars);
+        }
         Expr::Builtin(b) => {
             for a in &b.args {
                 find_referenced_vars_in_expr(a, vars);

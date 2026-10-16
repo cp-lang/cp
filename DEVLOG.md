@@ -324,3 +324,14 @@ To align `cp` language with TypeScript semantics as requested, we implemented fu
   - **Move 语义**: 当执行 `let b = a;` 时，`a` 的所有权转移给 `b`。编译器前端（`cpc/src/codegen.rs`）在生成 Zig 代码时，跟踪局部变量字典。一旦检测到赋值操作的右值是类/指针（类型以 `*` 开头），则将该标识符加入 `self.moved_vars` 集合中。后续如果在表达式中再次遇到该标识符，直接抛出 `CP Compile Error: Use of moved value`。
   - **Auto-Drop 机制 (RAII)**: CP 的面向对象支持 `init()` 和 `release()`。为了实现变量在离开作用域时自动调用析构函数，编译器在声明指针变量时，会在 Zig 代码中生成：`var __a_moved = false;` 和一段 `defer` 代码块。如果变量没有被 move（`!__a_moved`），则通过 Zig 的反射 API (`@hasDecl(Child, "release")`) 判断目标结构体是否具有 `release` 方法，并在作用域结束时自动调用。
 - **执行与测试**: 运行 `cpc compile` 测试文件时，精确拦截并引发了预期的编译期 Panic。运行正向测试用例时，编译输出的 Zig 码成功执行并打印出了 `release called`，无缝闭环了整个设计。
+
+## 2026-10-16 - 零摩擦生命周期 (Zero-Friction Lifetimes) 与栈绑定借用视图 (`ref struct`) 架构实现
+- **解决痛点与设计哲学**:
+  - Rust 的 `<'a>` 生命周期泛型存在严重的“语法噪音”与“结构体病毒式传染”，破坏了 TypeScript 程序员的编程体验。同时，如果结构体完全禁止裸借用而只允许 Move 或 `Shared<T>`（原子引用计数），在 1% 的极致底层场景（如局部原地可变视图 `MutView`、零开销切片解析器）下会产生纳米级原子计数开销或表达力受限。
+  - **解决方案**:
+    1. **局部 NLL (Non-Lexical Lifetimes)**: 在进入函数生成前，通过 `compute_last_uses_block` 扫描每个语句的序号并记录每个借用变量的最后一次读取位置 (`last_use_map`)。当借用变量度过最后一次读取语句后，自动释放对原所有权变量的锁定；若在最后一次读取前试图 `move` 原变量或发起冲突的可变借用，立即抛出编译期错误。
+    2. **作用域深度防悬垂 (Scope Depth)**: 维护 `current_scope_depth` 并在进入块 `{}`、`if`、`while` 时递增。赋值操作 `lhs = rhs` 时，溯源 `rhs` 的所有底层被借用变量 `src`，若 `depth(src) > depth(lhs)`，说明短命借用试图逃逸到长命变量，立即编译报错。
+    3. **函数返回三级推导梯队**:
+       - 第一级（单参省略）与第二级（多参默认取交集 `min(a, b)`）均无需任何生命周期标注，由 `extract_expr_borrow_info` 自动将返回值绑定至所有对象实参的生命周期集合。
+       - 第三级（1% 异作用域消歧）采用直观的参数名指认语法 `-> &x Tensor` 或 `-> &(x | y) Tensor`，调用处仅追踪指定实参的存活深度，从而允许未绑定的临时参数在内层作用域提前 `release()`。
+    4. **借鉴 C# `ref struct` 的栈绑定视图**: 允许声明 `ref struct` / `ref class`（或当字段含 `&T` / `&mut T` 时自动识别为 `is_ref`）。它直接持有裸指针，零原子计数开销，支持 `&mut T` 原地修改，且无需写 `<'a>`！作为安全交换，编译器在 `Return`、外层变量赋值、以及 `@spawn` 闭包捕获处对其进行严格拦截，确保 `ref struct` 绝不逃逸出所借用局部变量的栈帧作用域。

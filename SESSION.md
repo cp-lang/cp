@@ -2107,3 +2107,14 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 ## 2026-10-11 - 内存安全模型：变量所有权与自动释放
 - **用户指令**: 完善 CP 语言设计，实现类似 Rust 的变量所有权机制（创建者拥有、赋值时 move、生命周期结束自动释放），并编写测试用例验证 "Use-After-Move" 编译期报错，以及自动调用释放函数。
 - **执行结果**: 成功在 `cpc` 编译器中实现了变量借用分析与所有权跟踪。`test_ownership_fail.cp` 成功在编译期拦截 Use-After-Move 并报错，`test_ownership_pass.cp` 成功在作用域结束时利用 Zig 的 `defer` 机制自动调用了类的 `release()` 方法。
+
+## 2026-10-16 - 零摩擦生命周期 (Zero-Friction Lifetimes) 与栈绑定借用视图 (ref struct) 完整设计与落地
+- **用户指令**: 确认“零摩擦生命周期”方案（局部 NLL 自动推导 + 函数返回三级梯队 + 结构体 `Shared<T>` 免 `<'a>` 传染），同时要求借鉴 C# 的 `ref struct`，支持结构体零开销借用局部数据，彻底消灭最后 1% 的性能与表达力缺陷。
+- **执行结果**:
+  1. **设计规范更新 (`cp_ref.md`)**: 完整写入第十章《内存安全模型》，明确了 NLL 非词法生命周期、函数返回借用的三级推导梯队（单参省略、多参默认交集、`&param` 参数名直观绑定），以及结构体双轨制（普通结构体使用 Move / `Shared<T>` 自由逃逸，栈绑定视图 `ref struct` 零开销局部借用并严格禁止逃逸）。
+  2. **编译器全面实装 (`cpc`)**:
+     - `lexer.rs` / `ast.rs` / `parser.rs` / `dcp.rs` / `sema.rs`: 新增 `ref`、`struct` 关键字，支持 `ref struct` / `ref class` 声明（或当字段含 `&T` / `&mut T` 时自动标记为 `is_ref: true`）；支持 `&expr`、`&mut expr` 借用表达式；支持 `: &T`、`: &mut T`、`: &x T`、`: &(x | y) T` 以及 `Shared<T>` 类型解析。
+     - `codegen.rs`: 实装了基于 AST 预扫描的 **NLL（Last-Use 非词法生命周期分析器）**、**作用域深度防悬垂检查器（Scope Depth Escape Check）**、**三级函数返回生命周期追踪器**、以及 **`ref struct` 逃逸拦截器**（严禁返回借用局部变量的 `ref struct`、严禁赋值给外层长生命周期变量、严禁跨 `@spawn` Actor 边界捕获）。
+  3. **全场景测试验证**:
+     - `cap/test/test_lifetime_pass.cp`: 验证 NLL 借用结束后安全 Move、`ref struct` 零开销原地可变修改局部张量、`&x Tensor` 显式参数绑定跨越内层作用域释放，编译并原生运行通过！
+     - `cap/test/test_lifetime_fail_dangling.cp` / `test_lifetime_fail_nll.cp` / `test_ref_struct_fail_escape.cp`: 全部在编译期精准触发 `CP Compile Error` 拦截！

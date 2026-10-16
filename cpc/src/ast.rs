@@ -83,6 +83,8 @@ pub struct Class {
     pub fields: Vec<Field>,
     pub methods: Vec<Function>,
     pub implements: Vec<Ident>,
+    #[serde(default)]
+    pub is_ref: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -199,6 +201,7 @@ pub enum Expr {
     Template(TemplateLit),
     Await(Box<Expr>),
     Move(Box<Expr>),
+    Borrow(Box<Expr>, bool),
     Builtin(BuiltinCall),
 }
 
@@ -360,6 +363,12 @@ pub enum Type {
     Unknown,
     ErrorUnion(Box<Type>),
     Optional(Box<Type>),
+    BorrowType {
+        inner: Box<Type>,
+        is_mut: bool,
+        lifetimes: Vec<String>,
+    },
+    Shared(Box<Type>),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

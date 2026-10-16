@@ -240,6 +240,22 @@ impl DcpEmitter {
             }
             Type::ErrorUnion(inner) => format!("!{}", self.format_type(inner)),
             Type::Optional(inner) => format!("?{}", self.format_type(inner)),
+            Type::BorrowType {
+                inner,
+                is_mut,
+                lifetimes,
+            } => {
+                let lt = if lifetimes.is_empty() {
+                    String::new()
+                } else if lifetimes.len() == 1 {
+                    format!("{} ", lifetimes[0])
+                } else {
+                    format!("({}) ", lifetimes.join(" | "))
+                };
+                let m = if *is_mut { "mut " } else { "" };
+                format!("&{}{}{}", lt, m, self.format_type(inner))
+            }
+            Type::Shared(inner) => format!("Shared<{}>", self.format_type(inner)),
         }
     }
 }

@@ -23,7 +23,6 @@ pub enum SemaError {
     CannotMutateReadOnlyBorrow(String, Span),
     #[error("Cannot borrow '{0}' as mutable because it is also borrowed as immutable in the current scope at {1:?}")]
     MutableBorrowConflict(String, Span),
-
 }
 
 pub type SemaResult<T> = Result<T, SemaError>;
@@ -65,21 +64,45 @@ impl Analyzer {
         let mock_span = Span { start: 0, end: 0 };
         let regex_class = crate::ast::Class {
             span: mock_span.clone(),
-            ident: crate::ast::Ident { span: mock_span.clone(), sym: "RegExp".to_string() },
+            ident: crate::ast::Ident {
+                span: mock_span.clone(),
+                sym: "RegExp".to_string(),
+            },
             fields: vec![],
             methods: vec![],
-            implements: vec![]
+            implements: vec![],
+            is_ref: false,
         };
-        self.classes.insert("RegExp".to_string(), regex_class.clone());
+        self.classes
+            .insert("RegExp".to_string(), regex_class.clone());
         self.scopes[0].insert("RegExp".to_string(), SymbolKind::Class(regex_class));
-        let set_class = crate::ast::Class { span: mock_span.clone(), ident: crate::ast::Ident { span: mock_span.clone(), sym: "Set".to_string() }, fields: vec![], methods: vec![], implements: vec![] };
+        let set_class = crate::ast::Class {
+            span: mock_span.clone(),
+            ident: crate::ast::Ident {
+                span: mock_span.clone(),
+                sym: "Set".to_string(),
+            },
+            fields: vec![],
+            methods: vec![],
+            implements: vec![],
+            is_ref: false,
+        };
         self.classes.insert("Set".to_string(), set_class.clone());
         self.scopes[0].insert("Set".to_string(), SymbolKind::Class(set_class));
 
-        let map_class = crate::ast::Class { span: mock_span.clone(), ident: crate::ast::Ident { span: mock_span.clone(), sym: "Map".to_string() }, fields: vec![], methods: vec![], implements: vec![] };
+        let map_class = crate::ast::Class {
+            span: mock_span.clone(),
+            ident: crate::ast::Ident {
+                span: mock_span.clone(),
+                sym: "Map".to_string(),
+            },
+            fields: vec![],
+            methods: vec![],
+            implements: vec![],
+            is_ref: false,
+        };
         self.classes.insert("Map".to_string(), map_class.clone());
         self.scopes[0].insert("Map".to_string(), SymbolKind::Class(map_class));
-
 
         for item in &module.body {
             match item {
@@ -272,6 +295,12 @@ impl Analyzer {
             Expr::Await(inner) => {
                 self.analyze_expr(inner)?;
             }
+            Expr::Borrow(inner, _) => {
+                self.analyze_expr(inner)?;
+            }
+            Expr::Move(inner) => {
+                self.analyze_expr(inner)?;
+            }
             Expr::Builtin(call) => {
                 for arg in &call.args {
                     self.analyze_expr(arg)?;
@@ -308,7 +337,7 @@ impl Analyzer {
         if a == b {
             return true;
         }
-        if *a == Type::Any || *b == Type::Any {
+        if *a == Type::Any || *b == Type::Any || *a == Type::Unknown || *b == Type::Unknown {
             return true;
         }
         if (*a == Type::I32 && *b == Type::U32) || (*a == Type::U32 && *b == Type::I32) {
@@ -316,6 +345,13 @@ impl Analyzer {
         }
         match (a, b) {
             (Type::Ref(t1), Type::Ref(t2)) => t1.sym == t2.sym,
+            (Type::BorrowType { inner: i1, .. }, Type::BorrowType { inner: i2, .. }) => {
+                self.types_eq(i1, i2)
+            }
+            (Type::BorrowType { inner: i1, .. }, other)
+            | (other, Type::BorrowType { inner: i1, .. }) => self.types_eq(i1, other),
+            (Type::Shared(i1), Type::Shared(i2)) => self.types_eq(i1, i2),
+            (Type::Shared(i1), other) | (other, Type::Shared(i1)) => self.types_eq(i1, other),
             (Type::Optional(t1), Type::Optional(t2)) => self.types_eq(t1, t2),
             (Type::ErrorUnion(t1), Type::ErrorUnion(t2)) => self.types_eq(t1, t2),
             (Type::Array(t1), Type::Array(t2)) => self.types_eq(t1, t2),
@@ -554,6 +590,15 @@ impl Analyzer {
                 }
                 self.infer_type(inner)
             }
+            Expr::Borrow(inner, is_mut) => {
+                let inner_ty = self.infer_type(inner)?;
+                Ok(Type::BorrowType {
+                    inner: Box::new(inner_ty),
+                    is_mut: *is_mut,
+                    lifetimes: vec![],
+                })
+            }
+            Expr::Move(inner) => self.infer_type(inner),
             Expr::Builtin(call) => {
                 // Builtins could have specific return types.
                 // For now, @map returns an array, @print returns void.
