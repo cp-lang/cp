@@ -176,10 +176,16 @@ impl<'a> Parser<'a> {
 
     fn parse_function(&mut self) -> ParseResult<Function> {
         let start = self.peek_span().start;
+        let mut is_static = false;
         let mut is_async = false;
-        if self.peek() == Some(&Token::Async) {
-            self.bump()?;
-            is_async = true;
+        while matches!(self.peek(), Some(Token::Static) | Some(Token::Async)) {
+            if self.peek() == Some(&Token::Static) {
+                self.bump()?;
+                is_static = true;
+            } else if self.peek() == Some(&Token::Async) {
+                self.bump()?;
+                is_async = true;
+            }
         }
         self.expect(Token::Fn)?;
         let ident = self.parse_ident()?;
@@ -207,6 +213,7 @@ impl<'a> Parser<'a> {
             return_type,
             body,
             is_async,
+            is_static,
         })
     }
 
@@ -226,7 +233,9 @@ impl<'a> Parser<'a> {
             }
 
             let p_ident = self.parse_ident()?;
-            let ty = if p_ident.sym == "this" && self.peek() != Some(&Token::Colon) {
+            let ty = if (p_ident.sym == "this" || p_ident.sym == "_")
+                && self.peek() != Some(&Token::Colon)
+            {
                 Type::Any
             } else {
                 self.expect(Token::Colon)?;
@@ -548,10 +557,20 @@ impl<'a> Parser<'a> {
                 }))
             }
             _ => {
-                if self.peek() == Some(&Token::Bang) {
+                if self.peek() == Some(&Token::Star) || self.peek() == Some(&Token::Bang) {
                     self.bump()?;
                     return Ok(Pattern::Wildcard);
-                } // Hack for _
+                }
+                if let Some(Token::IntLiteral(_)) = self.peek() {
+                    if let (Token::IntLiteral(v), _) = self.bump()? {
+                        return Ok(Pattern::Lit(Lit::Int(v)));
+                    }
+                }
+                if let Some(Token::StringLiteral(_)) = self.peek() {
+                    if let (Token::StringLiteral(s), _) = self.bump()? {
+                        return Ok(Pattern::Lit(Lit::Str(s)));
+                    }
+                }
                 Ok(Pattern::Ident(self.parse_ident()?))
             }
         }
@@ -657,17 +676,34 @@ impl<'a> Parser<'a> {
         }
         let ident = self.parse_ident()?;
 
+        let mut extends = None;
         let mut implements = Vec::new();
-        if self.peek() == Some(&Token::Extends) || self.peek() == Some(&Token::Implements) {
+        if self.peek() == Some(&Token::Extends) {
+            self.bump()?;
+            let parent = self.parse_ident()?;
+            if parent.sym == "Agent" {
+                implements.push(parent.clone());
+            } else {
+                extends = Some(parent);
+            }
+        }
+        if self.peek() == Some(&Token::Implements) {
             self.bump()?;
             implements.push(self.parse_ident()?);
+            while self.peek() == Some(&Token::Comma) {
+                self.bump()?;
+                implements.push(self.parse_ident()?);
+            }
         }
 
         let mut fields = Vec::new();
         let mut methods = Vec::new();
         self.expect(Token::LBrace)?;
         while self.peek() != Some(&Token::RBrace) {
-            if self.peek() == Some(&Token::Fn) || self.peek() == Some(&Token::Async) {
+            if matches!(
+                self.peek(),
+                Some(Token::Fn) | Some(Token::Async) | Some(Token::Static)
+            ) {
                 methods.push(self.parse_function()?);
             } else {
                 let f_ident = self.parse_ident()?;
@@ -693,6 +729,7 @@ impl<'a> Parser<'a> {
             fields,
             methods,
             implements,
+            extends,
             is_ref,
         })
     }
@@ -712,7 +749,12 @@ impl<'a> Parser<'a> {
                 self.bump()?;
                 return_type = Some(self.parse_type()?);
             }
-            self.expect(Token::Semicolon)?;
+            let default_body = if self.peek() == Some(&Token::LBrace) {
+                Some(self.parse_block_stmt()?)
+            } else {
+                self.expect(Token::Semicolon)?;
+                None
+            };
             methods.push(MethodSig {
                 span: Span {
                     start: m_start,
@@ -721,6 +763,7 @@ impl<'a> Parser<'a> {
                 ident: m_ident,
                 params,
                 return_type,
+                default_body,
             });
         }
         let end = self.expect(Token::RBrace)?.end;

@@ -2118,3 +2118,51 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
   3. **全场景测试验证**:
      - `cap/test/test_lifetime_pass.cp`: 验证 NLL 借用结束后安全 Move、`ref struct` 零开销原地可变修改局部张量、`&x Tensor` 显式参数绑定跨越内层作用域释放，编译并原生运行通过！
      - `cap/test/test_lifetime_fail_dangling.cp` / `test_lifetime_fail_nll.cp` / `test_ref_struct_fail_escape.cp`: 全部在编译期精准触发 `CP Compile Error` 拦截！
+
+---
+
+## 2026-10-18 (Trait、单继承 Class 与 `_`/`this` 实例所有权、借用及生命周期设计与实现)
+
+### 用户指令 1
+> 很好，我们已经完成类似rust中的变量所有权、借用（只读、可变）、与生命周期。
+> 现在我们继续完善trait 与 类成员函数实例的所有权、借用与生命周期。
+> Rust中的trait 类似Typescript中的Interface，但比Interface强大得多，借鉴 rust,实现/优化 cp 中的 trait, 除了struct，cp 语言有单继承class, trait 需支持 class 类。
+> trait 与 class 里的 self（类似Typescript this）实例在内部函数调用中，是否也涉及生命周期、可读借用、可变借用、所有权问题, cp的设计目标：既要实现类似rust的安全性，同时保持类似Typescript类似的语法简便性（比如使用缺省约定之类的方式，减少编写代码），给出你的完美设计方案
+> 其中，我有几点建议, 供你参考、借鉴，如果你有更好方案，可以不采纳，并给出原因:
+> 1. trait、class 成员函数可提供this（类似rust中的self）访问自身实例，成员函数互相调用省略this。
+> 2. _ 符号等同于 this，测试样例直接使用_代替this，减少代码量，代码更简洁。
+> 3. 模式匹配中使用 * 代替 _, 避免关键字冲突，模式匹配后续再完成。
+> 4. trait与class中的函数访问 this, 是否需要类似rust那样，将this作为函数参数，用于标记借用、所有权？如不作为参数，如何解决借用、所有权。
+> 5. 如作为第一个参数，缺省可读借用,可忽略。如需修改 this, 函数第一个参数,是否应填入 mut _ 或 move _, 表示可变借用或所有权转移？
+> 6. 你是编程语言设计专家，给出你的设计方案。
+
+### 执行结果汇报 1
+- 全盘采纳大师的 5 条核心建议，并给出完整的 CP 语言 `trait`、单继承 `class` 与实例 `_`（`this`）所有权、借用及生命周期设计方案：
+  1. **一等公民 `_` 与 `this` 同义 + 省略前缀机制**：成员函数内支持 `_`（等同于 `this`），同类兄弟方法调用与非遮蔽字段访问支持直接省略 `_.` 前缀。
+  2. **模式匹配通配符切换为 `*`**：`match` 默认分支采用 `* => ...`，彻底消除与 `_`（`this`）的词法/语义冲突。
+  3. **首参缺省只读借用与显式 `mut _` / `move _`**：
+     - 缺省只读借用：`fn getVal(): i32`（省略首参 `_`，编译期严禁修改字段或调用 `mut _` / `move _` 方法）；
+     - 可变借用：`fn setVal(mut _, v: i32)`（允许修改字段，调用处自动触发 NLL 可变借用冲突与权限检查）；
+     - 所有权吞噬：`fn close(move _)`（调用后原实例所有权转移并标记失效，禁止二次使用并自动防止双重释放）；
+     - 静态方法：`static fn create(...)`（无 `_` 实例绑定）。
+  4. **成员方法返回借用的生命周期自动穿透（无缝接入三级生命周期体系）**：方法返回 `&T` 或 `ref struct` 时默认自动绑定至自身实例 `_`（Tier 1 零标注），在调用方锁定该实例直至返回借用的最后一次使用（NLL）。
+  5. **单继承 `class` (`extends`) + `trait` 统一契约**：支持 `class Child extends Parent`（字段与方法继承、`super.method()` 调用、重写方法接收者权限校验），`trait` 同时支持 `struct` 与 `class`、默认方法实现（`fn foo(mut _) { ... }`）、内联 `implements` 与后向 `impl Trait for Type` 扩展，以及基于静态单态化的零虚表开销多态参数借用检查。
+
+### 用户指令 2
+> 确认
+
+### 执行结果汇报 2
+- **设计规范更新**：更新 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)，新增第 10.5 节《`trait`、单继承 `class` 与自身实例 `_` / `this` 的所有权、借用与生命周期》，同步更新 `match` 通配符 `*` 与 `trait`/`extends` 规范。
+- **编译器实现 (`cpc`)**：
+  1. **词法与语法 (`lexer.rs`, `ast.rs`, `parser.rs`)**：新增 `extends`、`super` 关键字；支持方法首参简写 `_`、`mut _`、`move _`（以及 `this` / `mut this` / `move this`）；支持 `trait` 默认方法体实现；将 `match` 通配符解析切换为 `*` (`Token::Star`)。
+  2. **语义与代码生成 (`sema.rs`, `codegen.rs`)**：
+     - 实现单继承 `extends` 字段与方法展开、子类重写时自动生成 `__super_xxx` 供 `super.xxx()` 调用，并校验子类重写方法的接收者权限兼容性；
+     - 实现 `trait` 默认方法注入与 `implements` / `impl Trait for Type` 契约完整性及接收者模式（`ReadOnly` / `Mut` / `Move`）一致性检查；
+     - 实现 `_` 到 `self` 的映射、同类成员方法与字段省略 `_.` 前缀的自动解析；
+     - 实现只读方法内修改字段或调用 `mut _` / `move _` 方法的编译期拦截；
+     - 实现调用点 `obj.mutMethod()` 的 NLL 借用冲突检查、只读借用/只读参数越权调用 `mut _` 方法拦截；
+     - 实现调用点 `obj.moveMethod()` 的所有权吞噬追踪（设置 `__obj_moved = true` 避免调用方 `defer` 双重释放，后续访问报错 `Use of moved value`）；
+     - 实现方法返回 `&T` / `ref struct` 时自动将借用源绑定到调用接收者 `obj`（Tier 1 零标注生命周期穿透）。
+- **测试验证 (`cap/test/`)**：
+  - 正向全功能测试 [`test_trait_class_pass.cp`](file:///data/dev/cp/cap/test/test_trait_class_pass.cp) 编译并运行通过，验证了 `_` 接收者、省略 `_.` 互调、`match` 的 `*` 通配符、`extends` 单继承与 `super` 调用、`trait` 默认方法与后向 `impl`、Tier 1 方法返回借用 NLL 解锁，以及 `move _` 吞噬后 `Tensor` 与 `TurboEngine` 精确单次释放。
+  - 4 个反向编译报错测试（[`test_trait_class_fail_readonly_mutate.cp`](file:///data/dev/cp/cap/test/test_trait_class_fail_readonly_mutate.cp)、[`test_trait_class_fail_nll_conflict.cp`](file:///data/dev/cp/cap/test/test_trait_class_fail_nll_conflict.cp)、[`test_trait_class_fail_use_after_move_self.cp`](file:///data/dev/cp/cap/test/test_trait_class_fail_use_after_move_self.cp)、[`test_trait_class_fail_trait_mut.cp`](file:///data/dev/cp/cap/test/test_trait_class_fail_trait_mut.cp)）全部精准触发预期的编译期错误拦截。

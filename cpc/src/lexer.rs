@@ -26,6 +26,8 @@ pub enum Token {
     Ref,
     #[token("struct")]
     Struct,
+    #[token("static")]
+    Static,
 
     #[token("export")]
     Export,

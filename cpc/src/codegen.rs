@@ -3,6 +3,14 @@ use crate::Span;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiverMode {
+    ReadOnly,
+    Mut,
+    Move,
+    Static,
+}
+
 pub struct Codegen {
     pub is_beam_mode: bool,
     pub agent_classes: Vec<crate::ast::Class>,
@@ -27,6 +35,13 @@ pub struct Codegen {
     pub captured_vars: HashMap<String, Vec<(String, String)>>,
     pub ref_classes: HashSet<String>,
     pub fn_sigs: HashMap<String, Function>,
+    pub class_defs: HashMap<String, Class>,
+    pub trait_defs: HashMap<String, TraitDecl>,
+    pub current_class_name: Option<String>,
+    pub current_receiver_mode: ReceiverMode,
+    pub mutable_fn_params: HashSet<String>,
+    pub move_fn_params: HashSet<String>,
+    pub var_cp_types: HashMap<String, Type>,
     pub current_scope_depth: usize,
     pub var_scope_depth: HashMap<String, usize>,
     pub var_borrow_sources: HashMap<String, (Vec<String>, bool)>,
@@ -63,6 +78,13 @@ impl Codegen {
             captured_vars: HashMap::new(),
             ref_classes: HashSet::new(),
             fn_sigs: HashMap::new(),
+            class_defs: HashMap::new(),
+            trait_defs: HashMap::new(),
+            current_class_name: None,
+            current_receiver_mode: ReceiverMode::Static,
+            mutable_fn_params: HashSet::new(),
+            move_fn_params: HashSet::new(),
+            var_cp_types: HashMap::new(),
             current_scope_depth: 0,
             var_scope_depth: HashMap::new(),
             var_borrow_sources: HashMap::new(),
@@ -74,8 +96,122 @@ impl Codegen {
         }
     }
 
+    pub fn get_func_receiver_mode(func: &Function) -> ReceiverMode {
+        if func.is_static {
+            return ReceiverMode::Static;
+        }
+        if let Some(first) = func.params.first() {
+            if first.ident.sym == "this" || first.ident.sym == "_" {
+                if first.is_move {
+                    return ReceiverMode::Move;
+                } else if first.is_mut {
+                    return ReceiverMode::Mut;
+                } else if func.ident.sym == "init"
+                    || func.ident.sym == "release"
+                    || func.ident.sym == "__super_init"
+                    || func.ident.sym == "__super_release"
+                {
+                    return ReceiverMode::Mut;
+                } else {
+                    return ReceiverMode::ReadOnly;
+                }
+            }
+        }
+        if func.ident.sym == "init"
+            || func.ident.sym == "release"
+            || func.ident.sym == "__super_init"
+            || func.ident.sym == "__super_release"
+        {
+            ReceiverMode::Mut
+        } else {
+            ReceiverMode::ReadOnly
+        }
+    }
+
+    pub fn get_sig_receiver_mode(sig: &MethodSig) -> ReceiverMode {
+        if let Some(first) = sig.params.first() {
+            if first.ident.sym == "this" || first.ident.sym == "_" {
+                if first.is_move {
+                    return ReceiverMode::Move;
+                } else if first.is_mut {
+                    return ReceiverMode::Mut;
+                } else {
+                    return ReceiverMode::ReadOnly;
+                }
+            }
+        }
+        ReceiverMode::ReadOnly
+    }
+
+    pub fn is_class_field(&self, field_name: &str) -> bool {
+        if let Some(c_name) = &self.current_class_name {
+            if let Some(cls) = self.class_defs.get(c_name) {
+                return cls.fields.iter().any(|f| f.ident.sym == field_name);
+            }
+        }
+        false
+    }
+
+    pub fn lookup_method(
+        &self,
+        type_name: &str,
+        method_name: &str,
+    ) -> Option<(Vec<Param>, Option<Type>, ReceiverMode)> {
+        let clean = type_name.trim_start_matches('*');
+        if let Some(cls) = self.class_defs.get(clean) {
+            if let Some(m) = cls.methods.iter().find(|m| m.ident.sym == method_name) {
+                return Some((
+                    m.params.clone(),
+                    m.return_type.clone(),
+                    Self::get_func_receiver_mode(m),
+                ));
+            }
+        }
+        if let Some(tr) = self.trait_defs.get(clean) {
+            if let Some(tm) = tr.methods.iter().find(|m| m.ident.sym == method_name) {
+                return Some((
+                    tm.params.clone(),
+                    tm.return_type.clone(),
+                    Self::get_sig_receiver_mode(tm),
+                ));
+            }
+        }
+        None
+    }
+
+    pub fn resolve_var_type_name(&self, var_name: &str) -> Option<String> {
+        if var_name == "this" || var_name == "_" {
+            return self.current_class_name.clone();
+        }
+        if let Some(ty) = self.var_cp_types.get(var_name) {
+            match ty {
+                Type::Ref(id) => return Some(id.sym.clone()),
+                Type::BorrowType { inner, .. } => {
+                    if let Type::Ref(id) = &**inner {
+                        return Some(id.sym.clone());
+                    }
+                }
+                Type::Shared(inner) => {
+                    if let Type::Ref(id) = &**inner {
+                        return Some(id.sym.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(zig_ty) = self.locals.get(var_name) {
+            let clean = zig_ty.trim_start_matches('*');
+            if self.class_defs.contains_key(clean) || self.trait_defs.contains_key(clean) {
+                return Some(clean.to_string());
+            }
+        }
+        None
+    }
+
     pub fn generate_module(&mut self, module: &Module) -> String {
         println!("[TRACE] In generate_module: setting up globals");
+        let mut class_order = Vec::new();
+        let mut impl_decls = Vec::new();
         for item in &module.body {
             if let ModuleItem::Decl(Decl::Func(f)) = item {
                 self.globals.insert(f.ident.sym.clone());
@@ -89,12 +225,152 @@ impl Codegen {
                 if c.implements.iter().any(|i| i.sym == "Agent") {
                     self.agent_classes.push(c.clone());
                 }
+                class_order.push(c.ident.sym.clone());
+                self.class_defs.insert(c.ident.sym.clone(), c.clone());
             }
             if let ModuleItem::Decl(Decl::Enum(e)) = item {
                 self.globals.insert(e.ident.sym.clone());
             }
             if let ModuleItem::Decl(Decl::Trait(t)) = item {
                 self.globals.insert(t.ident.sym.clone());
+                self.trait_defs.insert(t.ident.sym.clone(), t.clone());
+            }
+            if let ModuleItem::Decl(Decl::Impl(i)) = item {
+                impl_decls.push(i.clone());
+            }
+        }
+
+        // 1. Merge retroactive `impl Trait for Class` declarations into class_defs
+        for imp in &impl_decls {
+            if let Some(cls) = self.class_defs.get_mut(&imp.target_name.sym) {
+                if !cls.implements.iter().any(|i| i.sym == imp.trait_name.sym) {
+                    cls.implements.push(imp.trait_name.clone());
+                }
+                for m in &imp.methods {
+                    if let Some(existing) = cls
+                        .methods
+                        .iter_mut()
+                        .find(|cm| cm.ident.sym == m.ident.sym)
+                    {
+                        *existing = m.clone();
+                    } else {
+                        cls.methods.push(m.clone());
+                    }
+                }
+            }
+        }
+
+        // 2. Resolve single inheritance (`extends Parent`) for classes
+        for c_name in &class_order {
+            let parent_opt = self.class_defs.get(c_name).and_then(|c| c.extends.clone());
+            if let Some(parent_ident) = parent_opt {
+                if let Some(parent_cls) = self.class_defs.get(&parent_ident.sym).cloned() {
+                    if let Some(child_cls) = self.class_defs.get_mut(c_name) {
+                        if parent_cls.is_ref {
+                            child_cls.is_ref = true;
+                            self.ref_classes.insert(c_name.clone());
+                        }
+                        // Prepend parent fields
+                        let mut combined_fields = parent_cls.fields.clone();
+                        for cf in &child_cls.fields {
+                            if !combined_fields
+                                .iter()
+                                .any(|pf| pf.ident.sym == cf.ident.sym)
+                            {
+                                combined_fields.push(cf.clone());
+                            }
+                        }
+                        child_cls.fields = combined_fields;
+
+                        // Inherit parent traits
+                        for pt in &parent_cls.implements {
+                            if !child_cls.implements.iter().any(|ct| ct.sym == pt.sym) {
+                                child_cls.implements.push(pt.clone());
+                            }
+                        }
+
+                        // Inherit parent methods & synthesize `__super_<method>`
+                        for pm in &parent_cls.methods {
+                            let mut super_m = pm.clone();
+                            super_m.ident.sym = format!("__super_{}", pm.ident.sym);
+                            if !child_cls
+                                .methods
+                                .iter()
+                                .any(|cm| cm.ident.sym == super_m.ident.sym)
+                            {
+                                child_cls.methods.push(super_m);
+                            }
+
+                            if let Some(cm) = child_cls
+                                .methods
+                                .iter()
+                                .find(|cm| cm.ident.sym == pm.ident.sym)
+                            {
+                                // Override contract check
+                                if pm.ident.sym != "init" && pm.ident.sym != "release" {
+                                    let p_mode = Self::get_func_receiver_mode(pm);
+                                    let c_mode = Self::get_func_receiver_mode(cm);
+                                    if p_mode != c_mode {
+                                        panic!(
+                                            "CP Compile Error: Method '{}.{}' receiver modifier ({:?}) does not match parent class '{}.{}' ({:?})",
+                                            c_name, cm.ident.sym, c_mode, parent_ident.sym, pm.ident.sym, p_mode
+                                        );
+                                    }
+                                }
+                            } else {
+                                child_cls.methods.push(pm.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Validate Trait contracts & inject Trait Default Methods
+        for c_name in &class_order {
+            let impl_traits = self
+                .class_defs
+                .get(c_name)
+                .map(|c| c.implements.clone())
+                .unwrap_or_default();
+            for tr_ident in impl_traits {
+                if let Some(tr_decl) = self.trait_defs.get(&tr_ident.sym).cloned() {
+                    for tm in &tr_decl.methods {
+                        let expected_mode = Self::get_sig_receiver_mode(tm);
+                        let existing_method = self
+                            .class_defs
+                            .get(c_name)
+                            .and_then(|c| c.methods.iter().find(|m| m.ident.sym == tm.ident.sym))
+                            .cloned();
+                        if let Some(cm) = existing_method {
+                            let actual_mode = Self::get_func_receiver_mode(&cm);
+                            if expected_mode != actual_mode {
+                                panic!(
+                                    "CP Compile Error: Method '{}.{}' receiver modifier ({:?}) does not match trait '{}.{}' contract ({:?})",
+                                    c_name, cm.ident.sym, actual_mode, tr_decl.ident.sym, tm.ident.sym, expected_mode
+                                );
+                            }
+                        } else if let Some(default_body) = &tm.default_body {
+                            let synth_fn = Function {
+                                span: tm.span,
+                                ident: tm.ident.clone(),
+                                params: tm.params.clone(),
+                                return_type: tm.return_type.clone(),
+                                body: default_body.clone(),
+                                is_async: false,
+                                is_static: false,
+                            };
+                            if let Some(cls) = self.class_defs.get_mut(c_name) {
+                                cls.methods.push(synth_fn);
+                            }
+                        } else {
+                            panic!(
+                                "CP Compile Error: Class '{}' is missing implementation for trait method '{}.{}'",
+                                c_name, tr_decl.ident.sym, tm.ident.sym
+                            );
+                        }
+                    }
+                }
             }
         }
         self.globals.insert("Math".to_string());
@@ -416,7 +692,12 @@ impl Codegen {
                 if c.ident.sym == "PID" || c.ident.sym == "Message" || c.ident.sym == "Agent" {
                     continue;
                 }
-                self.generate_class(c);
+                let resolved = self
+                    .class_defs
+                    .get(&c.ident.sym)
+                    .cloned()
+                    .unwrap_or_else(|| c.clone());
+                self.generate_class(&resolved);
             }
         }
         println!("[TRACE] Generating Impls");
@@ -568,6 +849,9 @@ impl Codegen {
         for m in &t.methods {
             let mut p_str = String::from("ptr: *anyopaque");
             for p in &m.params {
+                if p.ident.sym == "this" || p.ident.sym == "_" {
+                    continue;
+                }
                 p_str.push_str(", ");
                 p_str.push_str(&self.map_type(&p.ty));
             }
@@ -583,17 +867,21 @@ impl Codegen {
     }
 
     fn generate_impl(&mut self, i: &ImplDecl) {
-        self.writeln(&format!(
-            "const vtable_{}_{} = {}.VTable {{ .{} = @ptrCast(&{}_{}) }};",
-            i.trait_name.sym,
-            i.target_name.sym,
-            i.trait_name.sym,
-            i.methods[0].ident.sym,
-            i.target_name.sym,
-            i.methods[0].ident.sym
-        ));
-        for m in &i.methods {
-            self.generate_function_logic(m, Some(&i.target_name.sym));
+        if let Some(tr) = self.trait_defs.get(&i.trait_name.sym) {
+            let mut fields_str = String::new();
+            for (idx, tm) in tr.methods.iter().enumerate() {
+                fields_str.push_str(&format!(
+                    ".{} = @ptrCast(&{}.{})",
+                    tm.ident.sym, i.target_name.sym, tm.ident.sym
+                ));
+                if idx + 1 < tr.methods.len() {
+                    fields_str.push_str(", ");
+                }
+            }
+            self.writeln(&format!(
+                "const vtable_{}_{} = {}.VTable {{ {} }};",
+                i.trait_name.sym, i.target_name.sym, i.trait_name.sym, fields_str
+            ));
         }
     }
 
@@ -694,6 +982,9 @@ impl Codegen {
                 if let Expr::Bin(bin) = e {
                     if bin.op == BinaryOp::Assign {
                         crate::ast_visitor::find_referenced_vars_in_expr(&bin.right, &mut refs);
+                        if let Expr::Member(mem) = &*bin.left {
+                            crate::ast_visitor::find_referenced_vars_in_expr(&mem.obj, &mut refs);
+                        }
                         for r in refs {
                             self.last_use_map.insert(r, idx);
                         }
@@ -773,15 +1064,48 @@ impl Codegen {
         // Returns: (source_vars, is_mut_borrow, is_ref_struct)
         match expr {
             Expr::Borrow(inner, is_mut) => {
-                if let Expr::Ident(id) = &**inner {
-                    self.check_borrow_conflict(&id.sym, *is_mut);
-                    let mut sources = vec![id.sym.clone()];
-                    if let Some((orig, _)) = self.var_borrow_sources.get(&id.sym) {
-                        if !orig.is_empty() {
-                            sources = orig.clone();
+                match &**inner {
+                    Expr::Ident(id) => {
+                        if id.sym == "this" || id.sym == "_" || self.is_class_field(&id.sym) {
+                            if *is_mut && self.current_receiver_mode == ReceiverMode::ReadOnly {
+                                panic!(
+                                    "CP Compile Error: Cannot take mutable borrow '&mut' of '{}' in a read-only method (add 'mut _' as first parameter)",
+                                    id.sym
+                                );
+                            }
+                            return (vec!["this".to_string(), "_".to_string()], *is_mut, false);
+                        }
+                        self.check_borrow_conflict(&id.sym, *is_mut);
+                        let mut sources = vec![id.sym.clone()];
+                        if let Some((orig, _)) = self.var_borrow_sources.get(&id.sym) {
+                            if !orig.is_empty() {
+                                sources = orig.clone();
+                            }
+                        }
+                        return (sources, *is_mut, false);
+                    }
+                    Expr::Member(mem) => {
+                        if let Expr::Ident(obj_id) = &*mem.obj {
+                            if obj_id.sym == "this" || obj_id.sym == "_" {
+                                if *is_mut && self.current_receiver_mode == ReceiverMode::ReadOnly {
+                                    panic!(
+                                        "CP Compile Error: Cannot take mutable borrow '&mut {}.{}' in a read-only method (add 'mut _' as first parameter)",
+                                        obj_id.sym, mem.prop.sym
+                                    );
+                                }
+                                return (vec!["this".to_string(), "_".to_string()], *is_mut, false);
+                            }
+                            self.check_borrow_conflict(&obj_id.sym, *is_mut);
+                            let mut sources = vec![obj_id.sym.clone()];
+                            if let Some((orig, _)) = self.var_borrow_sources.get(&obj_id.sym) {
+                                if !orig.is_empty() {
+                                    sources = orig.clone();
+                                }
+                            }
+                            return (sources, *is_mut, false);
                         }
                     }
-                    return (sources, *is_mut, false);
+                    _ => {}
                 }
                 (vec![], *is_mut, false)
             }
@@ -835,7 +1159,103 @@ impl Codegen {
                 (vec![], false, false)
             }
             Expr::Call(call) => {
-                if let Expr::Ident(fid) = &*call.callee {
+                if let Expr::Member(mem) = &*call.callee {
+                    if let Expr::Ident(obj_id) = &*mem.obj {
+                        if let Some(type_name) = self.resolve_var_type_name(&obj_id.sym) {
+                            if let Some((params, Some(ret_ty), recv_mode)) =
+                                self.lookup_method(&type_name, &mem.prop.sym)
+                            {
+                                let non_recv_params: Vec<&Param> = params
+                                    .iter()
+                                    .filter(|p| p.ident.sym != "this" && p.ident.sym != "_")
+                                    .collect();
+                                match ret_ty {
+                                    Type::BorrowType {
+                                        is_mut, lifetimes, ..
+                                    } => {
+                                        let mut sources = Vec::new();
+                                        // Tier 1: Method Return Lifetime Elision (default binds to receiver `_`/`this`)
+                                        if lifetimes.is_empty()
+                                            || lifetimes.iter().any(|l| l == "this" || l == "_")
+                                        {
+                                            if obj_id.sym == "this" || obj_id.sym == "_" {
+                                                sources.push("this".to_string());
+                                                sources.push("_".to_string());
+                                            } else if let Some((orig, _)) =
+                                                self.var_borrow_sources.get(&obj_id.sym)
+                                            {
+                                                sources.extend(orig.clone());
+                                            } else {
+                                                sources.push(obj_id.sym.clone());
+                                            }
+                                        }
+                                        // Tier 3: Explicit parameter binding on method (e.g. `: &other Tensor`)
+                                        for lt_name in &lifetimes {
+                                            if let Some(pos) = non_recv_params
+                                                .iter()
+                                                .position(|p| &p.ident.sym == lt_name)
+                                            {
+                                                if pos < call.args.len() {
+                                                    if let Expr::Ident(arg_id) = &call.args[pos] {
+                                                        if let Some((orig, _)) =
+                                                            self.var_borrow_sources.get(&arg_id.sym)
+                                                        {
+                                                            sources.extend(orig.clone());
+                                                        } else {
+                                                            sources.push(arg_id.sym.clone());
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        return (sources, is_mut, false);
+                                    }
+                                    Type::Ref(cid) if self.ref_classes.contains(&cid.sym) => {
+                                        let mut sources = Vec::new();
+                                        if obj_id.sym == "this" || obj_id.sym == "_" {
+                                            sources.push("this".to_string());
+                                            sources.push("_".to_string());
+                                        } else if let Some((orig, _)) =
+                                            self.var_borrow_sources.get(&obj_id.sym)
+                                        {
+                                            sources.extend(orig.clone());
+                                        } else {
+                                            sources.push(obj_id.sym.clone());
+                                        }
+                                        return (sources, recv_mode == ReceiverMode::Mut, true);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                } else if let Expr::Ident(fid) = &*call.callee {
+                    // Check if `fid` is an omitted-receiver method call on current_class_name
+                    if let Some(c_name) = &self.current_class_name {
+                        if !self.locals.contains_key(&fid.sym) {
+                            if let Some((_, Some(ret_ty), recv_mode)) =
+                                self.lookup_method(c_name, &fid.sym)
+                            {
+                                match ret_ty {
+                                    Type::BorrowType { is_mut, .. } => {
+                                        return (
+                                            vec!["this".to_string(), "_".to_string()],
+                                            is_mut,
+                                            false,
+                                        );
+                                    }
+                                    Type::Ref(cid) if self.ref_classes.contains(&cid.sym) => {
+                                        return (
+                                            vec!["this".to_string(), "_".to_string()],
+                                            recv_mode == ReceiverMode::Mut,
+                                            true,
+                                        );
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
                     if let Some(sig) = self.fn_sigs.get(&fid.sym).cloned() {
                         // Also check param modifiers (`mut` / `move`) at call site
                         for (idx, param) in sig.params.iter().enumerate() {
@@ -946,7 +1366,14 @@ impl Codegen {
         } else {
             zig_name.clone()
         };
-        self.is_class_method = class_name.is_some();
+        self.current_class_name = class_name.cloned();
+        self.current_receiver_mode = if class_name.is_some() {
+            Self::get_func_receiver_mode(func)
+        } else {
+            ReceiverMode::Static
+        };
+        self.is_class_method =
+            class_name.is_some() && self.current_receiver_mode != ReceiverMode::Static;
         self.is_main = func.ident.sym == "main";
         let ret_ty = func
             .return_type
@@ -961,21 +1388,54 @@ impl Codegen {
         self.var_borrow_sources.clear();
         self.var_is_ref_struct.clear();
         self.current_fn_params.clear();
+        self.mutable_fn_params.clear();
+        self.move_fn_params.clear();
+        self.var_cp_types.clear();
         self.current_fn_ret_ty = func.return_type.clone();
         self.current_stmt_idx = 0;
         self.last_use_map.clear();
         let mut stmt_counter = 0;
         self.compute_last_uses_block(&func.body, &mut stmt_counter);
 
-        if class_name.is_some() {
-            self.current_fn_params.insert("this".to_string());
-            self.current_fn_params.insert("self".to_string());
-            self.var_scope_depth.insert("this".to_string(), 0);
-            self.var_scope_depth.insert("self".to_string(), 0);
+        if let Some(c) = class_name {
+            if self.current_receiver_mode != ReceiverMode::Static {
+                self.current_fn_params.insert("this".to_string());
+                self.current_fn_params.insert("_".to_string());
+                self.current_fn_params.insert("self".to_string());
+                self.var_scope_depth.insert("this".to_string(), 0);
+                self.var_scope_depth.insert("_".to_string(), 0);
+                self.var_scope_depth.insert("self".to_string(), 0);
+                let cls_ty = Type::Ref(Ident {
+                    span: Span { start: 0, end: 0 },
+                    sym: c.clone(),
+                });
+                self.var_cp_types.insert("this".to_string(), cls_ty.clone());
+                self.var_cp_types.insert("_".to_string(), cls_ty);
+                if self.current_receiver_mode == ReceiverMode::Mut
+                    || self.current_receiver_mode == ReceiverMode::Move
+                {
+                    self.mutable_fn_params.insert("this".to_string());
+                    self.mutable_fn_params.insert("_".to_string());
+                }
+                if self.current_receiver_mode == ReceiverMode::Move {
+                    self.move_fn_params.insert("this".to_string());
+                    self.move_fn_params.insert("_".to_string());
+                }
+            }
         }
         for p in &func.params {
+            if p.ident.sym == "this" || p.ident.sym == "_" {
+                continue;
+            }
             self.current_fn_params.insert(p.ident.sym.clone());
             self.var_scope_depth.insert(p.ident.sym.clone(), 0);
+            self.var_cp_types.insert(p.ident.sym.clone(), p.ty.clone());
+            if p.is_mut || p.is_move {
+                self.mutable_fn_params.insert(p.ident.sym.clone());
+            }
+            if p.is_move {
+                self.move_fn_params.insert(p.ident.sym.clone());
+            }
             if let Type::Ref(cid) = &p.ty {
                 if self.ref_classes.contains(&cid.sym) {
                     self.var_is_ref_struct.insert(p.ident.sym.clone());
@@ -994,19 +1454,25 @@ impl Codegen {
             self.locals.clear();
             self.moved_vars.clear();
             if let Some(c) = class_name {
-                self.locals.insert("self".to_string(), format!("*{}", c));
-                params_str.push_str(&format!("self: *{}", c));
+                if self.current_receiver_mode != ReceiverMode::Static {
+                    self.locals.insert("self".to_string(), format!("*{}", c));
+                    params_str.push_str(&format!("self: *{}", c));
+                }
             }
             for p in &func.params {
-                if p.ident.sym == "this" {
+                if p.ident.sym == "this" || p.ident.sym == "_" {
                     continue;
                 }
+                let mapped_ty = match &p.ty {
+                    Type::Ref(id) if self.trait_defs.contains_key(&id.sym) => "anytype".to_string(),
+                    _ => self.map_type(&p.ty),
+                };
                 self.locals
                     .insert(p.ident.sym.clone(), self.map_type(&p.ty));
                 if !params_str.is_empty() {
                     params_str.push_str(", ");
                 }
-                params_str.push_str(&format!("{}: {}", p.ident.sym, self.map_type(&p.ty)));
+                params_str.push_str(&format!("{}: {}", p.ident.sym, mapped_ty));
             }
             self.extract_locals_simple(&func.body);
             writeln!(
@@ -1016,12 +1482,23 @@ impl Codegen {
             )
             .unwrap();
             self.indent();
-            if class_name.is_some() {
+            if self.is_class_method {
                 self.writeln("_ = &self;");
+                if self.current_receiver_mode == ReceiverMode::Move && func.ident.sym != "release" {
+                    self.writeln("var __self_moved = false; _ = &__self_moved;");
+                    self.writeln("defer if (!__self_moved) { const T = @TypeOf(self); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@\"struct\" and @hasDecl(Child, \"release\")) { const RType = @typeInfo(@TypeOf(Child.release)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) { _ = self.release() catch {}; } else { self.release(); } } } };");
+                }
             }
             for p in &func.params {
-                if p.ident.sym != "this" {
+                if p.ident.sym != "this" && p.ident.sym != "_" {
                     self.writeln(&format!("_ = &{};", p.ident.sym));
+                    if p.is_move {
+                        self.writeln(&format!(
+                            "var __{}_moved = false; _ = &__{}_moved;",
+                            p.ident.sym, p.ident.sym
+                        ));
+                        self.writeln(&format!("defer if (!__{0}_moved) {{ const T = @TypeOf({0}); if (@typeInfo(T) == .pointer) {{ const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@\"struct\" and @hasDecl(Child, \"release\")) {{ const RType = @typeInfo(@TypeOf(Child.release)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _ = {0}.release() catch {{}}; }} else {{ {0}.release(); }} }} }} }};", p.ident.sym));
+                    }
                 }
             }
             self.dedent();
@@ -1054,7 +1531,9 @@ impl Codegen {
         writeln!(self.output, "const {}_Context = struct {{ pc: u32 = 0, _self: PID = undefined, _parent: ?*anyopaque = null, _parent_fn: ?*const fn(*anyopaque) anyerror!void = null, arena: ?*std.heap.ArenaAllocator = null, received_msg: ?Message = null, received_sender: ?PID = null, await_result: ?Message = null,", ctx_name).unwrap();
         self.indent();
         if let Some(c) = class_name {
-            self.writeln(&format!("self: *{},", c));
+            if self.current_receiver_mode != ReceiverMode::Static {
+                self.writeln(&format!("self: *{},", c));
+            }
         }
         self.pc_counter = 0;
         self.tmp_counter = 0;
@@ -1063,9 +1542,14 @@ impl Codegen {
         self.locals.clear();
         self.moved_vars.clear();
         if let Some(c) = class_name {
-            self.locals.insert("self".to_string(), format!("*{}", c));
+            if self.current_receiver_mode != ReceiverMode::Static {
+                self.locals.insert("self".to_string(), format!("*{}", c));
+            }
         }
         for p in &func.params {
+            if p.ident.sym == "this" || p.ident.sym == "_" {
+                continue;
+            }
             self.locals
                 .insert(p.ident.sym.clone(), self.map_type(&p.ty));
         }
@@ -1078,10 +1562,12 @@ impl Codegen {
         if self.is_state_machine {
             let mut init_params = String::from("arena: *std.heap.ArenaAllocator, parent: ?*anyopaque, parent_fn: ?*const fn(*anyopaque) anyerror!void");
             if let Some(c) = class_name {
-                init_params.push_str(&format!(", self_arg: *{}", c));
+                if self.current_receiver_mode != ReceiverMode::Static {
+                    init_params.push_str(&format!(", self_arg: *{}", c));
+                }
             }
             for p in &func.params {
-                if p.ident.sym == "this" {
+                if p.ident.sym == "this" || p.ident.sym == "_" {
                     continue;
                 }
                 init_params.push_str(&format!(", arg_{}: {}", p.ident.sym, self.map_type(&p.ty)));
@@ -1099,11 +1585,11 @@ impl Codegen {
             )
             .unwrap();
             writeln!(self.output, "    ctx.* = undefined; ctx.pc = 0; ctx._self = PID{{ .node_id = current_node_id, .local_id = next_local_id }}; next_local_id += 1; ctx.received_msg = null; ctx.received_sender = null; ctx.arena = arena; ctx._parent = parent; ctx._parent_fn = parent_fn;").unwrap();
-            if class_name.is_some() {
+            if self.is_class_method {
                 writeln!(self.output, "    ctx.self = self_arg;").unwrap();
             }
             for p in &func.params {
-                if p.ident.sym == "this" {
+                if p.ident.sym == "this" || p.ident.sym == "_" {
                     continue;
                 }
                 writeln!(
@@ -1229,6 +1715,44 @@ impl Codegen {
                         Pattern::Ident(ident) => {
                             self.var_scope_depth
                                 .insert(ident.sym.clone(), self.current_scope_depth);
+                            if let Some(t) = &var.ty {
+                                self.var_cp_types.insert(ident.sym.clone(), t.clone());
+                            } else if let Expr::New(nc) = init {
+                                if let Expr::Ident(cid) = &*nc.callee {
+                                    self.var_cp_types
+                                        .insert(ident.sym.clone(), Type::Ref(cid.clone()));
+                                }
+                            } else if let Expr::Call(c) = init {
+                                if let Expr::Ident(fid) = &*c.callee {
+                                    if let Some(sig) = self.fn_sigs.get(&fid.sym) {
+                                        if let Some(rt) = &sig.return_type {
+                                            self.var_cp_types.insert(ident.sym.clone(), rt.clone());
+                                        }
+                                    } else if let Some(c_name) = &self.current_class_name {
+                                        if let Some((_, Some(rt), _)) =
+                                            self.lookup_method(c_name, &fid.sym)
+                                        {
+                                            self.var_cp_types.insert(ident.sym.clone(), rt);
+                                        }
+                                    }
+                                } else if let Expr::Member(mem) = &*c.callee {
+                                    if let Expr::Ident(oid) = &*mem.obj {
+                                        if let Some(tname) = self.resolve_var_type_name(&oid.sym) {
+                                            if let Some((_, Some(rt), _)) =
+                                                self.lookup_method(&tname, &mem.prop.sym)
+                                            {
+                                                self.var_cp_types.insert(ident.sym.clone(), rt);
+                                            }
+                                        } else if self.class_defs.contains_key(&oid.sym) {
+                                            if let Some((_, Some(rt), _)) =
+                                                self.lookup_method(&oid.sym, &mem.prop.sym)
+                                            {
+                                                self.var_cp_types.insert(ident.sym.clone(), rt);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             let mut is_var_borrow = !borrow_sources.is_empty();
                             if let Some(Type::BorrowType { .. }) = &var.ty {
                                 is_var_borrow = true;
@@ -1263,6 +1787,21 @@ impl Codegen {
                                     } else {
                                         String::new()
                                     }
+                                } else if let Some(t) = &var.ty {
+                                    let is_trait_ty = if let Type::Ref(id) = t {
+                                        self.trait_defs.contains_key(&id.sym)
+                                    } else {
+                                        false
+                                    };
+                                    if matches!(t, Type::BorrowType { .. }) || is_trait_ty {
+                                        String::new()
+                                    } else {
+                                        format!(": {}", self.map_type(t))
+                                    }
+                                } else if matches!(init, Expr::Lit(Lit::Int(_))) {
+                                    ": i32".to_string()
+                                } else if matches!(init, Expr::Lit(Lit::Float(_))) {
+                                    ": f32".to_string()
                                 } else {
                                     String::new()
                                 };
@@ -1287,9 +1826,10 @@ impl Codegen {
                                 self.write_to_case(&format!("_ = &{};", ident.sym));
                             }
                             if let Expr::Ident(id) = init {
-                                // Only move if `id` is an owned local pointer (not a borrow and not a borrowed param)
+                                // Only move if `id` is an owned local pointer or `move` parameter (not a borrow)
                                 let is_id_borrow = self.var_borrow_sources.contains_key(&id.sym)
-                                    || self.current_fn_params.contains(&id.sym);
+                                    || (self.current_fn_params.contains(&id.sym)
+                                        && !self.move_fn_params.contains(&id.sym));
                                 if !is_id_borrow && self.locals.contains_key(&id.sym) {
                                     let ty_str = &self.locals[&id.sym];
                                     if ty_str.starts_with('*') && ty_str != "*anyopaque" {
@@ -1355,6 +1895,50 @@ impl Codegen {
             }
             Stmt::Expr(expr) => match expr {
                 Expr::Bin(bin) if bin.op == BinaryOp::Assign => {
+                    if let Expr::Member(mem) = &*bin.left {
+                        if let Expr::Ident(obj_id) = &*mem.obj {
+                            if obj_id.sym == "this" || obj_id.sym == "_" {
+                                if self.current_receiver_mode == ReceiverMode::ReadOnly {
+                                    panic!(
+                                        "CP Compile Error: Cannot mutate field '{}.{}' in a read-only method (add 'mut _' as first parameter)",
+                                        obj_id.sym, mem.prop.sym
+                                    );
+                                }
+                                self.check_borrow_conflict("this", true);
+                                self.check_borrow_conflict("_", true);
+                            } else {
+                                if let Some((_, is_mut)) = self.var_borrow_sources.get(&obj_id.sym)
+                                {
+                                    if !*is_mut {
+                                        panic!(
+                                            "CP Compile Error: Cannot mutate field '{}' through read-only borrow '{}'",
+                                            mem.prop.sym, obj_id.sym
+                                        );
+                                    }
+                                } else if self.current_fn_params.contains(&obj_id.sym)
+                                    && !self.mutable_fn_params.contains(&obj_id.sym)
+                                {
+                                    panic!(
+                                        "CP Compile Error: Cannot mutate field '{}' of read-only parameter '{}' (mark parameter as 'mut {}')",
+                                        mem.prop.sym, obj_id.sym, obj_id.sym
+                                    );
+                                }
+                                self.check_borrow_conflict(&obj_id.sym, true);
+                            }
+                        }
+                    } else if let Expr::Ident(lhs_id) = &*bin.left {
+                        if self.is_class_field(&lhs_id.sym) {
+                            if self.current_receiver_mode == ReceiverMode::ReadOnly {
+                                panic!(
+                                    "CP Compile Error: Cannot mutate field '{}' in a read-only method (add 'mut _' as first parameter)",
+                                    lhs_id.sym
+                                );
+                            }
+                            self.check_borrow_conflict("this", true);
+                            self.check_borrow_conflict("_", true);
+                        }
+                    }
+
                     let (borrow_sources, is_mut_borrow, is_ref_st) =
                         self.extract_expr_borrow_info(&bin.right);
                     if let Expr::Ident(lhs_id) = &*bin.left {
@@ -1390,7 +1974,8 @@ impl Codegen {
 
                     if let Expr::Ident(id) = &*bin.right {
                         let is_id_borrow = self.var_borrow_sources.contains_key(&id.sym)
-                            || self.current_fn_params.contains(&id.sym);
+                            || (self.current_fn_params.contains(&id.sym)
+                                && !self.move_fn_params.contains(&id.sym));
                         if !is_id_borrow && self.locals.contains_key(&id.sym) {
                             let ty_str = &self.locals[&id.sym];
                             if ty_str.starts_with('*') && ty_str != "*anyopaque" {
@@ -1402,6 +1987,39 @@ impl Codegen {
                             }
                         }
                     }
+                }
+                Expr::Match(m) => {
+                    let disc = self.generate_expr(&m.disc);
+                    self.write_to_case(&format!("switch ({}) {{", disc));
+                    self.indent();
+                    for arm in &m.arms {
+                        let pat_str = match &arm.pat {
+                            Pattern::Lit(Lit::Int(v)) => v.to_string(),
+                            Pattern::Lit(Lit::Bool(b)) => {
+                                if *b {
+                                    "true".to_string()
+                                } else {
+                                    "false".to_string()
+                                }
+                            }
+                            Pattern::Wildcard => "else".to_string(),
+                            Pattern::Ident(id) => id.sym.clone(),
+                            _ => "else".to_string(),
+                        };
+                        self.write_to_case(&format!("{} => {{", pat_str));
+                        self.indent();
+                        if let Stmt::Block(b) = &*arm.body {
+                            for s in &b.body {
+                                self.generate_stmt(s);
+                            }
+                        } else {
+                            self.generate_stmt(&arm.body);
+                        }
+                        self.dedent();
+                        self.write_to_case("},");
+                    }
+                    self.dedent();
+                    self.write_to_case("}");
                 }
                 Expr::Zig(zig) => self.write_to_case(&format!("{}\n", zig.code)),
                 _ => {
@@ -1526,27 +2144,52 @@ impl Codegen {
                             }
                         }
                         if let Some(Type::BorrowType { lifetimes, .. }) = &self.current_fn_ret_ty {
-                            if !lifetimes.is_empty() && !lifetimes.contains(src) {
-                                panic!(
-                                    "CP Compile Error: Returned reference borrows from '{}', which does not match lifetime annotation '&{}'",
-                                    src,
-                                    lifetimes.join(" | ")
-                                );
+                            if !lifetimes.is_empty() {
+                                let matches_lt = if src == "this" || src == "_" {
+                                    lifetimes.iter().any(|l| l == "this" || l == "_")
+                                } else {
+                                    lifetimes.contains(src)
+                                };
+                                if !matches_lt {
+                                    panic!(
+                                        "CP Compile Error: Returned reference borrows from '{}', which does not match lifetime annotation '&{}'",
+                                        src,
+                                        lifetimes.join(" | ")
+                                    );
+                                }
                             }
                         }
                     }
                     if is_ref_st && borrow_sources.is_empty() {
                         panic!("CP Compile Error: Stack-bound ref struct cannot escape function via return");
                     }
-                    // If returning an owned local variable, mark it as moved so defer doesn't release it before caller uses it!
+                    // If returning an owned local variable or move receiver/param, mark it as moved so defer doesn't release it before caller uses it!
                     if let Expr::Ident(ret_id) = arg {
-                        let is_borrow = self.var_borrow_sources.contains_key(&ret_id.sym);
-                        if !is_borrow && !self.current_fn_params.contains(&ret_id.sym) {
+                        if (ret_id.sym == "this" || ret_id.sym == "_")
+                            && self.current_receiver_mode == ReceiverMode::Move
+                        {
+                            self.check_active_borrows_before_move("this");
+                            self.check_active_borrows_before_move("_");
+                            if !self.is_state_machine {
+                                self.write_to_case("__self_moved = true;");
+                            }
+                        } else if self.move_fn_params.contains(&ret_id.sym) {
                             self.check_active_borrows_before_move(&ret_id.sym);
-                            if !self.is_state_machine && self.locals.contains_key(&ret_id.sym) {
-                                let ty_str = &self.locals[&ret_id.sym];
-                                if ty_str.starts_with('*') && ty_str != "*anyopaque" {
-                                    self.write_to_case(&format!("__{}_moved = true;", ret_id.sym));
+                            if !self.is_state_machine {
+                                self.write_to_case(&format!("__{}_moved = true;", ret_id.sym));
+                            }
+                        } else {
+                            let is_borrow = self.var_borrow_sources.contains_key(&ret_id.sym);
+                            if !is_borrow && !self.current_fn_params.contains(&ret_id.sym) {
+                                self.check_active_borrows_before_move(&ret_id.sym);
+                                if !self.is_state_machine && self.locals.contains_key(&ret_id.sym) {
+                                    let ty_str = &self.locals[&ret_id.sym];
+                                    if ty_str.starts_with('*') && ty_str != "*anyopaque" {
+                                        self.write_to_case(&format!(
+                                            "__{}_moved = true;",
+                                            ret_id.sym
+                                        ));
+                                    }
                                 }
                             }
                         }
@@ -1576,56 +2219,230 @@ impl Codegen {
                     }
                 }
             }
+            Stmt::Match(m) => {
+                let disc = self.generate_expr(&m.disc);
+                self.write_to_case(&format!("switch ({}) {{", disc));
+                self.indent();
+                for arm in &m.arms {
+                    let pat_str = match &arm.pat {
+                        Pattern::Lit(Lit::Int(v)) => v.to_string(),
+                        Pattern::Lit(Lit::Bool(b)) => {
+                            if *b {
+                                "true".to_string()
+                            } else {
+                                "false".to_string()
+                            }
+                        }
+                        Pattern::Wildcard => "else".to_string(),
+                        Pattern::Ident(id) => id.sym.clone(),
+                        _ => "else".to_string(),
+                    };
+                    self.write_to_case(&format!("{} => {{", pat_str));
+                    self.indent();
+                    if let Stmt::Block(b) = &*arm.body {
+                        for s in &b.body {
+                            self.generate_stmt(s);
+                        }
+                    } else {
+                        self.generate_stmt(&arm.body);
+                    }
+                    self.dedent();
+                    self.write_to_case("},");
+                }
+                self.dedent();
+                self.write_to_case("}");
+            }
             _ => {}
         }
     }
 
     fn generate_expr(&mut self, expr: &Expr) -> String {
         match expr {
-            Expr::Lit(Lit::Int(v)) => v.to_string(), Expr::Lit(Lit::Float(f)) => { let s = f.to_string(); if s.contains(".") { s } else { format!("{}.0", s) } }, Expr::Lit(Lit::Str(s)) => format!("\"{}\"", s.replace("\"", "\\\"")), Expr::Lit(Lit::Bool(b)) => if *b { "true".to_string() } else { "false".to_string() }, Expr::Lit(Lit::Null) => "null".to_string(), Expr::Lit(Lit::Undefined) => "undefined".to_string(),
+            Expr::Lit(Lit::Int(v)) => v.to_string(),
+            Expr::Lit(Lit::Float(f)) => {
+                let s = f.to_string();
+                if s.contains('.') {
+                    s
+                } else {
+                    format!("{}.0", s)
+                }
+            }
+            Expr::Lit(Lit::Str(s)) => format!("\"{}\"", s.replace('\"', "\\\"")),
+            Expr::Lit(Lit::Bool(b)) => {
+                if *b {
+                    "true".to_string()
+                } else {
+                    "false".to_string()
+                }
+            }
+            Expr::Lit(Lit::Null) => "null".to_string(),
+            Expr::Lit(Lit::Undefined) => "undefined".to_string(),
             Expr::Ident(i) => {
-                if self.moved_vars.contains(&i.sym) { panic!("CP Compile Error: Use of moved value '{}'", i.sym); }
-                if self.uninitialized_vars.contains(&i.sym) { panic!("CP Compile Error: Variable '{}' read before initialization", i.sym); }
-                if i.sym == "@is_beam" { return if self.is_beam_mode { "true".to_string() } else { "false".to_string() }; }
-                if i.sym == "@self" { return if self.is_state_machine { "ctx._self".to_string() } else { "PID{ .node_id = current_node_id, .local_id = 1 }".to_string() }; }
-                if i.sym == "@sender" { return if self.is_state_machine { "ctx.received_sender.?".to_string() } else { "PID{ .node_id = 0, .local_id = 0 }".to_string() }; }
-                if i.sym == "this" { if self.is_state_machine { "ctx.self".to_string() } else { "self".to_string() } }
-                else if i.sym == "true" || i.sym == "false" || i.sym == "null" || i.sym.starts_with('@') || i.sym.ends_with("_Context") || self.is_comptime || self.globals.contains(&i.sym) { i.sym.clone() }
-                else if self.is_state_machine && self.locals.contains_key(&i.sym) { format!("ctx.{}", i.sym) } else { i.sym.clone() }
-            },
+                if self.moved_vars.contains(&i.sym)
+                    || ((i.sym == "this" || i.sym == "_")
+                        && (self.moved_vars.contains("this") || self.moved_vars.contains("_")))
+                {
+                    panic!("CP Compile Error: Use of moved value '{}'", i.sym);
+                }
+                if self.uninitialized_vars.contains(&i.sym) {
+                    panic!(
+                        "CP Compile Error: Variable '{}' read before initialization",
+                        i.sym
+                    );
+                }
+                if i.sym == "@is_beam" {
+                    return if self.is_beam_mode {
+                        "true".to_string()
+                    } else {
+                        "false".to_string()
+                    };
+                }
+                if i.sym == "@self" {
+                    return if self.is_state_machine {
+                        "ctx._self".to_string()
+                    } else {
+                        "PID{ .node_id = current_node_id, .local_id = 1 }".to_string()
+                    };
+                }
+                if i.sym == "@sender" {
+                    return if self.is_state_machine {
+                        "ctx.received_sender.?".to_string()
+                    } else {
+                        "PID{ .node_id = 0, .local_id = 0 }".to_string()
+                    };
+                }
+                if i.sym == "this" || i.sym == "_" {
+                    if self.is_state_machine {
+                        "ctx.self".to_string()
+                    } else {
+                        "self".to_string()
+                    }
+                } else if i.sym == "true"
+                    || i.sym == "false"
+                    || i.sym == "null"
+                    || i.sym.starts_with('@')
+                    || i.sym.ends_with("_Context")
+                    || self.is_comptime
+                    || self.globals.contains(&i.sym)
+                {
+                    i.sym.clone()
+                } else if self.is_state_machine && self.locals.contains_key(&i.sym) {
+                    format!("ctx.{}", i.sym)
+                } else if self.is_class_field(&i.sym) {
+                    if self.moved_vars.contains("this") || self.moved_vars.contains("_") {
+                        panic!(
+                            "CP Compile Error: Use of moved value '_' when accessing field '{}'",
+                            i.sym
+                        );
+                    }
+                    if self.is_state_machine {
+                        format!("ctx.self.{}", i.sym)
+                    } else {
+                        format!("self.{}", i.sym)
+                    }
+                } else {
+                    i.sym.clone()
+                }
+            }
             Expr::Borrow(inner, is_mut) => {
                 if let Expr::Ident(i) = &**inner {
-                    self.check_borrow_conflict(&i.sym, *is_mut);
+                    if i.sym == "this" || i.sym == "_" || self.is_class_field(&i.sym) {
+                        if *is_mut && self.current_receiver_mode == ReceiverMode::ReadOnly {
+                            panic!(
+                                "CP Compile Error: Cannot take mutable borrow '&mut' of '{}' in a read-only method (add 'mut _' as first parameter)",
+                                i.sym
+                            );
+                        }
+                        self.check_borrow_conflict("this", *is_mut);
+                        self.check_borrow_conflict("_", *is_mut);
+                    } else {
+                        if *is_mut {
+                            if let Some((_, is_m)) = self.var_borrow_sources.get(&i.sym) {
+                                if !*is_m {
+                                    panic!(
+                                        "CP Compile Error: Cannot take mutable borrow '&mut {}' from read-only borrow",
+                                        i.sym
+                                    );
+                                }
+                            } else if self.current_fn_params.contains(&i.sym)
+                                && !self.mutable_fn_params.contains(&i.sym)
+                            {
+                                panic!(
+                                    "CP Compile Error: Cannot take mutable borrow '&mut {}' from read-only parameter",
+                                    i.sym
+                                );
+                            }
+                        }
+                        self.check_borrow_conflict(&i.sym, *is_mut);
+                    }
                 }
                 self.generate_expr(inner)
-            },
+            }
             Expr::Move(expr) => {
                 if let Expr::Ident(i) = &**expr {
-                    self.check_active_borrows_before_move(&i.sym);
-                    let gen = self.generate_expr(expr);
-                    self.moved_vars.insert(i.sym.clone());
-                    if !self.is_state_machine {
-                        format!("(blk: {{ __{}_moved = true; break :blk {}; }})", i.sym, gen)
+                    if i.sym == "this" || i.sym == "_" {
+                        if self.current_receiver_mode != ReceiverMode::Move {
+                            panic!(
+                                "CP Compile Error: Cannot move '{}' in a non-move method (add 'move _' as first parameter)",
+                                i.sym
+                            );
+                        }
+                        self.check_active_borrows_before_move("this");
+                        self.check_active_borrows_before_move("_");
+                        let gen = self.generate_expr(expr);
+                        self.moved_vars.insert("this".to_string());
+                        self.moved_vars.insert("_".to_string());
+                        if !self.is_state_machine {
+                            format!("(blk: {{ __self_moved = true; break :blk {}; }})", gen)
+                        } else {
+                            gen
+                        }
                     } else {
-                        gen
+                        if self.var_borrow_sources.contains_key(&i.sym)
+                            || (self.current_fn_params.contains(&i.sym)
+                                && !self.move_fn_params.contains(&i.sym))
+                        {
+                            panic!(
+                                "CP Compile Error: Cannot move borrowed reference or read-only parameter '{}'",
+                                i.sym
+                            );
+                        }
+                        self.check_active_borrows_before_move(&i.sym);
+                        let gen = self.generate_expr(expr);
+                        self.moved_vars.insert(i.sym.clone());
+                        if !self.is_state_machine {
+                            format!("(blk: {{ __{}_moved = true; break :blk {}; }})", i.sym, gen)
+                        } else {
+                            gen
+                        }
                     }
                 } else {
                     panic!("CP Compile Error: move keyword can only be applied to identifiers");
                 }
-            },
-            Expr::Bin(bin) => { 
-                let l = self.generate_expr(&bin.left); 
-                let r = self.generate_expr(&bin.right); 
-                match bin.op { 
+            }
+            Expr::Bin(bin) => {
+                let l = self.generate_expr(&bin.left);
+                let r = self.generate_expr(&bin.right);
+                match bin.op {
                     BinaryOp::Eq => format!("cp_eq({}, {})", l, r),
                     BinaryOp::NotEq => format!("cp_neq({}, {})", l, r),
                     _ => {
-                        let op = match bin.op { BinaryOp::Add => "+", BinaryOp::Sub => "-", BinaryOp::Mul => "*", BinaryOp::Div => "/", BinaryOp::Lt => "<", BinaryOp::Gt => ">", BinaryOp::LtEq => "<=", BinaryOp::GtEq => ">=", _ => "" }; 
+                        let op = match bin.op {
+                            BinaryOp::Add => "+",
+                            BinaryOp::Sub => "-",
+                            BinaryOp::Mul => "*",
+                            BinaryOp::Div => "/",
+                            BinaryOp::Lt => "<",
+                            BinaryOp::Gt => ">",
+                            BinaryOp::LtEq => "<=",
+                            BinaryOp::GtEq => ">=",
+                            _ => "",
+                        };
                         format!("({} {} {})", l, op, r)
                     }
-                } 
-            },
-                        Expr::Call(call) => {
+                }
+            }
+            Expr::Call(call) => {
                 if let Expr::Member(mem) = &*call.callee {
                     let prop = mem.prop.sym.as_str();
                     if prop == "indexOf" {
@@ -1639,7 +2456,10 @@ impl Codegen {
                     } else if prop == "includes" {
                         let obj = self.generate_expr(&mem.obj);
                         let arg = self.generate_expr(&call.args[0]);
-                        return format!("(@import(\"std\").mem.indexOf(u8, {}, {}) != null)", obj, arg);
+                        return format!(
+                            "(@import(\"std\").mem.indexOf(u8, {}, {}) != null)",
+                            obj, arg
+                        );
                     } else if prop == "startsWith" {
                         let obj = self.generate_expr(&mem.obj);
                         let arg = self.generate_expr(&call.args[0]);
@@ -1682,37 +2502,500 @@ impl Codegen {
                         return format!("{}.exec({})", obj, arg);
                     }
                 }
-                
+
                 if let Expr::Member(mem) = &*call.callee {
                     if let Expr::Ident(id) = &*mem.obj {
                         if id.sym == "Math" {
                             let prop = mem.prop.sym.as_str();
-                            if prop == "abs" { return format!("@abs({})", self.generate_expr(&call.args[0])); }
-                            if prop == "ceil" { return format!("@ceil({})", self.generate_expr(&call.args[0])); }
-                            if prop == "floor" { return format!("@floor({})", self.generate_expr(&call.args[0])); }
-                            if prop == "round" { return format!("@round({})", self.generate_expr(&call.args[0])); }
-                            if prop == "trunc" { return format!("@trunc({})", self.generate_expr(&call.args[0])); }
-                            if prop == "max" { return format!("@max({}, {})", self.generate_expr(&call.args[0]), self.generate_expr(&call.args[1])); }
-                            if prop == "min" { return format!("@min({}, {})", self.generate_expr(&call.args[0]), self.generate_expr(&call.args[1])); }
-                            if prop == "sqrt" { return format!("@sqrt({})", self.generate_expr(&call.args[0])); }
-                            if prop == "sin" { return format!("@sin({})", self.generate_expr(&call.args[0])); }
-                            if prop == "cos" { return format!("@cos({})", self.generate_expr(&call.args[0])); }
-                            if prop == "tan" { return format!("@tan({})", self.generate_expr(&call.args[0])); }
-                            if prop == "exp" { return format!("@exp({})", self.generate_expr(&call.args[0])); }
-                            if prop == "log" { return format!("@log({})", self.generate_expr(&call.args[0])); }
-                            if prop == "log10" { return format!("@log10({})", self.generate_expr(&call.args[0])); }
-                            if prop == "log2" { return format!("@log2({})", self.generate_expr(&call.args[0])); }
-                            if prop == "pow" { return format!("@import(\"std\").math.pow(f32, {}, {})", self.generate_expr(&call.args[0]), self.generate_expr(&call.args[1])); }
-                            if prop == "asin" { return format!("@import(\"std\").math.asin({})", self.generate_expr(&call.args[0])); }
-                            if prop == "acos" { return format!("@import(\"std\").math.acos({})", self.generate_expr(&call.args[0])); }
-                            if prop == "atan" { return format!("@import(\"std\").math.atan({})", self.generate_expr(&call.args[0])); }
-                            if prop == "atan2" { return format!("@import(\"std\").math.atan2({}, {})", self.generate_expr(&call.args[0]), self.generate_expr(&call.args[1])); }
-                            if prop == "random" { return format!("cp_math_random()"); }
+                            if prop == "abs" {
+                                return format!("@abs({})", self.generate_expr(&call.args[0]));
+                            }
+                            if prop == "ceil" {
+                                return format!("@ceil({})", self.generate_expr(&call.args[0]));
+                            }
+                            if prop == "floor" {
+                                return format!("@floor({})", self.generate_expr(&call.args[0]));
+                            }
+                            if prop == "round" {
+                                return format!("@round({})", self.generate_expr(&call.args[0]));
+                            }
+                            if prop == "trunc" {
+                                return format!("@trunc({})", self.generate_expr(&call.args[0]));
+                            }
+                            if prop == "max" {
+                                return format!(
+                                    "@max({}, {})",
+                                    self.generate_expr(&call.args[0]),
+                                    self.generate_expr(&call.args[1])
+                                );
+                            }
+                            if prop == "min" {
+                                return format!(
+                                    "@min({}, {})",
+                                    self.generate_expr(&call.args[0]),
+                                    self.generate_expr(&call.args[1])
+                                );
+                            }
+                            if prop == "sqrt" {
+                                return format!("@sqrt({})", self.generate_expr(&call.args[0]));
+                            }
+                            if prop == "sin" {
+                                return format!("@sin({})", self.generate_expr(&call.args[0]));
+                            }
+                            if prop == "cos" {
+                                return format!("@cos({})", self.generate_expr(&call.args[0]));
+                            }
+                            if prop == "tan" {
+                                return format!("@tan({})", self.generate_expr(&call.args[0]));
+                            }
+                            if prop == "exp" {
+                                return format!("@exp({})", self.generate_expr(&call.args[0]));
+                            }
+                            if prop == "log" {
+                                return format!("@log({})", self.generate_expr(&call.args[0]));
+                            }
+                            if prop == "log10" {
+                                return format!("@log10({})", self.generate_expr(&call.args[0]));
+                            }
+                            if prop == "log2" {
+                                return format!("@log2({})", self.generate_expr(&call.args[0]));
+                            }
+                            if prop == "pow" {
+                                return format!(
+                                    "@import(\"std\").math.pow(f32, {}, {})",
+                                    self.generate_expr(&call.args[0]),
+                                    self.generate_expr(&call.args[1])
+                                );
+                            }
+                            if prop == "asin" {
+                                return format!(
+                                    "@import(\"std\").math.asin({})",
+                                    self.generate_expr(&call.args[0])
+                                );
+                            }
+                            if prop == "acos" {
+                                return format!(
+                                    "@import(\"std\").math.acos({})",
+                                    self.generate_expr(&call.args[0])
+                                );
+                            }
+                            if prop == "atan" {
+                                return format!(
+                                    "@import(\"std\").math.atan({})",
+                                    self.generate_expr(&call.args[0])
+                                );
+                            }
+                            if prop == "atan2" {
+                                return format!(
+                                    "@import(\"std\").math.atan2({}, {})",
+                                    self.generate_expr(&call.args[0]),
+                                    self.generate_expr(&call.args[1])
+                                );
+                            }
+                            if prop == "random" {
+                                return "cp_math_random()".to_string();
+                            }
+                        }
+
+                        // 1. Handle `super.method(...)` in single-inheritance subclass
+                        if id.sym == "super" {
+                            let c_name = self.current_class_name.clone().expect(
+                                "CP Compile Error: 'super' can only be used inside a class method",
+                            );
+                            let super_method_name = format!("__super_{}", mem.prop.sym);
+                            if let Some((_params, _ret_ty, target_recv_mode)) =
+                                self.lookup_method(&c_name, &super_method_name)
+                            {
+                                if self.moved_vars.contains("this") || self.moved_vars.contains("_")
+                                {
+                                    panic!("CP Compile Error: Use of moved value '_'");
+                                }
+                                match target_recv_mode {
+                                    ReceiverMode::Mut => {
+                                        if self.current_receiver_mode == ReceiverMode::ReadOnly {
+                                            panic!(
+                                                "CP Compile Error: Cannot call mutable parent method 'super.{}()' from a read-only method (add 'mut _' as first parameter)",
+                                                mem.prop.sym
+                                            );
+                                        }
+                                        self.check_borrow_conflict("this", true);
+                                        self.check_borrow_conflict("_", true);
+                                    }
+                                    ReceiverMode::Move => {
+                                        if self.current_receiver_mode != ReceiverMode::Move {
+                                            panic!(
+                                                "CP Compile Error: Cannot call consuming parent method 'super.{}()' from a non-move method (add 'move _' as first parameter)",
+                                                mem.prop.sym
+                                            );
+                                        }
+                                        self.check_active_borrows_before_move("this");
+                                        self.check_active_borrows_before_move("_");
+                                    }
+                                    ReceiverMode::ReadOnly => {
+                                        self.check_borrow_conflict("this", false);
+                                        self.check_borrow_conflict("_", false);
+                                    }
+                                    ReceiverMode::Static => {}
+                                }
+                                let mut args = String::new();
+                                for (idx, arg) in call.args.iter().enumerate() {
+                                    args.push_str(&self.generate_expr(arg));
+                                    if idx < call.args.len() - 1 {
+                                        args.push_str(", ");
+                                    }
+                                }
+                                let self_str = if self.is_state_machine {
+                                    "ctx.self"
+                                } else {
+                                    "self"
+                                };
+                                if target_recv_mode == ReceiverMode::Move {
+                                    self.moved_vars.insert("this".to_string());
+                                    self.moved_vars.insert("_".to_string());
+                                    if !self.is_state_machine {
+                                        return format!(
+                                            "(blk: {{ __self_moved = true; break :blk {}.{}({}); }})",
+                                            self_str, super_method_name, args
+                                        );
+                                    }
+                                }
+                                return format!("{}.{}({})", self_str, super_method_name, args);
+                            } else {
+                                panic!(
+                                    "CP Compile Error: Parent method 'super.{}()' not found in class '{}'",
+                                    mem.prop.sym, c_name
+                                );
+                            }
+                        }
+
+                        // 2. Handle `_.method(...)` / `this.method(...)` or `obj.method(...)`
+                        if let Some(type_name) = self.resolve_var_type_name(&id.sym) {
+                            if let Some((params, _ret_ty, target_recv_mode)) =
+                                self.lookup_method(&type_name, &mem.prop.sym)
+                            {
+                                let is_self_recv = id.sym == "this" || id.sym == "_";
+                                if is_self_recv {
+                                    if self.moved_vars.contains("this")
+                                        || self.moved_vars.contains("_")
+                                    {
+                                        panic!(
+                                            "CP Compile Error: Use of moved value '{}'",
+                                            id.sym
+                                        );
+                                    }
+                                    match target_recv_mode {
+                                        ReceiverMode::Mut => {
+                                            if self.current_receiver_mode == ReceiverMode::ReadOnly
+                                            {
+                                                panic!(
+                                                    "CP Compile Error: Cannot call mutable method '{}.{}()' inside a read-only method (add 'mut _' as first parameter)",
+                                                    id.sym, mem.prop.sym
+                                                );
+                                            }
+                                            self.check_borrow_conflict("this", true);
+                                            self.check_borrow_conflict("_", true);
+                                        }
+                                        ReceiverMode::Move => {
+                                            if self.current_receiver_mode != ReceiverMode::Move {
+                                                panic!(
+                                                    "CP Compile Error: Cannot call consuming 'move _' method '{}.{}()' inside a non-move method (add 'move _' as first parameter)",
+                                                    id.sym, mem.prop.sym
+                                                );
+                                            }
+                                            self.check_active_borrows_before_move("this");
+                                            self.check_active_borrows_before_move("_");
+                                        }
+                                        ReceiverMode::ReadOnly => {
+                                            self.check_borrow_conflict("this", false);
+                                            self.check_borrow_conflict("_", false);
+                                        }
+                                        ReceiverMode::Static => {}
+                                    }
+                                } else {
+                                    if self.moved_vars.contains(&id.sym) {
+                                        panic!(
+                                            "CP Compile Error: Use of moved value '{}'",
+                                            id.sym
+                                        );
+                                    }
+                                    match target_recv_mode {
+                                        ReceiverMode::Mut => {
+                                            if let Some((_, is_mut)) =
+                                                self.var_borrow_sources.get(&id.sym)
+                                            {
+                                                if !*is_mut {
+                                                    panic!(
+                                                        "CP Compile Error: Cannot call mutable method '{}()' on read-only borrow '{}'",
+                                                        mem.prop.sym, id.sym
+                                                    );
+                                                }
+                                            } else if self.current_fn_params.contains(&id.sym)
+                                                && !self.mutable_fn_params.contains(&id.sym)
+                                            {
+                                                panic!(
+                                                    "CP Compile Error: Cannot call mutable method '{}()' on read-only parameter '{}' (mark parameter as 'mut {}')",
+                                                    mem.prop.sym, id.sym, id.sym
+                                                );
+                                            }
+                                            self.check_borrow_conflict(&id.sym, true);
+                                        }
+                                        ReceiverMode::Move => {
+                                            if self.var_borrow_sources.contains_key(&id.sym) {
+                                                panic!(
+                                                    "CP Compile Error: Cannot call consuming 'move _' method '{}()' on borrowed reference '{}'",
+                                                    mem.prop.sym, id.sym
+                                                );
+                                            }
+                                            if self.current_fn_params.contains(&id.sym)
+                                                && !self.move_fn_params.contains(&id.sym)
+                                            {
+                                                panic!(
+                                                    "CP Compile Error: Cannot call consuming 'move _' method '{}()' on borrowed parameter '{}' (mark parameter as 'move {}')",
+                                                    mem.prop.sym, id.sym, id.sym
+                                                );
+                                            }
+                                            self.check_active_borrows_before_move(&id.sym);
+                                        }
+                                        ReceiverMode::ReadOnly => {
+                                            self.check_borrow_conflict(&id.sym, false);
+                                        }
+                                        ReceiverMode::Static => {}
+                                    }
+                                }
+
+                                let non_recv_params: Vec<Param> = params
+                                    .into_iter()
+                                    .filter(|p| p.ident.sym != "this" && p.ident.sym != "_")
+                                    .collect();
+                                let obj_code = self.generate_expr(&mem.obj);
+                                let mut args = String::new();
+                                for (idx, arg) in call.args.iter().enumerate() {
+                                    let mut arg_is_move_param = false;
+                                    if idx < non_recv_params.len() {
+                                        let param = &non_recv_params[idx];
+                                        if let Type::Ref(t_id) = &param.ty {
+                                            if self.trait_defs.contains_key(&t_id.sym) {
+                                                if let Expr::Ident(arg_id) = arg {
+                                                    if let Some(arg_cls) =
+                                                        self.resolve_var_type_name(&arg_id.sym)
+                                                    {
+                                                        let implements = self
+                                                            .class_defs
+                                                            .get(&arg_cls)
+                                                            .map_or(false, |c| {
+                                                                c.implements
+                                                                    .iter()
+                                                                    .any(|i| i.sym == t_id.sym)
+                                                            });
+                                                        if !implements {
+                                                            panic!(
+                                                                "CP Compile Error: Type '{}' does not implement trait '{}'",
+                                                                arg_cls, t_id.sym
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if let Expr::Ident(arg_id) = arg {
+                                            if param.is_mut {
+                                                if let Some((_, is_m)) =
+                                                    self.var_borrow_sources.get(&arg_id.sym)
+                                                {
+                                                    if !*is_m {
+                                                        panic!(
+                                                            "CP Compile Error: Cannot pass read-only borrow '{}' to mutable parameter '{}'",
+                                                            arg_id.sym, param.ident.sym
+                                                        );
+                                                    }
+                                                } else if self.current_fn_params.contains(&arg_id.sym)
+                                                    && !self.mutable_fn_params.contains(&arg_id.sym)
+                                                {
+                                                    panic!(
+                                                        "CP Compile Error: Cannot pass read-only parameter '{}' to mutable parameter '{}'",
+                                                        arg_id.sym, param.ident.sym
+                                                    );
+                                                }
+                                                self.check_borrow_conflict(&arg_id.sym, true);
+                                            } else if param.is_move {
+                                                if self.var_borrow_sources.contains_key(&arg_id.sym)
+                                                    || (self.current_fn_params.contains(&arg_id.sym)
+                                                        && !self
+                                                            .move_fn_params
+                                                            .contains(&arg_id.sym))
+                                                {
+                                                    panic!(
+                                                        "CP Compile Error: Cannot move borrowed reference or read-only parameter '{}' into consuming parameter '{}'",
+                                                        arg_id.sym, param.ident.sym
+                                                    );
+                                                }
+                                                self.check_active_borrows_before_move(&arg_id.sym);
+                                                arg_is_move_param = true;
+                                            } else {
+                                                self.check_borrow_conflict(&arg_id.sym, false);
+                                            }
+                                        }
+                                    }
+                                    let gen_arg = self.generate_expr(arg);
+                                    if arg_is_move_param {
+                                        if let Expr::Ident(arg_id) = arg {
+                                            self.moved_vars.insert(arg_id.sym.clone());
+                                            if !self.is_state_machine {
+                                                args.push_str(&format!(
+                                                    "(blk: {{ __{}_moved = true; break :blk {}; }})",
+                                                    arg_id.sym, gen_arg
+                                                ));
+                                            } else {
+                                                args.push_str(&gen_arg);
+                                            }
+                                        } else {
+                                            args.push_str(&gen_arg);
+                                        }
+                                    } else {
+                                        args.push_str(&gen_arg);
+                                    }
+                                    if idx < call.args.len() - 1 {
+                                        args.push_str(", ");
+                                    }
+                                }
+
+                                if target_recv_mode == ReceiverMode::Move {
+                                    if is_self_recv {
+                                        self.moved_vars.insert("this".to_string());
+                                        self.moved_vars.insert("_".to_string());
+                                        if !self.is_state_machine {
+                                            return format!(
+                                                "(blk: {{ __self_moved = true; break :blk {}.{}({}); }})",
+                                                obj_code, mem.prop.sym, args
+                                            );
+                                        }
+                                    } else {
+                                        self.moved_vars.insert(id.sym.clone());
+                                        if !self.is_state_machine {
+                                            return format!(
+                                                "(blk: {{ __{}_moved = true; break :blk {}.{}({}); }})",
+                                                id.sym, obj_code, mem.prop.sym, args
+                                            );
+                                        }
+                                    }
+                                }
+                                return format!("{}.{}({})", obj_code, mem.prop.sym, args);
+                            }
                         }
                     }
                 }
 
-                let callee = match &*call.callee { Expr::Ident(ident) => ident.sym.clone(), _ => self.generate_expr(&call.callee) };
+                // 3. Check omitted-receiver sibling method call inside a class method (`helper()` -> `self.helper()`)
+                if let Expr::Ident(ident) = &*call.callee {
+                    if let Some(c_name) = self.current_class_name.clone() {
+                        if self.current_receiver_mode != ReceiverMode::Static
+                            && !self.locals.contains_key(&ident.sym)
+                            && !self.fn_sigs.contains_key(&ident.sym)
+                        {
+                            if let Some((params, _ret_ty, target_recv_mode)) =
+                                self.lookup_method(&c_name, &ident.sym)
+                            {
+                                if self.moved_vars.contains("this") || self.moved_vars.contains("_")
+                                {
+                                    panic!("CP Compile Error: Use of moved value '_'");
+                                }
+                                match target_recv_mode {
+                                    ReceiverMode::Mut => {
+                                        if self.current_receiver_mode == ReceiverMode::ReadOnly {
+                                            panic!(
+                                                "CP Compile Error: Cannot call mutable method '{}()' inside a read-only method (add 'mut _' as first parameter)",
+                                                ident.sym
+                                            );
+                                        }
+                                        self.check_borrow_conflict("this", true);
+                                        self.check_borrow_conflict("_", true);
+                                    }
+                                    ReceiverMode::Move => {
+                                        if self.current_receiver_mode != ReceiverMode::Move {
+                                            panic!(
+                                                "CP Compile Error: Cannot call consuming 'move _' method '{}()' inside a non-move method (add 'move _' as first parameter)",
+                                                ident.sym
+                                            );
+                                        }
+                                        self.check_active_borrows_before_move("this");
+                                        self.check_active_borrows_before_move("_");
+                                    }
+                                    ReceiverMode::ReadOnly => {
+                                        self.check_borrow_conflict("this", false);
+                                        self.check_borrow_conflict("_", false);
+                                    }
+                                    ReceiverMode::Static => {}
+                                }
+                                let non_recv_params: Vec<Param> = params
+                                    .into_iter()
+                                    .filter(|p| p.ident.sym != "this" && p.ident.sym != "_")
+                                    .collect();
+                                let mut args = String::new();
+                                for (idx, arg) in call.args.iter().enumerate() {
+                                    let mut arg_is_move_param = false;
+                                    if idx < non_recv_params.len() {
+                                        let param = &non_recv_params[idx];
+                                        if let Expr::Ident(arg_id) = arg {
+                                            if param.is_mut {
+                                                self.check_borrow_conflict(&arg_id.sym, true);
+                                            } else if param.is_move {
+                                                self.check_active_borrows_before_move(&arg_id.sym);
+                                                arg_is_move_param = true;
+                                            } else {
+                                                self.check_borrow_conflict(&arg_id.sym, false);
+                                            }
+                                        }
+                                    }
+                                    let gen_arg = self.generate_expr(arg);
+                                    if arg_is_move_param {
+                                        if let Expr::Ident(arg_id) = arg {
+                                            self.moved_vars.insert(arg_id.sym.clone());
+                                            if !self.is_state_machine {
+                                                args.push_str(&format!(
+                                                    "(blk: {{ __{}_moved = true; break :blk {}; }})",
+                                                    arg_id.sym, gen_arg
+                                                ));
+                                            } else {
+                                                args.push_str(&gen_arg);
+                                            }
+                                        } else {
+                                            args.push_str(&gen_arg);
+                                        }
+                                    } else {
+                                        args.push_str(&gen_arg);
+                                    }
+                                    if idx < call.args.len() - 1 {
+                                        args.push_str(", ");
+                                    }
+                                }
+                                if target_recv_mode == ReceiverMode::Static {
+                                    return format!("{}.{}({})", c_name, ident.sym, args);
+                                }
+                                let self_str = if self.is_state_machine {
+                                    "ctx.self"
+                                } else {
+                                    "self"
+                                };
+                                if target_recv_mode == ReceiverMode::Move {
+                                    self.moved_vars.insert("this".to_string());
+                                    self.moved_vars.insert("_".to_string());
+                                    if !self.is_state_machine {
+                                        return format!(
+                                            "(blk: {{ __self_moved = true; break :blk {}.{}({}); }})",
+                                            self_str, ident.sym, args
+                                        );
+                                    }
+                                }
+                                return format!("{}.{}({})", self_str, ident.sym, args);
+                            }
+                        }
+                    }
+                }
+
+                let callee = match &*call.callee {
+                    Expr::Ident(ident) => ident.sym.clone(),
+                    _ => self.generate_expr(&call.callee),
+                };
                 if callee == "test" && call.args.len() == 2 {
                     let name = self.generate_expr(&call.args[0]);
                     let lambda = self.generate_expr(&call.args[1]);
@@ -1741,30 +3024,176 @@ impl Codegen {
                         arg
                     );
                 }
-                let mut args = String::new(); for (idx, arg) in call.args.iter().enumerate() { args.push_str(&self.generate_expr(arg)); if idx < call.args.len() - 1 { args.push_str(", "); } } format!("{}({})", callee, args)
-            },
-            Expr::Question(inner) => { let exp = self.generate_expr(inner); format!("try {}", exp) },
-            Expr::New(call) => { 
-                let class_name = match &*call.callee { Expr::Ident(id) => id.sym.clone(), _ => "Unknown".to_string() };
+
+                // 4. Free function call: check Trait conformance and `mut` / `move` parameter modifiers
+                let fn_sig_opt = self.fn_sigs.get(&callee).cloned();
                 let mut args = String::new();
                 for (idx, arg) in call.args.iter().enumerate() {
-                    args.push_str(&self.generate_expr(arg));
-                    if idx < call.args.len() - 1 { args.push_str(", "); }
+                    let mut arg_is_move_param = false;
+                    if let Some(sig) = &fn_sig_opt {
+                        if idx < sig.params.len() {
+                            let param = &sig.params[idx];
+                            if let Type::Ref(t_id) = &param.ty {
+                                if self.trait_defs.contains_key(&t_id.sym) {
+                                    let inner_arg = match arg {
+                                        Expr::Move(inner) | Expr::Borrow(inner, _) => &**inner,
+                                        other => other,
+                                    };
+                                    if let Expr::Ident(arg_id) = inner_arg {
+                                        if let Some(arg_cls) =
+                                            self.resolve_var_type_name(&arg_id.sym)
+                                        {
+                                            let implements = self
+                                                .class_defs
+                                                .get(&arg_cls)
+                                                .map_or(false, |c| {
+                                                    c.implements
+                                                        .iter()
+                                                        .any(|i| i.sym == t_id.sym)
+                                                });
+                                            if !implements {
+                                                panic!(
+                                                    "CP Compile Error: Type '{}' does not implement trait '{}'",
+                                                    arg_cls, t_id.sym
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if let Expr::Ident(arg_id) = arg {
+                                if param.is_mut {
+                                    if let Some((_, is_m)) = self.var_borrow_sources.get(&arg_id.sym)
+                                    {
+                                        if !*is_m {
+                                            panic!(
+                                                "CP Compile Error: Cannot pass read-only borrow '{}' to mutable parameter '{}'",
+                                                arg_id.sym, param.ident.sym
+                                            );
+                                        }
+                                    } else if self.current_fn_params.contains(&arg_id.sym)
+                                        && !self.mutable_fn_params.contains(&arg_id.sym)
+                                    {
+                                        panic!(
+                                            "CP Compile Error: Cannot pass read-only parameter '{}' to mutable parameter '{}'",
+                                            arg_id.sym, param.ident.sym
+                                        );
+                                    }
+                                    self.check_borrow_conflict(&arg_id.sym, true);
+                                } else if param.is_move {
+                                    if self.var_borrow_sources.contains_key(&arg_id.sym)
+                                        || (self.current_fn_params.contains(&arg_id.sym)
+                                            && !self.move_fn_params.contains(&arg_id.sym))
+                                    {
+                                        panic!(
+                                            "CP Compile Error: Cannot move borrowed reference or read-only parameter '{}' into consuming parameter '{}'",
+                                            arg_id.sym, param.ident.sym
+                                        );
+                                    }
+                                    self.check_active_borrows_before_move(&arg_id.sym);
+                                    arg_is_move_param = true;
+                                } else {
+                                    self.check_borrow_conflict(&arg_id.sym, false);
+                                }
+                            }
+                        }
+                    }
+                    let gen_arg = self.generate_expr(arg);
+                    if arg_is_move_param {
+                        if let Expr::Ident(arg_id) = arg {
+                            self.moved_vars.insert(arg_id.sym.clone());
+                            if !self.is_state_machine {
+                                args.push_str(&format!(
+                                    "(blk: {{ __{}_moved = true; break :blk {}; }})",
+                                    arg_id.sym, gen_arg
+                                ));
+                            } else {
+                                args.push_str(&gen_arg);
+                            }
+                        } else {
+                            args.push_str(&gen_arg);
+                        }
+                    } else {
+                        args.push_str(&gen_arg);
+                    }
+                    if idx < call.args.len() - 1 {
+                        args.push_str(", ");
+                    }
+                }
+                format!("{}({})", callee, args)
+            }
+            Expr::Question(inner) => {
+                let exp = self.generate_expr(inner);
+                format!("try {}", exp)
+            }
+            Expr::New(call) => {
+                let class_name = match &*call.callee {
+                    Expr::Ident(id) => id.sym.clone(),
+                    _ => "Unknown".to_string(),
+                };
+                let init_params: Vec<Param> = self
+                    .lookup_method(&class_name, "init")
+                    .map(|(p, _, _)| {
+                        p.into_iter()
+                            .filter(|param| param.ident.sym != "this" && param.ident.sym != "_")
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut args = String::new();
+                for (idx, arg) in call.args.iter().enumerate() {
+                    let mut arg_is_move_param = false;
+                    if idx < init_params.len() {
+                        let param = &init_params[idx];
+                        if let Expr::Ident(arg_id) = arg {
+                            if param.is_mut {
+                                self.check_borrow_conflict(&arg_id.sym, true);
+                            } else if param.is_move {
+                                self.check_active_borrows_before_move(&arg_id.sym);
+                                arg_is_move_param = true;
+                            } else {
+                                self.check_borrow_conflict(&arg_id.sym, false);
+                            }
+                        }
+                    }
+                    let gen_arg = self.generate_expr(arg);
+                    if arg_is_move_param {
+                        if let Expr::Ident(arg_id) = arg {
+                            self.moved_vars.insert(arg_id.sym.clone());
+                            if !self.is_state_machine {
+                                args.push_str(&format!(
+                                    "(blk_arg: {{ __{}_moved = true; break :blk_arg {}; }})",
+                                    arg_id.sym, gen_arg
+                                ));
+                            } else {
+                                args.push_str(&gen_arg);
+                            }
+                        } else {
+                            args.push_str(&gen_arg);
+                        }
+                    } else {
+                        args.push_str(&gen_arg);
+                    }
+                    if idx < call.args.len() - 1 {
+                        args.push_str(", ");
+                    }
                 }
                 format!("(blk: {{ const _obj = {}._create(std.heap.page_allocator) catch unreachable; if (@hasDecl({}, \"init\")) {{ const RType = @typeInfo(@TypeOf({}.init)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _obj.init({}) catch unreachable; }} else {{ _obj.init({}); }} }} break :blk _obj; }})", class_name, class_name, class_name, args, args)
-            },
+            }
             Expr::Await(inner) => {
                 if let Expr::Call(call) = &**inner {
                     if self.is_state_machine {
-                        let (callee_init, callee_fn) = match &*call.callee { 
-                            Expr::Ident(id) => (id.sym.clone(), id.sym.clone()), 
+                        let (callee_init, callee_fn) = match &*call.callee {
+                            Expr::Ident(id) => (id.sym.clone(), id.sym.clone()),
                             Expr::Member(mem) => {
                                 let obj_type = self.infer_zig_type(None, Some(&mem.obj));
                                 let base = obj_type.trim_start_matches('*');
                                 let prop = &mem.prop;
-                                (format!("{}.{}_{}", base, base, prop.sym), format!("{}.{}", base, prop.sym))
-                            },
-                            _ => ("Unknown".to_string(), "Unknown".to_string()) 
+                                (
+                                    format!("{}.{}_{}", base, base, prop.sym),
+                                    format!("{}.{}", base, prop.sym),
+                                )
+                            }
+                            _ => ("Unknown".to_string(), "Unknown".to_string()),
                         };
                         let mut args_str = String::new();
                         if let Expr::Member(mem) = &*call.callee {
@@ -1786,7 +3215,7 @@ impl Codegen {
                         );
                         self.write_to_case(&logic);
                         self.next_state();
-                        
+
                         let inferred = self.infer_zig_type(None, Some(inner));
                         if inferred == "void" {
                             "(blk: { break :blk {}; })".to_string()
@@ -1795,9 +3224,15 @@ impl Codegen {
                         } else if inferred == "i32" || inferred == "usize" || inferred == "u32" {
                             "@intCast(ctx.await_result.?.int)".to_string()
                         } else if inferred.starts_with('*') {
-                            format!("@as({}, @ptrCast(@alignCast(ctx.await_result.?.any)))", inferred)
+                            format!(
+                                "@as({}, @ptrCast(@alignCast(ctx.await_result.?.any)))",
+                                inferred
+                            )
                         } else if inferred.starts_with("struct {") {
-                            format!("@as(*{}, @ptrCast(@alignCast(ctx.await_result.?.any))).*", inferred)
+                            format!(
+                                "@as(*{}, @ptrCast(@alignCast(ctx.await_result.?.any))).*",
+                                inferred
+                            )
                         } else {
                             "ctx.await_result".to_string()
                         }
@@ -1807,20 +3242,44 @@ impl Codegen {
                 } else {
                     self.generate_expr(inner)
                 }
-            },
-            Expr::Member(member) => { 
+            }
+            Expr::Member(member) => {
                 if let Expr::Ident(id) = &*member.obj {
                     if id.sym == "Math" {
-                        if member.prop.sym == "PI" { return "@import(\"std\").math.pi".to_string(); }
-                        if member.prop.sym == "E" { return "@import(\"std\").math.e".to_string(); }
+                        if member.prop.sym == "PI" {
+                            return "@import(\"std\").math.pi".to_string();
+                        }
+                        if member.prop.sym == "E" {
+                            return "@import(\"std\").math.e".to_string();
+                        }
                     }
                 }
-                let obj = self.generate_expr(&member.obj); let prop = match member.prop.sym.as_str() { "length" => "len", _ => &member.prop.sym }; format!("{}.{}", obj, prop) 
-            },
+                let obj = self.generate_expr(&member.obj);
+                let prop = match member.prop.sym.as_str() {
+                    "length" => "len",
+                    _ => &member.prop.sym,
+                };
+                format!("{}.{}", obj, prop)
+            }
             Expr::Builtin(call) => match call.name.as_str() {
-                "@print" => { let fmt = self.generate_expr(&call.args[0]); let mut args = String::from(".{ "); for idx in 1..call.args.len() { args.push_str(&self.generate_expr(&call.args[idx])); if idx < call.args.len() - 1 { args.push_str(", "); } } args.push_str(" }"); format!("std.debug.print({} ++ \"\\n\", {})", fmt, args) },
-                "@spawn" => { 
-                    let callee = match &call.args[0] { Expr::Ident(id) => id.sym.clone(), Expr::Arrow(_) => self.generate_expr(&call.args[0]), _ => "Unknown".to_string() }; 
+                "@print" => {
+                    let fmt = self.generate_expr(&call.args[0]);
+                    let mut args = String::from(".{ ");
+                    for idx in 1..call.args.len() {
+                        args.push_str(&self.generate_expr(&call.args[idx]));
+                        if idx < call.args.len() - 1 {
+                            args.push_str(", ");
+                        }
+                    }
+                    args.push_str(" }");
+                    format!("std.debug.print({} ++ \"\\n\", {})", fmt, args)
+                }
+                "@spawn" => {
+                    let callee = match &call.args[0] {
+                        Expr::Ident(id) => id.sym.clone(),
+                        Expr::Arrow(_) => self.generate_expr(&call.args[0]),
+                        _ => "Unknown".to_string(),
+                    };
                     let mut captures = String::new();
                     if let Some(cv) = self.captured_vars.get(&callee) {
                         for (r, _) in cv {
@@ -1830,27 +3289,89 @@ impl Codegen {
                             if self.var_borrow_sources.contains_key(r) {
                                 panic!("CP Compile Error: Temporary borrow '{}' cannot be captured across Actor @spawn boundary (use move or Shared<T>)", r);
                             }
-                            let src = if self.is_state_machine { format!("ctx.{}", r) } else { r.clone() };
+                            let src = if self.is_state_machine {
+                                format!("ctx.{}", r)
+                            } else {
+                                r.clone()
+                            };
                             captures.push_str(&format!("sub_ctx.{} = {}; ", r, src));
                         }
                     }
-                    format!("(blk: {{ const arena_ptr = std.heap.page_allocator.create(std.heap.ArenaAllocator) catch unreachable; arena_ptr.* = std.heap.ArenaAllocator.init(std.heap.page_allocator); const sub_ctx = arena_ptr.allocator().create({0}_Context) catch unreachable; sub_ctx.* = undefined; sub_ctx.pc = 0; sub_ctx.arena = arena_ptr; sub_ctx._parent = null; sub_ctx._parent_fn = null; {1} const p = PID{{ .node_id = current_node_id, .local_id = next_local_id }}; next_local_id += 1; sub_ctx._self = p; schedule(@ptrCast(&{0}), @ptrCast(sub_ctx)); break :blk p; }})", callee, captures) 
-                },
-                "@net_accept_async" => { if !self.is_state_machine { return "0".to_string(); } let handle = self.generate_expr(&call.args[0]); let next_pc = self.pc_counter + 1; let logic = if self.is_beam_mode { "unreachable;".to_string() } else { format!("const h: std.posix.fd_t = @intCast({}); const rc = std.os.linux.accept4(h, null, null, std.posix.SOCK.NONBLOCK | std.posix.SOCK.CLOEXEC); const err = std.posix.errno(rc); if (err == .SUCCESS) {{ ctx.received_msg = .{{ .int = @intCast(rc) }}; ctx.pc = {}; continue; }} else if (err == .AGAIN or err == .WOULDBLOCK) {{ register_fd(h, @ptrCast(&{}), @ptrCast(ctx), std.posix.POLL.IN); return; }} else {{ schedule(@ptrCast(&{}), @ptrCast(ctx)); return; }}", handle, next_pc, self.current_zig_fn_name, self.current_zig_fn_name) }; self.write_to_case(&logic); self.next_state(); "ctx.received_msg.?.int".to_string() },
-                "@net_read_async" => { if !self.is_state_machine { return "0".to_string(); } let handle = self.generate_expr(&call.args[0]); let next_pc = self.pc_counter + 1; let logic = if self.is_beam_mode { "unreachable;".to_string() } else { format!("const h: std.posix.fd_t = @intCast({}); var buf = ctx.arena.?.allocator().alloc(u8, 4096) catch unreachable; if (std.posix.read(h, buf)) |bytes_read| {{ if (bytes_read > 0) {{ ctx.received_msg = .{{ .string = buf[0..bytes_read] }}; ctx.pc = {}; continue; }} else {{ schedule(@ptrCast(&{}), @ptrCast(ctx)); return; }} }} else |err| switch (err) {{ error.WouldBlock => {{ register_fd(h, @ptrCast(&{}), @ptrCast(ctx), std.posix.POLL.IN); return; }}, else => {{ schedule(@ptrCast(&{}), @ptrCast(ctx)); return; }}, }}", handle, next_pc, self.current_zig_fn_name, self.current_zig_fn_name, self.current_zig_fn_name) }; self.write_to_case(&logic); self.next_state(); "ctx.received_msg.?.string".to_string() },
-                "@net_write_async" => { if !self.is_state_machine { return "0".to_string(); } let handle = self.generate_expr(&call.args[0]); let data = self.generate_expr(&call.args[1]); let next_pc = self.pc_counter + 1; let logic = if self.is_beam_mode { "unreachable;".to_string() } else { format!("const h: std.posix.fd_t = @intCast({}); const data_slice: []const u8 = {}; const rc = std.os.linux.write(h, data_slice.ptr, data_slice.len); const err = std.posix.errno(rc); if (err == .SUCCESS) {{ ctx.received_msg = .{{ .int = @intCast(rc) }}; ctx.pc = {}; continue; }} else if (err == .AGAIN or err == .WOULDBLOCK) {{ register_fd(h, @ptrCast(&{}), @ptrCast(ctx), std.posix.POLL.OUT); return; }} else {{ schedule(@ptrCast(&{}), @ptrCast(ctx)); return; }}", handle, data, next_pc, self.current_zig_fn_name, self.current_zig_fn_name) }; self.write_to_case(&logic); self.next_state(); "ctx.received_msg.?.int".to_string() },
-                "@fs_read_async" => { if !self.is_state_machine { return "0".to_string(); } let path = self.generate_expr(&call.args[0]); let next_pc = self.pc_counter + 1; let logic = if self.is_beam_mode { format!("const io_msg = try beam.Beam.makeFastMessage(ctx.self.env.?, 99990001, @intFromEnum(beam.SystemAction.FS_READ), {}); ctx.pc = {}; const ctx_bin = try beam.Beam.makeBinary(ctx.self.env.?, std.mem.asBytes(ctx)); return beam.Beam.makeTuple(ctx.self.env.?, &[_]beam.Term{{ beam.Beam.makeAtom(ctx.self.env.?, \"yield\"), io_msg, ctx_bin }});", path, next_pc) } else { format!("const f = std.fs.cwd().openFile({}, .{{}}) catch unreachable; defer f.close(); const data = f.readToEndAlloc(ctx.arena.?.allocator(), 10 * 1024 * 1024) catch unreachable; ctx.received_msg = .{{ .string = data }}; ctx.pc = {}; continue;", path, next_pc) }; self.write_to_case(&logic); self.next_state(); "ctx.received_msg.?.string".to_string() },
-                
+                    format!("(blk: {{ const arena_ptr = std.heap.page_allocator.create(std.heap.ArenaAllocator) catch unreachable; arena_ptr.* = std.heap.ArenaAllocator.init(std.heap.page_allocator); const sub_ctx = arena_ptr.allocator().create({0}_Context) catch unreachable; sub_ctx.* = undefined; sub_ctx.pc = 0; sub_ctx.arena = arena_ptr; sub_ctx._parent = null; sub_ctx._parent_fn = null; {1} const p = PID{{ .node_id = current_node_id, .local_id = next_local_id }}; next_local_id += 1; sub_ctx._self = p; schedule(@ptrCast(&{0}), @ptrCast(sub_ctx)); break :blk p; }})", callee, captures)
+                }
+                "@net_accept_async" => {
+                    if !self.is_state_machine {
+                        return "0".to_string();
+                    }
+                    let handle = self.generate_expr(&call.args[0]);
+                    let next_pc = self.pc_counter + 1;
+                    let logic = if self.is_beam_mode {
+                        "unreachable;".to_string()
+                    } else {
+                        format!("const h: std.posix.fd_t = @intCast({}); const rc = std.os.linux.accept4(h, null, null, std.posix.SOCK.NONBLOCK | std.posix.SOCK.CLOEXEC); const err = std.posix.errno(rc); if (err == .SUCCESS) {{ ctx.received_msg = .{{ .int = @intCast(rc) }}; ctx.pc = {}; continue; }} else if (err == .AGAIN or err == .WOULDBLOCK) {{ register_fd(h, @ptrCast(&{}), @ptrCast(ctx), std.posix.POLL.IN); return; }} else {{ schedule(@ptrCast(&{}), @ptrCast(ctx)); return; }}", handle, next_pc, self.current_zig_fn_name, self.current_zig_fn_name)
+                    };
+                    self.write_to_case(&logic);
+                    self.next_state();
+                    "ctx.received_msg.?.int".to_string()
+                }
+                "@net_read_async" => {
+                    if !self.is_state_machine {
+                        return "0".to_string();
+                    }
+                    let handle = self.generate_expr(&call.args[0]);
+                    let next_pc = self.pc_counter + 1;
+                    let logic = if self.is_beam_mode {
+                        "unreachable;".to_string()
+                    } else {
+                        format!("const h: std.posix.fd_t = @intCast({}); var buf = ctx.arena.?.allocator().alloc(u8, 4096) catch unreachable; if (std.posix.read(h, buf)) |bytes_read| {{ if (bytes_read > 0) {{ ctx.received_msg = .{{ .string = buf[0..bytes_read] }}; ctx.pc = {}; continue; }} else {{ schedule(@ptrCast(&{}), @ptrCast(ctx)); return; }} }} else |err| switch (err) {{ error.WouldBlock => {{ register_fd(h, @ptrCast(&{}), @ptrCast(ctx), std.posix.POLL.IN); return; }}, else => {{ schedule(@ptrCast(&{}), @ptrCast(ctx)); return; }}, }}", handle, next_pc, self.current_zig_fn_name, self.current_zig_fn_name, self.current_zig_fn_name)
+                    };
+                    self.write_to_case(&logic);
+                    self.next_state();
+                    "ctx.received_msg.?.string".to_string()
+                }
+                "@net_write_async" => {
+                    if !self.is_state_machine {
+                        return "0".to_string();
+                    }
+                    let handle = self.generate_expr(&call.args[0]);
+                    let data = self.generate_expr(&call.args[1]);
+                    let next_pc = self.pc_counter + 1;
+                    let logic = if self.is_beam_mode {
+                        "unreachable;".to_string()
+                    } else {
+                        format!("const h: std.posix.fd_t = @intCast({}); const data_slice: []const u8 = {}; const rc = std.os.linux.write(h, data_slice.ptr, data_slice.len); const err = std.posix.errno(rc); if (err == .SUCCESS) {{ ctx.received_msg = .{{ .int = @intCast(rc) }}; ctx.pc = {}; continue; }} else if (err == .AGAIN or err == .WOULDBLOCK) {{ register_fd(h, @ptrCast(&{}), @ptrCast(ctx), std.posix.POLL.OUT); return; }} else {{ schedule(@ptrCast(&{}), @ptrCast(ctx)); return; }}", handle, data, next_pc, self.current_zig_fn_name, self.current_zig_fn_name)
+                    };
+                    self.write_to_case(&logic);
+                    self.next_state();
+                    "ctx.received_msg.?.int".to_string()
+                }
+                "@fs_read_async" => {
+                    if !self.is_state_machine {
+                        return "0".to_string();
+                    }
+                    let path = self.generate_expr(&call.args[0]);
+                    let next_pc = self.pc_counter + 1;
+                    let logic = if self.is_beam_mode {
+                        format!("const io_msg = try beam.Beam.makeFastMessage(ctx.self.env.?, 99990001, @intFromEnum(beam.SystemAction.FS_READ), {}); ctx.pc = {}; const ctx_bin = try beam.Beam.makeBinary(ctx.self.env.?, std.mem.asBytes(ctx)); return beam.Beam.makeTuple(ctx.self.env.?, &[_]beam.Term{{ beam.Beam.makeAtom(ctx.self.env.?, \"yield\"), io_msg, ctx_bin }});", path, next_pc)
+                    } else {
+                        format!("const f = std.fs.cwd().openFile({}, .{{}}) catch unreachable; defer f.close(); const data = f.readToEndAlloc(ctx.arena.?.allocator(), 10 * 1024 * 1024) catch unreachable; ctx.received_msg = .{{ .string = data }}; ctx.pc = {}; continue;", path, next_pc)
+                    };
+                    self.write_to_case(&logic);
+                    self.next_state();
+                    "ctx.received_msg.?.string".to_string()
+                }
                 "@net_listen" => {
                     let port = self.generate_expr(&call.args[0]);
                     format!("(blk: {{ const addr = @import(\"std\").Io.net.IpAddress.parse(\"127.0.0.1\", @intCast({})) catch unreachable; const _server = addr.listen(global_io, .{{}}) catch unreachable; break :blk @as(i32, @intCast(_server.socket.handle)); }})", port)
-                },
+                }
                 "@net_close" => {
                     let handle = self.generate_expr(&call.args[0]);
                     format!("(blk: {{ const h: std.posix.fd_t = @intCast({}); _ = @import(\"std\").os.linux.close(h); break :blk {{}}; }})", handle)
-                },
+                }
                 "@yield_to_beam" => {
-                    if !self.is_state_machine || !self.is_beam_mode { return "0".to_string(); }
+                    if !self.is_state_machine || !self.is_beam_mode {
+                        return "0".to_string();
+                    }
                     let action_id = self.generate_expr(&call.args[0]);
                     let payload = self.generate_expr(&call.args[1]);
                     let next_pc = self.pc_counter + 1;
@@ -1864,71 +3385,155 @@ impl Codegen {
                     self.write_to_case(&logic);
                     self.next_state();
                     "ctx.received_msg.?.string".to_string()
-                },
-
-                
-                "@print_err" => { let fmt = self.generate_expr(&call.args[0]); let mut args = String::from(".{ "); for idx in 1..call.args.len() { args.push_str(&self.generate_expr(&call.args[idx])); if idx < call.args.len() - 1 { args.push_str(", "); } } args.push_str(" }"); format!("std.debug.print({} ++ \"\\n\", {})", fmt, args) },
+                }
+                "@print_err" => {
+                    let fmt = self.generate_expr(&call.args[0]);
+                    let mut args = String::from(".{ ");
+                    for idx in 1..call.args.len() {
+                        args.push_str(&self.generate_expr(&call.args[idx]));
+                        if idx < call.args.len() - 1 {
+                            args.push_str(", ");
+                        }
+                    }
+                    args.push_str(" }");
+                    format!("std.debug.print({} ++ \"\\n\", {})", fmt, args)
+                }
                 "@io_write_stdout" => {
                     let fmt = self.generate_expr(&call.args[0]);
                     let mut args = String::from(".{ ");
-                    for idx in 1..call.args.len() { args.push_str(&self.generate_expr(&call.args[idx])); if idx < call.args.len() - 1 { args.push_str(", "); } }
+                    for idx in 1..call.args.len() {
+                        args.push_str(&self.generate_expr(&call.args[idx]));
+                        if idx < call.args.len() - 1 {
+                            args.push_str(", ");
+                        }
+                    }
                     args.push_str(" }");
                     format!("(blk: {{ const out = std.io.getStdOut().writer(); try out.print({} ++ \"\\n\", {}); break :blk {{}}; }})", fmt, args)
-                },
+                }
                 "@io_write_stderr" => {
                     let fmt = self.generate_expr(&call.args[0]);
                     let mut args = String::from(".{ ");
-                    for idx in 1..call.args.len() { args.push_str(&self.generate_expr(&call.args[idx])); if idx < call.args.len() - 1 { args.push_str(", "); } }
+                    for idx in 1..call.args.len() {
+                        args.push_str(&self.generate_expr(&call.args[idx]));
+                        if idx < call.args.len() - 1 {
+                            args.push_str(", ");
+                        }
+                    }
                     args.push_str(" }");
                     format!("(blk: {{ const err_w = std.io.getStdErr().writer(); try err_w.print({} ++ \"\\n\", {}); break :blk {{}}; }})", fmt, args)
-                },
+                }
                 "@io_read_stdin_line" => r#"(blk: { var buf: [1024]u8 = undefined; const line = (try std.io.getStdIn().reader().readUntilDelimiterOrEof(&buf, '\n')) orelse ""; break :blk try std.heap.page_allocator.dupe(u8, line); })"#.to_string(),
-
-                "@http_fetch" => { if !self.is_state_machine { return "0".to_string(); } let url = self.generate_expr(&call.args[0]); let next_pc = self.pc_counter + 1; let logic = if self.is_beam_mode { format!("const payload_bin = try beam.Beam.makeBinary(ctx.self.env.?, {}); const io_msg = try beam.Beam.makeFastMessage(ctx.self.env.?, 99990001, @intFromEnum(beam.SystemAction.HTTP_FETCH), payload_bin); ctx.pc = {}; const ctx_bin = try beam.Beam.makeBinary(ctx.self.env.?, std.mem.asBytes(ctx)); return beam.Beam.makeTuple(ctx.self.env.?, &[_]beam.Term{{ beam.Beam.makeAtom(ctx.self.env.?, \"yield\"), io_msg, ctx_bin }});", url, next_pc) } else { format!("ctx.received_msg = .{{ .string = \"Mock HTTP Res\" }}; ctx.pc = {}; continue;", next_pc) }; self.write_to_case(&logic); self.next_state(); "ctx.received_msg.?.string".to_string() },
-                "@fs_write_file" => { let p = self.generate_expr(&call.args[0]); let d = self.generate_expr(&call.args[1]); format!("(blk: {{ const file_out = @import(\"std\").Io.Dir.createFile(.cwd(), global_io, {}, .{{}}) catch unreachable; defer @import(\"std\").Io.File.close(file_out, global_io); @import(\"std\").Io.File.writeStreamingAll(file_out, global_io, {}) catch unreachable; break :blk {{}}; }})", p, d) },
-                "@fs_mkdir" => { let p = self.generate_expr(&call.args[0]); format!("(blk: {{ @import(\"std\").Io.Dir.createDirPath(.cwd(), global_io, {}) catch unreachable; break :blk {{}}; }})", p) },
-                                "@fs_stat_size" => { let p = self.generate_expr(&call.args[0]); format!("(blk: {{ const stat = @import(\"std\").Io.Dir.statFile(.cwd(), global_io, {}, .{{}}) catch unreachable; break :blk @as(i32, @intCast(stat.size)); }})", p) },
-                "@fs_is_dir" => { let p = self.generate_expr(&call.args[0]); format!("(blk: {{ const stat = @import(\"std\").Io.Dir.statFile(.cwd(), global_io, {}, .{{}}) catch unreachable; break :blk stat.kind == .directory; }})", p) },
-                "@fs_remove" => { let p = self.generate_expr(&call.args[0]); format!("(blk: {{ @import(\"std\").Io.Dir.deleteFile(.cwd(), global_io, {}) catch unreachable; break :blk {{}}; }})", p) },
-                "@fs_rmdir" => { let p = self.generate_expr(&call.args[0]); format!("(blk: {{ @import(\"std\").Io.Dir.deleteDir(.cwd(), global_io, {}) catch unreachable; break :blk {{}}; }})", p) },
-                "@fs_rename" => { let old_p = self.generate_expr(&call.args[0]); let new_p = self.generate_expr(&call.args[1]); format!("(blk: {{ @import(\"std\").Io.Dir.rename(.cwd(), {}, .cwd(), {}, global_io) catch unreachable; break :blk {{}}; }})", old_p, new_p) },
-                "@fs_copy_file" => { let src = self.generate_expr(&call.args[0]); let dest = self.generate_expr(&call.args[1]); format!("(blk: {{ @import(\"std\").Io.Dir.copyFile(.cwd(), {}, .cwd(), {}, global_io, .{{}}) catch unreachable; break :blk {{}}; }})", src, dest) },
-
-                "@fs_exists" => { let p = self.generate_expr(&call.args[0]); format!("(blk: {{ const is_exists = if (@import(\"std\").Io.Dir.statFile(.cwd(), global_io, {}, .{{}})) |_| true else |err| if (err == error.FileNotFound) false else unreachable; break :blk is_exists; }})", p) },
+                "@http_fetch" => {
+                    if !self.is_state_machine {
+                        return "0".to_string();
+                    }
+                    let url = self.generate_expr(&call.args[0]);
+                    let next_pc = self.pc_counter + 1;
+                    let logic = if self.is_beam_mode {
+                        format!("const payload_bin = try beam.Beam.makeBinary(ctx.self.env.?, {}); const io_msg = try beam.Beam.makeFastMessage(ctx.self.env.?, 99990001, @intFromEnum(beam.SystemAction.HTTP_FETCH), payload_bin); ctx.pc = {}; const ctx_bin = try beam.Beam.makeBinary(ctx.self.env.?, std.mem.asBytes(ctx)); return beam.Beam.makeTuple(ctx.self.env.?, &[_]beam.Term{{ beam.Beam.makeAtom(ctx.self.env.?, \"yield\"), io_msg, ctx_bin }});", url, next_pc)
+                    } else {
+                        format!("ctx.received_msg = .{{ .string = \"Mock HTTP Res\" }}; ctx.pc = {}; continue;", next_pc)
+                    };
+                    self.write_to_case(&logic);
+                    self.next_state();
+                    "ctx.received_msg.?.string".to_string()
+                }
+                "@fs_write_file" => {
+                    let p = self.generate_expr(&call.args[0]);
+                    let d = self.generate_expr(&call.args[1]);
+                    format!("(blk: {{ const file_out = @import(\"std\").Io.Dir.createFile(.cwd(), global_io, {}, .{{}}) catch unreachable; defer @import(\"std\").Io.File.close(file_out, global_io); @import(\"std\").Io.File.writeStreamingAll(file_out, global_io, {}) catch unreachable; break :blk {{}}; }})", p, d)
+                }
+                "@fs_mkdir" => {
+                    let p = self.generate_expr(&call.args[0]);
+                    format!("(blk: {{ @import(\"std\").Io.Dir.createDirPath(.cwd(), global_io, {}) catch unreachable; break :blk {{}}; }})", p)
+                }
+                "@fs_stat_size" => {
+                    let p = self.generate_expr(&call.args[0]);
+                    format!("(blk: {{ const stat = @import(\"std\").Io.Dir.statFile(.cwd(), global_io, {}, .{{}}) catch unreachable; break :blk @as(i32, @intCast(stat.size)); }})", p)
+                }
+                "@fs_is_dir" => {
+                    let p = self.generate_expr(&call.args[0]);
+                    format!("(blk: {{ const stat = @import(\"std\").Io.Dir.statFile(.cwd(), global_io, {}, .{{}}) catch unreachable; break :blk stat.kind == .directory; }})", p)
+                }
+                "@fs_remove" => {
+                    let p = self.generate_expr(&call.args[0]);
+                    format!("(blk: {{ @import(\"std\").Io.Dir.deleteFile(.cwd(), global_io, {}) catch unreachable; break :blk {{}}; }})", p)
+                }
+                "@fs_rmdir" => {
+                    let p = self.generate_expr(&call.args[0]);
+                    format!("(blk: {{ @import(\"std\").Io.Dir.deleteDir(.cwd(), global_io, {}) catch unreachable; break :blk {{}}; }})", p)
+                }
+                "@fs_rename" => {
+                    let old_p = self.generate_expr(&call.args[0]);
+                    let new_p = self.generate_expr(&call.args[1]);
+                    format!("(blk: {{ @import(\"std\").Io.Dir.rename(.cwd(), {}, .cwd(), {}, global_io) catch unreachable; break :blk {{}}; }})", old_p, new_p)
+                }
+                "@fs_copy_file" => {
+                    let src = self.generate_expr(&call.args[0]);
+                    let dest = self.generate_expr(&call.args[1]);
+                    format!("(blk: {{ @import(\"std\").Io.Dir.copyFile(.cwd(), {}, .cwd(), {}, global_io, .{{}}) catch unreachable; break :blk {{}}; }})", src, dest)
+                }
+                "@fs_exists" => {
+                    let p = self.generate_expr(&call.args[0]);
+                    format!("(blk: {{ const is_exists = if (@import(\"std\").Io.Dir.statFile(.cwd(), global_io, {}, .{{}})) |_| true else |err| if (err == error.FileNotFound) false else unreachable; break :blk is_exists; }})", p)
+                }
                 "@crypto_uuid" => {
-                    let allocator = if self.is_state_machine { "ctx.arena.?.allocator()" } else { "std.heap.page_allocator" };
+                    let allocator = if self.is_state_machine {
+                        "ctx.arena.?.allocator()"
+                    } else {
+                        "std.heap.page_allocator"
+                    };
                     format!("(blk: {{ var uuid: [16]u8 = undefined; _ = @import(\"std\").os.linux.getrandom(&uuid, 16, 0); uuid[6] = (uuid[6] & 0x0f) | 0x40; uuid[8] = (uuid[8] & 0x3f) | 0x80; const s = @import(\"std\").fmt.allocPrint({}, \"{{x:0>2}}{{x:0>2}}{{x:0>2}}{{x:0>2}}-{{x:0>2}}{{x:0>2}}-{{x:0>2}}{{x:0>2}}-{{x:0>2}}{{x:0>2}}-{{x:0>2}}{{x:0>2}}{{x:0>2}}{{x:0>2}}{{x:0>2}}{{x:0>2}}\", .{{ uuid[0], uuid[1], uuid[2], uuid[3], uuid[4], uuid[5], uuid[6], uuid[7], uuid[8], uuid[9], uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15] }}) catch unreachable; break :blk s; }})", allocator)
-                },
+                }
                 "@crypto_hash" => {
-                    let allocator = if self.is_state_machine { "ctx.arena.?.allocator()" } else { "std.heap.page_allocator" };
+                    let allocator = if self.is_state_machine {
+                        "ctx.arena.?.allocator()"
+                    } else {
+                        "std.heap.page_allocator"
+                    };
                     let data = self.generate_expr(&call.args[0]);
                     format!("(blk: {{ var out: [32]u8 = undefined; @import(\"std\").crypto.hash.sha2.Sha256.hash({}, &out, .{{}}); const hex = @import(\"std\").fmt.bytesToHex(out, .lower); const hex_str = {}.dupe(u8, &hex) catch unreachable; break :blk hex_str; }})", data, allocator)
-                },
-                "@fs_read_file" => { let p = self.generate_expr(&call.args[0]); format!("(blk: {{ const file_in = @import(\"std\").Io.Dir.openFile(.cwd(), global_io, {}, .{{}}) catch unreachable; defer @import(\"std\").Io.File.close(file_in, global_io); const stat = @import(\"std\").Io.File.stat(file_in, global_io) catch unreachable; const data = std.heap.page_allocator.alloc(u8, @intCast(stat.size)) catch unreachable; _ = @import(\"std\").Io.File.readPositionalAll(file_in, global_io, data, 0) catch unreachable; break :blk data; }})", p) },
-                "@net_connect" => { format!("(blk: {{ break :blk 1; }})") },
-                "@net_send" => { format!("(blk: {{ break :blk {{}}; }})") },
-                "@net_close" => { format!("(blk: {{ break :blk {{}}; }})") },
+                }
+                "@fs_read_file" => {
+                    let p = self.generate_expr(&call.args[0]);
+                    format!("(blk: {{ const file_in = @import(\"std\").Io.Dir.openFile(.cwd(), global_io, {}, .{{}}) catch unreachable; defer @import(\"std\").Io.File.close(file_in, global_io); const stat = @import(\"std\").Io.File.stat(file_in, global_io) catch unreachable; const data = std.heap.page_allocator.alloc(u8, @intCast(stat.size)) catch unreachable; _ = @import(\"std\").Io.File.readPositionalAll(file_in, global_io, data, 0) catch unreachable; break :blk data; }})", p)
+                }
+                "@net_connect" => "(blk: { break :blk 1; })".to_string(),
+                "@net_send" => "(blk: { break :blk {}; })".to_string(),
+                "@net_close" => "(blk: { break :blk {}; })".to_string(),
                 "@worker_spawn" => {
                     let entry = self.generate_expr(&call.args[0]);
                     format!("(blk: {{ const wid = global_next_worker_id.fetchAdd(1, .monotonic); const _Runner = struct {{ pub fn run(w_id: u32) void {{ current_node_id = w_id; next_local_id = 2; const worker_ctx = std.heap.page_allocator.create({0}_Context) catch unreachable; worker_ctx.* = undefined; worker_ctx.pc = 0; worker_ctx._self = PID{{ .node_id = w_id, .local_id = 1 }}; worker_ctx.arena = null; worker_ctx._parent = null; worker_ctx._parent_fn = null; worker_ctx.received_msg = null; worker_ctx.received_sender = null; schedule(@ptrCast(&{0}), @ptrCast(worker_ctx)); while (true) {{ drain_cross_thread_mailbox(); while (queue_len > 0) {{ const task = task_queue[0]; for (task_queue[1..queue_len], 0..) |t, j| {{ task_queue[j] = t; }} queue_len -= 1; task.run(task.ctx) catch unreachable; }} drain_cross_thread_mailbox(); if (active_fds == 0 and queue_len == 0 and waiting_count == 0) break; if (queue_len == 0 and waiting_count > 0 and active_fds == 0) {{ const ts = std.os.linux.timespec{{ .sec = 0, .nsec = 500_000 }}; _ = std.os.linux.nanosleep(&ts, null); }} if (active_fds > 0) {{ const ready_count = std.posix.poll(poll_fds[0..active_fds], 10) catch 0; if (ready_count > 0) {{ var i: usize = 0; while (i < active_fds) {{ if (poll_fds[i].revents != 0) {{ schedule(fd_to_run[i], fd_to_ctx[i]); poll_fds[i] = poll_fds[active_fds - 1]; fd_to_ctx[i] = fd_to_ctx[active_fds - 1]; fd_to_run[i] = fd_to_run[active_fds - 1]; active_fds -= 1; }} else {{ i += 1; }} }} }} }} }} }} }}; const _t = @import(\"std\").Thread.spawn(.{{}}, _Runner.run, .{{wid}}) catch unreachable; _t.detach(); break :blk PID{{ .node_id = wid, .local_id = 1 }}; }})", entry)
-                },
+                }
                 "@send" | "@reply" => {
                     let target = self.generate_expr(&call.args[0]);
                     let msg = self.generate_expr(&call.args[1]);
-                    let sender = if self.is_state_machine { "ctx._self" } else { "PID{ .node_id = current_node_id, .local_id = 1 }" };
+                    let sender = if self.is_state_machine {
+                        "ctx._self"
+                    } else {
+                        "PID{ .node_id = current_node_id, .local_id = 1 }"
+                    };
                     format!("cp_send({}, {}, cp_message_from({}))", sender, target, msg)
-                },
+                }
                 "@self" => {
-                    if self.is_state_machine { "ctx._self".to_string() } else { "PID{ .node_id = current_node_id, .local_id = 1 }".to_string() }
-                },
+                    if self.is_state_machine {
+                        "ctx._self".to_string()
+                    } else {
+                        "PID{ .node_id = current_node_id, .local_id = 1 }".to_string()
+                    }
+                }
                 "@sender" => {
-                    if self.is_state_machine { "ctx.received_sender.?".to_string() } else { "PID{ .node_id = 0, .local_id = 0 }".to_string() }
-                },
-                "@http_serve" => {
-                    self.generate_http_serve(&call.args[0])
-                },
+                    if self.is_state_machine {
+                        "ctx.received_sender.?".to_string()
+                    } else {
+                        "PID{ .node_id = 0, .local_id = 0 }".to_string()
+                    }
+                }
+                "@http_serve" => self.generate_http_serve(&call.args[0]),
                 "@receive" => {
-                    if !self.is_state_machine { return "null".to_string(); }
+                    if !self.is_state_machine {
+                        return "null".to_string();
+                    }
                     let check_pc = self.pc_counter + 1;
                     self.write_to_case(&format!("ctx.pc = {}; continue;\n", check_pc));
                     self.next_state();
@@ -1944,76 +3549,125 @@ impl Codegen {
                     self.write_to_case(&logic);
                     self.next_state();
                     "ctx.received_msg.?".to_string()
-                },
-                "@alloc" => { let s = self.generate_expr(&call.args[0]); format!("(blk: {{ const ptr = std.heap.page_allocator.alloc(u8, {}) catch unreachable; break :blk ptr.ptr; }})", s) },
-                "@free" => { format!("(blk: {{ break :blk {{}}; }})") },
-                "@get_arena" => { format!("(blk: {{ break :blk 0; }})") },
-                "@shared_tensor_init" => { format!("(blk: {{ break :blk 0; }})") },
-                "@json_parse" => { 
+                }
+                "@alloc" => {
+                    let s = self.generate_expr(&call.args[0]);
+                    format!("(blk: {{ const ptr = std.heap.page_allocator.alloc(u8, {}) catch unreachable; break :blk ptr.ptr; }})", s)
+                }
+                "@free" => "(blk: { break :blk {}; })".to_string(),
+                "@get_arena" => "(blk: { break :blk 0; })".to_string(),
+                "@shared_tensor_init" => "(blk: { break :blk 0; })".to_string(),
+                "@json_parse" => {
                     let json_str = self.generate_expr(&call.args[0]);
                     let type_name = if call.args.len() > 1 {
-                        if let Expr::Ident(id) = &call.args[1] { id.sym.clone() } else { "std.json.Value".to_string() }
-                    } else { "std.json.Value".to_string() };
-                    
+                        if let Expr::Ident(id) = &call.args[1] {
+                            id.sym.clone()
+                        } else {
+                            "std.json.Value".to_string()
+                        }
+                    } else {
+                        "std.json.Value".to_string()
+                    };
+
                     if type_name == "std.json.Value" {
                         format!("(blk: {{ const parsed = try @import(\"std\").json.parseFromSlice(std.json.Value, std.heap.page_allocator, {}, .{{ .ignore_unknown_fields = true }}); break :blk parsed.value; }})", json_str)
                     } else {
                         format!("(blk: {{ const parsed = try @import(\"std\").json.parseFromSlice({}, std.heap.page_allocator, {}, .{{ .ignore_unknown_fields = true }}); const json_ptr = try std.heap.page_allocator.create({}); json_ptr.* = parsed.value; break :blk json_ptr; }})", type_name, json_str, type_name)
                     }
-                },
+                }
                 "@json_stringify" => {
                     let obj = self.generate_expr(&call.args[0]);
                     format!("(blk: {{ break :blk try @import(\"std\").fmt.allocPrint(std.heap.page_allocator, \"{{f}}\", .{{@import(\"std\").json.fmt({}.*, .{{}})}}); }})", obj)
-                },
+                }
                 _ => "0".to_string(),
             },
             Expr::Arrow(arrow) => {
-                let lambda_name = format!("lambda_{}", self.lambda_counter); self.lambda_counter += 1;
-                let old_fn = self.current_zig_fn_name.clone(); let mut lambda_output = String::new(); let mut lambda_gen = Codegen::new();
-                lambda_gen.globals = self.globals.clone(); lambda_gen.is_state_machine = true; lambda_gen.current_fn_is_async = true; lambda_gen.current_zig_fn_name = lambda_name.clone();
+                let lambda_name = format!("lambda_{}", self.lambda_counter);
+                self.lambda_counter += 1;
+                let old_fn = self.current_zig_fn_name.clone();
+                let mut lambda_output = String::new();
+                let mut lambda_gen = Codegen::new();
+                lambda_gen.globals = self.globals.clone();
+                lambda_gen.is_state_machine = true;
+                lambda_gen.current_fn_is_async = true;
+                lambda_gen.current_zig_fn_name = lambda_name.clone();
                 let ctx_name = format!("{}_Context", lambda_name);
                 writeln!(lambda_output, "const {} = struct {{ pc: u32 = 0, _self: PID = undefined, _parent: ?*anyopaque = null, _parent_fn: ?*const fn(*anyopaque) anyerror!void = null, arena: ?*std.heap.ArenaAllocator = null, received_msg: ?Message = null, received_sender: ?PID = null, await_result: ?Message = null,", ctx_name).unwrap();
-                
+
                 let mut refs = std::collections::HashSet::new();
                 match &*arrow.body {
-                    ArrowBody::Expr(e) => crate::ast_visitor::find_referenced_vars_in_expr(e, &mut refs),
-                    ArrowBody::Block(b) => crate::ast_visitor::find_referenced_vars_in_block(b, &mut refs),
+                    ArrowBody::Expr(e) => {
+                        crate::ast_visitor::find_referenced_vars_in_expr(e, &mut refs)
+                    }
+                    ArrowBody::Block(b) => {
+                        crate::ast_visitor::find_referenced_vars_in_block(b, &mut refs)
+                    }
                 }
                 let decls = match &*arrow.body {
                     ArrowBody::Expr(_) => std::collections::HashSet::new(),
                     ArrowBody::Block(b) => crate::ast_visitor::get_declared_vars_in_block(b),
                 };
-                for d in decls { refs.remove(&d); }
+                for d in decls {
+                    refs.remove(&d);
+                }
                 let mut captured = Vec::new();
                 for r in refs {
                     if let Some(ty) = self.locals.get(&r) {
                         captured.push((r.clone(), ty.clone()));
                     }
                 }
-                self.captured_vars.insert(lambda_name.clone(), captured.clone());
+                self.captured_vars
+                    .insert(lambda_name.clone(), captured.clone());
 
                 for (r, ty) in &captured {
                     lambda_gen.locals.insert(r.clone(), ty.clone());
                     writeln!(lambda_output, "    {}: {},", r, ty).unwrap();
                 }
 
-                if let ArrowBody::Block(b) = &*arrow.body { lambda_gen.extract_local_vars_to_str(b, &mut lambda_output); }
+                if let ArrowBody::Block(b) = &*arrow.body {
+                    lambda_gen.extract_local_vars_to_str(b, &mut lambda_output);
+                }
                 writeln!(lambda_output, "}};").unwrap();
-                writeln!(lambda_output, "pub fn {}(ptr: *anyopaque) anyerror!void {{", lambda_name).unwrap();
-                writeln!(lambda_output, "    const ctx: *{} = @ptrCast(@alignCast(ptr)); while (true) {{ switch (ctx.pc) {{", ctx_name).unwrap();
+                writeln!(
+                    lambda_output,
+                    "pub fn {}(ptr: *anyopaque) anyerror!void {{",
+                    lambda_name
+                )
+                .unwrap();
+                writeln!(
+                    lambda_output,
+                    "    const ctx: *{} = @ptrCast(@alignCast(ptr)); while (true) {{ switch (ctx.pc) {{",
+                    ctx_name
+                )
+                .unwrap();
                 lambda_gen.indent_level = 2;
-                match &*arrow.body { ArrowBody::Expr(e) => { let ec = lambda_gen.generate_expr(e); lambda_gen.write_to_case(&format!("_ = {}; return;", ec)); }, ArrowBody::Block(b) => { for s in &b.body { lambda_gen.generate_stmt(s); } } }
-                lambda_gen.emit_current_case(); for case in &lambda_gen.cases { lambda_output.push_str(case); }
-                writeln!(lambda_output, "        else => unreachable,\n    }} }} }}\n").unwrap(); self.lambda_funcs.push(lambda_output);
-                
+                match &*arrow.body {
+                    ArrowBody::Expr(e) => {
+                        let ec = lambda_gen.generate_expr(e);
+                        lambda_gen.write_to_case(&format!("_ = {}; return;", ec));
+                    }
+                    ArrowBody::Block(b) => {
+                        for s in &b.body {
+                            lambda_gen.generate_stmt(s);
+                        }
+                    }
+                }
+                lambda_gen.emit_current_case();
+                for case in &lambda_gen.cases {
+                    lambda_output.push_str(case);
+                }
+                writeln!(lambda_output, "        else => unreachable,\n    }} }} }}\n").unwrap();
+                self.lambda_funcs.push(lambda_output);
+
                 for moved in &lambda_gen.moved_vars {
                     if self.locals.contains_key(moved) {
                         self.moved_vars.insert(moved.clone());
                     }
                 }
 
-                self.current_zig_fn_name = old_fn; lambda_name
-            },
+                self.current_zig_fn_name = old_fn;
+                lambda_name
+            }
             Expr::Object(fields) => {
                 let mut s = String::from(".{ ");
                 for (idx, field) in fields.iter().enumerate() {
@@ -2243,7 +3897,36 @@ impl Codegen {
                                 return self.map_type(ret_ty);
                             }
                         }
+                        if let Some(c_name) = &self.current_class_name {
+                            if let Some((_, Some(ret_ty), _)) = self.lookup_method(c_name, &id.sym)
+                            {
+                                return self.map_type(&ret_ty);
+                            }
+                        }
                     } else if let Expr::Member(mem) = &*call.callee {
+                        if let Expr::Ident(obj_id) = &*mem.obj {
+                            if obj_id.sym == "super" {
+                                if let Some(c_name) = &self.current_class_name {
+                                    if let Some((_, Some(ret_ty), _)) = self
+                                        .lookup_method(c_name, &format!("__super_{}", mem.prop.sym))
+                                    {
+                                        return self.map_type(&ret_ty);
+                                    }
+                                }
+                            } else if let Some(tname) = self.resolve_var_type_name(&obj_id.sym) {
+                                if let Some((_, Some(ret_ty), _)) =
+                                    self.lookup_method(&tname, &mem.prop.sym)
+                                {
+                                    return self.map_type(&ret_ty);
+                                }
+                            } else if self.class_defs.contains_key(&obj_id.sym) {
+                                if let Some((_, Some(ret_ty), _)) =
+                                    self.lookup_method(&obj_id.sym, &mem.prop.sym)
+                                {
+                                    return self.map_type(&ret_ty);
+                                }
+                            }
+                        }
                         let prop = mem.prop.sym.as_str();
                         if prop == "indexOf" || prop == "lastIndexOf" || prop == "charCodeAt" {
                             return "i32".to_string();
@@ -2325,7 +4008,7 @@ impl Codegen {
                     if inner_type == "Message" {
                         return "Message".to_string();
                     }
-                    if inner_type == "Unknown" || inner_type == "" {
+                    if inner_type == "Unknown" || inner_type.is_empty() {
                         return "?Message".to_string();
                     }
                     return inner_type;
@@ -2337,14 +4020,35 @@ impl Codegen {
                     if id.sym == "@self" || id.sym == "@sender" {
                         return "PID".to_string();
                     }
+                    if id.sym == "this" || id.sym == "_" {
+                        if let Some(t) = self.locals.get("self") {
+                            return t.clone();
+                        }
+                    }
                     if let Some(t) = self.locals.get(&id.sym) {
                         return t.clone();
+                    }
+                    if let Some(c_name) = &self.current_class_name {
+                        if let Some(cls) = self.class_defs.get(c_name) {
+                            if let Some(f) = cls.fields.iter().find(|f| f.ident.sym == id.sym) {
+                                return self.map_type(&f.ty);
+                            }
+                        }
                     }
                 }
                 Expr::Member(mem) => {
                     if let Expr::Ident(id) = &*mem.obj {
                         if id.sym == "Math" {
                             return "f32".to_string();
+                        }
+                        if let Some(tname) = self.resolve_var_type_name(&id.sym) {
+                            if let Some(cls) = self.class_defs.get(&tname) {
+                                if let Some(f) =
+                                    cls.fields.iter().find(|f| f.ident.sym == mem.prop.sym)
+                                {
+                                    return self.map_type(&f.ty);
+                                }
+                            }
                         }
                     }
                     if mem.prop.sym == "node_id" || mem.prop.sym == "local_id" {
@@ -2371,6 +4075,14 @@ impl Codegen {
                     match &v.pat {
                         Pattern::Ident(i) => {
                             self.locals.insert(i.sym.clone(), ty_str);
+                            if let Some(t) = &v.ty {
+                                self.var_cp_types.insert(i.sym.clone(), t.clone());
+                            } else if let Some(Expr::New(nc)) = &v.init {
+                                if let Expr::Ident(cid) = &*nc.callee {
+                                    self.var_cp_types
+                                        .insert(i.sym.clone(), Type::Ref(cid.clone()));
+                                }
+                            }
                         }
                         Pattern::Tuple(el) => {
                             if let Some(Type::Tuple(tys)) = v.ty.as_ref() {

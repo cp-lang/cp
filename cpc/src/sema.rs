@@ -71,6 +71,7 @@ impl Analyzer {
             fields: vec![],
             methods: vec![],
             implements: vec![],
+            extends: None,
             is_ref: false,
         };
         self.classes
@@ -85,6 +86,7 @@ impl Analyzer {
             fields: vec![],
             methods: vec![],
             implements: vec![],
+            extends: None,
             is_ref: false,
         };
         self.classes.insert("Set".to_string(), set_class.clone());
@@ -99,6 +101,7 @@ impl Analyzer {
             fields: vec![],
             methods: vec![],
             implements: vec![],
+            extends: None,
             is_ref: false,
         };
         self.classes.insert("Map".to_string(), map_class.clone());
@@ -181,6 +184,82 @@ impl Analyzer {
                     let old_async = self.current_fn_is_async;
                     self.current_fn_is_async = m.is_async;
                     self.enter_scope();
+                    // Define receiver aliases `this` and `_`
+                    let self_ty = Type::Ref(c.ident.clone());
+                    let _ = self.define(
+                        "this".to_string(),
+                        SymbolKind::Var {
+                            ty: self_ty.clone(),
+                            kind: VarDeclKind::Let,
+                        },
+                        c.ident.span,
+                    );
+                    let _ = self.define(
+                        "_".to_string(),
+                        SymbolKind::Var {
+                            ty: self_ty.clone(),
+                            kind: VarDeclKind::Let,
+                        },
+                        c.ident.span,
+                    );
+                    // Define fields & methods from parent hierarchy and current class for omitted `_.` calls
+                    let mut cur_opt = Some(c.clone());
+                    while let Some(cur_c) = cur_opt {
+                        for f in &cur_c.fields {
+                            let _ = self.define(
+                                f.ident.sym.clone(),
+                                SymbolKind::Var {
+                                    ty: f.ty.clone(),
+                                    kind: VarDeclKind::Let,
+                                },
+                                f.ident.span,
+                            );
+                        }
+                        for cm in &cur_c.methods {
+                            let params = cm
+                                .params
+                                .iter()
+                                .filter(|p| p.ident.sym != "this" && p.ident.sym != "_")
+                                .map(|p| p.ty.clone())
+                                .collect();
+                            let _ = self.define(
+                                cm.ident.sym.clone(),
+                                SymbolKind::Func {
+                                    params,
+                                    ret: cm.return_type.clone(),
+                                    is_async: cm.is_async,
+                                },
+                                cm.ident.span,
+                            );
+                        }
+                        cur_opt = cur_c
+                            .extends
+                            .as_ref()
+                            .and_then(|p| self.classes.get(&p.sym).cloned());
+                    }
+                    // Also define methods from implemented traits
+                    for tr_id in &c.implements {
+                        if let Some(SymbolKind::Trait(tr_decl)) = self.resolve(&tr_id.sym).cloned()
+                        {
+                            for tm in &tr_decl.methods {
+                                let params = tm
+                                    .params
+                                    .iter()
+                                    .filter(|p| p.ident.sym != "this" && p.ident.sym != "_")
+                                    .map(|p| p.ty.clone())
+                                    .collect();
+                                let _ = self.define(
+                                    tm.ident.sym.clone(),
+                                    SymbolKind::Func {
+                                        params,
+                                        ret: tm.return_type.clone(),
+                                        is_async: false,
+                                    },
+                                    tm.ident.span,
+                                );
+                            }
+                        }
+                    }
                     for p in &m.params {
                         let p_kind = SymbolKind::Var {
                             ty: p.ty.clone(),
@@ -487,7 +566,11 @@ impl Analyzer {
                 if ident.sym == "null" {
                     return Ok(Type::Optional(Box::new(Type::Unknown)));
                 }
-                if ident.sym.starts_with('@') {
+                if ident.sym.starts_with('@')
+                    || ident.sym == "this"
+                    || ident.sym == "_"
+                    || ident.sym == "super"
+                {
                     return Ok(Type::Any);
                 }
                 match self.resolve(&ident.sym) {
@@ -501,6 +584,7 @@ impl Analyzer {
                         Box::new(ret.clone().unwrap_or(Type::I32)),
                     )),
                     Some(SymbolKind::Class(c)) => Ok(Type::Ref(c.ident.clone())),
+                    Some(SymbolKind::Trait(t)) => Ok(Type::Ref(t.ident.clone())),
                     _ => Err(SemaError::UndefinedSymbol(ident.sym.clone(), ident.span)),
                 }
             }

@@ -335,3 +335,34 @@ To align `cp` language with TypeScript semantics as requested, we implemented fu
        - 第一级（单参省略）与第二级（多参默认取交集 `min(a, b)`）均无需任何生命周期标注，由 `extract_expr_borrow_info` 自动将返回值绑定至所有对象实参的生命周期集合。
        - 第三级（1% 异作用域消歧）采用直观的参数名指认语法 `-> &x Tensor` 或 `-> &(x | y) Tensor`，调用处仅追踪指定实参的存活深度，从而允许未绑定的临时参数在内层作用域提前 `release()`。
     4. **借鉴 C# `ref struct` 的栈绑定视图**: 允许声明 `ref struct` / `ref class`（或当字段含 `&T` / `&mut T` 时自动识别为 `is_ref`）。它直接持有裸指针，零原子计数开销，支持 `&mut T` 原地修改，且无需写 `<'a>`！作为安全交换，编译器在 `Return`、外层变量赋值、以及 `@spawn` 闭包捕获处对其进行严格拦截，确保 `ref struct` 绝不逃逸出所借用局部变量的栈帧作用域。
+
+---
+
+## 2026-10-18: Trait、单继承 Class 与 `_`/`this` 实例所有权、借用及生命周期架构实现
+
+### 1. 问题背景与设计目标
+在完成局部变量与函数参数的 Rust 级所有权、读写借用（NLL）及三级生命周期推导之后，CP 语言需要将这套内存安全体系无缝延伸至面向对象与多态契约层——即 `class`、`struct`、`trait` 及其成员函数中的自身实例（`this` / `_`）：
+1. **人体工学与精简度**：若完全照搬 Rust 在每个只读方法里都写 `&self`，在拥有大量 getter / 查询方法的业务与 Agent 类中会产生大量样板代码；同时 `this.` 在方法体内反复书写也较为冗长。
+2. **词法冲突消解**：引入 `_` 作为 `this` 的超短一等公民同义词后，必须消除与模式匹配 `match` 默认通配符 `_` 的语法冲突。
+3. **编译期借用与生命周期穿透**：成员方法修改字段、吞噬自身（如 `close(move _)`）或返回内部字段引用（如 `fn getWeights(): &Tensor`）时，必须在编译期与调用方的 NLL 借用检查器和自动释放（`defer`）机制精确联动。
+4. **单继承 `class` 与 `trait` 统一**：CP 支持 `class Child extends Parent` 单继承，且 `trait` 需同时支持 `struct` 与 `class`，包括默认方法实现、内联 `implements` 与后向 `impl Trait for Type`。
+
+### 2. 核心技术方案与实现原理
+1. **`_` 与 `this` 双轨同义 + 省略 `_.` 前缀 + `*` 通配符**：
+   - 在 `parser.rs` 中将 `match` 分支的通配符切换为 `Token::Star` (`*`)，彻底释放 `_` 标识符。
+   - 在 `codegen.rs` 中，将成员方法内的 `_` 与 `this` 统一映射为底层 Zig 实例指针 `self`（或 CPS 状态机中的 `ctx.self`）。
+   - 当标识符 `ident` 既不在当前函数局部变量表 `locals` 中、也不在全局符号表中时，自动查询当前类（含继承链）的字段表与方法表，若匹配则自动展开为 `self.ident` 或 `self.ident(...)`，并在展开时执行与显式 `_.ident` 完全相同的借用与移动检查。
+2. **首参接收者四态模型 (`ReceiverMode`)**：
+   - `parse_params` 允许方法第一个参数简写为 `_`、`mut _`、`move _`（或 `this`、`mut this`、`move this`）。
+   - `get_func_receiver_mode` 将成员方法归纳为四种模式：
+     - `ReadOnly`（默认，可省略首参 `_`）：方法体内任何对 `_.field`（或省略前缀的 `field`）的赋值、对 `&mut _.field` 的可变借用，或对同类/父类 `mut _` / `move _` 方法的调用均在编译期直接报错拦截。
+     - `Mut`（首参为 `mut _`；`init` 与 `release` 默认也是 `Mut`）：允许修改自身字段及调用 `mut _` 方法。在调用点 `obj.mutMethod()` 处，编译器首先校验 `obj` 是否为只读借用或只读参数（若是则拦截），随后调用 `check_borrow_conflict("obj", true)` 执行 NLL 可变借用排他检查。
+     - `Move`（首参为 `move _`）：在方法体内为 `self` 生成 `__self_moved` 守卫与 `defer` 自动释放逻辑（若方法结束前未将 `_` 移出，则在方法退出时精确释放一次 `self`）；在调用点 `obj.moveMethod()` 处，校验 `obj` 无活跃借用后将其记入 `moved_vars`，并生成 `(blk: { __obj_moved = true; break :blk obj.moveMethod(); })` 阻断调用方作用域末尾的 `defer` 重复释放。
+     - `Static`（`static fn`）：无 `self` 参数。
+3. **成员方法返回借用的 Tier 1 生命周期自动穿透**：
+   - 在 `extract_expr_borrow_info` 中，当调用 `obj.getWeights()` 且方法返回类型为 `&T`（`Type::BorrowType`）或 `ref struct` 时，若返回类型未显式绑定其他参数名，编译器默认将该返回值的借用源绑定到接收者 `obj`（若接收者为 `mut _` 则视为可变借用源，否则为只读借用源）。
+   - 调用方局部变量 `let w_ref = engine.getWeights();` 自动继承对 `engine` 的借用锁定，直到 `w_ref` 的最后一次读取语句（NLL）执行完毕后立即解锁 `engine`。
+4. **单继承 `class extends` 与 `trait` 静态多态展开**：
+   - 在代码生成前的 `resolve_class_hierarchy_and_traits` 阶段，编译器沿 `super_class` 继承链递归合并父类字段与方法；当子类重写父类方法时，自动校验接收者权限不发生非法扩张，并将父类原方法以 `__super_<name>` 注入子类，使 `super.method(...)` 编译为零开销直接调用。
+   - 遍历 `trait` 定义与 `impl Trait for Type` / `implements`，将 `trait` 的默认方法注入目标类，并严格校核所有必需方法的存在性、参数数量以及接收者借用模式（`ReadOnly` / `Mut` / `Move`）的一致性。
+   - 当函数参数声明为 `item: Trait` 或 `mut item: Trait` 时，在 Zig 后端利用 `anytype` 实现零虚表开销的静态单态化分发，同时在 CP 编译期严格校验实参是否实现该 `Trait` 以及只读 `item: Trait` 是否越权调用了 `mut _` 方法。

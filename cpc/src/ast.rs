@@ -84,6 +84,8 @@ pub struct Class {
     pub methods: Vec<Function>,
     pub implements: Vec<Ident>,
     #[serde(default)]
+    pub extends: Option<Ident>,
+    #[serde(default)]
     pub is_ref: bool,
 }
 
@@ -95,6 +97,8 @@ pub struct Function {
     pub return_type: Option<Type>,
     pub body: BlockStmt,
     pub is_async: bool,
+    #[serde(default)]
+    pub is_static: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -394,4 +398,6 @@ pub struct MethodSig {
     pub ident: Ident,
     pub params: Vec<Param>,
     pub return_type: Option<Type>,
+    #[serde(default)]
+    pub default_body: Option<BlockStmt>,
 }
