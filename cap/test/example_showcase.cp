@@ -148,9 +148,9 @@ fn loadDynamicPlugin(type_id: i32): Box<dyn AgentPlugin> {
 // 5. 错误冒泡、兜底、自动冒泡域 (try/catch)
 // ============================================================================
 
-// 尾部 ? return default: 遇到 Err 或 null 时立即携缺省值提前从函数返回
+// 尾部 ? default: 遇到 Err 或 null 时直接作为表达式缺省值，省略冗余的 return
 fn safeGetConfig(filename: string): string {
-    let cfg = readConfigFile(filename) ? return "DEFAULT_CONFIG";
+    let cfg = readConfigFile(filename) ? "DEFAULT_CONFIG";
     return "GOT:" + cfg;
 }
 
@@ -218,9 +218,9 @@ fn main() {
     let fallback_val = readConfigFile("forbidden.json") ? "BACKUP_CONFIG";
     @print("2. '? default' 兜底: {s}", fallback_val);
 
-    // C. 后缀 `? return default`
+    // C. 后缀 `? default` 赋予缺省值 (省略 return)
     let ret_val = safeGetConfig("");
-    @print("3. '? return default' 提前返回: {s}", ret_val);
+    @print("3. '? default' 赋予缺省值: {s}", ret_val);
 
     // D. 内联 catch 与纯 null 合并 (??)
     let inline_res = (readConfigFile("forbidden.json") catch err => "FALLBACK_FROM_ERR") ?? "FALLBACK_FROM_NULL";

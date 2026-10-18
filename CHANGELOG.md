@@ -111,3 +111,9 @@
 - [`cap/test/test_box_fail_bare_dyn.cp`](file:///data/dev/cp/cap/test/test_box_fail_bare_dyn.cp): 裸 `dyn Trait` 置于栈上的编译期报错反向测试。
 - [`cap/test/test_error_fail_incompatible_from.cp`](file:///data/dev/cp/cap/test/test_error_fail_incompatible_from.cp): 跨异构错误集冒泡未声明 `from` 转换时的编译期报错反向测试。
 - [`cap/test/example_showcase.cp`](file:///data/dev/cp/cap/test/example_showcase.cp): CP 语言全特性综合示例程序，覆盖三态返回 `?T ! E`、直接返回、`null`、`Err(.Variant)`、`? default`、`? return default`、`catch` + `??`、匿名错误集、`?.` 可选链、`Box<dyn Trait>` 胖指针虚表与自动 Drop、`downcast<T>()`、声明式 `from` 错误提升、`try/catch` 自动冒泡区与 `switch` 高级模式匹配（范围、守卫、或模式）。
+
+## [2026-10-18] 错误兜底语法精炼 (Error Fallback Refinement)
+
+### 修改文件 (Modified)
+- [`cap/test/example_showcase.cp`](file:///data/dev/cp/cap/test/example_showcase.cp):
+  - 简化 `safeGetConfig` 中的错误兜底为纯粹的 `let cfg = readConfigFile(filename) ? "DEFAULT_CONFIG";`，省略冗余的 `return` 关键字，确保变量初始化与表达式级降级语义保持严格一致。

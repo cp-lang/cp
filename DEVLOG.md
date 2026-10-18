@@ -432,3 +432,27 @@ To align `cp` language with TypeScript semantics as requested, we implemented fu
 
 ### 3. 执行验证
 在 `cap` 目录下执行 `./bin/cap test/example_showcase.cp`，编译及链接一气呵成，12 项测试全部打印成功，完全符合预期。
+
+## 2026-10-18: 错误兜底语法精炼与表达式级降维语义正交化
+
+### 1. 现象与洞察
+在示例代码最初实现中，出现了 `let cfg = readConfigFile(filename) ? return "DEFAULT_CONFIG";` 的写法。
+经过用户指正审视，该写法存在明显的语义割裂：
+- `let cfg = ...` 是变量声明与绑定语句，其心智模型期望右侧是一个“求值表达式”；
+- 若在右侧混入 `return` 控制流中断，会导致 `cfg` 变量声明显得多余且无意义，同时也让初学者困惑于“究竟是在给 `cfg` 赋值还是提前退出外层函数”。
+
+### 2. 设计规范对齐
+在 CP 语言的设计哲学中，`? default`（如 `? "DEFAULT_CONFIG"`）扮演的是与 `?? default` 平行的**表达式级降维运算符**：
+- `?? default`：专职于 `?T` 的 `null` 检查与拆包；
+- `? default`：专职于 `?T ! E` 或 `T ! E` 的 `Err` 及 `null` 检查与拆包。
+两者均为**纯表达式操作**，直接求出兜底值并赋给左侧变量，完全不需要、也不应该书写 `return`：
+```ts
+let cfg = readConfigFile(filename) ? "DEFAULT_CONFIG";
+```
+当 `readConfigFile` 发生错误或返回 `null` 时，表达式直接求值为 `"DEFAULT_CONFIG"`，函数继续按正常控制流向下执行，优雅自然。
+
+若用户确需在错误时提前从外层函数中断返回，则使用语义更加清晰显式的控制流语法：
+```ts
+let cfg = readConfigFile(filename) catch return "DEFAULT_CONFIG";
+```
+这样划分使得表达式降维（`? default`）与控制流跳转（`catch return`）权责分明、互不干扰。

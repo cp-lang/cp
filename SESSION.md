@@ -2248,3 +2248,37 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
      - **编译期自动冒泡块 `try { ... } catch err => { ... }`**：区域内无须重复书写后缀 `?`，自动捕获并在 `catch` 中通过模式匹配处理；
      - **`switch` 模式匹配**：三态解构匹配（值绑定、`null`、`Err(e)`）、闭区间范围（`0..=50`、`51..=100`）、`if` 模式守卫（`if latency < 90`）、或模式（`404 | 500`）及通配符 `*`。
    - 使用 `./bin/cap test/example_showcase.cp` 编译并原生运行，12 项测试全部一次性通过并输出预期结果。
+### 用户指令 5
+> return Err(.AccessDenied); 
+> return Err(.EmptyPrompt);
+> 解释下, 这个错误值前缀 . 是起什么作用, 能去掉吗?
+> 
+> 下面这行daima, Box.new()  这个Box 是什么? 为何不使用 new Box() 这种写法
+>  return Box.new(f); // 自动装箱为胖指针
+
+### 执行结果汇报
+1. **关于错误值前缀 `.` 的作用与保留原因**：
+   - **作用**：借鉴自 Zig 和 Swift 的“上下文类型推导（Leading Dot Syntax）”，在已知返回错误类型（`! FileErr` 或匿名错误集 `!{ EmptyPrompt, TooLong }`）的上下文中，省去重复书写父类型名 `FileErr.AccessDenied` 的冗余，同时成为匿名错误集引用变体的唯一语法。
+   - **为何不省略**：若去掉 `.`，`AccessDenied` 会变成普通标识符，产生变量作用域遮蔽（Shadowing）与二义性冲突；保留 `.` 提供了零污染、无歧义且视觉醒目的变体字面量标记。
+2. **关于 `Box` 的本质与 `Box.new()` 语法**：
+   - **`Box` 的本质**：编译器内建的动态胖指针（Fat Pointer，包含数据指针 `ptr: *anyopaque` 与虚函数表指针 `vtable: *const VTable`），用于特征对象装箱、类型擦除、虚表分发与离开作用域自动 Drop 释放堆内存。
+   - **为何不用 `new Box()`**：`new MyClass()` 用于实例化具有具体数据结构的对象，而 `Box` 不是普通类，其核心行为是“类型擦除装箱（Boxing）与特征绑定”；使用 `Box.new(f)` 工厂原语不仅语义正交，还能根据目标类型自动推导需绑定的 Trait 虚表，免除手写 `new Box<dyn Trait>(f)` 的繁琐。
+
+### 用户指令 6
+> let cfg = readConfigFile(filename) ? return "DEFAULT_CONFIG";
+> 这里应该省略 return,如:let cfg = readConfigFile(filename) ? "DEFAULT_CONFIG";
+> 表示出错 null 时,返回 缺省值
+
+### 执行结果汇报
+1. **语法优化与语义对齐**：
+   - 大师指正完全切中要害！在 `let cfg = ...` 变量绑定语句中出现 `return` 会割裂“变量赋值”的心智模型。
+   - `? default`（如 `? "DEFAULT_CONFIG"`）是纯正的**表达式级降级兜底运算符**，当调用返回 `Err` 或 `null` 时，直接求值为缺省值并赋予左侧变量 `cfg`，彻底省略冗余的 `return` 关键字。
+2. **示例代码更新与验证**：
+   - 将 [`cap/test/example_showcase.cp`](file:///data/dev/cp/cap/test/example_showcase.cp) 中 `safeGetConfig` 修改为：
+     ```ts
+     fn safeGetConfig(filename: string): string {
+         let cfg = readConfigFile(filename) ? "DEFAULT_CONFIG";
+         return "GOT:" + cfg;
+     }
+     ```
+   - 运行 `./bin/cap test/example_showcase.cp` 验证通过，成功输出 `3. '? default' 赋予缺省值: GOT:DEFAULT_CONFIG`。
