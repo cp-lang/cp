@@ -2228,3 +2228,23 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
      - [`test_error_fail_non_exhaustive_switch.cp`](file:///data/dev/cp/cap/test/test_error_fail_non_exhaustive_switch.cp)：`switch` 遗漏 `null` 或错误变体且无 `*` 通配分支时精准报错拦截；
      - [`test_box_fail_bare_dyn.cp`](file:///data/dev/cp/cap/test/test_box_fail_bare_dyn.cp)：试图将裸 `dyn Trait` 放在栈上（未使用 `Box<dyn Trait>`）精准报错拦截；
      - [`test_error_fail_incompatible_from.cp`](file:///data/dev/cp/cap/test/test_error_fail_incompatible_from.cp)：向上冒泡未声明 `from` 转换关系的异构错误集时精准报错拦截。
+### 用户指令 4
+> 提交到代码库
+> 将上述成果,编写一个cp 示例代码
+
+### 执行结果汇报
+1. **代码库提交与远端推送状态**：
+   - 本地 Git 提交已于此前完成（commit `6f7f269`：`feat: implement tri-state returns (?T!E), ? default fallback, try/catch auto-bubble, ?. optional chaining, Box<dyn Trait> fat pointer with downcast, and switch pattern matching`）。
+   - 执行 `git push origin main` 时触发 GitHub 远端交互式鉴权提示（`Username for 'https://github.com'`），因无交互式终端输入凭证而暂停，避免进程挂起阻塞。待用户配置凭据或通过对应认证方式后可直接执行 `git push`。
+2. **全特性综合示例代码编写与实机验证**：
+   - 编写了大型综合示例文件 [`cap/test/example_showcase.cp`](file:///data/dev/cp/cap/test/example_showcase.cp)，集中涵盖本次所有语言核心设计特性：
+     - **三态函数返回类型与零包装返回**：`fn readConfigFile(filename: string): ?string ! FileErr`，正常直接 `return str;`，空值直接 `return null;`，异常使用 `return Err(.Variant);`；
+     - **错误与空值快速兜底与提前返回**：`readConfigFile(...) ? "BACKUP"`（`? default`）与 `readConfigFile(...) ? return "DEFAULT"`（`? return default`）；
+     - **纯空值合并与内联捕获**：`(readConfigFile(...) catch err => "FALLBACK") ?? "NULL_FALLBACK"`（严格拦截未处理错误的表达式直接使用 `??`）；
+     - **匿名错误集**：`fn validatePrompt(...): i32 ! { EmptyPrompt, TooLong }`；
+     - **可选链 `?.` 深度安全访问**：`agent1?.runtime?.spec?.getGpuId() ?? -1`；
+     - **`Box<dyn Trait>` 胖指针与运行时向下转换 `downcast<T>()`**：动态加载插件接口、虚表分发调用、`plugin.downcast<SafetyFilter>()` 运行时校验、超出作用域自动触发析构函数释放堆内存（输出 `>> SafetyFilter 堆内存由 Box 自动释放`）；
+     - **声明式 `from` 错误集提升**：底层 `FileErr` 与 `NetErr` 自动向上转换为统一应用级 `AppErr.Io` 与 `AppErr.Net`；
+     - **编译期自动冒泡块 `try { ... } catch err => { ... }`**：区域内无须重复书写后缀 `?`，自动捕获并在 `catch` 中通过模式匹配处理；
+     - **`switch` 模式匹配**：三态解构匹配（值绑定、`null`、`Err(e)`）、闭区间范围（`0..=50`、`51..=100`）、`if` 模式守卫（`if latency < 90`）、或模式（`404 | 500`）及通配符 `*`。
+   - 使用 `./bin/cap test/example_showcase.cp` 编译并原生运行，12 项测试全部一次性通过并输出预期结果。

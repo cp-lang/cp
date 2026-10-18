@@ -408,3 +408,27 @@ To align `cp` language with TypeScript semantics as requested, we implemented fu
 6. **`switch` 模式匹配与编译期穷尽检查**：
    - 使用 `switch` 替代 `match`，支持直接匹配三态联合体（裸模式匹配成功值 `T`、`null` 匹配空分支、`Err(pat)` 匹配错误分支）、`*` 通配符、`..=` 闭区间范围、`A | B` 或模式以及 `if` 守卫。
    - `check_switch_exhaustiveness` 在编译期对 `enum`、`?T`、`T ! E`、`?T ! E` 执行严格的分支覆盖检查：只要没有顶层 `*` 通配分支，任何遗漏的错误变体或 `null` 分支均在编译期精准报错。
+
+## 2026-10-18: CP 语言全特性综合示例与远端推送交互处理
+
+### 1. 目标与背景
+在完成三态返回类型（`?T ! E`）、`?` 冒泡与 `? default` / `? return default` 兜底、`try/catch` 自动冒泡区域、纯空值合并 `??`、可选链 `?.`、`Box<dyn Trait>` 胖指针自动虚表与析构、`downcast<T>()` 以及 `switch` 模式匹配的全链路实现并完成本地提交后，需要：
+1. 汇报远端代码库推送状态；
+2. 编写一份直观、完整、贴近业务场景的综合示例程序（[`cap/test/example_showcase.cp`](file:///data/dev/cp/cap/test/example_showcase.cp)），直观展示 CP 语言相较于 Rust、Zig、TypeScript 的独特语法美学与工程体验。
+
+### 2. 示例设计与工程实践细节
+1. **真实领域模型模拟**：
+   - 构造文件加载 `readConfigFile`（三态：`?string ! FileErr`）、远端模型获取 `fetchRemoteModel`（`string ! NetErr`）以及提示词校验 `validatePrompt`（匿名错误集 `!{ EmptyPrompt, TooLong }`）。
+   - 通过 `enum AppErr` 与 `Io(FileErr) from FileErr`、`Net(NetErr) from NetErr` 演示声明式错误提升转换，无需手写繁琐的 `From` / `Into` 实现。
+2. **纯粹的空值合并与错误防呆**：
+   - 展示 `readConfigFile(...) ? "BACKUP"` 一键处理错误与空值；
+   - 展示 `catch` 结合 `??` 的链式语法：`(readConfigFile(...) catch err => "FALLBACK") ?? "NULL_FALLBACK"`；
+   - 展现编译器针对未解包错误的表达式直接使用 `??` 的严格拦截保护。
+3. **`Box<dyn Trait>` 生命周期与栈/堆隔离**：
+   - 将插件加载与类型向下转型封装在 `testPluginLifecycle()` 函数作用域中；
+   - 当插件实例离开该函数作用域时，由生成的 Zig 状态机与作用域 `defer` 自动触发虚表中的 `vtable.__drop(ptr)`，调用 `SafetyFilter.release()` 并释放堆内存，验证了“智能指针 + 自动 Drop + 运行时 O(1) 类型校验”的完备性。
+4. **`switch` 高级模式匹配**：
+   - 结合闭区间范围 `0..=50`、`51..=100 if latency < 90` 守卫分支、`404 | 500` 或模式与 `*` 通配符，验证了表达力极强的现代控制流。
+
+### 3. 执行验证
+在 `cap` 目录下执行 `./bin/cap test/example_showcase.cp`，编译及链接一气呵成，12 项测试全部打印成功，完全符合预期。
