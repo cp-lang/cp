@@ -2166,3 +2166,65 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 - **测试验证 (`cap/test/`)**：
   - 正向全功能测试 [`test_trait_class_pass.cp`](file:///data/dev/cp/cap/test/test_trait_class_pass.cp) 编译并运行通过，验证了 `_` 接收者、省略 `_.` 互调、`match` 的 `*` 通配符、`extends` 单继承与 `super` 调用、`trait` 默认方法与后向 `impl`、Tier 1 方法返回借用 NLL 解锁，以及 `move _` 吞噬后 `Tensor` 与 `TurboEngine` 精确单次释放。
   - 4 个反向编译报错测试（[`test_trait_class_fail_readonly_mutate.cp`](file:///data/dev/cp/cap/test/test_trait_class_fail_readonly_mutate.cp)、[`test_trait_class_fail_nll_conflict.cp`](file:///data/dev/cp/cap/test/test_trait_class_fail_nll_conflict.cp)、[`test_trait_class_fail_use_after_move_self.cp`](file:///data/dev/cp/cap/test/test_trait_class_fail_use_after_move_self.cp)、[`test_trait_class_fail_trait_mut.cp`](file:///data/dev/cp/cap/test/test_trait_class_fail_trait_mut.cp)）全部精准触发预期的编译期错误拦截。
+
+---
+
+## 2026-10-18 (Part 2: 函数三态返回类型 `?T ! E`、错误冒泡与兜底 `? default`、自动冒泡域 `try/catch`、可选链 `?.`、`Box<dyn Trait>` 胖指针与 `switch` 模式匹配)
+
+### 用户指令 1
+> ## 函数返回类型（正常、错误、空），冒泡、捕获与模式匹配
+> 我们继续完善、优化函数返回类型定义与错误冒泡。
+> 函数返回类型涉及：正常、异常、null（空） 三种状态，借鉴rust与zig，同时保持类似Typescript的间接性，我提出如下设计建议，供你分析、参考、借鉴后，给出完美设计方案：
+> 1. 函数返回类似Typescript使用符号`:`，返回void可省略，避免到处都是void。
+> 2. 函数内部调用使用尾部 `?` 错误向上冒泡。
+> 3. 函数内部使用 `catch` 捕获错误（类似zig），但不使用try。
+> 4. 使用 `??` “返回值”，简化遇到错误时直接返回值。
+> 5. 为避免函数中调用到处出现尾部`?`，可使用 `try {内部带错误返回类型调用忽略尾部?，编译时自动添加尾部?} catch err => {}`，这里的try与zig、Typescript含义都不一样，只是一个省略尾部?区域标记，让代码更简洁、美观。
+> 6. 函数返回类型 `?T!E`，`?`可选空置，`T`正常，`E`错误集合。
+> 7. 错误联合体语法 `T ! ErrType`；成功返回直接写原值，不用`Ok()`；错误返回必须写`Err(xxx)`，`Err` 是编译器识别的关键字 / 内置构造器。
+> 8. ErrType集合支持 `ErrType1 | ErrType2` 多个集合合并。
+> 9. ErrType支持匿名错误集合 `{err1, err2}`。
+> 10. 匿名错误集合在赋值时对应使用匿名错误集合定义变量类型：`let x: T!{err1, err2} = fn()`，如编译期能自动推导，可省略。
+> 11. 错误集采用类似 Rust 的转换，转换语法尽量简洁，减少手动编写代码。
+> 12. 提供一个内部的统一 `Error` 对象（内置 `code`、`msg`、`cause` 等固定属性），在业务层可将错误转换为统一 `Error` 对象处理。
+> - **可选链**：`expr?.member`、`?T`、`?&T` / `?&mut T`、`null` 字面量仅能赋给 `?T`。
+> - **Box胖指针**：类似 Rust 的 `Box` 胖指针（数据指针、虚函数指针），管理堆内存所有权，离开作用域自动 Release 释放，`downcast()` 返回错误实例引用。
+> - **switch 模式匹配优化**：使用 `switch` 代替 `match`，表达式语义，无穿透、无需 `break`，支持模式守卫 `if`，支持字面量、范围、元组、结构体、枚举、错误联合体解构、嵌套模式；不带 `Err` = 成功分支，带 `Err` = 错误分支，`null` = 空分支，`*` 代替 `_`，编译期穷尽检查。
+
+### 用户指令 2（两项关键微调）
+> 有2个细节微调:
+> 1. `??` 作为null 缺省值, 使用 `?? return default` null 和出错时, 函数返回缺省值似乎不妥, 是否应该更改为 `? default`, 扩展函数尾部`?`, 如果后面跟了一个表达式/值,则表示null,出错时, 返回后面指定的值, 避免专用null的 `??` 还要判断 出错, 语法不统一
+> 2. 由于zig中没有类似Rust中胖指针, 需要自己手写, 涉及内存安全及释放,非常麻烦, cp 中内置实现类似Rust的Box胖指针结构体实现如下功能:
+> - 底层库优先静态错误集合`{}` / enum；**只有动态加载插件、第三方用户智能体模块才选用`Box<dyn Trait>`动态错误**，避免不必要的运行时开销。
+> - 当`impl Trait for Type`，编译器自动生成该类型对应的 vtable（不用像 Zig 手写虚表）；
+> - `Box<dyn Trait>`自动生成胖指针；
+> - `downcast<T>`内置方法，依赖类型 ID 做运行时类型校验；
+> - 所有权规则：`Box`持有堆实例所有权，超出作用域自动 Drop 释放；
+> - 借用规则沿用 CP 的借用 / 生命周期检查：胖指针同样受可读 / 可变借用互斥约束。
+> - 边界约束：downcast 是运行时检查；禁止在底层高性能核心路径默认使用；不允许 `dyn Trait` 放在栈上，必须由 Box 装箱（编译期报错）。
+
+### 用户指令 3
+> 开始执行
+
+### 执行结果汇报
+1. **规范文档更新 ([`cp_ref.md`](file:///data/dev/cp/cp_ref.md))**：
+   - 更新第 1 节并新增第 11 节《函数返回类型（三态模型）、错误冒泡与捕获、可选链、`Box<dyn Trait>` 胖指针与 `switch` 模式匹配》，完整落地所有语法与安全边界。
+2. **编译器全链路实装 (`cpc`)**：
+   - **词法与语法 (`lexer.rs`, `ast.rs`, `ast_visitor.rs`, `parser.rs`, `sema.rs`, `dcp.rs`)**：
+     - 新增 `switch`, `try`, `catch`, `null`, `dyn`, `??` (`QuestionQuestion`), `?.` (`QuestionDot`), `..=` (`DotDotEq`)；
+     - 支持 `: T`, `: ?T`, `: T ! E`, `: ?T ! E`, `: !E`（等价于 `void ! E`）以及省略 `: void`；
+     - 支持具名错误枚举 `enum`、声明式错误转换 `Variant(SubErr) from SubErr`、错误集合并 `E1 | E2`、匿名错误集 `!{ err1, err2 }`、统一 `Error { code, msg, cause }` 与动态插件错误 `!Box<dyn Trait>`；
+     - 支持后缀冒泡 `expr?`、统一异常/空值兜底 `expr ? default` 与提前返回 `expr ? return default`、纯空值合并 `expr ?? default`（严格限制仅用于 `?T`，用于 `T ! E` 时编译期报错）、内联错误捕获 `expr catch err => ...`、以及自动冒泡区域 `try { ... } catch err => { ... }`；
+     - 支持可选链 `expr?.prop` 与 `expr?.method(...)` 短路求值及 `?T` 类型推导；
+     - 支持 `Box<dyn Trait>`、`Box.new(val)`、`.downcast<T>()` / `.downcast_mut<T>()`，并在编译期严禁裸 `dyn Trait` 上栈；
+     - 支持 `switch` 表达式与语句，包含三态分支（成功值绑定、`null` 分支、`Err(...)` 分支）、`*` 通配符、`..=` 范围、`if` 模式守卫、`A | B` 或模式，以及编译期穷尽性检查。
+   - **Zig 0.17 后端代码生成 (`codegen.rs`)**：
+     - 注入 `CpResult(T, E)` 零开销标签联合体、内置 `Error` 结构体、`cp_convert_err` 零样板错误自动转换引擎；
+     - 为每个 `Trait` 自动生成包含 `__type_id: u64`、`_drop: *const fn (*anyopaque) void` 及所有契约方法函数指针的 `VTable` 与 `Box<dyn Trait>` 胖指针结构体，自动为每个实现类生成编译期 FNV-1a 64 位 `__TYPE_ID` 与静态虚表实例，支持 O(1) `downcast<T>()`（返回 `?&T` 借用，受 NLL 借用检查器保护）以及离开作用域时自动触发 `vtable._drop(ptr)` 析构并释放堆内存。
+3. **测试验证 (`cap/test/`)**：
+   - **正向综合测试 [`test_error_box_switch_pass.cp`](file:///data/dev/cp/cap/test/test_error_box_switch_pass.cp)**：一次性覆盖 14 个核心场景（三态 `?string ! FileErr`、`Err(.Variant)`、后缀 `?`、`? default`、`? return default`、`catch` + `??`、匿名错误集 `!{ EmptyInput, Overflow }`、声明式 `from` 自动转换、`try { ... } catch` 自动冒泡区、统一 `Error` 结构体、`?.` 可选链、`Box<dyn PluginError>` 虚表调用与自动 Drop、`downcast<T>()` 运行时向下转型、`switch` 范围与 `if` 守卫），编译并原生执行全部通过！
+   - **4 项反向编译期拦截测试**：
+     - [`test_error_fail_null_coalesce_on_err.cp`](file:///data/dev/cp/cap/test/test_error_fail_null_coalesce_on_err.cp)：对未处理错误的 `T ! E` 直接使用 `??` 精准报错拦截；
+     - [`test_error_fail_non_exhaustive_switch.cp`](file:///data/dev/cp/cap/test/test_error_fail_non_exhaustive_switch.cp)：`switch` 遗漏 `null` 或错误变体且无 `*` 通配分支时精准报错拦截；
+     - [`test_box_fail_bare_dyn.cp`](file:///data/dev/cp/cap/test/test_box_fail_bare_dyn.cp)：试图将裸 `dyn Trait` 放在栈上（未使用 `Box<dyn Trait>`）精准报错拦截；
+     - [`test_error_fail_incompatible_from.cp`](file:///data/dev/cp/cap/test/test_error_fail_incompatible_from.cp)：向上冒泡未声明 `from` 转换关系的异构错误集时精准报错拦截。

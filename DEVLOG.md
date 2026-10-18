@@ -366,3 +366,45 @@ To align `cp` language with TypeScript semantics as requested, we implemented fu
    - 在代码生成前的 `resolve_class_hierarchy_and_traits` 阶段，编译器沿 `super_class` 继承链递归合并父类字段与方法；当子类重写父类方法时，自动校验接收者权限不发生非法扩张，并将父类原方法以 `__super_<name>` 注入子类，使 `super.method(...)` 编译为零开销直接调用。
    - 遍历 `trait` 定义与 `impl Trait for Type` / `implements`，将 `trait` 的默认方法注入目标类，并严格校核所有必需方法的存在性、参数数量以及接收者借用模式（`ReadOnly` / `Mut` / `Move`）的一致性。
    - 当函数参数声明为 `item: Trait` 或 `mut item: Trait` 时，在 Zig 后端利用 `anytype` 实现零虚表开销的静态单态化分发，同时在 CP 编译期严格校验实参是否实现该 `Trait` 以及只读 `item: Trait` 是否越权调用了 `mut _` 方法。
+
+---
+
+## 2026-10-18 (Part 2): 函数三态返回类型 (`?T ! E`)、错误冒泡与兜底 (`? default`)、`try/catch` 自动冒泡区、`Box<dyn Trait>` 胖指针与 `switch` 模式匹配架构实现
+
+### 1. 设计背景与核心权衡
+在系统级智能体语言 CP 中，函数的返回值往往同时面临三种状态：**正常值 (`T`)**、**空值 (`null` / `?T`)** 与 **领域错误 (`!E`)**。
+- Rust 采用嵌套枚举 `Result<Option<T>, E>`，每一次返回都要写 `Ok(Some(v))` 或 `Ok(None)`，匹配时更需要多层解构，样板代码沉重；同时 Rust 的 `From<E>` trait 实现繁琐。
+- Zig 的错误联合体 `!T` 虽然轻量，但自动合并全局错误集会导致跨层调用的错误集失去边界膨胀，且 Zig 没有内置带自动生命周期与虚表管理的 `Box<dyn Trait>` 胖指针，手写 `@ptrCast` 虚表极易引发悬垂指针与内存泄漏。
+- TypeScript 的 `?.` 与 `??` 体验极佳，但 `try/catch` 基于栈展开异常且错误类型为 `any` / `unknown`，缺乏编译期穷尽保障。
+
+为此，CP 语言确立了**“三态扁平联合 + 算子职责正交 + 静态错误集优先、动态 `Box<dyn Trait>` 插件兜底”**的完整技术方案：
+
+### 2. 核心机制与编译器实现原理
+
+1. **三态返回类型 `?T ! E` 与零包装返回**：
+   - 语法上通过正交组合 `?`（可空）与 `!`（错误集）表达四种状态：`T`、`?T`、`T ! E`、`?T ! E`，返回 `void` 默认省略。
+   - 在 Zig 0.17 后端映射为泛型标签联合体 `CpResult(OkType, ErrType)`（其中 `?T ! E` 映射为 `CpResult(?T, E)`），并内嵌编译期标记 `pub const __IS_CP_RESULT = true;`。
+   - 函数体内返回正常值直接写 `return val;`，返回空直接写 `return null;`，返回错误写 `return Err(e);`（支持上下文简写 `return Err(.Variant);`），编译器根据当前函数的 `current_fn_ret_ty` 自动封装为 `.{ .ok = ... }` 或 `.{ .err = ... }`，彻底消灭 `Ok(Some(...))` 噪音。
+
+2. **`?` 家族与 `??` 的严格正交分工**：
+   - **后缀 `expr?`**：向上冒泡算子。当外层函数返回 `?U ! E`（具备可空通道）且不在 `try` 块内时，`expr?` 同时向上冒泡 `Err` 与 `null`，直接解包出 `T`；当外层函数返回非空 `U ! E` 或位于 `try` 块内时，`expr?` 仅冒泡 `Err` 并保留 `?T` 供后续 `??` 处理。
+   - **后缀 `expr ? default` 与 `expr ? return default`**：统一解包兜底算子。无论是遇到 `Err(e)` 还是 `null`，一律拦截并替换为 `default`（或直接从当前函数 `return default`），一行代码把 `?T ! E` 降维为确定值 `T`。
+   - **中缀 `expr ?? default`**：纯 `null` 空值合并算子。编译器在 `infer_cp_type` 阶段严格校验左操作数：若左操作数仍带有未处理的 `!E`（`Type::ResultType`），立即抛出编译期错误 `CP Compile Error: Operator '??' can only be used on optional '?T'`，强制开发者先通过 `?` 或 `catch` 处理错误，杜绝静默吞掉异常。
+
+3. **`try { ... } catch err => { ... }` 编译期自动冒泡区**：
+   - CP 的 `try` 块不是运行时栈展开异常，而是**编译期自动追加 `?` 的语法糖区域**。
+   - 在 `in_try_region = true` 期间，编译器在 `maybe_wrap_try_call` 中自动识别所有返回 `Type::ResultType` 的函数/方法调用，并将其包裹为向当前命名块 `__try_blk_N` 跳转并写入 `__try_err_N` 的分支结构，块外紧跟 `if (__try_failed_N)` 执行 `catch` 恢复逻辑，实现零运行时异常表开销。
+
+4. **错误集体系与声明式 `from` 转换**：
+   - 支持具名错误枚举 `enum`、匿名内联错误集 `!{ EmptyInput, Overflow }`（自动合成为 `__AnonErr_...`）、错误集合并 `E1 | E2`（自动合成为 `__UnionErr_...`）以及内置统一 `Error { code: i32, msg: string, cause }`。
+   - 在枚举定义中支持 `Io(FileErr) from FileErr`，编译器自动为该枚举生成 Zig 编译期多态转换函数 `pub fn __from(v: anytype) @This()`，并在 `verify_error_type_compatibility` 中进行静态可达性校验：未声明 `from` 的异构错误冒泡在编译期直接拒绝。
+
+5. **内置 `Box<dyn Trait>` 胖指针、自动 VTable 与 `downcast<T>()`**：
+   - 编译期对所有声明类型执行 `check_type_validity_and_collect_errors` 扫描，一旦发现未包裹在 `Box<...>` 中的裸 `Type::BareDyn`（`dyn Trait`），立即编译期报错拦截，确保动态特征对象永不非法置于栈上。
+   - 编译器为每个 `Trait` 自动生成 `VTable` 结构体（含 `__type_id: u64`、`_drop: *const fn (*anyopaque) void` 及所有契约函数指针）与胖指针结构体 `{ ptr: *anyopaque, vtable: *const VTable }`。
+   - 为每个 `class`/`struct` 计算确定性的 64 位 FNV-1a 哈希常量 `__TYPE_ID`，并在 `implements` / `impl Trait for Type` 时自动生成静态虚表实例 `vtable_<Trait>_<Class>`。
+   - `box_obj.downcast<T>()` 在运行时对比 `self.vtable.__type_id == T.__TYPE_ID`，匹配则返回 `?&T`（只读借用，纳入 NLL 借用检查器防止在借用存活期间移动或释放 `box_obj`），不匹配则返回 `null`；当 `Box<dyn Trait>` 离开作用域时，通过 `defer` 自动调用 `vtable._drop(ptr)` 执行底层具体类型的 `release()` 并释放堆内存。
+
+6. **`switch` 模式匹配与编译期穷尽检查**：
+   - 使用 `switch` 替代 `match`，支持直接匹配三态联合体（裸模式匹配成功值 `T`、`null` 匹配空分支、`Err(pat)` 匹配错误分支）、`*` 通配符、`..=` 闭区间范围、`A | B` 或模式以及 `if` 守卫。
+   - `check_switch_exhaustiveness` 在编译期对 `enum`、`?T`、`T ! E`、`?T ! E` 执行严格的分支覆盖检查：只要没有顶层 `*` 通配分支，任何遗漏的错误变体或 `null` 分支均在编译期精准报错。

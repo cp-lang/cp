@@ -60,6 +60,10 @@ pub struct EnumVariant {
     pub ident: Ident,
     pub fields: Option<Vec<Field>>,
     pub value: Option<Expr>,
+    #[serde(default)]
+    pub tuple_type: Option<Type>,
+    #[serde(default)]
+    pub from_err: Option<Ident>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -114,6 +118,13 @@ pub enum Stmt {
     ErrDefer(Box<Stmt>),
     ComptimeBlock(BlockStmt),
     Block(BlockStmt),
+    TryCatch {
+        span: Span,
+        try_block: BlockStmt,
+        err_ident: Option<Ident>,
+        is_err_mut: bool,
+        catch_body: Option<Box<Stmt>>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -147,6 +158,14 @@ pub enum Pattern {
     Lit(Lit),
     Rest(Box<Pattern>),
     Wildcard,
+    Null,
+    Err(Box<Pattern>),
+    Range {
+        start: i64,
+        end: i64,
+        inclusive: bool,
+    },
+    Or(Vec<Pattern>),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -155,6 +174,8 @@ pub struct EnumPattern {
     pub enum_name: Ident,
     pub variant_name: Ident,
     pub fields: Option<Vec<ObjectPatProp>>,
+    #[serde(default)]
+    pub tuple_pats: Option<Vec<Pattern>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -192,12 +213,36 @@ pub enum Expr {
     Call(CallExpr),
     New(CallExpr),
     Member(MemberExpr),
+    OptMember(MemberExpr),
+    OptCall(CallExpr),
     Slice(SliceExpr),
     Match(Box<MatchExpr>),
     Spawn(Box<SpawnExpr>),
     Receive(Option<Box<Type>>),
     Zig(ZigEscapeExpr),
     Question(Box<Expr>),
+    QuestionFallback {
+        expr: Box<Expr>,
+        fallback: Box<Expr>,
+        is_return_fallback: bool,
+    },
+    NullCoalesce {
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    Catch {
+        expr: Box<Expr>,
+        err_ident: Option<Ident>,
+        is_err_mut: bool,
+        body: Box<Stmt>,
+    },
+    ErrWrap(Box<Expr>),
+    BoxNew(Box<Expr>),
+    Downcast {
+        obj: Box<Expr>,
+        target_ty: Ident,
+        is_mut: bool,
+    },
     Array(Vec<Expr>),
     Object(Vec<ObjectField>),
     Arrow(Box<ArrowExpr>),
@@ -329,6 +374,8 @@ pub struct MatchExpr {
 pub struct MatchArm {
     pub span: Span,
     pub pat: Pattern,
+    #[serde(default)]
+    pub guard: Option<Expr>,
     pub body: Box<Stmt>,
 }
 
@@ -343,6 +390,15 @@ pub struct SpawnExpr {
 pub struct ZigEscapeExpr {
     pub span: Span,
     pub code: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ErrorType {
+    Named(Ident),
+    Union(Vec<Ident>),
+    AnonSet(Vec<Ident>),
+    BoxDyn(Ident),
+    DefaultError,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -366,6 +422,10 @@ pub enum Type {
     PID,
     Unknown,
     ErrorUnion(Box<Type>),
+    ResultType {
+        ok: Box<Type>,
+        err: ErrorType,
+    },
     Optional(Box<Type>),
     BorrowType {
         inner: Box<Type>,
@@ -373,6 +433,8 @@ pub enum Type {
         lifetimes: Vec<String>,
     },
     Shared(Box<Type>),
+    BoxDyn(Ident),
+    BareDyn(Ident),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

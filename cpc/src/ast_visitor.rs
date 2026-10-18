@@ -22,9 +22,15 @@ pub fn find_referenced_vars_in_expr(expr: &Expr, vars: &mut HashSet<String>) {
                 find_referenced_vars_in_expr(a, vars);
             }
         }
-        Expr::Member(m) => {
+        Expr::Member(m) | Expr::OptMember(m) => {
             find_referenced_vars_in_expr(&m.obj, vars);
         } // prop is just name
+        Expr::OptCall(c) => {
+            find_referenced_vars_in_expr(&c.callee, vars);
+            for a in &c.args {
+                find_referenced_vars_in_expr(a, vars);
+            }
+        }
         Expr::Slice(s) => {
             find_referenced_vars_in_expr(&s.obj, vars);
             if let Some(st) = &s.start {
@@ -37,6 +43,9 @@ pub fn find_referenced_vars_in_expr(expr: &Expr, vars: &mut HashSet<String>) {
         Expr::Match(m) => {
             find_referenced_vars_in_expr(&m.disc, vars);
             for arm in &m.arms {
+                if let Some(g) = &arm.guard {
+                    find_referenced_vars_in_expr(g, vars);
+                }
                 find_referenced_vars_in_stmt(&arm.body, vars);
             }
         }
@@ -46,8 +55,23 @@ pub fn find_referenced_vars_in_expr(expr: &Expr, vars: &mut HashSet<String>) {
                 find_referenced_vars_in_expr(a, vars);
             }
         }
-        Expr::Question(q) => {
+        Expr::Question(q) | Expr::ErrWrap(q) | Expr::BoxNew(q) => {
             find_referenced_vars_in_expr(q, vars);
+        }
+        Expr::QuestionFallback { expr, fallback, .. } => {
+            find_referenced_vars_in_expr(expr, vars);
+            find_referenced_vars_in_expr(fallback, vars);
+        }
+        Expr::NullCoalesce { left, right } => {
+            find_referenced_vars_in_expr(left, vars);
+            find_referenced_vars_in_expr(right, vars);
+        }
+        Expr::Catch { expr, body, .. } => {
+            find_referenced_vars_in_expr(expr, vars);
+            find_referenced_vars_in_stmt(body, vars);
+        }
+        Expr::Downcast { obj, .. } => {
+            find_referenced_vars_in_expr(obj, vars);
         }
         Expr::Array(arr) => {
             for a in arr {
@@ -120,6 +144,9 @@ pub fn find_referenced_vars_in_stmt(stmt: &Stmt, vars: &mut HashSet<String>) {
         Stmt::Match(m) => {
             find_referenced_vars_in_expr(&m.disc, vars);
             for arm in &m.arms {
+                if let Some(g) = &arm.guard {
+                    find_referenced_vars_in_expr(g, vars);
+                }
                 find_referenced_vars_in_stmt(&arm.body, vars);
             }
         }
@@ -133,6 +160,16 @@ pub fn find_referenced_vars_in_stmt(stmt: &Stmt, vars: &mut HashSet<String>) {
         Stmt::ErrDefer(d) => find_referenced_vars_in_stmt(d, vars),
         Stmt::ComptimeBlock(b) => find_referenced_vars_in_block(b, vars),
         Stmt::Block(b) => find_referenced_vars_in_block(b, vars),
+        Stmt::TryCatch {
+            try_block,
+            catch_body,
+            ..
+        } => {
+            find_referenced_vars_in_block(try_block, vars);
+            if let Some(cb) = catch_body {
+                find_referenced_vars_in_stmt(cb, vars);
+            }
+        }
     }
 }
 
@@ -152,6 +189,18 @@ pub fn get_declared_vars_in_block(block: &BlockStmt) -> HashSet<String> {
         } else if let Stmt::Block(b) = stmt {
             let inner = get_declared_vars_in_block(b);
             vars.extend(inner);
+        } else if let Stmt::TryCatch {
+            try_block,
+            catch_body,
+            ..
+        } = stmt
+        {
+            vars.extend(get_declared_vars_in_block(try_block));
+            if let Some(cb) = catch_body {
+                if let Stmt::Block(b) = &**cb {
+                    vars.extend(get_declared_vars_in_block(b));
+                }
+            }
         } else if let Stmt::If(i) = stmt {
             if let Stmt::Block(b) = &*i.cons {
                 vars.extend(get_declared_vars_in_block(b));

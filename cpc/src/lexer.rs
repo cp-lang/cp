@@ -10,6 +10,16 @@ pub enum Token {
     Const,
     #[token("match")]
     Match,
+    #[token("switch")]
+    Switch,
+    #[token("try")]
+    Try,
+    #[token("catch")]
+    Catch,
+    #[token("null")]
+    Null,
+    #[token("dyn")]
+    Dyn,
     #[token("if")]
     If,
     #[token("else")]
@@ -28,6 +38,8 @@ pub enum Token {
     Struct,
     #[token("static")]
     Static,
+    #[token("super")]
+    Super,
 
     #[token("export")]
     Export,
@@ -133,12 +145,18 @@ pub enum Token {
     LessEq,
     #[token(">=")]
     GreaterEq,
+    #[token("??")]
+    QuestionQuestion,
+    #[token("?.")]
+    QuestionDot,
     #[token("?")]
-    Question, // Error bubbling
+    Question, // Error bubbling / fallback
     #[token("!")]
     Bang,
+    #[token("..=")]
+    DotDotEq,
     #[token("..")]
-    DotDot, // Slices
+    DotDot, // Slices / Ranges
     #[token("=>")]
     FatArrow,
     #[token("->")]

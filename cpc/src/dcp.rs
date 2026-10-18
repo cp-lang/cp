@@ -256,6 +256,28 @@ impl DcpEmitter {
                 format!("&{}{}{}", lt, m, self.format_type(inner))
             }
             Type::Shared(inner) => format!("Shared<{}>", self.format_type(inner)),
+            Type::ResultType { ok, err } => {
+                let err_str = match err {
+                    crate::ast::ErrorType::Named(id) => id.sym.clone(),
+                    crate::ast::ErrorType::Union(ids) => ids
+                        .iter()
+                        .map(|i| i.sym.clone())
+                        .collect::<Vec<_>>()
+                        .join(" | "),
+                    crate::ast::ErrorType::AnonSet(ids) => format!(
+                        "{{ {} }}",
+                        ids.iter()
+                            .map(|i| i.sym.clone())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    crate::ast::ErrorType::BoxDyn(id) => format!("Box<dyn {}>", id.sym),
+                    crate::ast::ErrorType::DefaultError => "Error".to_string(),
+                };
+                format!("{} ! {}", self.format_type(ok), err_str)
+            }
+            Type::BoxDyn(id) => format!("Box<dyn {}>", id.sym),
+            Type::BareDyn(id) => format!("dyn {}", id.sym),
         }
     }
 }

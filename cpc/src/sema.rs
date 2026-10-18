@@ -107,6 +107,54 @@ impl Analyzer {
         self.classes.insert("Map".to_string(), map_class.clone());
         self.scopes[0].insert("Map".to_string(), SymbolKind::Class(map_class));
 
+        let error_class = crate::ast::Class {
+            span: mock_span.clone(),
+            ident: crate::ast::Ident {
+                span: mock_span.clone(),
+                sym: "Error".to_string(),
+            },
+            fields: vec![
+                crate::ast::Field {
+                    span: mock_span.clone(),
+                    ident: crate::ast::Ident {
+                        span: mock_span.clone(),
+                        sym: "code".to_string(),
+                    },
+                    ty: Type::I32,
+                },
+                crate::ast::Field {
+                    span: mock_span.clone(),
+                    ident: crate::ast::Ident {
+                        span: mock_span.clone(),
+                        sym: "msg".to_string(),
+                    },
+                    ty: Type::String,
+                },
+            ],
+            methods: vec![],
+            implements: vec![],
+            extends: None,
+            is_ref: false,
+        };
+        self.classes
+            .insert("Error".to_string(), error_class.clone());
+        self.scopes[0].insert("Error".to_string(), SymbolKind::Class(error_class));
+
+        let box_class = crate::ast::Class {
+            span: mock_span.clone(),
+            ident: crate::ast::Ident {
+                span: mock_span.clone(),
+                sym: "Box".to_string(),
+            },
+            fields: vec![],
+            methods: vec![],
+            implements: vec![],
+            extends: None,
+            is_ref: false,
+        };
+        self.classes.insert("Box".to_string(), box_class.clone());
+        self.scopes[0].insert("Box".to_string(), SymbolKind::Class(box_class));
+
         for item in &module.body {
             match item {
                 ModuleItem::Decl(Decl::Class(c)) => {
@@ -280,6 +328,67 @@ impl Analyzer {
         Ok(())
     }
 
+    fn bind_match_pattern(&mut self, pat: &Pattern) {
+        match pat {
+            Pattern::Ident(id) => {
+                let _ = self.define(
+                    id.sym.clone(),
+                    SymbolKind::Var {
+                        ty: Type::Any,
+                        kind: VarDeclKind::Let,
+                    },
+                    id.span,
+                );
+            }
+            Pattern::Err(inner) => self.bind_match_pattern(inner),
+            Pattern::Enum(ep) => {
+                if let Some(tpats) = &ep.tuple_pats {
+                    for tp in tpats {
+                        self.bind_match_pattern(tp);
+                    }
+                }
+                if let Some(props) = &ep.fields {
+                    for p in props {
+                        if let Some(vp) = &p.val {
+                            self.bind_match_pattern(vp);
+                        } else {
+                            let _ = self.define(
+                                p.key.sym.clone(),
+                                SymbolKind::Var {
+                                    ty: Type::Any,
+                                    kind: VarDeclKind::Let,
+                                },
+                                p.key.span,
+                            );
+                        }
+                    }
+                }
+            }
+            Pattern::Tuple(els) | Pattern::Or(els) => {
+                for el in els {
+                    self.bind_match_pattern(el);
+                }
+            }
+            Pattern::Object(props) => {
+                for p in props {
+                    if let Some(vp) = &p.val {
+                        self.bind_match_pattern(vp);
+                    } else {
+                        let _ = self.define(
+                            p.key.sym.clone(),
+                            SymbolKind::Var {
+                                ty: Type::Any,
+                                kind: VarDeclKind::Let,
+                            },
+                            p.key.span,
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn analyze_stmt(&mut self, stmt: &Stmt) -> SemaResult<()> {
         match stmt {
             Stmt::Var(var) => {
@@ -315,6 +424,43 @@ impl Analyzer {
                     self.analyze_expr(arg)?;
                 }
             }
+            Stmt::Match(m) => {
+                self.infer_type(&m.disc)?;
+                self.analyze_expr(&m.disc)?;
+                for arm in &m.arms {
+                    self.enter_scope();
+                    self.bind_match_pattern(&arm.pat);
+                    if let Some(g) = &arm.guard {
+                        self.infer_type(g)?;
+                        self.analyze_expr(g)?;
+                    }
+                    self.analyze_stmt(&arm.body)?;
+                    self.exit_scope();
+                }
+            }
+            Stmt::TryCatch {
+                try_block,
+                err_ident,
+                catch_body,
+                ..
+            } => {
+                self.analyze_block(try_block)?;
+                if let Some(cb) = catch_body {
+                    self.enter_scope();
+                    if let Some(cv) = err_ident {
+                        let _ = self.define(
+                            cv.sym.clone(),
+                            SymbolKind::Var {
+                                ty: Type::Any,
+                                kind: VarDeclKind::Let,
+                            },
+                            cv.span,
+                        );
+                    }
+                    self.analyze_stmt(cb)?;
+                    self.exit_scope();
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -331,7 +477,7 @@ impl Analyzer {
                 self.analyze_expr(&bin.left)?;
                 self.analyze_expr(&bin.right)?;
             }
-            Expr::Call(call) => {
+            Expr::Call(call) | Expr::OptCall(call) => {
                 self.analyze_expr(&call.callee)?;
                 for arg in &call.args {
                     self.analyze_expr(arg)?;
@@ -343,7 +489,7 @@ impl Analyzer {
                     self.analyze_expr(arg)?;
                 }
             }
-            Expr::Member(member) => {
+            Expr::Member(member) | Expr::OptMember(member) => {
                 self.analyze_expr(&member.obj)?;
             }
             Expr::Slice(slice) => {
@@ -358,7 +504,13 @@ impl Analyzer {
             Expr::Match(m) => {
                 self.analyze_expr(&m.disc)?;
                 for arm in &m.arms {
+                    self.enter_scope();
+                    self.bind_match_pattern(&arm.pat);
+                    if let Some(g) = &arm.guard {
+                        self.analyze_expr(g)?;
+                    }
                     self.analyze_stmt(&arm.body)?;
+                    self.exit_scope();
                 }
             }
             Expr::Array(elements) => {
@@ -371,14 +523,47 @@ impl Analyzer {
                     self.analyze_expr(&f.val)?;
                 }
             }
-            Expr::Await(inner) => {
+            Expr::Await(inner)
+            | Expr::Question(inner)
+            | Expr::ErrWrap(inner)
+            | Expr::BoxNew(inner)
+            | Expr::Move(inner) => {
                 self.analyze_expr(inner)?;
             }
             Expr::Borrow(inner, _) => {
                 self.analyze_expr(inner)?;
             }
-            Expr::Move(inner) => {
-                self.analyze_expr(inner)?;
+            Expr::QuestionFallback { expr, fallback, .. } => {
+                self.analyze_expr(expr)?;
+                self.analyze_expr(fallback)?;
+            }
+            Expr::NullCoalesce { left, right } => {
+                self.analyze_expr(left)?;
+                self.analyze_expr(right)?;
+            }
+            Expr::Catch {
+                expr,
+                err_ident,
+                body,
+                ..
+            } => {
+                self.analyze_expr(expr)?;
+                self.enter_scope();
+                if let Some(ev) = err_ident {
+                    let _ = self.define(
+                        ev.sym.clone(),
+                        SymbolKind::Var {
+                            ty: Type::Any,
+                            kind: VarDeclKind::Let,
+                        },
+                        ev.span,
+                    );
+                }
+                self.analyze_stmt(body)?;
+                self.exit_scope();
+            }
+            Expr::Downcast { obj, .. } => {
+                self.analyze_expr(obj)?;
             }
             Expr::Builtin(call) => {
                 for arg in &call.args {
@@ -424,6 +609,8 @@ impl Analyzer {
         }
         match (a, b) {
             (Type::Ref(t1), Type::Ref(t2)) => t1.sym == t2.sym,
+            (Type::BoxDyn(t1), Type::BoxDyn(t2)) => t1.sym == t2.sym,
+            (Type::BoxDyn(_), Type::Ref(_)) | (Type::Ref(_), Type::BoxDyn(_)) => true,
             (Type::BorrowType { inner: i1, .. }, Type::BorrowType { inner: i2, .. }) => {
                 self.types_eq(i1, i2)
             }
@@ -432,7 +619,14 @@ impl Analyzer {
             (Type::Shared(i1), Type::Shared(i2)) => self.types_eq(i1, i2),
             (Type::Shared(i1), other) | (other, Type::Shared(i1)) => self.types_eq(i1, other),
             (Type::Optional(t1), Type::Optional(t2)) => self.types_eq(t1, t2),
+            (Type::Optional(t1), other) | (other, Type::Optional(t1)) => self.types_eq(t1, other),
             (Type::ErrorUnion(t1), Type::ErrorUnion(t2)) => self.types_eq(t1, t2),
+            (Type::ResultType { ok: o1, .. }, Type::ResultType { ok: o2, .. }) => {
+                self.types_eq(o1, o2)
+            }
+            (Type::ResultType { ok: o1, .. }, other) | (other, Type::ResultType { ok: o1, .. }) => {
+                self.types_eq(o1, other)
+            }
             (Type::Array(t1), Type::Array(t2)) => self.types_eq(t1, t2),
             (Type::Tuple(t1), Type::Tuple(t2)) => {
                 if t1.len() != t2.len() {
@@ -556,7 +750,7 @@ impl Analyzer {
                 Lit::Float(_) => Ok(Type::F32),
                 Lit::Bool(_) => Ok(Type::Bool),
                 Lit::Str(_) => Ok(Type::String),
-                Lit::Null => Ok(Type::Unknown),
+                Lit::Null => Ok(Type::Optional(Box::new(Type::Unknown))),
                 Lit::Undefined => Ok(Type::Any),
             },
             Expr::Ident(ident) => {
@@ -570,6 +764,9 @@ impl Analyzer {
                     || ident.sym == "this"
                     || ident.sym == "_"
                     || ident.sym == "super"
+                    || ident.sym == "Box"
+                    || ident.sym == "Err"
+                    || ident.sym == "Error"
                 {
                     return Ok(Type::Any);
                 }
@@ -585,6 +782,7 @@ impl Analyzer {
                     )),
                     Some(SymbolKind::Class(c)) => Ok(Type::Ref(c.ident.clone())),
                     Some(SymbolKind::Trait(t)) => Ok(Type::Ref(t.ident.clone())),
+                    Some(SymbolKind::Enum(e)) => Ok(Type::Ref(e.ident.clone())),
                     _ => Err(SemaError::UndefinedSymbol(ident.sym.clone(), ident.span)),
                 }
             }
@@ -610,6 +808,7 @@ impl Analyzer {
                     || bin.op == BinaryOp::Gt
                     || bin.op == BinaryOp::GtEq
                     || bin.op == BinaryOp::NotEq
+                    || bin.op == BinaryOp::Eq
                 {
                     Ok(Type::Bool)
                 } else if bin.op == BinaryOp::Add && (left == Type::String || right == Type::String)
@@ -630,6 +829,7 @@ impl Analyzer {
                     _ => Err(SemaError::NotAFunction(call.span)),
                 }
             }
+            Expr::OptCall(_) | Expr::OptMember(_) => Ok(Type::Optional(Box::new(Type::Any))),
             Expr::New(call) => {
                 if let Expr::Ident(ident) = &*call.callee {
                     if self.classes.contains_key(&ident.sym) {
@@ -645,10 +845,52 @@ impl Analyzer {
             Expr::Question(inner) => {
                 let inner_ty = self.infer_type(inner)?;
                 match inner_ty {
+                    Type::ResultType { ok, .. } => match *ok {
+                        Type::Optional(t) => Ok(*t),
+                        other => Ok(other),
+                    },
                     Type::ErrorUnion(t) | Type::Optional(t) => Ok(*t),
                     _ => Ok(inner_ty),
                 }
             }
+            Expr::QuestionFallback { expr, fallback, .. }
+            | Expr::NullCoalesce {
+                left: expr,
+                right: fallback,
+            } => {
+                let inner_ty = self.infer_type(expr)?;
+                let fb_ty = self.infer_type(fallback)?;
+                match inner_ty {
+                    Type::ResultType { ok, .. } => match *ok {
+                        Type::Optional(t) => Ok(*t),
+                        other => Ok(other),
+                    },
+                    Type::ErrorUnion(t) | Type::Optional(t) => {
+                        if *t == Type::Unknown || *t == Type::Any {
+                            Ok(fb_ty)
+                        } else {
+                            Ok(*t)
+                        }
+                    }
+                    _ => Ok(fb_ty),
+                }
+            }
+            Expr::Catch { expr, .. } => {
+                let inner_ty = self.infer_type(expr)?;
+                match inner_ty {
+                    Type::ResultType { ok, .. } => Ok(*ok),
+                    Type::ErrorUnion(t) => Ok(*t),
+                    _ => Ok(inner_ty),
+                }
+            }
+            Expr::ErrWrap(_) | Expr::BoxNew(_) => Ok(Type::Any),
+            Expr::Downcast {
+                target_ty, is_mut, ..
+            } => Ok(Type::Optional(Box::new(Type::BorrowType {
+                inner: Box::new(Type::Ref(target_ty.clone())),
+                is_mut: *is_mut,
+                lifetimes: vec![],
+            }))),
             Expr::Object(fields) => {
                 let mut fs = Vec::new();
                 for f in fields {
@@ -683,42 +925,36 @@ impl Analyzer {
                 })
             }
             Expr::Move(inner) => self.infer_type(inner),
-            Expr::Builtin(call) => {
-                // Builtins could have specific return types.
-                // For now, @map returns an array, @print returns void.
-                match call.name.as_str() {
-                    "@print" | "@fs_write_file" | "@fs_mkdir" | "@fs_remove" | "@fs_copy"
-                    | "@net_send" | "@net_close" | "@net_listen" => Ok(Type::Void),
-                    "@fs_read_file" | "@fs_read_async" | "@net_read_async" | "@http_fetch" => {
-                        Ok(Type::String)
-                    }
-                    "@fs_exists" => Ok(Type::Bool),
-                    "@net_connect" => Ok(Type::I32),
-                    "@self" => Ok(Type::PID),
-                    "@yield_to_beam" | "@json_parse" | "@alloc" => Ok(Type::Any),
-                    "@get_arena" => Ok(Type::Ref(Ident {
-                        span: Span { start: 0, end: 0 },
-                        sym: "Arena".to_string(),
-                    })),
-                    "@io_read_stdin_line" => Ok(Type::String),
-                    "@io_write_stdout" | "@io_write_stderr" | "@print_err" | "@free" => {
-                        Ok(Type::Void)
-                    }
-                    "@shared_tensor_init" => Ok(Type::Ref(Ident {
-                        span: Span { start: 0, end: 0 },
-                        sym: "SharedTensor".to_string(),
-                    })),
-                    "@map" => {
-                        if call.args.len() > 0 {
-                            let inner = self.infer_type(&call.args[0])?;
-                            Ok(inner)
-                        } else {
-                            Ok(Type::Unknown)
-                        }
-                    }
-                    _ => Ok(Type::Unknown),
+            Expr::Builtin(call) => match call.name.as_str() {
+                "@print" | "@fs_write_file" | "@fs_mkdir" | "@fs_remove" | "@fs_copy"
+                | "@net_send" | "@net_close" | "@net_listen" => Ok(Type::Void),
+                "@fs_read_file" | "@fs_read_async" | "@net_read_async" | "@http_fetch" => {
+                    Ok(Type::String)
                 }
-            }
+                "@fs_exists" => Ok(Type::Bool),
+                "@net_connect" => Ok(Type::I32),
+                "@self" => Ok(Type::PID),
+                "@yield_to_beam" | "@json_parse" | "@alloc" => Ok(Type::Any),
+                "@get_arena" => Ok(Type::Ref(Ident {
+                    span: Span { start: 0, end: 0 },
+                    sym: "Arena".to_string(),
+                })),
+                "@io_read_stdin_line" => Ok(Type::String),
+                "@io_write_stdout" | "@io_write_stderr" | "@print_err" | "@free" => Ok(Type::Void),
+                "@shared_tensor_init" => Ok(Type::Ref(Ident {
+                    span: Span { start: 0, end: 0 },
+                    sym: "SharedTensor".to_string(),
+                })),
+                "@map" => {
+                    if call.args.len() > 0 {
+                        let inner = self.infer_type(&call.args[0])?;
+                        Ok(inner)
+                    } else {
+                        Ok(Type::Unknown)
+                    }
+                }
+                _ => Ok(Type::Unknown),
+            },
             _ => Ok(Type::Any),
         }
     }

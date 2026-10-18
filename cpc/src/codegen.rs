@@ -37,6 +37,13 @@ pub struct Codegen {
     pub fn_sigs: HashMap<String, Function>,
     pub class_defs: HashMap<String, Class>,
     pub trait_defs: HashMap<String, TraitDecl>,
+    pub enum_defs: HashMap<String, EnumDecl>,
+    pub error_sets: HashMap<String, Vec<Ident>>,
+    pub anon_err_sets: Vec<(String, Vec<String>)>,
+    pub union_err_sets: Vec<(String, Vec<String>)>,
+    pub in_try_region: bool,
+    pub try_catch_target: Option<(String, String, String, ErrorType)>,
+    pub expected_box_trait: Option<String>,
     pub current_class_name: Option<String>,
     pub current_receiver_mode: ReceiverMode,
     pub mutable_fn_params: HashSet<String>,
@@ -80,6 +87,13 @@ impl Codegen {
             fn_sigs: HashMap::new(),
             class_defs: HashMap::new(),
             trait_defs: HashMap::new(),
+            enum_defs: HashMap::new(),
+            error_sets: HashMap::new(),
+            anon_err_sets: Vec::new(),
+            union_err_sets: Vec::new(),
+            in_try_region: false,
+            try_catch_target: None,
+            expected_box_trait: None,
             current_class_name: None,
             current_receiver_mode: ReceiverMode::Static,
             mutable_fn_params: HashSet::new(),
@@ -94,6 +108,181 @@ impl Codegen {
             current_stmt_idx: 0,
             last_use_map: HashMap::new(),
         }
+    }
+
+    pub fn fnv1a_type_id(name: &str) -> u64 {
+        let mut hash: u64 = 0xcbf29ce484222325;
+        for b in name.as_bytes() {
+            hash ^= *b as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash
+    }
+
+    pub fn map_error_type(&self, err: &ErrorType) -> String {
+        match err {
+            ErrorType::Named(id) => id.sym.clone(),
+            ErrorType::Union(idents) => {
+                let names: Vec<String> = idents.iter().map(|i| i.sym.clone()).collect();
+                format!("__UnionErr_{}", names.join("_"))
+            }
+            ErrorType::AnonSet(idents) => {
+                let names: Vec<String> = idents.iter().map(|i| i.sym.clone()).collect();
+                format!("__AnonErr_{}", names.join("_"))
+            }
+            ErrorType::BoxDyn(id) => id.sym.clone(),
+            ErrorType::DefaultError => "Error".to_string(),
+        }
+    }
+
+    pub fn check_type_validity_and_collect_errors(&mut self, ty: &Type) {
+        match ty {
+            Type::BareDyn(tr) => {
+                panic!(
+                    "CP Compile Error: Bare 'dyn {}' cannot be placed on the stack; wrap it in 'Box<dyn {}>'",
+                    tr.sym, tr.sym
+                );
+            }
+            Type::ResultType { ok, err } => {
+                self.check_type_validity_and_collect_errors(ok);
+                match err {
+                    ErrorType::AnonSet(idents) => {
+                        let zig_name = self.map_error_type(err);
+                        if !self.anon_err_sets.iter().any(|(n, _)| n == &zig_name) {
+                            let variants = idents.iter().map(|i| i.sym.clone()).collect();
+                            self.anon_err_sets.push((zig_name, variants));
+                        }
+                    }
+                    ErrorType::Union(idents) => {
+                        let zig_name = self.map_error_type(err);
+                        if !self.union_err_sets.iter().any(|(n, _)| n == &zig_name) {
+                            let sub_names = idents.iter().map(|i| i.sym.clone()).collect();
+                            self.union_err_sets.push((zig_name, sub_names));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Type::Optional(inner)
+            | Type::Array(inner)
+            | Type::Shared(inner)
+            | Type::ErrorUnion(inner)
+            | Type::BorrowType { inner, .. } => {
+                self.check_type_validity_and_collect_errors(inner);
+            }
+            Type::Tuple(tys) => {
+                for t in tys {
+                    self.check_type_validity_and_collect_errors(t);
+                }
+            }
+            Type::Object(fields) => {
+                for f in fields {
+                    self.check_type_validity_and_collect_errors(&f.ty);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn scan_stmt_types(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::Var(v) => {
+                if let Some(t) = &v.ty {
+                    self.check_type_validity_and_collect_errors(t);
+                }
+            }
+            Stmt::Block(b) => {
+                for s in &b.body {
+                    self.scan_stmt_types(s);
+                }
+            }
+            Stmt::If(i) => {
+                self.scan_stmt_types(&i.cons);
+                if let Some(alt) = &i.alt {
+                    self.scan_stmt_types(alt);
+                }
+            }
+            Stmt::While(w) => self.scan_stmt_types(&w.body),
+            Stmt::Match(m) => {
+                for arm in &m.arms {
+                    self.scan_stmt_types(&arm.body);
+                }
+            }
+            Stmt::TryCatch {
+                try_block,
+                catch_body,
+                ..
+            } => {
+                for s in &try_block.body {
+                    self.scan_stmt_types(s);
+                }
+                if let Some(cb) = catch_body {
+                    self.scan_stmt_types(cb);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn verify_error_type_compatibility(&self, src: &ErrorType, dst: &ErrorType) {
+        if src == dst {
+            return;
+        }
+        let src_name = self.map_error_type(src);
+        let dst_name = self.map_error_type(dst);
+        if src_name == dst_name || dst_name == "Error" {
+            return;
+        }
+        match (src, dst) {
+            (ErrorType::Named(s_id), ErrorType::Union(d_ids)) => {
+                if d_ids.iter().any(|d| d.sym == s_id.sym) {
+                    return;
+                }
+            }
+            (ErrorType::Union(s_ids), ErrorType::Union(d_ids)) => {
+                if s_ids.iter().all(|s| d_ids.iter().any(|d| d.sym == s.sym)) {
+                    return;
+                }
+            }
+            (ErrorType::AnonSet(s_ids), ErrorType::AnonSet(d_ids)) => {
+                if s_ids.iter().all(|s| d_ids.iter().any(|d| d.sym == s.sym)) {
+                    return;
+                }
+            }
+            (ErrorType::Named(s_id), ErrorType::Named(d_id)) => {
+                if let Some(en) = self.enum_defs.get(&d_id.sym) {
+                    if en
+                        .variants
+                        .iter()
+                        .any(|v| v.from_err.as_ref().map_or(false, |f| f.sym == s_id.sym))
+                    {
+                        return;
+                    }
+                }
+                if self.trait_defs.contains_key(&d_id.sym) {
+                    if let Some(cls) = self.class_defs.get(&s_id.sym) {
+                        if cls.implements.iter().any(|i| i.sym == d_id.sym) {
+                            return;
+                        }
+                    }
+                }
+            }
+            (ErrorType::Named(s_id), ErrorType::BoxDyn(tr_id)) => {
+                if s_id.sym == tr_id.sym {
+                    return;
+                }
+                if let Some(cls) = self.class_defs.get(&s_id.sym) {
+                    if cls.implements.iter().any(|i| i.sym == tr_id.sym) {
+                        return;
+                    }
+                }
+            }
+            _ => {}
+        }
+        panic!(
+            "CP Compile Error: Error type '{}' cannot be automatically converted to '{}' (missing 'from {}' in target error enum)",
+            src_name, dst_name, src_name
+        );
     }
 
     pub fn get_func_receiver_mode(func: &Function) -> ReceiverMode {
@@ -157,7 +346,7 @@ impl Codegen {
         type_name: &str,
         method_name: &str,
     ) -> Option<(Vec<Param>, Option<Type>, ReceiverMode)> {
-        let clean = type_name.trim_start_matches('*');
+        let clean = type_name.trim_start_matches('?').trim_start_matches('*');
         if let Some(cls) = self.class_defs.get(clean) {
             if let Some(m) = cls.methods.iter().find(|m| m.ident.sym == method_name) {
                 return Some((
@@ -185,12 +374,21 @@ impl Codegen {
         }
         if let Some(ty) = self.var_cp_types.get(var_name) {
             match ty {
-                Type::Ref(id) => return Some(id.sym.clone()),
+                Type::Ref(id) | Type::BoxDyn(id) => return Some(id.sym.clone()),
                 Type::BorrowType { inner, .. } => {
-                    if let Type::Ref(id) = &**inner {
+                    if let Type::Ref(id) | Type::BoxDyn(id) = &**inner {
                         return Some(id.sym.clone());
                     }
                 }
+                Type::Optional(inner) => match &**inner {
+                    Type::Ref(id) | Type::BoxDyn(id) => return Some(id.sym.clone()),
+                    Type::BorrowType { inner: b_in, .. } => {
+                        if let Type::Ref(id) | Type::BoxDyn(id) = &**b_in {
+                            return Some(id.sym.clone());
+                        }
+                    }
+                    _ => {}
+                },
                 Type::Shared(inner) => {
                     if let Type::Ref(id) = &**inner {
                         return Some(id.sym.clone());
@@ -200,8 +398,11 @@ impl Codegen {
             }
         }
         if let Some(zig_ty) = self.locals.get(var_name) {
-            let clean = zig_ty.trim_start_matches('*');
-            if self.class_defs.contains_key(clean) || self.trait_defs.contains_key(clean) {
+            let clean = zig_ty.trim_start_matches('?').trim_start_matches('*');
+            if clean == "Error"
+                || self.class_defs.contains_key(clean)
+                || self.trait_defs.contains_key(clean)
+            {
                 return Some(clean.to_string());
             }
         }
@@ -230,6 +431,12 @@ impl Codegen {
             }
             if let ModuleItem::Decl(Decl::Enum(e)) = item {
                 self.globals.insert(e.ident.sym.clone());
+                self.enum_defs.insert(e.ident.sym.clone(), e.clone());
+            }
+            if let ModuleItem::Decl(Decl::ErrorSet(es)) = item {
+                self.globals.insert(es.ident.sym.clone());
+                self.error_sets
+                    .insert(es.ident.sym.clone(), es.variants.clone());
             }
             if let ModuleItem::Decl(Decl::Trait(t)) = item {
                 self.globals.insert(t.ident.sym.clone());
@@ -373,12 +580,56 @@ impl Codegen {
                 }
             }
         }
+        // 4. Scan all types in the module to reject BareDyn (`dyn Trait` on stack) and collect AnonSet / Union error sets
+        let fn_list: Vec<Function> = self.fn_sigs.values().cloned().collect();
+        for f in &fn_list {
+            for p in &f.params {
+                self.check_type_validity_and_collect_errors(&p.ty);
+            }
+            if let Some(rt) = &f.return_type {
+                self.check_type_validity_and_collect_errors(rt);
+            }
+            for s in &f.body.body {
+                self.scan_stmt_types(s);
+            }
+        }
+        let cls_list: Vec<Class> = self.class_defs.values().cloned().collect();
+        for c in &cls_list {
+            for fl in &c.fields {
+                self.check_type_validity_and_collect_errors(&fl.ty);
+            }
+            for m in &c.methods {
+                for p in &m.params {
+                    self.check_type_validity_and_collect_errors(&p.ty);
+                }
+                if let Some(rt) = &m.return_type {
+                    self.check_type_validity_and_collect_errors(rt);
+                }
+                for s in &m.body.body {
+                    self.scan_stmt_types(s);
+                }
+            }
+        }
+        let tr_list: Vec<TraitDecl> = self.trait_defs.values().cloned().collect();
+        for t in &tr_list {
+            for m in &t.methods {
+                for p in &m.params {
+                    self.check_type_validity_and_collect_errors(&p.ty);
+                }
+                if let Some(rt) = &m.return_type {
+                    self.check_type_validity_and_collect_errors(rt);
+                }
+            }
+        }
+
         self.globals.insert("Math".to_string());
         self.globals.insert("Map".to_string());
         self.globals.insert("Set".to_string());
         self.globals.insert("PID".to_string());
         self.globals.insert("Message".to_string());
         self.globals.insert("Mailbox".to_string());
+        self.globals.insert("Error".to_string());
+        self.globals.insert("Box".to_string());
         self.globals.insert("print".to_string());
         self.globals.insert("console".to_string());
 
@@ -387,6 +638,41 @@ impl Codegen {
         if self.is_beam_mode {
             self.writeln("const beam = @import(\"beam.zig\");");
         }
+        self.writeln("");
+
+        // --- Tri-State Result, Built-in Error, String Concat & Pattern Helpers ---
+        self.writeln("pub fn CpResult(comptime T: type, comptime E: type) type {");
+        self.writeln("    return union(enum) { ok: T, err: E, pub const __IS_CP_RESULT = true; };");
+        self.writeln("}");
+        self.writeln("pub const Error = struct {");
+        self.writeln("    code: i32 = 0,");
+        self.writeln("    msg: []const u8 = \"\",");
+        self.writeln("    cause: ?*const anyopaque = null,");
+        self.writeln("    pub const __TYPE_ID: u64 = 0xEE00_0000_0000_0001;");
+        self.writeln("    pub fn init(code: i32, msg: []const u8) Error { return Error{ .code = code, .msg = msg }; }");
+        self.writeln("};");
+        self.writeln("fn is_cp_result(comptime T: type) bool {");
+        self.writeln("    return @typeInfo(T) == .@\"union\" and @hasDecl(T, \"__IS_CP_RESULT\");");
+        self.writeln("}");
+        self.writeln("fn CpOptType(comptime T: type) type {");
+        self.writeln("    if (@typeInfo(T) == .optional) return T;");
+        self.writeln("    return ?T;");
+        self.writeln("}");
+        self.writeln("fn CpUnwrapOpt(comptime T: type) type {");
+        self.writeln("    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;");
+        self.writeln("    return T;");
+        self.writeln("}");
+        self.writeln("fn cp_opt_is_null(v: anytype) bool {");
+        self.writeln("    const T = @TypeOf(v);");
+        self.writeln("    if (comptime @typeInfo(T) == .optional) return v == null;");
+        self.writeln("    return false;");
+        self.writeln("}");
+        self.writeln("fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {");
+        self.writeln("    const T = @TypeOf(v);");
+        self.writeln(
+            "    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }",
+        );
+        self.writeln("}");
         self.writeln("");
 
         // --- Top-Level C-FFI / Zig Escapes ---
@@ -571,7 +857,17 @@ impl Codegen {
         self.writeln("}");
         self.writeln("");
         self.writeln("fn is_string_like(comptime T: type) bool { if (T == []const u8 or T == []u8) return true; if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }");
-        self.writeln("fn to_string_slice(v: anytype) []const u8 { const T = @TypeOf(v); if (T == []const u8 or T == []u8) return v; const slice: []const u8 = v; return slice; }");
+        self.writeln("fn to_string_slice(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime (T == []const u8 or T == []u8)) { return v; } else { const slice: []const u8 = v; return slice; } }");
+        self.writeln("fn CpValType(comptime T: type) type { if (is_string_like(T)) return []const u8; if (T == comptime_int) return i32; if (T == comptime_float) return f32; return T; }");
+        self.writeln("fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == comptime_int) { return @as(i32, v); } else if (comptime T == comptime_float) { return @as(f32, v); } else { return v; } }");
+        self.writeln("fn CpAddReturn(comptime Ta: type, comptime Tb: type) type { if (is_string_like(Ta) or is_string_like(Tb)) return []const u8; if (Ta == comptime_int and Tb == comptime_int) return i32; if (Ta == comptime_int) return Tb; if (Tb == comptime_int) return Ta; if (Ta == comptime_float and Tb == comptime_float) return f32; if (Ta == comptime_float) return Tb; if (Tb == comptime_float) return Ta; return Ta; }");
+        self.writeln("fn cp_add(a: anytype, b: anytype) CpAddReturn(@TypeOf(a), @TypeOf(b)) { const Ta = @TypeOf(a); const Tb = @TypeOf(b); if (comptime (is_string_like(Ta) and is_string_like(Tb))) { return std.fmt.allocPrint(std.heap.page_allocator, \"{s}{s}\", .{ to_string_slice(a), to_string_slice(b) }) catch unreachable; } else if (comptime is_string_like(Ta)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{s}{d}\", .{ to_string_slice(a), b }) catch unreachable; } else if (comptime is_string_like(Tb)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{d}{s}\", .{ a, to_string_slice(b) }) catch unreachable; } else { return a + b; } }");
+        self.writeln("fn CpUnwrapOkType(comptime T: type) type { if (is_cp_result(T)) { const OkT = @FieldType(T, \"ok\"); if (@typeInfo(OkT) == .optional) return @typeInfo(OkT).optional.child; return OkT; } if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child; return T; }");
+        self.writeln("fn cp_has_ok_val(v: anytype) bool { const T = @TypeOf(v); if (comptime is_cp_result(T)) { if (v != .ok) return false; const OkT = @FieldType(T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok != null; } else { return true; } } else if (comptime @typeInfo(T) == .optional) { return v != null; } else { return true; } }");
+        self.writeln("fn cp_unwrap_ok_val(v: anytype) CpUnwrapOkType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_cp_result(T)) { const OkT = @FieldType(T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok.?; } else { return v.ok; } } else if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; } }");
+        self.writeln("fn cp_is_null_val(v: anytype) bool { const T = @TypeOf(v); if (comptime is_cp_result(T)) { if (v != .ok) return false; const OkT = @FieldType(T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok == null; } else { return false; } } else if (comptime @typeInfo(T) == .optional) { return v == null; } else { return false; } }");
+        self.writeln("fn cp_convert_err(comptime TargetErr: type, err_val: anytype) TargetErr { const SrcType = @TypeOf(err_val); if (comptime SrcType == TargetErr) { return err_val; } else if (comptime TargetErr == Error) { if (comptime (@typeInfo(SrcType) == .@\"union\" or @typeInfo(SrcType) == .@\"enum\")) { return Error{ .code = @intCast(@intFromEnum(std.meta.activeTag(err_val))), .msg = @tagName(err_val) }; } else { return Error{ .code = -1, .msg = \"error\" }; } } else if (comptime @typeInfo(TargetErr) == .@\"union\" and @hasDecl(TargetErr, \"__from\")) { return TargetErr.__from(err_val); } else { return err_val; } }");
+        self.writeln("fn cp_not(v: anytype) bool { const T = @TypeOf(v); if (comptime T == bool) { return !v; } else if (comptime @typeInfo(T) == .optional) { return v == null; } else if (comptime is_string_like(T)) { return to_string_slice(v).len == 0; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return v == 0; } else { return false; } }");
 
         self.writeln("fn cp_math_random() f32 {");
         self.writeln("    return 0.5; // Stub");
@@ -674,11 +970,87 @@ impl Codegen {
                 self.generate_trait(t);
             }
         }
-        println!("[TRACE] Generating Enums");
+        println!("[TRACE] Generating Enums & ErrorSets");
         for item in &module.body {
             if let ModuleItem::Decl(Decl::Enum(e)) = item {
                 self.generate_enum(e);
             }
+            if let ModuleItem::Decl(Decl::ErrorSet(es)) = item {
+                self.writeln(&format!("const {} = union(enum) {{", es.ident.sym));
+                self.indent();
+                for v in &es.variants {
+                    self.writeln(&format!("{},", v.sym));
+                }
+                self.dedent();
+                self.writeln("};\n");
+            }
+        }
+        // Emit synthesized AnonSet and Union error sets
+        let anon_sets = self.anon_err_sets.clone();
+        for (zig_name, variants) in &anon_sets {
+            self.writeln(&format!("const {} = union(enum) {{", zig_name));
+            self.indent();
+            for v in variants {
+                self.writeln(&format!("{},", v));
+            }
+            self.writeln("pub fn __from(v: anytype) @This() {");
+            self.indent();
+            self.writeln("return switch (v) {");
+            self.indent();
+            for v in variants {
+                self.writeln(&format!(
+                    ".{0} => |p| if (@hasField(@TypeOf(v), \"{0}\")) .{{ .{0} = p }} else unreachable,",
+                    v
+                ));
+            }
+            self.writeln("else => unreachable,");
+            self.dedent();
+            self.writeln("};");
+            self.dedent();
+            self.writeln("}");
+            self.dedent();
+            self.writeln("};\n");
+        }
+        let union_sets = self.union_err_sets.clone();
+        for (zig_name, sub_names) in &union_sets {
+            self.writeln(&format!("const {} = union(enum) {{", zig_name));
+            self.indent();
+            let mut seen_variants = HashSet::new();
+            let mut variant_list = Vec::new();
+            for sn in sub_names {
+                if let Some(en) = self.enum_defs.get(sn).cloned() {
+                    for v in &en.variants {
+                        if seen_variants.insert(v.ident.sym.clone()) {
+                            variant_list.push(v.ident.sym.clone());
+                            if let Some(tty) = &v.tuple_type {
+                                self.writeln(&format!("{}: {},", v.ident.sym, self.map_type(tty)));
+                            } else {
+                                self.writeln(&format!("{},", v.ident.sym));
+                            }
+                        }
+                    }
+                } else if let Some(es) = self.error_sets.get(sn).cloned() {
+                    for v in &es {
+                        if seen_variants.insert(v.sym.clone()) {
+                            variant_list.push(v.sym.clone());
+                            self.writeln(&format!("{},", v.sym));
+                        }
+                    }
+                }
+            }
+            self.writeln("pub fn __from(v: anytype) @This() {");
+            self.indent();
+            for v in &variant_list {
+                self.writeln(&format!(
+                    "if (comptime @hasField(@TypeOf(v), \"{0}\")) {{ if (std.meta.activeTag(v) == .{0}) return .{{ .{0} = @field(v, \"{0}\") }}; }}",
+                    v
+                ));
+            }
+            self.writeln("unreachable;");
+            self.dedent();
+            self.writeln("}");
+            self.dedent();
+            self.writeln("};\n");
         }
         println!("[TRACE] Generating Interfaces");
         for item in &module.body {
@@ -841,11 +1213,13 @@ impl Codegen {
     fn generate_trait(&mut self, t: &TraitDecl) {
         writeln!(
             self.output,
-            "const {} = struct {{ ptr: *anyopaque, vtable: *const VTable, const VTable = struct {{",
+            "const {} = struct {{ ptr: *anyopaque, vtable: *const VTable, pub const VTable = struct {{",
             t.ident.sym
         )
         .unwrap();
         self.indent();
+        self.writeln("__type_id: u64,");
+        self.writeln("__drop: *const fn(ptr: *anyopaque) void,");
         for m in &t.methods {
             let mut p_str = String::from("ptr: *anyopaque");
             for p in &m.params {
@@ -863,26 +1237,42 @@ impl Codegen {
             self.writeln(&format!("{}: *const fn({}) {},", m.ident.sym, p_str, ret));
         }
         self.dedent();
-        self.writeln("}; };\n");
-    }
-
-    fn generate_impl(&mut self, i: &ImplDecl) {
-        if let Some(tr) = self.trait_defs.get(&i.trait_name.sym) {
-            let mut fields_str = String::new();
-            for (idx, tm) in tr.methods.iter().enumerate() {
-                fields_str.push_str(&format!(
-                    ".{} = @ptrCast(&{}.{})",
-                    tm.ident.sym, i.target_name.sym, tm.ident.sym
-                ));
-                if idx + 1 < tr.methods.len() {
-                    fields_str.push_str(", ");
+        self.writeln("};");
+        self.indent();
+        for m in &t.methods {
+            let mut fn_params = format!("self: {}", t.ident.sym);
+            let mut call_args = String::from("self.ptr");
+            for p in &m.params {
+                if p.ident.sym == "this" || p.ident.sym == "_" {
+                    continue;
                 }
+                fn_params.push_str(&format!(", {}: {}", p.ident.sym, self.map_type(&p.ty)));
+                call_args.push_str(&format!(", {}", p.ident.sym));
             }
+            let ret = m
+                .return_type
+                .as_ref()
+                .map(|t| self.map_type(t))
+                .unwrap_or("void".to_string());
             self.writeln(&format!(
-                "const vtable_{}_{} = {}.VTable {{ {} }};",
-                i.trait_name.sym, i.target_name.sym, i.trait_name.sym, fields_str
+                "pub fn {}({}) {} {{ return self.vtable.{}({}); }}",
+                m.ident.sym, fn_params, ret, m.ident.sym, call_args
             ));
         }
+        self.writeln(&format!(
+            "pub fn downcast(self: {}, comptime Target: type) ?*Target {{ if (self.vtable.__type_id == Target.__TYPE_ID) return @ptrCast(@alignCast(self.ptr)); return null; }}",
+            t.ident.sym
+        ));
+        self.writeln(&format!(
+            "pub fn release(self: {}) void {{ self.vtable.__drop(self.ptr); }}",
+            t.ident.sym
+        ));
+        self.dedent();
+        self.writeln("};\n");
+    }
+
+    fn generate_impl(&mut self, _i: &ImplDecl) {
+        // VTables are emitted uniformly in generate_class for all traits in class.implements
     }
 
     fn generate_enum(&mut self, e: &EnumDecl) {
@@ -899,7 +1289,10 @@ impl Codegen {
                 line.push_str(" = ");
                 line.push_str(&self.generate_expr(val));
             }
-            if let Some(fields) = &v.fields {
+            if let Some(tuple_ty) = &v.tuple_type {
+                line.push_str(&format!(": {},", self.map_type(tuple_ty)));
+                self.writeln(&line);
+            } else if let Some(fields) = &v.fields {
                 line.push_str(": struct {");
                 self.writeln(&line);
                 self.indent();
@@ -912,6 +1305,25 @@ impl Codegen {
                 line.push(',');
                 self.writeln(&line);
             }
+        }
+        let from_variants: Vec<&EnumVariant> =
+            e.variants.iter().filter(|v| v.from_err.is_some()).collect();
+        if !from_variants.is_empty() {
+            self.writeln(&format!("pub fn __from(v: anytype) {} {{", e.ident.sym));
+            self.indent();
+            self.writeln("const V = @TypeOf(v);");
+            for (idx, fv) in from_variants.iter().enumerate() {
+                if let Some(src_err) = &fv.from_err {
+                    let prefix = if idx == 0 { "if" } else { "else if" };
+                    self.writeln(&format!(
+                        "{} (comptime V == {}) {{ return {}{{ .{} = v }}; }}",
+                        prefix, src_err.sym, e.ident.sym, fv.ident.sym
+                    ));
+                }
+            }
+            self.writeln("else { @compileError(\"Unsupported error conversion\"); }");
+            self.dedent();
+            self.writeln("}");
         }
         self.dedent();
         self.writeln("};\n");
@@ -943,8 +1355,10 @@ impl Codegen {
     }
 
     fn generate_class(&mut self, class: &Class) {
+        let type_id = Self::fnv1a_type_id(&class.ident.sym);
         writeln!(self.output, "const {} = struct {{", class.ident.sym).unwrap();
         self.indent();
+        self.writeln(&format!("pub const __TYPE_ID: u64 = 0x{:016x};", type_id));
         if class.implements.iter().any(|i| i.sym == "Agent") {
             self.writeln("id: u32 = 0,");
         }
@@ -952,11 +1366,35 @@ impl Codegen {
             self.writeln(&format!("{}: {},", f.ident.sym, self.map_type(&f.ty)));
         }
         self.writeln(&format!("\npub fn _create(allocator: std.mem.Allocator) !*{} {{ const self_ptr = try allocator.create({}); self_ptr.* = undefined; return self_ptr; }}", class.ident.sym, class.ident.sym));
+        self.writeln(&format!(
+            "pub fn __box_drop(ptr: *anyopaque) void {{ const self_ptr: *{0} = @ptrCast(@alignCast(ptr)); if (@hasDecl({0}, \"release\")) {{ const RType = @typeInfo(@TypeOf({0}.release)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _ = self_ptr.release() catch {{}}; }} else {{ self_ptr.release(); }} }} std.heap.page_allocator.destroy(self_ptr); }}",
+            class.ident.sym
+        ));
         for m in &class.methods {
             self.generate_function_logic(m, Some(&class.ident.sym));
         }
         self.dedent();
-        self.writeln("};\n");
+        self.writeln("};");
+        // Emit VTables for all implemented traits
+        for tr_id in &class.implements {
+            if let Some(tr) = self.trait_defs.get(&tr_id.sym).cloned() {
+                let mut fields_str = format!(
+                    ".__type_id = {}.__TYPE_ID, .__drop = &{}.__box_drop",
+                    class.ident.sym, class.ident.sym
+                );
+                for tm in &tr.methods {
+                    fields_str.push_str(&format!(
+                        ", .{} = @ptrCast(&{}.{})",
+                        tm.ident.sym, class.ident.sym, tm.ident.sym
+                    ));
+                }
+                self.writeln(&format!(
+                    "const vtable_{}_{} = {}.VTable {{ {} }};",
+                    tr.ident.sym, class.ident.sym, tr.ident.sym, fields_str
+                ));
+            }
+        }
+        self.writeln("");
     }
 
     fn compute_last_uses_block(&mut self, block: &BlockStmt, counter: &mut usize) {
@@ -1022,6 +1460,32 @@ impl Codegen {
                 }
                 self.compute_last_uses_stmt(&w.body, counter);
             }
+            Stmt::Match(m) => {
+                crate::ast_visitor::find_referenced_vars_in_expr(&m.disc, &mut refs);
+                for r in refs {
+                    self.last_use_map.insert(r, idx);
+                }
+                for arm in &m.arms {
+                    if let Some(g) = &arm.guard {
+                        let mut grefs = HashSet::new();
+                        crate::ast_visitor::find_referenced_vars_in_expr(g, &mut grefs);
+                        for r in grefs {
+                            self.last_use_map.insert(r, idx);
+                        }
+                    }
+                    self.compute_last_uses_stmt(&arm.body, counter);
+                }
+            }
+            Stmt::TryCatch {
+                try_block,
+                catch_body,
+                ..
+            } => {
+                self.compute_last_uses_block(try_block, counter);
+                if let Some(cb) = catch_body {
+                    self.compute_last_uses_stmt(cb, counter);
+                }
+            }
             Stmt::Defer(d) => self.compute_last_uses_stmt(d, counter),
             Stmt::ErrDefer(d) => self.compute_last_uses_stmt(d, counter),
             _ => {}
@@ -1063,6 +1527,23 @@ impl Codegen {
     fn extract_expr_borrow_info(&self, expr: &Expr) -> (Vec<String>, bool, bool) {
         // Returns: (source_vars, is_mut_borrow, is_ref_struct)
         match expr {
+            Expr::Downcast { obj, is_mut, .. } => {
+                if let Expr::Ident(id) = &**obj {
+                    self.check_borrow_conflict(&id.sym, *is_mut);
+                    let mut sources = vec![id.sym.clone()];
+                    if let Some((orig, _)) = self.var_borrow_sources.get(&id.sym) {
+                        if !orig.is_empty() {
+                            sources = orig.clone();
+                        }
+                    }
+                    return (sources, *is_mut, false);
+                }
+                (vec![], *is_mut, false)
+            }
+            Expr::Question(inner)
+            | Expr::QuestionFallback { expr: inner, .. }
+            | Expr::NullCoalesce { left: inner, .. }
+            | Expr::Catch { expr: inner, .. } => self.extract_expr_borrow_info(inner),
             Expr::Borrow(inner, is_mut) => {
                 match &**inner {
                     Expr::Ident(id) => {
@@ -1349,6 +1830,1069 @@ impl Codegen {
         }
     }
 
+    fn infer_cp_type(&self, expr: &Expr) -> Option<Type> {
+        match expr {
+            Expr::Lit(Lit::Int(_)) => Some(Type::I32),
+            Expr::Lit(Lit::Float(_)) => Some(Type::F32),
+            Expr::Lit(Lit::Str(_)) => Some(Type::String),
+            Expr::Lit(Lit::Bool(_)) => Some(Type::Bool),
+            Expr::Ident(id) => {
+                if id.sym == "this" || id.sym == "_" {
+                    return self.current_class_name.as_ref().map(|c| {
+                        Type::Ref(Ident {
+                            span: Span { start: 0, end: 0 },
+                            sym: c.clone(),
+                        })
+                    });
+                }
+                self.var_cp_types.get(&id.sym).cloned()
+            }
+            Expr::New(nc) => {
+                if let Expr::Ident(cid) = &*nc.callee {
+                    return Some(Type::Ref(cid.clone()));
+                }
+                None
+            }
+            Expr::BoxNew(_) => self.expected_box_trait.as_ref().map(|tr| {
+                Type::BoxDyn(Ident {
+                    span: Span { start: 0, end: 0 },
+                    sym: tr.clone(),
+                })
+            }),
+            Expr::Downcast {
+                target_ty, is_mut, ..
+            } => Some(Type::Optional(Box::new(Type::BorrowType {
+                inner: Box::new(Type::Ref(target_ty.clone())),
+                is_mut: *is_mut,
+                lifetimes: vec![],
+            }))),
+            Expr::EnumInit(ei) => Some(Type::Ref(ei.enum_name.clone())),
+            Expr::Move(inner) | Expr::Borrow(inner, _) => self.infer_cp_type(inner),
+            Expr::Call(c) => {
+                if let Expr::Ident(fid) = &*c.callee {
+                    if fid.sym == "Error" {
+                        return Some(Type::Ref(Ident {
+                            span: Span { start: 0, end: 0 },
+                            sym: "Error".to_string(),
+                        }));
+                    }
+                    if let Some(sig) = self.fn_sigs.get(&fid.sym) {
+                        if let Some(rt) = &sig.return_type {
+                            if self.in_try_region {
+                                if let Type::ResultType { ok, .. } = rt {
+                                    return Some((**ok).clone());
+                                }
+                            }
+                            return Some(rt.clone());
+                        }
+                    } else if let Some(c_name) = &self.current_class_name {
+                        if let Some((_, Some(rt), _)) = self.lookup_method(c_name, &fid.sym) {
+                            if self.in_try_region {
+                                if let Type::ResultType { ok, .. } = &rt {
+                                    return Some((**ok).clone());
+                                }
+                            }
+                            return Some(rt);
+                        }
+                    }
+                } else if let Expr::Member(mem) = &*c.callee {
+                    if let Expr::Ident(oid) = &*mem.obj {
+                        if self.enum_defs.contains_key(&oid.sym) {
+                            return Some(Type::Ref(oid.clone()));
+                        }
+                        let tname_opt = self.resolve_var_type_name(&oid.sym).or_else(|| {
+                            if self.class_defs.contains_key(&oid.sym) {
+                                Some(oid.sym.clone())
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(tname) = tname_opt {
+                            if let Some((_, Some(rt), _)) =
+                                self.lookup_method(&tname, &mem.prop.sym)
+                            {
+                                if self.in_try_region {
+                                    if let Type::ResultType { ok, .. } = &rt {
+                                        return Some((**ok).clone());
+                                    }
+                                }
+                                return Some(rt);
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            Expr::Member(mem) => {
+                if let Expr::Ident(oid) = &*mem.obj {
+                    if self.enum_defs.contains_key(&oid.sym)
+                        || self.error_sets.contains_key(&oid.sym)
+                    {
+                        return Some(Type::Ref(oid.clone()));
+                    }
+                    if let Some(tname) = self.resolve_var_type_name(&oid.sym) {
+                        if tname == "Error" {
+                            if mem.prop.sym == "code" {
+                                return Some(Type::I32);
+                            }
+                            if mem.prop.sym == "msg" {
+                                return Some(Type::String);
+                            }
+                        }
+                        if let Some(cls) = self.class_defs.get(&tname) {
+                            if let Some(f) = cls.fields.iter().find(|f| f.ident.sym == mem.prop.sym)
+                            {
+                                return Some(f.ty.clone());
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            Expr::OptMember(mem) => {
+                if let Some(obj_ty) = self.infer_cp_type(&mem.obj) {
+                    let mut base_ty = &obj_ty;
+                    while let Type::Optional(inner) | Type::BorrowType { inner, .. } = base_ty {
+                        base_ty = inner;
+                    }
+                    if let Type::Ref(cid) = base_ty {
+                        if let Some(cls) = self.class_defs.get(&cid.sym) {
+                            if let Some(f) = cls.fields.iter().find(|f| f.ident.sym == mem.prop.sym)
+                            {
+                                return match &f.ty {
+                                    Type::Optional(_) => Some(f.ty.clone()),
+                                    other => Some(Type::Optional(Box::new(other.clone()))),
+                                };
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            Expr::OptCall(call) => {
+                if let Expr::Member(mem) | Expr::OptMember(mem) = &*call.callee {
+                    if let Some(obj_ty) = self.infer_cp_type(&mem.obj) {
+                        let mut base_ty = &obj_ty;
+                        while let Type::Optional(inner) | Type::BorrowType { inner, .. } = base_ty {
+                            base_ty = inner;
+                        }
+                        if let Type::Ref(cid) | Type::BoxDyn(cid) = base_ty {
+                            if let Some((_, Some(rt), _)) =
+                                self.lookup_method(&cid.sym, &mem.prop.sym)
+                            {
+                                return match rt {
+                                    Type::Optional(_) => Some(rt),
+                                    other => Some(Type::Optional(Box::new(other))),
+                                };
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            Expr::Question(inner) => {
+                if let Some(inner_ty) = self.infer_cp_type(inner) {
+                    let fn_bubbles_null = self.try_catch_target.is_none()
+                        && match &self.current_fn_ret_ty {
+                            Some(Type::ResultType { ok: fn_ok, .. }) => {
+                                matches!(&**fn_ok, Type::Optional(_))
+                            }
+                            Some(Type::Optional(_)) => true,
+                            _ => false,
+                        };
+                    return match inner_ty {
+                        Type::ResultType { ok, .. } => match *ok {
+                            Type::Optional(opt_in) if fn_bubbles_null => Some(*opt_in),
+                            other => Some(other),
+                        },
+                        Type::Optional(opt_in) => Some(*opt_in),
+                        other => Some(other),
+                    };
+                }
+                None
+            }
+            Expr::QuestionFallback {
+                expr: inner,
+                fallback,
+                is_return_fallback,
+            } => {
+                if let Some(inner_ty) = self.infer_cp_type(inner) {
+                    return match inner_ty {
+                        Type::ResultType { ok, .. } => match *ok {
+                            Type::Optional(opt_in) => Some(*opt_in),
+                            other => Some(other),
+                        },
+                        Type::Optional(opt_in) => Some(*opt_in),
+                        other => Some(other),
+                    };
+                }
+                if !*is_return_fallback {
+                    return self.infer_cp_type(fallback);
+                }
+                None
+            }
+            Expr::NullCoalesce { left, right } => {
+                if let Some(l_ty) = self.infer_cp_type(left) {
+                    if let Type::Optional(opt_in) = l_ty {
+                        return Some(*opt_in);
+                    }
+                    return Some(l_ty);
+                }
+                self.infer_cp_type(right)
+            }
+            Expr::Catch { expr: inner, .. } => {
+                if let Some(inner_ty) = self.infer_cp_type(inner) {
+                    if let Type::ResultType { ok, .. } = inner_ty {
+                        return Some(*ok);
+                    }
+                    return Some(inner_ty);
+                }
+                None
+            }
+            Expr::Bin(bin) => {
+                if bin.op == BinaryOp::Add {
+                    let l_ty = self.infer_cp_type(&bin.left);
+                    let r_ty = self.infer_cp_type(&bin.right);
+                    if matches!(l_ty, Some(Type::String)) || matches!(r_ty, Some(Type::String)) {
+                        return Some(Type::String);
+                    }
+                    return l_ty.or(r_ty);
+                }
+                if matches!(
+                    bin.op,
+                    BinaryOp::Eq
+                        | BinaryOp::NotEq
+                        | BinaryOp::Lt
+                        | BinaryOp::Gt
+                        | BinaryOp::LtEq
+                        | BinaryOp::GtEq
+                ) {
+                    return Some(Type::Bool);
+                }
+                self.infer_cp_type(&bin.left)
+            }
+            Expr::Match(m) => {
+                let disc_ty = self.infer_cp_type(&m.disc);
+                for arm in &m.arms {
+                    if let Stmt::Expr(e) = &*arm.body {
+                        if let Some(t) = self.infer_cp_type(e) {
+                            return Some(t);
+                        }
+                        if let (Pattern::Ident(pid), Expr::Ident(eid)) = (&arm.pat, e) {
+                            if pid.sym == eid.sym {
+                                if let Some(Type::ResultType { ok, .. }) = &disc_ty {
+                                    return match &**ok {
+                                        Type::Optional(inner) => Some((**inner).clone()),
+                                        other => Some(other.clone()),
+                                    };
+                                } else if let Some(Type::Optional(inner)) = &disc_ty {
+                                    return Some((**inner).clone());
+                                } else if let Some(dt) = &disc_ty {
+                                    return Some(dt.clone());
+                                }
+                            }
+                        }
+                    } else if let Stmt::Block(b) = &*arm.body {
+                        if let Some(Stmt::Expr(e)) = b.body.last() {
+                            if let Some(t) = self.infer_cp_type(e) {
+                                return Some(t);
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn collect_err_variants_for_type(&self, err_ty: &ErrorType) -> Vec<String> {
+        let mut out = Vec::new();
+        match err_ty {
+            ErrorType::Named(id) => {
+                if let Some(en) = self.enum_defs.get(&id.sym) {
+                    for v in &en.variants {
+                        out.push(v.ident.sym.clone());
+                    }
+                } else if let Some(es) = self.error_sets.get(&id.sym) {
+                    for v in es {
+                        out.push(v.sym.clone());
+                    }
+                }
+            }
+            ErrorType::AnonSet(ids) => {
+                for id in ids {
+                    out.push(id.sym.clone());
+                }
+            }
+            ErrorType::Union(ids) => {
+                for id in ids {
+                    let sub = self.collect_err_variants_for_type(&ErrorType::Named(id.clone()));
+                    for s in sub {
+                        if !out.contains(&s) {
+                            out.push(s);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        out
+    }
+
+    fn collect_covered_err_variants(
+        pat: &Pattern,
+        known_variants: &[String],
+        covered: &mut HashSet<String>,
+        has_err_catchall: &mut bool,
+    ) {
+        match pat {
+            Pattern::Wildcard => {
+                *has_err_catchall = true;
+            }
+            Pattern::Ident(id) => {
+                if known_variants.contains(&id.sym) {
+                    covered.insert(id.sym.clone());
+                } else {
+                    *has_err_catchall = true;
+                }
+            }
+            Pattern::Enum(ep) => {
+                covered.insert(ep.variant_name.sym.clone());
+            }
+            Pattern::Or(pats) => {
+                for p in pats {
+                    Self::collect_covered_err_variants(
+                        p,
+                        known_variants,
+                        covered,
+                        has_err_catchall,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn check_switch_exhaustiveness(&self, m: &MatchExpr, disc_cp_ty: Option<&Type>) {
+        let has_global_wildcard = m
+            .arms
+            .iter()
+            .any(|a| a.guard.is_none() && matches!(a.pat, Pattern::Wildcard));
+        if has_global_wildcard {
+            return;
+        }
+        if let Some(ty) = disc_cp_ty {
+            match ty {
+                Type::ResultType { ok, err } => {
+                    let is_opt = matches!(&**ok, Type::Optional(_));
+                    let mut has_ok_catchall = false;
+                    let mut has_null = false;
+                    let mut has_err_catchall = false;
+                    let required_err_variants = self.collect_err_variants_for_type(err);
+                    let mut covered_err_variants = HashSet::new();
+
+                    for arm in &m.arms {
+                        if arm.guard.is_some() {
+                            continue;
+                        }
+                        match &arm.pat {
+                            Pattern::Wildcard => {
+                                return;
+                            }
+                            Pattern::Null => {
+                                has_null = true;
+                            }
+                            Pattern::Err(inner_pat) => {
+                                Self::collect_covered_err_variants(
+                                    inner_pat,
+                                    &required_err_variants,
+                                    &mut covered_err_variants,
+                                    &mut has_err_catchall,
+                                );
+                            }
+                            Pattern::Ident(_) => {
+                                has_ok_catchall = true;
+                            }
+                            Pattern::Or(pats) => {
+                                for p in pats {
+                                    match p {
+                                        Pattern::Null => has_null = true,
+                                        Pattern::Err(ip) => Self::collect_covered_err_variants(
+                                            ip,
+                                            &required_err_variants,
+                                            &mut covered_err_variants,
+                                            &mut has_err_catchall,
+                                        ),
+                                        Pattern::Ident(_) => has_ok_catchall = true,
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    if is_opt && !has_null {
+                        panic!(
+                            "CP Compile Error: Non-exhaustive switch on '?T ! E': missing 'null' branch (or '*' wildcard)"
+                        );
+                    }
+                    if !has_err_catchall {
+                        if required_err_variants.is_empty() {
+                            panic!(
+                                "CP Compile Error: Non-exhaustive switch on 'T ! E': missing 'Err(e)' branch (or '*' wildcard)"
+                            );
+                        }
+                        let missing: Vec<String> = required_err_variants
+                            .into_iter()
+                            .filter(|v| !covered_err_variants.contains(v))
+                            .collect();
+                        if !missing.is_empty() {
+                            panic!(
+                                "CP Compile Error: Non-exhaustive switch: missing error variant(s): {}",
+                                missing.join(", ")
+                            );
+                        }
+                    }
+                    if !has_ok_catchall && **ok != Type::Void {
+                        // Also allow exhaustive enum/bool on ok if covered, otherwise require ok branch
+                        let has_any_ok_arm = m.arms.iter().any(|a| {
+                            !matches!(a.pat, Pattern::Null | Pattern::Err(_) | Pattern::Wildcard)
+                        });
+                        if !has_any_ok_arm {
+                            panic!(
+                                "CP Compile Error: Non-exhaustive switch on 'T ! E': missing success branch"
+                            );
+                        }
+                    }
+                }
+                Type::Optional(_) => {
+                    let has_null = m
+                        .arms
+                        .iter()
+                        .any(|a| a.guard.is_none() && matches!(a.pat, Pattern::Null));
+                    if !has_null {
+                        panic!(
+                            "CP Compile Error: Non-exhaustive switch on optional '?T': missing 'null' branch (or '*' wildcard)"
+                        );
+                    }
+                }
+                Type::Ref(ename) => {
+                    let mut req_variants = Vec::new();
+                    if let Some(en) = self.enum_defs.get(&ename.sym) {
+                        for v in &en.variants {
+                            req_variants.push(v.ident.sym.clone());
+                        }
+                    } else if let Some(es) = self.error_sets.get(&ename.sym) {
+                        for v in es {
+                            req_variants.push(v.sym.clone());
+                        }
+                    }
+                    if !req_variants.is_empty() {
+                        let mut covered = HashSet::new();
+                        let mut has_catchall = false;
+                        for arm in &m.arms {
+                            if arm.guard.is_some() {
+                                continue;
+                            }
+                            Self::collect_covered_err_variants(
+                                &arm.pat,
+                                &req_variants,
+                                &mut covered,
+                                &mut has_catchall,
+                            );
+                        }
+                        if !has_catchall {
+                            let missing: Vec<String> = req_variants
+                                .into_iter()
+                                .filter(|v| !covered.contains(v))
+                                .collect();
+                            if !missing.is_empty() {
+                                panic!(
+                                    "CP Compile Error: Non-exhaustive switch on enum '{}': missing variant(s): {}",
+                                    ename.sym,
+                                    missing.join(", ")
+                                );
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn generate_pattern_match(
+        &self,
+        val_expr: &str,
+        known_variants: &[String],
+        pat: &Pattern,
+        bound_types: &mut Vec<(String, Type)>,
+        val_cp_ty: Option<&Type>,
+    ) -> (String, String) {
+        match pat {
+            Pattern::Wildcard => ("true".to_string(), String::new()),
+            Pattern::Null => (format!("cp_is_null_val({})", val_expr), String::new()),
+            Pattern::Lit(Lit::Int(v)) => (format!("cp_eq({}, {})", val_expr, v), String::new()),
+            Pattern::Lit(Lit::Float(f)) => (format!("cp_eq({}, {})", val_expr, f), String::new()),
+            Pattern::Lit(Lit::Bool(b)) => (format!("cp_eq({}, {})", val_expr, b), String::new()),
+            Pattern::Lit(Lit::Str(s)) => (
+                format!("cp_eq({}, \"{}\")", val_expr, s.replace('\"', "\\\"")),
+                String::new(),
+            ),
+            Pattern::Range {
+                start,
+                end,
+                inclusive,
+            } => {
+                if *inclusive {
+                    (
+                        format!("({0} >= {1} and {0} <= {2})", val_expr, start, end),
+                        String::new(),
+                    )
+                } else {
+                    (
+                        format!("({0} >= {1} and {0} < {2})", val_expr, start, end),
+                        String::new(),
+                    )
+                }
+            }
+            Pattern::Ident(id) => {
+                if known_variants.contains(&id.sym) {
+                    (
+                        format!("(std.meta.activeTag({}) == .{})", val_expr, id.sym),
+                        String::new(),
+                    )
+                } else {
+                    if let Some(t) = val_cp_ty {
+                        bound_types.push((id.sym.clone(), t.clone()));
+                    }
+                    let defer_drop = if matches!(val_cp_ty, Some(Type::BoxDyn(_))) {
+                        format!("defer {}.release(); ", id.sym)
+                    } else {
+                        String::new()
+                    };
+                    (
+                        "true".to_string(),
+                        format!(
+                            "const {0} = {1}; _ = &{0}; {2}",
+                            id.sym, val_expr, defer_drop
+                        ),
+                    )
+                }
+            }
+            Pattern::Tuple(pats) => {
+                let mut conds = Vec::new();
+                let mut binds = String::new();
+                for (idx, sub_pat) in pats.iter().enumerate() {
+                    let elem_expr = format!("{}.@\"{}\"", val_expr, idx);
+                    let sub_ty = if let Some(Type::Tuple(tys)) = val_cp_ty {
+                        tys.get(idx)
+                    } else {
+                        None
+                    };
+                    let (c, b) = self.generate_pattern_match(
+                        &elem_expr,
+                        known_variants,
+                        sub_pat,
+                        bound_types,
+                        sub_ty,
+                    );
+                    if c != "true" {
+                        conds.push(c);
+                    }
+                    binds.push_str(&b);
+                }
+                let cond_str = if conds.is_empty() {
+                    "true".to_string()
+                } else {
+                    format!("({})", conds.join(" and "))
+                };
+                (cond_str, binds)
+            }
+            Pattern::Object(props) => {
+                let mut conds = Vec::new();
+                let mut binds = String::new();
+                for prop in props {
+                    let field_expr = format!("{}.{}", val_expr, prop.key.sym);
+                    if let Some(sub_pat) = &prop.val {
+                        let (c, b) = self.generate_pattern_match(
+                            &field_expr,
+                            known_variants,
+                            sub_pat,
+                            bound_types,
+                            None,
+                        );
+                        if c != "true" {
+                            conds.push(c);
+                        }
+                        binds.push_str(&b);
+                    } else {
+                        binds.push_str(&format!(
+                            "const {0} = {1}; _ = &{0}; ",
+                            prop.key.sym, field_expr
+                        ));
+                    }
+                }
+                let cond_str = if conds.is_empty() {
+                    "true".to_string()
+                } else {
+                    format!("({})", conds.join(" and "))
+                };
+                (cond_str, binds)
+            }
+            Pattern::Enum(ep) => {
+                let vname = &ep.variant_name.sym;
+                let base_cond = format!("(std.meta.activeTag({}) == .{})", val_expr, vname);
+                if let Some(tuple_pats) = &ep.tuple_pats {
+                    let payload_expr = format!("@field({}, \"{}\")", val_expr, vname);
+                    if tuple_pats.len() == 1 {
+                        let mut sub_ty = None;
+                        if !ep.enum_name.sym.is_empty() {
+                            if let Some(en) = self.enum_defs.get(&ep.enum_name.sym) {
+                                if let Some(v) = en.variants.iter().find(|v| &v.ident.sym == vname)
+                                {
+                                    sub_ty = v.tuple_type.as_ref();
+                                }
+                            }
+                        }
+                        let (sub_c, sub_b) = self.generate_pattern_match(
+                            &payload_expr,
+                            known_variants,
+                            &tuple_pats[0],
+                            bound_types,
+                            sub_ty,
+                        );
+                        let full_cond = if sub_c == "true" {
+                            base_cond
+                        } else {
+                            format!("({} and {})", base_cond, sub_c)
+                        };
+                        return (full_cond, sub_b);
+                    }
+                } else if let Some(fields) = &ep.fields {
+                    let payload_expr = format!("@field({}, \"{}\")", val_expr, vname);
+                    let mut binds = String::new();
+                    let mut conds = vec![base_cond];
+                    let is_tuple_variant = if !ep.enum_name.sym.is_empty() {
+                        self.enum_defs
+                            .get(&ep.enum_name.sym)
+                            .and_then(|en| en.variants.iter().find(|v| &v.ident.sym == vname))
+                            .map_or(false, |v| v.tuple_type.is_some())
+                    } else {
+                        false
+                    };
+                    for f in fields {
+                        let f_expr = if is_tuple_variant {
+                            payload_expr.clone()
+                        } else {
+                            format!("{}.{}", payload_expr, f.key.sym)
+                        };
+                        if let Some(sub_pat) = &f.val {
+                            let (c, b) = self.generate_pattern_match(
+                                &f_expr,
+                                known_variants,
+                                sub_pat,
+                                bound_types,
+                                None,
+                            );
+                            if c != "true" {
+                                conds.push(c);
+                            }
+                            binds.push_str(&b);
+                        } else {
+                            binds.push_str(&format!(
+                                "const {0} = {1}; _ = &{0}; ",
+                                f.key.sym, f_expr
+                            ));
+                        }
+                    }
+                    return (format!("({})", conds.join(" and ")), binds);
+                }
+                (base_cond, String::new())
+            }
+            Pattern::Or(pats) => {
+                let mut conds = Vec::new();
+                for p in pats {
+                    let (c, _) = self.generate_pattern_match(
+                        val_expr,
+                        known_variants,
+                        p,
+                        bound_types,
+                        val_cp_ty,
+                    );
+                    conds.push(c);
+                }
+                (format!("({})", conds.join(" or ")), String::new())
+            }
+            _ => ("true".to_string(), String::new()),
+        }
+    }
+
+    fn error_type_to_cp_type(&self, err_ty: &ErrorType) -> Type {
+        match err_ty {
+            ErrorType::Named(id) => Type::Ref(id.clone()),
+            ErrorType::BoxDyn(id) => Type::BoxDyn(id.clone()),
+            ErrorType::DefaultError => Type::Ref(Ident {
+                span: Span { start: 0, end: 0 },
+                sym: "Error".to_string(),
+            }),
+            ErrorType::AnonSet(_) | ErrorType::Union(_) => Type::Ref(Ident {
+                span: Span { start: 0, end: 0 },
+                sym: self.map_error_type(err_ty),
+            }),
+        }
+    }
+
+    fn generate_switch(&mut self, m: &MatchExpr, is_expr: bool) -> String {
+        let disc_cp_ty = self.infer_cp_type(&m.disc);
+        self.check_switch_exhaustiveness(m, disc_cp_ty.as_ref());
+
+        let sw_id = self.tmp_counter;
+        self.tmp_counter += 1;
+        let disc_code = self.generate_expr(&m.disc);
+        let blk_label = format!("__sw_blk_{}", sw_id);
+        let disc_var = format!("__disc_{}", sw_id);
+
+        let is_result_disc = matches!(disc_cp_ty, Some(Type::ResultType { .. }))
+            || m.arms.iter().any(|a| matches!(a.pat, Pattern::Err(_)));
+
+        let (ok_cp_ty, err_cp_ty, err_variants) = match &disc_cp_ty {
+            Some(Type::ResultType { ok, err }) => {
+                let unwrapped_ok = match &**ok {
+                    Type::Optional(inner) => (**inner).clone(),
+                    other => other.clone(),
+                };
+                (
+                    Some(unwrapped_ok),
+                    Some(self.error_type_to_cp_type(err)),
+                    self.collect_err_variants_for_type(err),
+                )
+            }
+            Some(Type::Optional(inner)) => (Some((**inner).clone()), None, vec![]),
+            Some(Type::Ref(ename)) => {
+                let mut vs = Vec::new();
+                if let Some(en) = self.enum_defs.get(&ename.sym) {
+                    for v in &en.variants {
+                        vs.push(v.ident.sym.clone());
+                    }
+                } else if let Some(es) = self.error_sets.get(&ename.sym) {
+                    for v in es {
+                        vs.push(v.sym.clone());
+                    }
+                }
+                (Some(Type::Ref(ename.clone())), None, vs)
+            }
+            other => (other.clone(), None, vec![]),
+        };
+
+        let mut arms_code = String::new();
+        for arm in &m.arms {
+            let mut bound_types = Vec::new();
+            let (outer_cond, inner_setup, pat_cond, pat_binds) = match &arm.pat {
+                Pattern::Wildcard => (
+                    "true".to_string(),
+                    String::new(),
+                    "true".to_string(),
+                    String::new(),
+                ),
+                Pattern::Null => (
+                    format!("cp_is_null_val({})", disc_var),
+                    String::new(),
+                    "true".to_string(),
+                    String::new(),
+                ),
+                Pattern::Err(err_pat) => {
+                    let err_val_var = format!("__err_v_{}", sw_id);
+                    let (ec, eb) = self.generate_pattern_match(
+                        &err_val_var,
+                        &err_variants,
+                        err_pat,
+                        &mut bound_types,
+                        err_cp_ty.as_ref(),
+                    );
+                    (
+                        format!("(!cp_has_ok_val({0}) and !cp_is_null_val({0}))", disc_var),
+                        format!("const {0} = {1}.err; _ = &{0}; ", err_val_var, disc_var),
+                        ec,
+                        eb,
+                    )
+                }
+                other_pat => {
+                    if is_result_disc
+                        || matches!(disc_cp_ty, Some(Type::Optional(_)))
+                        || m.arms.iter().any(|a| matches!(a.pat, Pattern::Null))
+                    {
+                        let ok_val_var = format!("__ok_v_{}", sw_id);
+                        let (oc, ob) = self.generate_pattern_match(
+                            &ok_val_var,
+                            &err_variants,
+                            other_pat,
+                            &mut bound_types,
+                            ok_cp_ty.as_ref(),
+                        );
+                        (
+                            format!("cp_has_ok_val({})", disc_var),
+                            format!(
+                                "const {0} = cp_unwrap_ok_val({1}); _ = &{0}; ",
+                                ok_val_var, disc_var
+                            ),
+                            oc,
+                            ob,
+                        )
+                    } else {
+                        let (oc, ob) = self.generate_pattern_match(
+                            &disc_var,
+                            &err_variants,
+                            other_pat,
+                            &mut bound_types,
+                            ok_cp_ty.as_ref(),
+                        );
+                        ("true".to_string(), String::new(), oc, ob)
+                    }
+                }
+            };
+
+            let old_var_cp_types = self.var_cp_types.clone();
+            for (b_name, b_ty) in &bound_types {
+                self.var_cp_types.insert(b_name.clone(), b_ty.clone());
+            }
+
+            let guard_cond = if let Some(g) = &arm.guard {
+                self.generate_expr(g)
+            } else {
+                "true".to_string()
+            };
+
+            let body_code = if is_expr {
+                match &*arm.body {
+                    Stmt::Expr(e) => {
+                        let ec = self.generate_expr(e);
+                        format!("break :{} cp_val({});", blk_label, ec)
+                    }
+                    Stmt::Return(_) => {
+                        let saved = self.current_case_content.clone();
+                        self.current_case_content.clear();
+                        self.generate_stmt(&arm.body);
+                        let ret_s = self.current_case_content.trim().to_string();
+                        self.current_case_content = saved;
+                        ret_s
+                    }
+                    Stmt::Block(b) => {
+                        let saved = self.current_case_content.clone();
+                        self.current_case_content.clear();
+                        let len = b.body.len();
+                        for (idx, s) in b.body.iter().enumerate() {
+                            if idx + 1 == len {
+                                if let Stmt::Expr(e) = s {
+                                    let ec = self.generate_expr(e);
+                                    self.write_to_case(&format!(
+                                        "break :{} cp_val({});",
+                                        blk_label, ec
+                                    ));
+                                } else {
+                                    self.generate_stmt(s);
+                                }
+                            } else {
+                                self.generate_stmt(s);
+                            }
+                        }
+                        let blk_s = self.current_case_content.trim().to_string();
+                        self.current_case_content = saved;
+                        blk_s
+                    }
+                    _ => {
+                        let saved = self.current_case_content.clone();
+                        self.current_case_content.clear();
+                        self.generate_stmt(&arm.body);
+                        let s_str = self.current_case_content.trim().to_string();
+                        self.current_case_content = saved;
+                        format!("{} break :{} {{}};", s_str, blk_label)
+                    }
+                }
+            } else {
+                let saved = self.current_case_content.clone();
+                self.current_case_content.clear();
+                if let Stmt::Block(b) = &*arm.body {
+                    for s in &b.body {
+                        self.generate_stmt(s);
+                    }
+                } else {
+                    self.generate_stmt(&arm.body);
+                }
+                let s_str = self.current_case_content.trim().to_string();
+                self.current_case_content = saved;
+                if s_str.ends_with("return;")
+                    || s_str.contains("\nreturn")
+                    || s_str.starts_with("return ")
+                {
+                    s_str
+                } else {
+                    format!("{} break :{};", s_str, blk_label)
+                }
+            };
+
+            self.var_cp_types = old_var_cp_types;
+
+            let inner_check = if pat_cond == "true" && guard_cond == "true" {
+                format!("{}{} {}", inner_setup, pat_binds, body_code)
+            } else if guard_cond == "true" {
+                format!(
+                    "{}if ({}) {{ {} {} }}",
+                    inner_setup, pat_cond, pat_binds, body_code
+                )
+            } else if pat_cond == "true" {
+                format!(
+                    "{}{} if ({}) {{ {} }}",
+                    inner_setup, pat_binds, guard_cond, body_code
+                )
+            } else {
+                format!(
+                    "{}if ({}) {{ {} if ({}) {{ {} }} }}",
+                    inner_setup, pat_cond, pat_binds, guard_cond, body_code
+                )
+            };
+
+            if outer_cond == "true" {
+                arms_code.push_str(&format!("{{ {} }} ", inner_check));
+            } else {
+                arms_code.push_str(&format!("if ({}) {{ {} }} ", outer_cond, inner_check));
+            }
+        }
+
+        if is_expr {
+            format!(
+                "({}: {{ const {} = {}; _ = &{}; {} unreachable; }})",
+                blk_label, disc_var, disc_code, disc_var, arms_code
+            )
+        } else {
+            format!(
+                "{}: {{ const {} = {}; _ = &{}; {} }}",
+                blk_label, disc_var, disc_code, disc_var, arms_code
+            )
+        }
+    }
+
+    fn generate_err_value(&mut self, err_inner: &Expr, target_err: Option<&ErrorType>) -> String {
+        match err_inner {
+            Expr::EnumInit(ei) if ei.enum_name.sym.is_empty() => {
+                if let Some(dst_err) = target_err {
+                    let dst_zig = self.map_error_type(dst_err);
+                    return format!("@as({}, .{})", dst_zig, ei.variant_name.sym);
+                }
+                format!(".{}", ei.variant_name.sym)
+            }
+            Expr::Ident(id)
+                if !self.locals.contains_key(&id.sym) && !self.is_class_field(&id.sym) =>
+            {
+                if let Some(dst_err) = target_err {
+                    let dst_zig = self.map_error_type(dst_err);
+                    return format!("@as({}, .{})", dst_zig, id.sym);
+                }
+                format!(".{}", id.sym)
+            }
+            Expr::Member(mem) => {
+                if let Expr::Ident(oid) = &*mem.obj {
+                    if self.enum_defs.contains_key(&oid.sym)
+                        || self.error_sets.contains_key(&oid.sym)
+                    {
+                        if let Some(dst_err) = target_err {
+                            self.verify_error_type_compatibility(
+                                &ErrorType::Named(oid.clone()),
+                                dst_err,
+                            );
+                            let dst_zig = self.map_error_type(dst_err);
+                            return format!(
+                                "cp_convert_err({}, {}.{})",
+                                dst_zig, oid.sym, mem.prop.sym
+                            );
+                        }
+                        return format!("{}.{}", oid.sym, mem.prop.sym);
+                    }
+                }
+                let raw = self.generate_expr(err_inner);
+                if let Some(dst_err) = target_err {
+                    let dst_zig = self.map_error_type(dst_err);
+                    format!("cp_convert_err({}, {})", dst_zig, raw)
+                } else {
+                    raw
+                }
+            }
+            Expr::Call(call) => {
+                if let Expr::Member(mem) = &*call.callee {
+                    if let Expr::Ident(oid) = &*mem.obj {
+                        if self.enum_defs.contains_key(&oid.sym) {
+                            if let Some(dst_err) = target_err {
+                                self.verify_error_type_compatibility(
+                                    &ErrorType::Named(oid.clone()),
+                                    dst_err,
+                                );
+                                let dst_zig = self.map_error_type(dst_err);
+                                let raw = self.generate_expr(err_inner);
+                                return format!("cp_convert_err({}, {})", dst_zig, raw);
+                            }
+                        }
+                    }
+                }
+                let raw = self.generate_expr(err_inner);
+                if let Some(dst_err) = target_err {
+                    let dst_zig = self.map_error_type(dst_err);
+                    format!("cp_convert_err({}, {})", dst_zig, raw)
+                } else {
+                    raw
+                }
+            }
+            Expr::BoxNew(_) => {
+                let old_box = self.expected_box_trait.clone();
+                if let Some(ErrorType::BoxDyn(tr_id)) = target_err {
+                    self.expected_box_trait = Some(tr_id.sym.clone());
+                }
+                let raw = self.generate_expr(err_inner);
+                self.expected_box_trait = old_box;
+                raw
+            }
+            _ => {
+                if let Expr::Ident(id) = err_inner {
+                    if let Some(Type::Ref(src_id)) = self.var_cp_types.get(&id.sym).cloned() {
+                        if let Some(dst_err) = target_err {
+                            self.verify_error_type_compatibility(
+                                &ErrorType::Named(src_id),
+                                dst_err,
+                            );
+                        }
+                    } else if let Some(Type::BoxDyn(tr_id)) =
+                        self.var_cp_types.get(&id.sym).cloned()
+                    {
+                        if let Some(dst_err) = target_err {
+                            self.verify_error_type_compatibility(
+                                &ErrorType::BoxDyn(tr_id),
+                                dst_err,
+                            );
+                        }
+                        self.check_active_borrows_before_move(&id.sym);
+                        let gen = self.generate_expr(err_inner);
+                        self.moved_vars.insert(id.sym.clone());
+                        if !self.is_state_machine {
+                            return format!(
+                                "(blk_emv: {{ __{}_moved = true; break :blk_emv {}; }})",
+                                id.sym, gen
+                            );
+                        }
+                        return gen;
+                    }
+                }
+                let raw = self.generate_expr(err_inner);
+                if let Some(dst_err) = target_err {
+                    let dst_zig = self.map_error_type(dst_err);
+                    format!("cp_convert_err({}, {})", dst_zig, raw)
+                } else {
+                    raw
+                }
+            }
+        }
+    }
+
     fn generate_function(&mut self, func: &Function) {
         self.generate_function_logic(func, None);
     }
@@ -1497,7 +3041,7 @@ impl Codegen {
                             "var __{}_moved = false; _ = &__{}_moved;",
                             p.ident.sym, p.ident.sym
                         ));
-                        self.writeln(&format!("defer if (!__{0}_moved) {{ const T = @TypeOf({0}); if (@typeInfo(T) == .pointer) {{ const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@\"struct\" and @hasDecl(Child, \"release\")) {{ const RType = @typeInfo(@TypeOf(Child.release)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _ = {0}.release() catch {{}}; }} else {{ {0}.release(); }} }} }} }};", p.ident.sym));
+                        self.writeln(&format!("defer if (!__{0}_moved) {{ const T = @TypeOf({0}); if (@typeInfo(T) == .pointer) {{ const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@\"struct\" and @hasDecl(Child, \"release\")) {{ const RType = @typeInfo(@TypeOf(Child.release)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _ = {0}.release() catch {{}}; }} else {{ {0}.release(); }} }} }} else if (@typeInfo(T) == .@\"struct\" and @hasDecl(T, \"release\")) {{ {0}.release(); }} }};", p.ident.sym));
                     }
                 }
             }
@@ -1510,7 +3054,11 @@ impl Codegen {
             let body_str = self.current_case_content.clone();
             self.current_case_content.clear();
             self.output.push_str(&body_str);
-            if self.is_beam_mode && !body_str.contains("return") {
+            if let Some(Type::ResultType { ok, .. }) = &func.return_type {
+                if **ok == Type::Void && !body_str.trim_end().ends_with("return .{ .ok = {} };") {
+                    self.writeln("return .{ .ok = {} };");
+                }
+            } else if self.is_beam_mode && !body_str.contains("return") {
                 if self.is_class_method {
                     self.writeln(r#"return beam.Beam.makeAtom(self.env.?, "ok");"#);
                 } else {
@@ -1697,14 +3245,151 @@ impl Codegen {
         self.pc_counter
     }
 
+    fn collect_stmt_error_types(&self, stmt: &Stmt, out: &mut Vec<ErrorType>) {
+        match stmt {
+            Stmt::Var(v) => {
+                if let Some(init) = &v.init {
+                    self.collect_expr_error_types(init, out);
+                }
+            }
+            Stmt::Expr(e) => self.collect_expr_error_types(e, out),
+            Stmt::Return(r) => {
+                if let Some(a) = &r.arg {
+                    self.collect_expr_error_types(a, out);
+                }
+            }
+            Stmt::Block(b) => {
+                for s in &b.body {
+                    self.collect_stmt_error_types(s, out);
+                }
+            }
+            Stmt::If(i) => {
+                self.collect_expr_error_types(&i.test, out);
+                self.collect_stmt_error_types(&i.cons, out);
+                if let Some(alt) = &i.alt {
+                    self.collect_stmt_error_types(alt, out);
+                }
+            }
+            Stmt::While(w) => {
+                self.collect_expr_error_types(&w.test, out);
+                self.collect_stmt_error_types(&w.body, out);
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_expr_error_types(&self, expr: &Expr, out: &mut Vec<ErrorType>) {
+        match expr {
+            Expr::Call(c) => {
+                if let Expr::Ident(fid) = &*c.callee {
+                    if let Some(sig) = self.fn_sigs.get(&fid.sym) {
+                        if let Some(Type::ResultType { err, .. }) = &sig.return_type {
+                            if !out.contains(err) {
+                                out.push(err.clone());
+                            }
+                        }
+                    } else if let Some(c_name) = &self.current_class_name {
+                        if let Some((_, Some(Type::ResultType { err, .. }), _)) =
+                            self.lookup_method(c_name, &fid.sym)
+                        {
+                            if !out.contains(&err) {
+                                out.push(err);
+                            }
+                        }
+                    }
+                } else if let Expr::Member(mem) = &*c.callee {
+                    if let Expr::Ident(oid) = &*mem.obj {
+                        if let Some(tname) = self.resolve_var_type_name(&oid.sym) {
+                            if let Some((_, Some(Type::ResultType { err, .. }), _)) =
+                                self.lookup_method(&tname, &mem.prop.sym)
+                            {
+                                if !out.contains(&err) {
+                                    out.push(err);
+                                }
+                            }
+                        }
+                    }
+                }
+                for a in &c.args {
+                    self.collect_expr_error_types(a, out);
+                }
+            }
+            Expr::Question(inner) => self.collect_expr_error_types(inner, out),
+            Expr::Bin(b) => {
+                self.collect_expr_error_types(&b.left, out);
+                self.collect_expr_error_types(&b.right, out);
+            }
+            _ => {}
+        }
+    }
+
     fn generate_stmt(&mut self, stmt: &Stmt) {
         self.current_stmt_idx += 1;
         match stmt {
             Stmt::Var(var) => {
                 if let Some(init) = &var.init {
+                    let is_null_lit = matches!(init, Expr::Lit(Lit::Null))
+                        || matches!(init, Expr::Ident(id) if id.sym == "null");
+                    if is_null_lit {
+                        if let Some(t) = &var.ty {
+                            let allows_null = match t {
+                                Type::Optional(_) => true,
+                                Type::ResultType { ok, .. } => matches!(&**ok, Type::Optional(_)),
+                                _ => false,
+                            };
+                            if !allows_null {
+                                panic!(
+                                    "CP Compile Error: Cannot assign 'null' to non-optional type"
+                                );
+                            }
+                        } else {
+                            panic!(
+                                "CP Compile Error: Cannot assign 'null' without an explicit optional '?T' type annotation"
+                            );
+                        }
+                    }
                     let (borrow_sources, is_mut_borrow, is_ref_st) =
                         self.extract_expr_borrow_info(init);
-                    let expr_code = self.generate_expr(init);
+                    let old_box_trait = self.expected_box_trait.clone();
+                    match &var.ty {
+                        Some(Type::BoxDyn(tr_id)) => {
+                            self.expected_box_trait = Some(tr_id.sym.clone());
+                        }
+                        Some(Type::Optional(inner)) => {
+                            if let Type::BoxDyn(tr_id) = &**inner {
+                                self.expected_box_trait = Some(tr_id.sym.clone());
+                            }
+                        }
+                        Some(Type::ResultType { ok, err }) => {
+                            if let Type::BoxDyn(tr_id) = &**ok {
+                                self.expected_box_trait = Some(tr_id.sym.clone());
+                            } else if let ErrorType::BoxDyn(tr_id) = err {
+                                self.expected_box_trait = Some(tr_id.sym.clone());
+                            }
+                        }
+                        _ => {}
+                    }
+                    let expr_code =
+                        if let Some(Type::ResultType { err: var_err, .. }) = var.ty.clone() {
+                            if let Expr::ErrWrap(err_inner) = init {
+                                let ev = self.generate_err_value(err_inner, Some(&var_err));
+                                format!(".{{ .err = {} }}", ev)
+                            } else if is_null_lit {
+                                ".{ .ok = null }".to_string()
+                            } else {
+                                let init_ty = self.infer_cp_type(init);
+                                let raw_c = self.generate_expr(init);
+                                if let Some(Type::ResultType { err: init_err, .. }) = init_ty {
+                                    self.verify_error_type_compatibility(&init_err, &var_err);
+                                    raw_c
+                                } else {
+                                    format!(".{{ .ok = {} }}", raw_c)
+                                }
+                            }
+                        } else {
+                            self.generate_expr(init)
+                        };
+
                     let is_try = expr_code.starts_with("try ");
                     let final_expr = if is_try {
                         expr_code[4..].to_string()
@@ -1717,42 +3402,10 @@ impl Codegen {
                                 .insert(ident.sym.clone(), self.current_scope_depth);
                             if let Some(t) = &var.ty {
                                 self.var_cp_types.insert(ident.sym.clone(), t.clone());
-                            } else if let Expr::New(nc) = init {
-                                if let Expr::Ident(cid) = &*nc.callee {
-                                    self.var_cp_types
-                                        .insert(ident.sym.clone(), Type::Ref(cid.clone()));
-                                }
-                            } else if let Expr::Call(c) = init {
-                                if let Expr::Ident(fid) = &*c.callee {
-                                    if let Some(sig) = self.fn_sigs.get(&fid.sym) {
-                                        if let Some(rt) = &sig.return_type {
-                                            self.var_cp_types.insert(ident.sym.clone(), rt.clone());
-                                        }
-                                    } else if let Some(c_name) = &self.current_class_name {
-                                        if let Some((_, Some(rt), _)) =
-                                            self.lookup_method(c_name, &fid.sym)
-                                        {
-                                            self.var_cp_types.insert(ident.sym.clone(), rt);
-                                        }
-                                    }
-                                } else if let Expr::Member(mem) = &*c.callee {
-                                    if let Expr::Ident(oid) = &*mem.obj {
-                                        if let Some(tname) = self.resolve_var_type_name(&oid.sym) {
-                                            if let Some((_, Some(rt), _)) =
-                                                self.lookup_method(&tname, &mem.prop.sym)
-                                            {
-                                                self.var_cp_types.insert(ident.sym.clone(), rt);
-                                            }
-                                        } else if self.class_defs.contains_key(&oid.sym) {
-                                            if let Some((_, Some(rt), _)) =
-                                                self.lookup_method(&oid.sym, &mem.prop.sym)
-                                            {
-                                                self.var_cp_types.insert(ident.sym.clone(), rt);
-                                            }
-                                        }
-                                    }
-                                }
+                            } else if let Some(inferred_ty) = self.infer_cp_type(init) {
+                                self.var_cp_types.insert(ident.sym.clone(), inferred_ty);
                             }
+                            self.expected_box_trait = old_box_trait;
                             let mut is_var_borrow = !borrow_sources.is_empty();
                             if let Some(Type::BorrowType { .. }) = &var.ty {
                                 is_var_borrow = true;
@@ -1802,6 +3455,8 @@ impl Codegen {
                                     ": i32".to_string()
                                 } else if matches!(init, Expr::Lit(Lit::Float(_))) {
                                     ": f32".to_string()
+                                } else if matches!(init, Expr::Lit(Lit::Str(_))) {
+                                    ": []const u8".to_string()
                                 } else {
                                     String::new()
                                 };
@@ -1821,18 +3476,21 @@ impl Codegen {
                                     "var __{}_moved = false; _ = &__{}_moved;",
                                     ident.sym, ident.sym
                                 ));
-                                self.write_to_case(&format!("defer if (!__{}_moved) {{ const T = @TypeOf({}); if (@typeInfo(T) == .pointer) {{ const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@\"struct\" and @hasDecl(Child, \"release\")) {{ const RType = @typeInfo(@TypeOf(Child.release)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _ = {}.release() catch {{}}; }} else {{ {}.release(); }} }} }} }};", ident.sym, ident.sym, ident.sym, ident.sym));
+                                self.write_to_case(&format!("defer if (!__{0}_moved) {{ const T = @TypeOf({0}); if (@typeInfo(T) == .pointer) {{ const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@\"struct\" and @hasDecl(Child, \"release\")) {{ const RType = @typeInfo(@TypeOf(Child.release)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _ = {0}.release() catch {{}}; }} else {{ {0}.release(); }} }} }} else if (@typeInfo(T) == .@\"struct\" and @hasDecl(T, \"release\")) {{ {0}.release(); }} }};", ident.sym));
                             } else if !self.is_state_machine {
                                 self.write_to_case(&format!("_ = &{};", ident.sym));
                             }
                             if let Expr::Ident(id) = init {
-                                // Only move if `id` is an owned local pointer or `move` parameter (not a borrow)
+                                // Only move if `id` is an owned local pointer, Box<dyn Trait>, or `move` parameter (not a borrow)
                                 let is_id_borrow = self.var_borrow_sources.contains_key(&id.sym)
                                     || (self.current_fn_params.contains(&id.sym)
                                         && !self.move_fn_params.contains(&id.sym));
                                 if !is_id_borrow && self.locals.contains_key(&id.sym) {
                                     let ty_str = &self.locals[&id.sym];
-                                    if ty_str.starts_with('*') && ty_str != "*anyopaque" {
+                                    let is_owned_type = (ty_str.starts_with('*')
+                                        && ty_str != "*anyopaque")
+                                        || self.trait_defs.contains_key(ty_str.as_str());
+                                    if is_owned_type {
                                         // NLL Check: cannot move `id` if it has active borrows!
                                         self.check_active_borrows_before_move(&id.sym);
                                         // If `id` is a ref struct, check if it's moving to outer scope
@@ -1939,9 +3597,28 @@ impl Codegen {
                         }
                     }
 
+                    let is_null_rhs = matches!(&*bin.right, Expr::Lit(Lit::Null))
+                        || matches!(&*bin.right, Expr::Ident(id) if id.sym == "null");
+                    if is_null_rhs {
+                        if let Expr::Ident(lhs_id) = &*bin.left {
+                            if let Some(t) = self.var_cp_types.get(&lhs_id.sym) {
+                                if !matches!(t, Type::Optional(_)) {
+                                    panic!(
+                                        "CP Compile Error: Cannot assign 'null' to non-optional variable '{}'",
+                                        lhs_id.sym
+                                    );
+                                }
+                            }
+                        }
+                    }
+
                     let (borrow_sources, is_mut_borrow, is_ref_st) =
                         self.extract_expr_borrow_info(&bin.right);
+                    let mut expected_box = None;
                     if let Expr::Ident(lhs_id) = &*bin.left {
+                        if let Some(Type::BoxDyn(tr_id)) = self.var_cp_types.get(&lhs_id.sym) {
+                            expected_box = Some(tr_id.sym.clone());
+                        }
                         self.uninitialized_vars.remove(&lhs_id.sym);
                         let lhs_depth = self.var_scope_depth.get(&lhs_id.sym).copied().unwrap_or(1);
                         for src in &borrow_sources {
@@ -1968,7 +3645,12 @@ impl Codegen {
                             self.var_is_ref_struct.insert(lhs_id.sym.clone());
                         }
                     }
+                    let old_box = self.expected_box_trait.clone();
+                    if expected_box.is_some() {
+                        self.expected_box_trait = expected_box;
+                    }
                     let r = self.generate_expr(&bin.right);
+                    self.expected_box_trait = old_box;
                     let l = self.generate_expr(&bin.left);
                     self.write_to_case(&format!("{} = {};", l, r));
 
@@ -1978,7 +3660,9 @@ impl Codegen {
                                 && !self.move_fn_params.contains(&id.sym));
                         if !is_id_borrow && self.locals.contains_key(&id.sym) {
                             let ty_str = &self.locals[&id.sym];
-                            if ty_str.starts_with('*') && ty_str != "*anyopaque" {
+                            let is_owned_type = (ty_str.starts_with('*') && ty_str != "*anyopaque")
+                                || self.trait_defs.contains_key(ty_str.as_str());
+                            if is_owned_type {
                                 self.check_active_borrows_before_move(&id.sym);
                                 self.moved_vars.insert(id.sym.clone());
                                 if !self.is_state_machine {
@@ -1989,37 +3673,8 @@ impl Codegen {
                     }
                 }
                 Expr::Match(m) => {
-                    let disc = self.generate_expr(&m.disc);
-                    self.write_to_case(&format!("switch ({}) {{", disc));
-                    self.indent();
-                    for arm in &m.arms {
-                        let pat_str = match &arm.pat {
-                            Pattern::Lit(Lit::Int(v)) => v.to_string(),
-                            Pattern::Lit(Lit::Bool(b)) => {
-                                if *b {
-                                    "true".to_string()
-                                } else {
-                                    "false".to_string()
-                                }
-                            }
-                            Pattern::Wildcard => "else".to_string(),
-                            Pattern::Ident(id) => id.sym.clone(),
-                            _ => "else".to_string(),
-                        };
-                        self.write_to_case(&format!("{} => {{", pat_str));
-                        self.indent();
-                        if let Stmt::Block(b) = &*arm.body {
-                            for s in &b.body {
-                                self.generate_stmt(s);
-                            }
-                        } else {
-                            self.generate_stmt(&arm.body);
-                        }
-                        self.dedent();
-                        self.write_to_case("},");
-                    }
-                    self.dedent();
-                    self.write_to_case("}");
+                    let sw_code = self.generate_switch(m, false);
+                    self.write_to_case(&sw_code);
                 }
                 Expr::Zig(zig) => self.write_to_case(&format!("{}\n", zig.code)),
                 _ => {
@@ -2127,6 +3782,21 @@ impl Codegen {
             }
             Stmt::Return(ret) => {
                 if let Some(arg) = &ret.arg {
+                    let is_null_ret = matches!(arg, Expr::Lit(Lit::Null))
+                        || matches!(arg, Expr::Ident(id) if id.sym == "null");
+                    if is_null_ret {
+                        let allows_null = match &self.current_fn_ret_ty {
+                            Some(Type::Optional(_)) => true,
+                            Some(Type::ResultType { ok, .. }) => matches!(&**ok, Type::Optional(_)),
+                            _ => false,
+                        };
+                        if !allows_null {
+                            panic!(
+                                "CP Compile Error: Cannot return 'null' from function whose return type is not optional '?T'"
+                            );
+                        }
+                    }
+
                     // Check for dangling local reference return or ref struct escape!
                     let (borrow_sources, _, is_ref_st) = self.extract_expr_borrow_info(arg);
                     for src in &borrow_sources {
@@ -2164,7 +3834,18 @@ impl Codegen {
                         panic!("CP Compile Error: Stack-bound ref struct cannot escape function via return");
                     }
                     // If returning an owned local variable or move receiver/param, mark it as moved so defer doesn't release it before caller uses it!
-                    if let Expr::Ident(ret_id) = arg {
+                    let ret_ident_opt = match arg {
+                        Expr::Ident(ret_id) => Some(ret_id),
+                        Expr::ErrWrap(inner) => {
+                            if let Expr::Ident(ret_id) = &**inner {
+                                Some(ret_id)
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+                    if let Some(ret_id) = ret_ident_opt {
                         if (ret_id.sym == "this" || ret_id.sym == "_")
                             && self.current_receiver_mode == ReceiverMode::Move
                         {
@@ -2184,7 +3865,10 @@ impl Codegen {
                                 self.check_active_borrows_before_move(&ret_id.sym);
                                 if !self.is_state_machine && self.locals.contains_key(&ret_id.sym) {
                                     let ty_str = &self.locals[&ret_id.sym];
-                                    if ty_str.starts_with('*') && ty_str != "*anyopaque" {
+                                    let is_owned_type = (ty_str.starts_with('*')
+                                        && ty_str != "*anyopaque")
+                                        || self.trait_defs.contains_key(ty_str.as_str());
+                                    if is_owned_type {
                                         self.write_to_case(&format!(
                                             "__{}_moved = true;",
                                             ret_id.sym
@@ -2195,7 +3879,45 @@ impl Codegen {
                         }
                     }
 
+                    if let Some(Type::ResultType {
+                        ok: fn_ok,
+                        err: fn_err,
+                    }) = self.current_fn_ret_ty.clone()
+                    {
+                        if let Expr::ErrWrap(err_inner) = arg {
+                            let err_val = self.generate_err_value(err_inner, Some(&fn_err));
+                            self.write_to_case(&format!("return .{{ .err = {} }};", err_val));
+                            return;
+                        } else if is_null_ret {
+                            self.write_to_case("return .{ .ok = null };");
+                            return;
+                        } else {
+                            let old_box = self.expected_box_trait.clone();
+                            if let Type::BoxDyn(tr_id) = &*fn_ok {
+                                self.expected_box_trait = Some(tr_id.sym.clone());
+                            } else if let Type::Optional(opt_in) = &*fn_ok {
+                                if let Type::BoxDyn(tr_id) = &**opt_in {
+                                    self.expected_box_trait = Some(tr_id.sym.clone());
+                                }
+                            }
+                            let e = self.generate_expr(arg);
+                            self.expected_box_trait = old_box;
+                            self.write_to_case(&format!("return .{{ .ok = {} }};", e));
+                            return;
+                        }
+                    }
+
+                    let old_box = self.expected_box_trait.clone();
+                    if let Some(Type::BoxDyn(tr_id)) = &self.current_fn_ret_ty {
+                        self.expected_box_trait = Some(tr_id.sym.clone());
+                    } else if let Some(Type::Optional(opt_in)) = &self.current_fn_ret_ty {
+                        if let Type::BoxDyn(tr_id) = &**opt_in {
+                            self.expected_box_trait = Some(tr_id.sym.clone());
+                        }
+                    }
                     let e = self.generate_expr(arg);
+                    self.expected_box_trait = old_box;
+
                     if self.current_fn_is_async {
                         if self.is_beam_mode {
                             self.write_to_case(&format!("return {};", e));
@@ -2206,6 +3928,12 @@ impl Codegen {
                         self.write_to_case(&format!("return {};", e));
                     }
                 } else {
+                    if let Some(Type::ResultType { ok, .. }) = &self.current_fn_ret_ty {
+                        if **ok == Type::Void {
+                            self.write_to_case("return .{ .ok = {} };");
+                            return;
+                        }
+                    }
                     if self.is_main {
                         self.write_to_case("return;");
                     } else if self.is_beam_mode {
@@ -2220,40 +3948,119 @@ impl Codegen {
                 }
             }
             Stmt::Match(m) => {
-                let disc = self.generate_expr(&m.disc);
-                self.write_to_case(&format!("switch ({}) {{", disc));
-                self.indent();
-                for arm in &m.arms {
-                    let pat_str = match &arm.pat {
-                        Pattern::Lit(Lit::Int(v)) => v.to_string(),
-                        Pattern::Lit(Lit::Bool(b)) => {
-                            if *b {
-                                "true".to_string()
-                            } else {
-                                "false".to_string()
-                            }
-                        }
-                        Pattern::Wildcard => "else".to_string(),
-                        Pattern::Ident(id) => id.sym.clone(),
-                        _ => "else".to_string(),
-                    };
-                    self.write_to_case(&format!("{} => {{", pat_str));
+                let sw_code = self.generate_switch(m, false);
+                self.write_to_case(&sw_code);
+            }
+            Stmt::TryCatch {
+                try_block,
+                err_ident,
+                catch_body,
+                ..
+            } => {
+                if let Some(cb) = catch_body {
+                    let mut err_tys = Vec::new();
+                    for s in &try_block.body {
+                        self.collect_stmt_error_types(s, &mut err_tys);
+                    }
+                    let try_err_ty = err_tys
+                        .into_iter()
+                        .next()
+                        .unwrap_or(ErrorType::DefaultError);
+                    let err_zig_ty = self.map_error_type(&try_err_ty);
+                    let tc_id = self.tmp_counter;
+                    self.tmp_counter += 1;
+                    let blk_label = format!("__try_blk_{}", tc_id);
+                    let err_var = format!("__try_err_{}", tc_id);
+                    let flag_var = format!("__try_failed_{}", tc_id);
+
+                    self.write_to_case(&format!(
+                        "var {}: {} = undefined; _ = &{};",
+                        err_var, err_zig_ty, err_var
+                    ));
+                    self.write_to_case(&format!(
+                        "var {}: bool = false; _ = &{};",
+                        flag_var, flag_var
+                    ));
+                    self.write_to_case(&format!("{}: {{", blk_label));
                     self.indent();
-                    if let Stmt::Block(b) = &*arm.body {
+                    let old_in_try = self.in_try_region;
+                    let old_target = self.try_catch_target.clone();
+                    self.in_try_region = true;
+                    self.try_catch_target = Some((
+                        blk_label.clone(),
+                        err_var.clone(),
+                        flag_var.clone(),
+                        try_err_ty.clone(),
+                    ));
+                    for s in &try_block.body {
+                        self.generate_stmt(s);
+                    }
+                    self.in_try_region = old_in_try;
+                    self.try_catch_target = old_target;
+                    self.dedent();
+                    self.write_to_case("}");
+
+                    self.write_to_case(&format!("if ({}) {{", flag_var));
+                    self.indent();
+                    let old_vars = self.var_cp_types.clone();
+                    if let Some(eid) = err_ident {
+                        self.write_to_case(&format!(
+                            "const {0} = {1}; _ = &{0};",
+                            eid.sym, err_var
+                        ));
+                        self.var_cp_types
+                            .insert(eid.sym.clone(), self.error_type_to_cp_type(&try_err_ty));
+                    }
+                    if let Stmt::Block(b) = &**cb {
                         for s in &b.body {
                             self.generate_stmt(s);
                         }
                     } else {
-                        self.generate_stmt(&arm.body);
+                        self.generate_stmt(cb);
                     }
+                    self.var_cp_types = old_vars;
                     self.dedent();
-                    self.write_to_case("},");
+                    self.write_to_case("}");
+                } else {
+                    let old_in_try = self.in_try_region;
+                    self.in_try_region = true;
+                    for s in &try_block.body {
+                        self.generate_stmt(s);
+                    }
+                    self.in_try_region = old_in_try;
                 }
-                self.dedent();
-                self.write_to_case("}");
             }
             _ => {}
         }
+    }
+
+    fn maybe_wrap_try_call(&mut self, call_code: String, raw_ret_ty: Option<&Type>) -> String {
+        if !self.in_try_region {
+            return call_code;
+        }
+        if let Some(Type::ResultType { err: call_err, .. }) = raw_ret_ty {
+            let id = self.lambda_counter;
+            self.lambda_counter += 1;
+            if let Some((blk_label, err_var, flag_var, target_err)) = self.try_catch_target.clone()
+            {
+                self.verify_error_type_compatibility(call_err, &target_err);
+                let tgt_zig = self.map_error_type(&target_err);
+                return format!(
+                    "(blk_try_{id}: {{ const __r_{id} = {call_code}; switch (__r_{id}) {{ .err => |__e_{id}| {{ {err_var} = cp_convert_err({tgt_zig}, __e_{id}); {flag_var} = true; break :{blk_label}; }}, .ok => |__v_{id}| break :blk_try_{id} __v_{id} }} }})"
+                );
+            } else if let Some(Type::ResultType { err: fn_err, .. }) =
+                self.current_fn_ret_ty.clone()
+            {
+                self.verify_error_type_compatibility(call_err, &fn_err);
+                let tgt_zig = self.map_error_type(&fn_err);
+                return format!(
+                    "(blk_try_{id}: {{ const __r_{id} = {call_code}; switch (__r_{id}) {{ .err => |__e_{id}| return .{{ .err = cp_convert_err({tgt_zig}, __e_{id}) }}, .ok => |__v_{id}| break :blk_try_{id} __v_{id} }} }})"
+                );
+            } else {
+                panic!("CP Compile Error: Cannot auto-bubble error in 'try' block inside a function without '!Error' return type or 'catch' handler");
+            }
+        }
+        call_code
     }
 
     fn generate_expr(&mut self, expr: &Expr) -> String {
@@ -2426,9 +4233,9 @@ impl Codegen {
                 match bin.op {
                     BinaryOp::Eq => format!("cp_eq({}, {})", l, r),
                     BinaryOp::NotEq => format!("cp_neq({}, {})", l, r),
+                    BinaryOp::Add => format!("cp_add({}, {})", l, r),
                     _ => {
                         let op = match bin.op {
-                            BinaryOp::Add => "+",
                             BinaryOp::Sub => "-",
                             BinaryOp::Mul => "*",
                             BinaryOp::Div => "/",
@@ -2505,6 +4312,14 @@ impl Codegen {
 
                 if let Expr::Member(mem) = &*call.callee {
                     if let Expr::Ident(id) = &*mem.obj {
+                        if self.enum_defs.contains_key(&id.sym) {
+                            let arg_code = if !call.args.is_empty() {
+                                self.generate_expr(&call.args[0])
+                            } else {
+                                "{}".to_string()
+                            };
+                            return format!("{}{{ .{} = {} }}", id.sym, mem.prop.sym, arg_code);
+                        }
                         if id.sym == "Math" {
                             let prop = mem.prop.sym.as_str();
                             if prop == "abs" {
@@ -2603,7 +4418,7 @@ impl Codegen {
                                 "CP Compile Error: 'super' can only be used inside a class method",
                             );
                             let super_method_name = format!("__super_{}", mem.prop.sym);
-                            if let Some((_params, _ret_ty, target_recv_mode)) =
+                            if let Some((_params, ret_ty, target_recv_mode)) =
                                 self.lookup_method(&c_name, &super_method_name)
                             {
                                 if self.moved_vars.contains("this") || self.moved_vars.contains("_")
@@ -2649,17 +4464,21 @@ impl Codegen {
                                 } else {
                                     "self"
                                 };
-                                if target_recv_mode == ReceiverMode::Move {
+                                let call_res = if target_recv_mode == ReceiverMode::Move {
                                     self.moved_vars.insert("this".to_string());
                                     self.moved_vars.insert("_".to_string());
                                     if !self.is_state_machine {
-                                        return format!(
+                                        format!(
                                             "(blk: {{ __self_moved = true; break :blk {}.{}({}); }})",
                                             self_str, super_method_name, args
-                                        );
+                                        )
+                                    } else {
+                                        format!("{}.{}({})", self_str, super_method_name, args)
                                     }
-                                }
-                                return format!("{}.{}({})", self_str, super_method_name, args);
+                                } else {
+                                    format!("{}.{}({})", self_str, super_method_name, args)
+                                };
+                                return self.maybe_wrap_try_call(call_res, ret_ty.as_ref());
                             } else {
                                 panic!(
                                     "CP Compile Error: Parent method 'super.{}()' not found in class '{}'",
@@ -2670,7 +4489,7 @@ impl Codegen {
 
                         // 2. Handle `_.method(...)` / `this.method(...)` or `obj.method(...)`
                         if let Some(type_name) = self.resolve_var_type_name(&id.sym) {
-                            if let Some((params, _ret_ty, target_recv_mode)) =
+                            if let Some((params, ret_ty, target_recv_mode)) =
                                 self.lookup_method(&type_name, &mem.prop.sym)
                             {
                                 let is_self_recv = id.sym == "this" || id.sym == "_";
@@ -2771,8 +4590,12 @@ impl Codegen {
                                 let mut args = String::new();
                                 for (idx, arg) in call.args.iter().enumerate() {
                                     let mut arg_is_move_param = false;
+                                    let old_box = self.expected_box_trait.clone();
                                     if idx < non_recv_params.len() {
                                         let param = &non_recv_params[idx];
+                                        if let Type::BoxDyn(tr_id) = &param.ty {
+                                            self.expected_box_trait = Some(tr_id.sym.clone());
+                                        }
                                         if let Type::Ref(t_id) = &param.ty {
                                             if self.trait_defs.contains_key(&t_id.sym) {
                                                 if let Expr::Ident(arg_id) = arg {
@@ -2837,6 +4660,7 @@ impl Codegen {
                                         }
                                     }
                                     let gen_arg = self.generate_expr(arg);
+                                    self.expected_box_trait = old_box;
                                     if arg_is_move_param {
                                         if let Expr::Ident(arg_id) = arg {
                                             self.moved_vars.insert(arg_id.sym.clone());
@@ -2859,27 +4683,33 @@ impl Codegen {
                                     }
                                 }
 
-                                if target_recv_mode == ReceiverMode::Move {
+                                let call_res = if target_recv_mode == ReceiverMode::Move {
                                     if is_self_recv {
                                         self.moved_vars.insert("this".to_string());
                                         self.moved_vars.insert("_".to_string());
                                         if !self.is_state_machine {
-                                            return format!(
+                                            format!(
                                                 "(blk: {{ __self_moved = true; break :blk {}.{}({}); }})",
                                                 obj_code, mem.prop.sym, args
-                                            );
+                                            )
+                                        } else {
+                                            format!("{}.{}({})", obj_code, mem.prop.sym, args)
                                         }
                                     } else {
                                         self.moved_vars.insert(id.sym.clone());
                                         if !self.is_state_machine {
-                                            return format!(
+                                            format!(
                                                 "(blk: {{ __{}_moved = true; break :blk {}.{}({}); }})",
                                                 id.sym, obj_code, mem.prop.sym, args
-                                            );
+                                            )
+                                        } else {
+                                            format!("{}.{}({})", obj_code, mem.prop.sym, args)
                                         }
                                     }
-                                }
-                                return format!("{}.{}({})", obj_code, mem.prop.sym, args);
+                                } else {
+                                    format!("{}.{}({})", obj_code, mem.prop.sym, args)
+                                };
+                                return self.maybe_wrap_try_call(call_res, ret_ty.as_ref());
                             }
                         }
                     }
@@ -2892,7 +4722,7 @@ impl Codegen {
                             && !self.locals.contains_key(&ident.sym)
                             && !self.fn_sigs.contains_key(&ident.sym)
                         {
-                            if let Some((params, _ret_ty, target_recv_mode)) =
+                            if let Some((params, ret_ty, target_recv_mode)) =
                                 self.lookup_method(&c_name, &ident.sym)
                             {
                                 if self.moved_vars.contains("this") || self.moved_vars.contains("_")
@@ -2933,8 +4763,12 @@ impl Codegen {
                                 let mut args = String::new();
                                 for (idx, arg) in call.args.iter().enumerate() {
                                     let mut arg_is_move_param = false;
+                                    let old_box = self.expected_box_trait.clone();
                                     if idx < non_recv_params.len() {
                                         let param = &non_recv_params[idx];
+                                        if let Type::BoxDyn(tr_id) = &param.ty {
+                                            self.expected_box_trait = Some(tr_id.sym.clone());
+                                        }
                                         if let Expr::Ident(arg_id) = arg {
                                             if param.is_mut {
                                                 self.check_borrow_conflict(&arg_id.sym, true);
@@ -2947,6 +4781,7 @@ impl Codegen {
                                         }
                                     }
                                     let gen_arg = self.generate_expr(arg);
+                                    self.expected_box_trait = old_box;
                                     if arg_is_move_param {
                                         if let Expr::Ident(arg_id) = arg {
                                             self.moved_vars.insert(arg_id.sym.clone());
@@ -2969,24 +4804,29 @@ impl Codegen {
                                     }
                                 }
                                 if target_recv_mode == ReceiverMode::Static {
-                                    return format!("{}.{}({})", c_name, ident.sym, args);
+                                    let call_res = format!("{}.{}({})", c_name, ident.sym, args);
+                                    return self.maybe_wrap_try_call(call_res, ret_ty.as_ref());
                                 }
                                 let self_str = if self.is_state_machine {
                                     "ctx.self"
                                 } else {
                                     "self"
                                 };
-                                if target_recv_mode == ReceiverMode::Move {
+                                let call_res = if target_recv_mode == ReceiverMode::Move {
                                     self.moved_vars.insert("this".to_string());
                                     self.moved_vars.insert("_".to_string());
                                     if !self.is_state_machine {
-                                        return format!(
+                                        format!(
                                             "(blk: {{ __self_moved = true; break :blk {}.{}({}); }})",
                                             self_str, ident.sym, args
-                                        );
+                                        )
+                                    } else {
+                                        format!("{}.{}({})", self_str, ident.sym, args)
                                     }
-                                }
-                                return format!("{}.{}({})", self_str, ident.sym, args);
+                                } else {
+                                    format!("{}.{}({})", self_str, ident.sym, args)
+                                };
+                                return self.maybe_wrap_try_call(call_res, ret_ty.as_ref());
                             }
                         }
                     }
@@ -2996,6 +4836,19 @@ impl Codegen {
                     Expr::Ident(ident) => ident.sym.clone(),
                     _ => self.generate_expr(&call.callee),
                 };
+                if callee == "Error" {
+                    let code = if !call.args.is_empty() {
+                        self.generate_expr(&call.args[0])
+                    } else {
+                        "0".to_string()
+                    };
+                    let msg = if call.args.len() > 1 {
+                        self.generate_expr(&call.args[1])
+                    } else {
+                        "\"\"".to_string()
+                    };
+                    return format!("Error.init({}, {})", code, msg);
+                }
                 if callee == "test" && call.args.len() == 2 {
                     let name = self.generate_expr(&call.args[0]);
                     let lambda = self.generate_expr(&call.args[1]);
@@ -3030,9 +4883,13 @@ impl Codegen {
                 let mut args = String::new();
                 for (idx, arg) in call.args.iter().enumerate() {
                     let mut arg_is_move_param = false;
+                    let old_box = self.expected_box_trait.clone();
                     if let Some(sig) = &fn_sig_opt {
                         if idx < sig.params.len() {
                             let param = &sig.params[idx];
+                            if let Type::BoxDyn(tr_id) = &param.ty {
+                                self.expected_box_trait = Some(tr_id.sym.clone());
+                            }
                             if let Type::Ref(t_id) = &param.ty {
                                 if self.trait_defs.contains_key(&t_id.sym) {
                                     let inner_arg = match arg {
@@ -3099,6 +4956,7 @@ impl Codegen {
                         }
                     }
                     let gen_arg = self.generate_expr(arg);
+                    self.expected_box_trait = old_box;
                     if arg_is_move_param {
                         if let Expr::Ident(arg_id) = arg {
                             self.moved_vars.insert(arg_id.sym.clone());
@@ -3120,17 +4978,436 @@ impl Codegen {
                         args.push_str(", ");
                     }
                 }
-                format!("{}({})", callee, args)
+                let call_res = format!("{}({})", callee, args);
+                self.maybe_wrap_try_call(
+                    call_res,
+                    fn_sig_opt.as_ref().and_then(|s| s.return_type.as_ref()),
+                )
             }
             Expr::Question(inner) => {
+                let old_in_try = self.in_try_region;
+                self.in_try_region = false;
+                let inner_ty = self.infer_cp_type(inner);
                 let exp = self.generate_expr(inner);
-                format!("try {}", exp)
+                self.in_try_region = old_in_try;
+                let id = self.lambda_counter;
+                self.lambda_counter += 1;
+
+                match inner_ty {
+                    Some(Type::ResultType { ok, err: src_err }) => {
+                        let err_branch = if let Some((blk_label, err_var, flag_var, target_err)) =
+                            self.try_catch_target.clone()
+                        {
+                            self.verify_error_type_compatibility(&src_err, &target_err);
+                            let tgt_zig = self.map_error_type(&target_err);
+                            format!(
+                                ".err => |__e_{id}| {{ {err_var} = cp_convert_err({tgt_zig}, __e_{id}); {flag_var} = true; break :{blk_label}; }}"
+                            )
+                        } else if let Some(Type::ResultType { err: fn_err, .. }) =
+                            self.current_fn_ret_ty.clone()
+                        {
+                            self.verify_error_type_compatibility(&src_err, &fn_err);
+                            let tgt_zig = self.map_error_type(&fn_err);
+                            format!(
+                                ".err => |__e_{id}| return .{{ .err = cp_convert_err({tgt_zig}, __e_{id}) }}"
+                            )
+                        } else {
+                            panic!("CP Compile Error: Operator '?' cannot be used on '!Error' expression inside a function that does not return '!Error'");
+                        };
+
+                        let ok_branch = if matches!(*ok, Type::Optional(_))
+                            && self.try_catch_target.is_none()
+                        {
+                            match &self.current_fn_ret_ty {
+                                Some(Type::ResultType { ok: fn_ok, .. })
+                                    if matches!(&**fn_ok, Type::Optional(_)) =>
+                                {
+                                    format!(
+                                        ".ok => |__v_{id}| {{ if (__v_{id} == null) return .{{ .ok = null }}; break :blk_q_{id} __v_{id}.?; }}"
+                                    )
+                                }
+                                Some(Type::Optional(_)) => {
+                                    format!(
+                                        ".ok => |__v_{id}| {{ if (__v_{id} == null) return null; break :blk_q_{id} __v_{id}.?; }}"
+                                    )
+                                }
+                                _ => format!(".ok => |__v_{id}| break :blk_q_{id} __v_{id}"),
+                            }
+                        } else {
+                            format!(".ok => |__v_{id}| break :blk_q_{id} __v_{id}")
+                        };
+
+                        format!(
+                            "(blk_q_{id}: {{ const __r_{id} = {exp}; switch (__r_{id}) {{ {err_branch}, {ok_branch} }} }})"
+                        )
+                    }
+                    Some(Type::Optional(_)) => {
+                        let null_ret = match &self.current_fn_ret_ty {
+                            Some(Type::ResultType { ok: fn_ok, .. })
+                                if matches!(&**fn_ok, Type::Optional(_)) =>
+                            {
+                                "return .{ .ok = null };"
+                            }
+                            Some(Type::Optional(_)) => "return null;",
+                            _ => panic!(
+                                "CP Compile Error: Operator '?' cannot bubble 'null' from '?T' inside a function that does not return an optional '?U' type"
+                            ),
+                        };
+                        format!(
+                            "(blk_q_{id}: {{ const __v_{id} = {exp}; if (__v_{id} == null) {null_ret} break :blk_q_{id} __v_{id}.?; }})"
+                        )
+                    }
+                    _ => format!("try {}", exp),
+                }
             }
+            Expr::QuestionFallback {
+                expr: inner,
+                fallback,
+                is_return_fallback,
+            } => {
+                let old_in_try = self.in_try_region;
+                self.in_try_region = false;
+                let exp = self.generate_expr(inner);
+                self.in_try_region = old_in_try;
+                let id = self.lambda_counter;
+                self.lambda_counter += 1;
+
+                if *is_return_fallback {
+                    let is_null_fb = matches!(&**fallback, Expr::Lit(Lit::Null))
+                        || matches!(&**fallback, Expr::Ident(id) if id.sym == "null");
+                    let ret_stmt = if let Some(Type::ResultType { err: fn_err, .. }) =
+                        self.current_fn_ret_ty.clone()
+                    {
+                        if let Expr::ErrWrap(err_inner) = &**fallback {
+                            let ev = self.generate_err_value(err_inner, Some(&fn_err));
+                            format!("return .{{ .err = {} }};", ev)
+                        } else if is_null_fb {
+                            if !matches!(&self.current_fn_ret_ty, Some(Type::ResultType { ok, .. }) if matches!(&**ok, Type::Optional(_)))
+                            {
+                                panic!("CP Compile Error: Cannot return 'null' from function whose return type is not optional '?T'");
+                            }
+                            "return .{ .ok = null };".to_string()
+                        } else {
+                            let fb_c = self.generate_expr(fallback);
+                            format!("return .{{ .ok = {} }};", fb_c)
+                        }
+                    } else {
+                        if is_null_fb && !matches!(&self.current_fn_ret_ty, Some(Type::Optional(_)))
+                        {
+                            panic!("CP Compile Error: Cannot return 'null' from function whose return type is not optional '?T'");
+                        }
+                        let fb_c = self.generate_expr(fallback);
+                        format!("return {};", fb_c)
+                    };
+                    format!(
+                        "(blk_qf_{id}: {{ const __r_{id} = {exp}; if (cp_has_ok_val(__r_{id})) break :blk_qf_{id} cp_unwrap_ok_val(__r_{id}); {ret_stmt} }})"
+                    )
+                } else {
+                    let fb_c = self.generate_expr(fallback);
+                    format!(
+                        "(blk_qf_{id}: {{ const __r_{id} = {exp}; if (cp_has_ok_val(__r_{id})) break :blk_qf_{id} cp_unwrap_ok_val(__r_{id}); break :blk_qf_{id} cp_val({fb_c}); }})"
+                    )
+                }
+            }
+            Expr::NullCoalesce { left, right } => {
+                let old_in_try = self.in_try_region;
+                self.in_try_region = false;
+                let l_ty = self.infer_cp_type(left);
+                if matches!(
+                    l_ty,
+                    Some(Type::ResultType { .. }) | Some(Type::ErrorUnion(_))
+                ) {
+                    panic!(
+                        "CP Compile Error: Operator '??' can only be used on optional '?T' for null coalescing; for '!Error' types use '? default' or 'catch'"
+                    );
+                }
+                let l_code = self.generate_expr(left);
+                self.in_try_region = old_in_try;
+                let r_code = self.generate_expr(right);
+                let id = self.lambda_counter;
+                self.lambda_counter += 1;
+                format!(
+                    "(blk_nc_{id}: {{ const __l_{id} = {l_code}; if (__l_{id}) |__v_{id}| break :blk_nc_{id} __v_{id}; break :blk_nc_{id} cp_val({r_code}); }})"
+                )
+            }
+            Expr::Catch {
+                expr: inner,
+                err_ident,
+                body,
+                ..
+            } => {
+                let old_in_try = self.in_try_region;
+                self.in_try_region = false;
+                let inner_ty = self.infer_cp_type(inner);
+                let exp = self.generate_expr(inner);
+                self.in_try_region = old_in_try;
+                let id = self.lambda_counter;
+                self.lambda_counter += 1;
+                let blk_label = format!("blk_catch_{}", id);
+                let err_bind = err_ident
+                    .as_ref()
+                    .map(|i| i.sym.clone())
+                    .unwrap_or_else(|| format!("__ce_{}", id));
+
+                let old_vars = self.var_cp_types.clone();
+                let old_locals = self.locals.clone();
+                if let Some(Type::ResultType { err, .. }) = &inner_ty {
+                    if let Some(eid) = err_ident {
+                        self.var_cp_types
+                            .insert(eid.sym.clone(), self.error_type_to_cp_type(err));
+                        self.locals
+                            .insert(eid.sym.clone(), self.map_error_type(err));
+                    }
+                }
+
+                let catch_arm_body = match &**body {
+                    Stmt::Expr(e) => {
+                        let ec = self.generate_expr(e);
+                        format!("break :{} cp_val({});", blk_label, ec)
+                    }
+                    Stmt::Return(_) => {
+                        let saved = self.current_case_content.clone();
+                        self.current_case_content.clear();
+                        self.generate_stmt(body);
+                        let ret_s = self.current_case_content.trim().to_string();
+                        self.current_case_content = saved;
+                        ret_s
+                    }
+                    Stmt::Block(b) => {
+                        let saved = self.current_case_content.clone();
+                        self.current_case_content.clear();
+                        let len = b.body.len();
+                        for (idx, s) in b.body.iter().enumerate() {
+                            if idx + 1 == len {
+                                if let Stmt::Expr(e) = s {
+                                    let ec = self.generate_expr(e);
+                                    self.write_to_case(&format!(
+                                        "break :{} cp_val({});",
+                                        blk_label, ec
+                                    ));
+                                } else {
+                                    self.generate_stmt(s);
+                                }
+                            } else {
+                                self.generate_stmt(s);
+                            }
+                        }
+                        let blk_s = self.current_case_content.trim().to_string();
+                        self.current_case_content = saved;
+                        blk_s
+                    }
+                    _ => {
+                        let saved = self.current_case_content.clone();
+                        self.current_case_content.clear();
+                        self.generate_stmt(body);
+                        let s_str = self.current_case_content.trim().to_string();
+                        self.current_case_content = saved;
+                        s_str
+                    }
+                };
+
+                self.var_cp_types = old_vars;
+                self.locals = old_locals;
+
+                format!(
+                    "({blk_label}: {{ const __r_{id} = {exp}; switch (__r_{id}) {{ .ok => |__v_{id}| break :{blk_label} __v_{id}, .err => |{err_bind}| {{ _ = &{err_bind}; {catch_arm_body} }} }} }})"
+                )
+            }
+            Expr::ErrWrap(inner) => self.generate_err_value(inner, None),
+            Expr::BoxNew(inner) => {
+                let trait_name = self.expected_box_trait.clone().unwrap_or_else(|| {
+                    panic!("CP Compile Error: Box.new(...) requires a known Box<dyn Trait> target type")
+                });
+                let inner_unwrapped = match &**inner {
+                    Expr::Move(mv) => &**mv,
+                    other => other,
+                };
+                let cls_name = match inner_unwrapped {
+                    Expr::Ident(id) => {
+                        if self.moved_vars.contains(&id.sym) {
+                            panic!("CP Compile Error: Use of moved value '{}'", id.sym);
+                        }
+                        if self.var_borrow_sources.contains_key(&id.sym)
+                            || (self.current_fn_params.contains(&id.sym)
+                                && !self.move_fn_params.contains(&id.sym))
+                        {
+                            panic!(
+                                "CP Compile Error: Box.new() requires ownership of '{}'; cannot box a borrowed reference",
+                                id.sym
+                            );
+                        }
+                        self.check_active_borrows_before_move(&id.sym);
+                        self.resolve_var_type_name(&id.sym).unwrap_or_else(|| {
+                            panic!(
+                                "CP Compile Error: Cannot determine concrete type of '{}' for Box.new()",
+                                id.sym
+                            )
+                        })
+                    }
+                    Expr::New(nc) => match &*nc.callee {
+                        Expr::Ident(cid) => cid.sym.clone(),
+                        _ => panic!("CP Compile Error: Invalid New expression inside Box.new()"),
+                    },
+                    other => {
+                        if let Some(Type::Ref(cid)) = self.infer_cp_type(other) {
+                            cid.sym.clone()
+                        } else {
+                            panic!("CP Compile Error: Cannot determine concrete type for Box.new()")
+                        }
+                    }
+                };
+                let implements = self
+                    .class_defs
+                    .get(&cls_name)
+                    .map_or(false, |c| c.implements.iter().any(|i| i.sym == trait_name));
+                if !implements {
+                    panic!(
+                        "CP Compile Error: Type '{}' does not implement trait '{}' required by Box<dyn {}>",
+                        cls_name, trait_name, trait_name
+                    );
+                }
+                let inner_code = self.generate_expr(inner);
+                let move_stmt = if let Expr::Ident(id) = &**inner {
+                    self.moved_vars.insert(id.sym.clone());
+                    if !self.is_state_machine {
+                        format!("__{}_moved = true; ", id.sym)
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                };
+                let id = self.lambda_counter;
+                self.lambda_counter += 1;
+                format!(
+                    "(blk_box_{id}: {{ const __b_ptr_{id} = {inner_code}; {move_stmt}break :blk_box_{id} {trait_name}{{ .ptr = @ptrCast(__b_ptr_{id}), .vtable = &vtable_{trait_name}_{cls_name} }}; }})"
+                )
+            }
+            Expr::Downcast {
+                obj,
+                target_ty,
+                is_mut,
+            } => {
+                if let Expr::Ident(id) = &**obj {
+                    if *is_mut {
+                        if let Some((_, is_m)) = self.var_borrow_sources.get(&id.sym) {
+                            if !*is_m {
+                                panic!(
+                                    "CP Compile Error: Cannot take mutable downcast borrow from read-only borrow '{}'",
+                                    id.sym
+                                );
+                            }
+                        } else if self.current_fn_params.contains(&id.sym)
+                            && !self.mutable_fn_params.contains(&id.sym)
+                        {
+                            panic!(
+                                "CP Compile Error: Cannot take mutable downcast borrow from read-only parameter '{}'",
+                                id.sym
+                            );
+                        }
+                    }
+                    self.check_borrow_conflict(&id.sym, *is_mut);
+                }
+                let obj_code = self.generate_expr(obj);
+                format!("{}.downcast({})", obj_code, target_ty.sym)
+            }
+            Expr::EnumInit(ei) => {
+                let fields_slice = ei.fields.as_deref().unwrap_or(&[]);
+                if ei.enum_name.sym == "Error" {
+                    let mut s = String::from("Error{ ");
+                    for (idx, f) in fields_slice.iter().enumerate() {
+                        s.push_str(&format!(".{} = {}", f.key.sym, self.generate_expr(&f.val)));
+                        if idx + 1 < fields_slice.len() {
+                            s.push_str(", ");
+                        }
+                    }
+                    s.push_str(" }");
+                    return s;
+                }
+                if ei.enum_name.sym.is_empty() {
+                    if fields_slice.is_empty() {
+                        format!(".{}", ei.variant_name.sym)
+                    } else {
+                        let mut f_str = String::new();
+                        for (idx, f) in fields_slice.iter().enumerate() {
+                            f_str.push_str(&format!(
+                                ".{} = {}",
+                                f.key.sym,
+                                self.generate_expr(&f.val)
+                            ));
+                            if idx + 1 < fields_slice.len() {
+                                f_str.push_str(", ");
+                            }
+                        }
+                        format!(".{{ .{} = .{{ {} }} }}", ei.variant_name.sym, f_str)
+                    }
+                } else if fields_slice.is_empty() {
+                    format!("{}{{ .{} = {{}} }}", ei.enum_name.sym, ei.variant_name.sym)
+                } else {
+                    let mut f_str = String::new();
+                    for (idx, f) in fields_slice.iter().enumerate() {
+                        f_str.push_str(&format!(".{} = {}", f.key.sym, self.generate_expr(&f.val)));
+                        if idx + 1 < fields_slice.len() {
+                            f_str.push_str(", ");
+                        }
+                    }
+                    format!(
+                        "{}{{ .{} = .{{ {} }} }}",
+                        ei.enum_name.sym, ei.variant_name.sym, f_str
+                    )
+                }
+            }
+            Expr::OptMember(mem) => {
+                let obj_code = self.generate_expr(&mem.obj);
+                let prop = match mem.prop.sym.as_str() {
+                    "length" => "len",
+                    other => other,
+                };
+                let id = self.lambda_counter;
+                self.lambda_counter += 1;
+                format!(
+                    "(blk_om_{id}: {{ const __o_{id} = {obj_code}; const __R_{id} = CpOptType(@TypeOf(cp_opt_unwrap(__o_{id}).{prop})); if (cp_opt_is_null(__o_{id})) break :blk_om_{id} @as(__R_{id}, null); break :blk_om_{id} @as(__R_{id}, cp_opt_unwrap(__o_{id}).{prop}); }})"
+                )
+            }
+            Expr::OptCall(call) => {
+                if let Expr::OptMember(mem) | Expr::Member(mem) = &*call.callee {
+                    let obj_code = self.generate_expr(&mem.obj);
+                    let prop = &mem.prop.sym;
+                    let mut args = String::new();
+                    for (idx, arg) in call.args.iter().enumerate() {
+                        args.push_str(&self.generate_expr(arg));
+                        if idx + 1 < call.args.len() {
+                            args.push_str(", ");
+                        }
+                    }
+                    let id = self.lambda_counter;
+                    self.lambda_counter += 1;
+                    format!(
+                        "(blk_oc_{id}: {{ const __o_{id} = {obj_code}; const __R_{id} = CpOptType(@TypeOf(cp_opt_unwrap(__o_{id}).{prop}({args}))); if (cp_opt_is_null(__o_{id})) break :blk_oc_{id} @as(__R_{id}, null); break :blk_oc_{id} @as(__R_{id}, cp_opt_unwrap(__o_{id}).{prop}({args})); }})"
+                    )
+                } else {
+                    "null".to_string()
+                }
+            }
+            Expr::Match(m) => self.generate_switch(m, true),
             Expr::New(call) => {
                 let class_name = match &*call.callee {
                     Expr::Ident(id) => id.sym.clone(),
                     _ => "Unknown".to_string(),
                 };
+                if class_name == "Error" {
+                    let code = if !call.args.is_empty() {
+                        self.generate_expr(&call.args[0])
+                    } else {
+                        "0".to_string()
+                    };
+                    let msg = if call.args.len() > 1 {
+                        self.generate_expr(&call.args[1])
+                    } else {
+                        "\"\"".to_string()
+                    };
+                    return format!("Error.init({}, {})", code, msg);
+                }
                 let init_params: Vec<Param> = self
                     .lookup_method(&class_name, "init")
                     .map(|(p, _, _)| {
@@ -3253,6 +5530,22 @@ impl Codegen {
                             return "@import(\"std\").math.e".to_string();
                         }
                     }
+                    if self.enum_defs.contains_key(&id.sym) || self.error_sets.contains_key(&id.sym)
+                    {
+                        return format!("{}{{ .{} = {{}} }}", id.sym, member.prop.sym);
+                    }
+                }
+                if matches!(&*member.obj, Expr::OptMember(_) | Expr::OptCall(_)) {
+                    let obj_code = self.generate_expr(&member.obj);
+                    let prop = match member.prop.sym.as_str() {
+                        "length" => "len",
+                        other => other,
+                    };
+                    let id = self.lambda_counter;
+                    self.lambda_counter += 1;
+                    return format!(
+                        "(blk_om_{id}: {{ const __o_{id} = {obj_code}; const __R_{id} = CpOptType(@TypeOf(cp_opt_unwrap(__o_{id}).{prop})); if (cp_opt_is_null(__o_{id})) break :blk_om_{id} @as(__R_{id}, null); break :blk_om_{id} @as(__R_{id}, cp_opt_unwrap(__o_{id}).{prop}); }})"
+                    );
                 }
                 let obj = self.generate_expr(&member.obj);
                 let prop = match member.prop.sym.as_str() {
@@ -3262,6 +5555,10 @@ impl Codegen {
                 format!("{}.{}", obj, prop)
             }
             Expr::Builtin(call) => match call.name.as_str() {
+                "@not" => {
+                    let inner = self.generate_expr(&call.args[0]);
+                    format!("cp_not({})", inner)
+                }
                 "@print" => {
                     let fmt = self.generate_expr(&call.args[0]);
                     let mut args = String::from(".{ ");
@@ -3841,6 +6138,9 @@ impl Codegen {
             return self.map_type(t);
         }
         if let Some(expr) = init {
+            if let Some(cp_ty) = self.infer_cp_type(expr) {
+                return self.map_type(&cp_ty);
+            }
             match expr {
                 Expr::Lit(crate::ast::Lit::Int(_)) => return "i32".to_string(),
                 Expr::Lit(crate::ast::Lit::Float(_)) => return "f32".to_string(),
@@ -3848,11 +6148,25 @@ impl Codegen {
                 Expr::Lit(crate::ast::Lit::Bool(_)) => return "bool".to_string(),
                 Expr::New(call) => {
                     if let Expr::Ident(id) = &*call.callee {
+                        if id.sym == "Error" {
+                            return "Error".to_string();
+                        }
                         return format!("*{}", id.sym);
                     }
                 }
                 Expr::Call(call) => {
                     if let Expr::Ident(id) = &*call.callee {
+                        if let Some(sig) = self.fn_sigs.get(&id.sym) {
+                            if let Some(ret_ty) = &sig.return_type {
+                                return self.map_type(ret_ty);
+                            }
+                        }
+                        if let Some(c_name) = &self.current_class_name {
+                            if let Some((_, Some(ret_ty), _)) = self.lookup_method(c_name, &id.sym)
+                            {
+                                return self.map_type(&ret_ty);
+                            }
+                        }
                         if id.sym == "listen" {
                             return "*Server".to_string();
                         }
@@ -3891,17 +6205,6 @@ impl Codegen {
                         }
                         if id.sym == "sleep" {
                             return "void".to_string();
-                        }
-                        if let Some(sig) = self.fn_sigs.get(&id.sym) {
-                            if let Some(ret_ty) = &sig.return_type {
-                                return self.map_type(ret_ty);
-                            }
-                        }
-                        if let Some(c_name) = &self.current_class_name {
-                            if let Some((_, Some(ret_ty), _)) = self.lookup_method(c_name, &id.sym)
-                            {
-                                return self.map_type(&ret_ty);
-                            }
                         }
                     } else if let Expr::Member(mem) = &*call.callee {
                         if let Expr::Ident(obj_id) = &*mem.obj {
@@ -3982,7 +6285,7 @@ impl Codegen {
                     if call.name == "@receive" {
                         return "Message".to_string();
                     }
-                    if call.name == "@send" || call.name == "@reply" {
+                    if call.name == "@send" || call.name == "@reply" || call.name == "@not" {
                         return "bool".to_string();
                     }
                     if call.name == "@http_serve" {
@@ -4071,16 +6374,19 @@ impl Codegen {
         for stmt in &block.body {
             match stmt {
                 Stmt::Var(v) => {
+                    let old_box = self.expected_box_trait.clone();
+                    if let Some(Type::BoxDyn(tr_id)) = &v.ty {
+                        self.expected_box_trait = Some(tr_id.sym.clone());
+                    }
                     let ty_str = self.infer_zig_type(v.ty.as_ref(), v.init.as_ref());
                     match &v.pat {
                         Pattern::Ident(i) => {
                             self.locals.insert(i.sym.clone(), ty_str);
                             if let Some(t) = &v.ty {
                                 self.var_cp_types.insert(i.sym.clone(), t.clone());
-                            } else if let Some(Expr::New(nc)) = &v.init {
-                                if let Expr::Ident(cid) = &*nc.callee {
-                                    self.var_cp_types
-                                        .insert(i.sym.clone(), Type::Ref(cid.clone()));
+                            } else if let Some(init_expr) = &v.init {
+                                if let Some(inferred_ty) = self.infer_cp_type(init_expr) {
+                                    self.var_cp_types.insert(i.sym.clone(), inferred_ty);
                                 }
                             }
                         }
@@ -4132,6 +6438,7 @@ impl Codegen {
                         }
                         _ => {}
                     }
+                    self.expected_box_trait = old_box;
                 }
                 Stmt::Block(b) => self.extract_locals_simple(b),
                 Stmt::If(i) => {
@@ -4147,6 +6454,73 @@ impl Codegen {
                 Stmt::While(w) => {
                     if let Stmt::Block(b) = &*w.body {
                         self.extract_locals_simple(b);
+                    }
+                }
+                Stmt::TryCatch {
+                    try_block,
+                    catch_body,
+                    ..
+                } => {
+                    let old_try = self.in_try_region;
+                    self.in_try_region = true;
+                    self.extract_locals_simple(try_block);
+                    self.in_try_region = old_try;
+                    if let Some(cb) = catch_body {
+                        if let Stmt::Block(b) = &**cb {
+                            self.extract_locals_simple(b);
+                        }
+                    }
+                }
+                Stmt::Match(m) => {
+                    let disc_ty = self.infer_cp_type(&m.disc);
+                    for arm in &m.arms {
+                        let old_v = self.var_cp_types.clone();
+                        if let Pattern::Err(inner_p) = &arm.pat {
+                            if let Pattern::Ident(id) = &**inner_p {
+                                if let Some(Type::ResultType { err, .. }) = &disc_ty {
+                                    self.var_cp_types
+                                        .insert(id.sym.clone(), self.error_type_to_cp_type(err));
+                                }
+                            }
+                        } else if let Pattern::Ident(id) = &arm.pat {
+                            if let Some(Type::ResultType { ok, .. }) = &disc_ty {
+                                self.var_cp_types.insert(id.sym.clone(), (**ok).clone());
+                            } else if let Some(t) = &disc_ty {
+                                self.var_cp_types.insert(id.sym.clone(), t.clone());
+                            }
+                        }
+                        if let Stmt::Block(b) = &*arm.body {
+                            self.extract_locals_simple(b);
+                        }
+                        for (k, v) in old_v {
+                            self.var_cp_types.insert(k, v);
+                        }
+                    }
+                }
+                Stmt::Expr(Expr::Match(m)) => {
+                    let disc_ty = self.infer_cp_type(&m.disc);
+                    for arm in &m.arms {
+                        let old_v = self.var_cp_types.clone();
+                        if let Pattern::Err(inner_p) = &arm.pat {
+                            if let Pattern::Ident(id) = &**inner_p {
+                                if let Some(Type::ResultType { err, .. }) = &disc_ty {
+                                    self.var_cp_types
+                                        .insert(id.sym.clone(), self.error_type_to_cp_type(err));
+                                }
+                            }
+                        } else if let Pattern::Ident(id) = &arm.pat {
+                            if let Some(Type::ResultType { ok, .. }) = &disc_ty {
+                                self.var_cp_types.insert(id.sym.clone(), (**ok).clone());
+                            } else if let Some(t) = &disc_ty {
+                                self.var_cp_types.insert(id.sym.clone(), t.clone());
+                            }
+                        }
+                        if let Stmt::Block(b) = &*arm.body {
+                            self.extract_locals_simple(b);
+                        }
+                        for (k, v) in old_v {
+                            self.var_cp_types.insert(k, v);
+                        }
                     }
                 }
                 _ => {}
@@ -4244,7 +6618,15 @@ impl Codegen {
             Type::Any => "*anyopaque".to_string(),
             Type::Array(inner) => format!("[]const {}", self.map_type(inner)),
             Type::Ref(ident) => {
-                if ident.sym == "PID" || ident.sym == "Message" {
+                if ident.sym == "PID"
+                    || ident.sym == "Message"
+                    || ident.sym == "Error"
+                    || ident.sym.starts_with("__AnonErr_")
+                    || ident.sym.starts_with("__UnionErr_")
+                    || self.enum_defs.contains_key(&ident.sym)
+                    || self.error_sets.contains_key(&ident.sym)
+                    || self.trait_defs.contains_key(&ident.sym)
+                {
                     return ident.sym.clone();
                 }
                 format!("*{}", ident.sym)
@@ -4253,6 +6635,20 @@ impl Codegen {
             Type::Shared(inner) => self.map_type(inner),
             Type::Optional(inner) => format!("?{}", self.map_type(inner)),
             Type::ErrorUnion(inner) => format!("anyerror!{}", self.map_type(inner)),
+            Type::ResultType { ok, err } => {
+                format!(
+                    "CpResult({}, {})",
+                    self.map_type(ok),
+                    self.map_error_type(err)
+                )
+            }
+            Type::BoxDyn(id) => id.sym.clone(),
+            Type::BareDyn(id) => {
+                panic!(
+                    "CP Compile Error: Bare 'dyn {}' cannot be placed on the stack or used without Box; use 'Box<dyn {}>' instead",
+                    id.sym, id.sym
+                )
+            }
             Type::Tuple(types) => {
                 let mapped: Vec<String> = types.iter().map(|t| self.map_type(t)).collect();
                 format!("struct {{ {} }}", mapped.join(", "))
