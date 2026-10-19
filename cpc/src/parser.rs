@@ -454,6 +454,22 @@ impl<'a> Parser<'a> {
                     let tr = self.parse_ident()?;
                     self.expect(Token::Greater)?;
                     Type::BoxDyn(tr)
+                } else if (sym == "Map" || sym == "Dict") && self.peek() == Some(&Token::Less) {
+                    self.bump()?;
+                    let k = self.parse_type()?;
+                    self.expect(Token::Comma)?;
+                    let v = self.parse_type()?;
+                    self.expect(Token::Greater)?;
+                    if sym == "Dict" {
+                        Type::Dict(Box::new(k), Box::new(v))
+                    } else {
+                        Type::Map(Box::new(k), Box::new(v))
+                    }
+                } else if sym == "Set" && self.peek() == Some(&Token::Less) {
+                    self.bump()?;
+                    let elem = self.parse_type()?;
+                    self.expect(Token::Greater)?;
+                    Type::Set(Box::new(elem))
                 } else {
                     Type::Ref(Ident { span, sym })
                 }
@@ -1346,7 +1362,7 @@ impl<'a> Parser<'a> {
                     };
                 }
                 Some(Token::LBracket) => {
-                    let start_span = self.bump()?.1;
+                    let _start_span = self.bump()?.1;
                     let mut start_idx = None;
                     let mut end_idx = None;
                     let mut is_slice = false;
@@ -1381,17 +1397,10 @@ impl<'a> Parser<'a> {
                             end: end_idx,
                         });
                     } else {
-                        left = Expr::Member(MemberExpr {
-                            span: Span {
-                                start: left_span(&left).start,
-                                end: end_span.end,
-                            },
+                        left = Expr::Index {
                             obj: Box::new(left),
-                            prop: Ident {
-                                span: start_span,
-                                sym: "at".to_string(),
-                            },
-                        });
+                            index: start_idx.unwrap(),
+                        };
                     }
                 }
                 Some(Token::FatArrow) => {
@@ -1630,18 +1639,12 @@ impl<'a> Parser<'a> {
                 self.expect(Token::RParen)?;
                 Ok(expr)
             }
+            Token::HashLBrace => {
+                let fields = self.parse_object_fields()?;
+                Ok(Expr::Dict(fields))
+            }
             Token::LBrace => {
-                let mut fields = Vec::new();
-                while self.peek() != Some(&Token::RBrace) {
-                    let key = self.parse_ident()?;
-                    self.expect(Token::Colon)?;
-                    let val = self.parse_expr()?;
-                    fields.push(ObjectField { key, val });
-                    if self.peek() == Some(&Token::Comma) {
-                        self.bump()?;
-                    }
-                }
-                self.expect(Token::RBrace)?;
+                let fields = self.parse_object_fields()?;
                 Ok(Expr::Object(fields))
             }
             Token::Await => {
@@ -1761,6 +1764,54 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn parse_object_fields(&mut self) -> ParseResult<Vec<ObjectField>> {
+        let mut fields = Vec::new();
+        while self.peek() != Some(&Token::RBrace) && self.peek().is_some() {
+            if self.peek() == Some(&Token::DotDotDot) {
+                self.bump()?;
+                let val = self.parse_expr()?;
+                fields.push(ObjectField {
+                    key: None,
+                    val,
+                    is_spread: true,
+                });
+            } else {
+                let is_str = matches!(self.peek(), Some(Token::StringLiteral(_)));
+                let key = if is_str {
+                    let (tok, span) = self.bump()?;
+                    if let Token::StringLiteral(s) = tok {
+                        Ident { span, sym: s }
+                    } else {
+                        unreachable!()
+                    }
+                } else {
+                    self.parse_ident()?
+                };
+                if self.peek() == Some(&Token::Colon) {
+                    self.bump()?;
+                    let val = self.parse_expr()?;
+                    fields.push(ObjectField {
+                        key: Some(key),
+                        val,
+                        is_spread: false,
+                    });
+                } else {
+                    // Shorthand { key } -> { key: key }
+                    fields.push(ObjectField {
+                        key: Some(key.clone()),
+                        val: Expr::Ident(key),
+                        is_spread: false,
+                    });
+                }
+            }
+            if self.peek() == Some(&Token::Comma) {
+                self.bump()?;
+            }
+        }
+        self.expect(Token::RBrace)?;
+        Ok(fields)
+    }
+
     fn parse_arrow_params(&mut self) -> ParseResult<Vec<Pattern>> {
         let mut params = Vec::new();
         while self.peek() != Some(&Token::RParen) && self.peek().is_some() {
@@ -1874,7 +1925,8 @@ fn left_span(expr: &Expr) -> Span {
         Expr::NullCoalesce { left, .. } => left_span(left),
         Expr::Downcast { obj, .. } => left_span(obj),
         Expr::Array(_) => Span { start: 0, end: 0 },
-        Expr::Object(_) => Span { start: 0, end: 0 },
+        Expr::Object(_) | Expr::Dict(_) => Span { start: 0, end: 0 },
+        Expr::Index { obj, .. } => left_span(obj),
         Expr::Arrow(a) => a.span,
         Expr::EnumInit(e) => e.span,
         Expr::Template(t) => t.span,
@@ -1906,7 +1958,8 @@ fn right_span(expr: &Expr) -> Span {
         Expr::Catch { expr, .. } => right_span(expr),
         Expr::Downcast { target_ty, .. } => target_ty.span,
         Expr::Array(_) => Span { start: 0, end: 0 },
-        Expr::Object(_) => Span { start: 0, end: 0 },
+        Expr::Object(_) | Expr::Dict(_) => Span { start: 0, end: 0 },
+        Expr::Index { index, .. } => right_span(index),
         Expr::Arrow(a) => a.span,
         Expr::EnumInit(e) => e.span,
         Expr::Template(t) => t.span,

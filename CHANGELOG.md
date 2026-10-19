@@ -117,3 +117,38 @@
 ### 修改文件 (Modified)
 - [`cap/test/example_showcase.cp`](file:///data/dev/cp/cap/test/example_showcase.cp):
   - 简化 `safeGetConfig` 中的错误兜底为纯粹的 `let cfg = readConfigFile(filename) ? "DEFAULT_CONFIG";`，省略冗余的 `return` 关键字，确保变量初始化与表达式级降级语义保持严格一致。
+## [2026-10-19] 静态匿名对象与动态字典 (Static Anonymous Objects & Dynamic Dict)
+
+### 修改文件 (Modified)
+- [`cpc/src/lexer.rs`](file:///data/dev/cp/cpc/src/lexer.rs):
+  - 新增 `Token::DotDotDot` (`...`) 与 `Token::HashLBrace` (`#{`)。
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs):
+  - `ObjectField` 结构体重构：增加 `is_spread: bool` 与 `key: Option<Ident>`，同时支持 `...spread` 与常规 `key: val` / 简写 `{ key }`；
+  - `Expr` 枚举新增 `Dict(Vec<ObjectField>)` 动态字典表达式与 `Index { obj: Box<Expr>, index: Box<Expr> }` 索引访问表达式；
+  - `Type` 枚举新增 `Dict(Box<Type>, Box<Type>)` 与 `Set(Box<Type>)`。
+- [`cpc/src/ast_visitor.rs`](file:///data/dev/cp/cpc/src/ast_visitor.rs):
+  - 增加对 `Expr::Dict` 与 `Expr::Index` 节点的作用域与变量引用扫描访问支持。
+- [`cpc/src/dcp.rs`](file:///data/dev/cp/cpc/src/dcp.rs):
+  - 增加 `Type::Dict` 与 `Type::Set` 的类型声明格式化输出支持。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - 支持解析 `Dict<K, V>` 与 `Set<T>` 类型注解；
+  - 重构 `parse_object_fields`，支持 `...spread` 展开、`key: val` 及 `{ key }` 简写；
+  - 将 `{ ... }` 识别为静态匿名对象 `Expr::Object`，将 `#{ ... }` 识别为动态字典 `Expr::Dict`；
+  - 将中括号下标访问 `obj[idx]` 统一解析为 `Expr::Index`。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - `infer_type` 支持 `Expr::Object` 字段展开与覆盖合并、`Expr::Dict`（推导为动态类型 `Type::Dict(String, Any)`）以及 `Expr::Index`；
+  - 完善 `Pattern::Object` 解构赋值类型推导。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 注册 `Dict` 全局标识符；重构 Zig 运行时 `Map` 与 `Set` 底层；
+  - 废除未命中时的 undefined UB，`get()` 安全返回 `?Message`，并提供 `keys()`, `values()`, `entries()`, `put_all()` 完整 ES6 集合方法；
+  - 定义 `const Dict = Map;`，为 `Map` / `Set` / `Dict` 注入 `pub fn release(self: *Self) void` 实现作用域退出自动析构；
+  - 注入 `CpIndexReturnType`、`cp_index_get` 与 `cp_index_assign`，实现透明的容器索引读取与赋值；
+  - 注入 `CpNullCoalesceReturn` 与 `cp_null_coalesce`，优雅处理 `dict["key"] ?? fallback` 的跨类型空值合并；
+  - 升级 `cp_eq` 自动解包 `?Message` 并支持多基本类型比较；
+  - 增强 `infer_cp_type` 与 `infer_zig_type` 支持布尔字面量标识符 `true` / `false`、静态匿名对象展开与属性覆盖，并在 Zig 端生成零开销原生匿名结构体 `.{ .a = ... }`；
+  - 支持 CPS 状态机与常规函数中的对象解构绑定，自动从右侧表达式推导字段类型；
+  - 优化 `@print` 单参数安全打印，防止格式化注入错误。
+
+### 新增文件 (Added)
+- [`cap/test/test_static_object.cp`](file:///data/dev/cp/cap/test/test_static_object.cp): 静态匿名对象字面量、`.` 属性访问、解构赋值与 `...` 展开覆盖测试。
+- [`cap/test/test_map_set_dict.cp`](file:///data/dev/cp/cap/test/test_map_set_dict.cp): `Map` 与 `Set` 完整 ES6 接口、`#{ ... }` 动态字典、下标索引读写、字典展开及 `??` 空值合并测试。

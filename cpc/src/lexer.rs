@@ -153,6 +153,8 @@ pub enum Token {
     Question, // Error bubbling / fallback
     #[token("!")]
     Bang,
+    #[token("...")]
+    DotDotDot,
     #[token("..=")]
     DotDotEq,
     #[token("..")]
@@ -165,6 +167,8 @@ pub enum Token {
     LParen,
     #[token(")")]
     RParen,
+    #[token("#{")]
+    HashLBrace,
     #[token("{")]
     LBrace,
     #[token("}")]

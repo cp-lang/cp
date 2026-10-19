@@ -456,3 +456,59 @@ let cfg = readConfigFile(filename) ? "DEFAULT_CONFIG";
 let cfg = readConfigFile(filename) catch return "DEFAULT_CONFIG";
 ```
 这样划分使得表达式降维（`? default`）与控制流跳转（`catch return`）权责分明、互不干扰。
+## 2026-10-19: 静态匿名对象 (`{ ... }`) 与动态字典 (`Dict<K, V>` / `#{ ... }`) 架构落地与全套机制实现
+
+### 1. 架构定位与核心权衡
+在现代编程语言设计中，“对象”往往承担着两种截然不同的角色：
+1. **静态数据契约**：字段在编译期确定、访问性能极致、内存紧凑、受所有权与借用检查约束（如 Rust `struct`、Zig 结构体、C# 匿名类）。
+2. **动态键值容器**：键名在运行期动态增删、灵活性高、基于哈希表实现（如 JavaScript `Record<string, T>`、Python `dict`）。
+
+TypeScript 将这两者混为一谈，导致 V8 引擎需要引入极其复杂的“隐藏类（Shape/Hidden Class）”与内联缓存（IC）；一旦代码在运行期动态增删属性，隐藏类就会发生转移甚至退化为性能极慢的“字典模式（Dictionary Mode）”。
+
+为此，CP 语言实行了严格且优雅的**双轨分立设计**：
+- **静态匿名对象 `{ id: 1, name: "Alice" }`**：零成本纯值类型。编译期推导结构体内存布局，直接映射为 Zig 原生匿名结构体 `.{ .id = 1, .name = "Alice" }`。严禁在运行期动态新增或删除字段，访问属性使用零开销 `.` 运算符，完全融入所有权、解构与 `...` 展开。
+- **动态字典 `Dict<K, V>` 与 `#{ ... }` 语法糖**：显式动态哈希表。使用 `#` 前缀字面量（与 Ruby/Clojure 心智模型对齐），一眼区分静态结构体与动态字典。访问使用索引语法 `d["key"]`，支持运行时自由赋值 `d["key"] = val`，值类型采用可容纳任意基础类型的 `Message` 标签联合体，内部由堆分配并由 `release()` 自动析构，兼具灵活性与内存安全。
+
+---
+
+### 2. 第一阶段：静态匿名对象全链路实现
+
+1. **AST 与类型系统扩展**：
+   - 将 `ObjectField` 改造为 `Option<Ident>` 键名并新增 `is_spread: bool`，统一表达常规键值对、简写属性 `{ x }` 以及展开式 `...obj`。
+   - 在 `sema.rs` 与 `codegen.rs` 中，`infer_cp_type` 对 `{ ... }` 推导为 `Type::Object(Vec<Field>)`。
+   - 当遇到多个 `...spread` 与后续覆盖字段时，编译器自动执行属性去重与更新覆盖（`fs[pos] = new_field`），彻底杜绝 Zig 编译器报错“重复结构体字段名”。
+2. **零开销原生 Zig 代码生成**：
+   - 对于 `{ ...user, active: false, role: "admin" }`，编译器在编译期自动将其展开为：
+     ```zig
+     .{ .id = user.id, .name = user.name, .active = false, .role = "admin" }
+     ```
+     完全不需要运行期反射或内存拷贝，达成 100% 零运行时损耗的常量级初始化。
+3. **模式解构类型反向传播**：
+   - 针对 `let { id, name } = user;`，在 CPS 状态机 `extract_locals_simple` 与 `extract_local_vars_to_str` 中，当变量声明没有显式类型注解时，编译器自动从右侧初始化表达式 `var.init` 推导 `Type::Object(fields)`，并将 `id`、`name` 对应字段的真实类型绑定到局部变量表中，消灭了默认退化为 `i32` 导致的类型不匹配。
+
+---
+
+### 3. 第二阶段：Map/Set 重构与 Dict 动态字典实现
+
+1. **消灭未找到时的 Undefined UB**：
+   - 旧版 `Map.get()` 在 key 不存在时返回 `.{ .any = undefined }`，在后续使用时可能引发内存段错误。
+   - 本次重构将其彻底改为返回安全可选类型 `pub fn get(self: *Map, key: anytype) ?Message`。当 key 不存在时返回 `null`，配合 CP 原生的 `?` / `??` 提供百分之百内存安全保障。
+2. **泛型索引访问与赋值算子 (`[]`)**：
+   - 注入 `CpIndexReturnType` 与 `cp_index_get(container, key)`：当容器是拥有 `.get()` 方法的结构体指针（如 `Map`、`Dict`）时，调用 `.get(key)` 并返回 `?Message`；当容器是数组或切片时，返回其元素类型。
+   - 注入 `cp_index_assign(container, key, value)`：通过 comptime `@hasDecl(..., "set")` 判断，在赋值 `d[k] = v` 时自动分发给 `.set(k, v)`，完全抹平了容器与原生数组的下标语法差异。
+3. **跨类型安全空值合并 (`cp_null_coalesce`)**：
+   - 当执行 `let timeout = config["timeout"] ?? 5000;` 时，左侧解包为 `Message`，而右侧为 `i32`。Zig 要求同一个作用域块内所有 `break` 必须具备相同的类型。
+   - 实现 `cp_null_coalesce` 运行时函数，利用 Zig 编译期反射：若左侧为 `?Message`，将右侧兜底值自动装箱为 `Message`；若左侧为普通可选类型 `?T`，则解包或返回直接值，彻底解决了多类型联合体的空值合并一致性。
+4. **通用跨类型比较 (`cp_eq`)**：
+   - 扩展 `cp_eq` 辅助函数，使其能够自动展开并穿透 `?Message` 可选层，原生支持 `?Message` 与 `i32`、`f32`、`bool`、`string` 及 `Message` 的直接比较，使得 `expect_eq(config["ssl"], true)` 代码极其简洁纯粹。
+5. **完整 ES6 集合方法与作用域析构**：
+   - 为 `Map` 补齐 `keys()`, `values()`, `entries()`, `put_all()`；为 `Set` 补齐 `values()`, `delete()`, `clear()`。
+   - 将 `Dict` 作为 `Map` 的别名 (`const Dict = Map;`)，两者及 `Set` 均自带 `release()` 方法，被编译器内建的 `generate_stmt(Stmt::Var)` 自动捕获并生成作用域 `defer var.release();`，保证堆内存零泄漏。
+
+---
+
+### 4. 验证与回归测试
+
+1. 编写测试 [`cap/test/test_static_object.cp`](file:///data/dev/cp/cap/test/test_static_object.cp)，覆盖静态匿名对象初始化、`.` 访问、模式解构及多重展开覆盖，运行 `./bin/cap test/test_static_object.cp`，全部通过。
+2. 编写测试 [`cap/test/test_map_set_dict.cp`](file:///data/dev/cp/cap/test/test_map_set_dict.cp)，覆盖 Map、Set 完整 ES6 方法、`#{}` 动态字典、下标索引读写、字典展开及 `??` 空值合并，运行 `./bin/cap test/test_map_set_dict.cp`，全部通过。
+3. 全局回归测试（[`test_map_set.cp`](file:///data/dev/cp/cap/test/test_map_set.cp)、[`example_showcase.cp`](file:///data/dev/cp/cap/test/example_showcase.cp)、[`test_lifetime_pass.cp`](file:///data/dev/cp/cap/test/test_lifetime_pass.cp)、[`test_trait_class_pass.cp`](file:///data/dev/cp/cap/test/test_trait_class_pass.cp)），全部 100% 编译通过并正常运行。

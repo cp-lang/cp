@@ -2282,3 +2282,74 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
      }
      ```
    - 运行 `./bin/cap test/example_showcase.cp` 验证通过，成功输出 `3. '? default' 赋予缺省值: GOT:DEFAULT_CONFIG`。
+### 用户指令 7 & 8
+> TypeScript es6 中存在匿名对象和动态字段, 使用非常方便, zig rust中好像没有, 我们cp中按如下方法增加匿名对象和动态对象,你评估并补充优化, 并仔细思考借鉴zig rust C# 等编程语言,有无更好的方案, 或细节优化 
+> 
+> 1. **静态对象**：`struct` / 匿名对象`{ id:1, name:"A" }`
+>    - 字段编译期固定；访问用 `.`；高性能；支持借用检查、所有权；**不能动态增删字段**
+> 2. **动态字典**：`Dict<K,V>`（底层就是哈希表）
+>    - 运行时可以新增、删除键值；用索引语法访问；属于容器类型
+> 3. 动态字典写起来像 JS 对象
+> `#{}`区分静态`{}`，一眼区分静态匿名对象 vs 动态字典，避免混淆。
+> 4. TS 的`Record<string,T>`本质就对应我们的`Dict<string,T>`，不是普通对象。
+> 5. 动态字典里面的值类型：可以设计一个`Value`枚举，容纳数字、字符串、布尔、嵌套 Dict，类似 JSON Value。
+> 6. 动态字典**也支持所有权 / 借用检查**，只是内部是堆分配。
+> 
+> ## 设计决策
+> 1. ✅ CP 支持**静态匿名对象字面量 `{ ... }`**，自动推导匿名结构体类型，字段编译固定，无方法；
+> 2. ❌ **普通 struct / 静态匿名对象禁止运行时动态新增字段**；
+> 3. ✅ 需要动态属性时，单独使用`Dict`动态字典（可选语法糖`#{}`），专门处理动态键值场景；
+> 4. 静态匿名对象完全融入现有的类型系统、解构、`...`展开、所有权、Release 自动释放。
+> 
+> Dict Map Set 作为cp内置数据结构, 纳入内存安全和迭代, 检查之前实现的Map Set,是否完整, 给出新增加匿名对象和Dict,你的分析报告与完整设计方案
+
+### 执行结果汇报
+1. **深度对比与架构评估**：
+   - 全面审视了 Zig（匿名结构体元组/结构体，无动态字典）、Rust（匿名元组、具名 struct，无字面量字典）、C#（`new { ... }` 匿名类只读不可变，`ExpandoObject` / `Dictionary` 分立）与 TypeScript（字面量对象兼具结构体与字典双重角色，导致 V8 隐藏类退化）。
+   - 确立了“**静态匿名对象 `{}` 走零开销值类型**，**动态字典 `#{}` 走堆分配容器**”的黄金分割架构，彻底规避了 V8 字典模式性能惩罚与未定义属性访问错误。
+2. **完整设计方案确立**：
+   - 静态匿名对象：字面量 `{ id: 1, name: "Alice" }` 自动推导结构体类型，支持 `.` 属性访问、解构赋值与编译期零开销 `...` 展开（覆盖重写）。
+   - `Map` / `Set` / `Dict` 升级：彻底消灭 `return .{ .any = undefined }` 的段错误隐患，重构为返回安全可选类型 `?Message`（配合 `?` / `??`）；补充 ES6 完整集合方法（`keys()`, `values()`, `entries()`）；支持 `container[k]` 与 `d[k] = v` 索引语法；注入 RAII `release()` 自动释放，离开作用域自动析构。
+
+---
+
+### 用户指令 9
+> Map Set 方法参照Typescript Es6
+> 动态对象,使用 #前缀好,还是 . 前缀好,有其他更合适的符号吗?
+
+### 执行结果汇报
+1. **符号选型对比评估**：
+   - `.{ ... }`：在 Zig / CP 中已深度绑定为“已知上下文类型的结构体字面量”，如 `Point.{ x: 1 }` 或枚举返回 `.{ .ok = ... }`，若用于动态字典会产生严重的类型与解析歧义。
+   - `%{ ... }`：Elixir / Clojure 风格，易与取模运算符混淆。
+   - `#[ ... ]`：Rust 属性宏风格。
+   - `#{ ... }`：Ruby / Scheme / Clojure 经典集合语法，`#` 强视觉标识“哈希表（Hash/Dict）”，与静态对象 `{ ... }` 形成鲜明对照且与编译期宏符号解耦，是最佳语法糖选型。
+
+---
+
+### 用户指令 10
+> 认可你的这套设计路线，接下来分阶段实现这套设计.
+> 1. 第一阶段：在编译器中实装静态匿名对象 { ... } 的类型推导、. 属性访问、解构与 ... 展开；
+> 2. 第二阶段：修复重构 Map 与 Set 的 Zig 底层（注入完整泛型、release() 析构与迭代器），并实现 Dict<K, V> 与 #{} 动态字典语法糖！
+> 3. 完整实现你的整套方案, 并分别编写测试文件, 通过测试.
+
+### 执行结果汇报
+1. **第一阶段：静态匿名对象全链路实装完成**：
+   - **词法与语法分析**：新增 `Token::DotDotDot` (`...`)，在 `parser.rs` 中支持对象字段的展开表达式 `...val`、键值对 `key: val` 及简写 `{ key }`。
+   - **类型推导与语义检查**：在 `sema.rs` 与 `codegen.rs` 的 `infer_cp_type` 中，将 `{ ... }` 推导为 `Type::Object(Vec<Field>)`，自动合并展开对象的字段；若存在同名字段或后续显式赋值，精准执行字段类型覆盖更新，杜绝重复字段错误。
+   - **代码生成与解构展开**：
+     - 在编译到 Zig 原生代码时，将 `{ ...base, role: "admin" }` 在编译期零开销展开为 `.{ .id = base.id, .name = base.name, .role = "admin" }`，实现 100% 原生结构体初始化，零堆分配、零 GC 损耗。
+     - 在 `extract_locals_simple`、`extract_local_vars_to_str` 与 `generate_stmt(Stmt::Var)` 中，完美支持 `let { id, name } = user;` 对象解构绑定，自动从右侧表达式推导字段类型，无缝对接 CPS 状态机与非状态机上下文。
+   - **编写并运行测试**：编写 [`cap/test/test_static_object.cp`](file:///data/dev/cp/cap/test/test_static_object.cp)，验证静态对象初始化、`.` 属性访问、解构赋值与多层 `...` 展开合并，执行 `./bin/cap test/test_static_object.cp`，一次性通过！
+
+2. **第二阶段：Map / Set 重构与 Dict / `#{}` 动态字典实装完成**：
+   - **词法与语法分析**：新增 `Token::HashLBrace` (`#{`)，在 `parser.rs` 中将 `#{ ... }` 独立解析为 `Expr::Dict`，解析 `[...]` 为 `Expr::Index`。
+   - **消灭 Undefined UB 与安全可选返回**：重构 Zig 后端 `Map.get(k)` 返回 `?Message`，未查找到时安全返回 `null`。
+   - **完整 ES6 集合方法与迭代器**：为 `Map` 补齐 `keys()`、`values()`、`entries()`、`put_all()`；为 `Set` 补齐 `values()`、`delete()`、`clear()`；定义 `const Dict = Map;`。
+   - **索引语法与运算符分发**：
+     - 在 Zig 后端注入 `CpIndexReturnType` 与 `cp_index_get(container, key)`，对 Map/Dict 返回 `?Message`，对数组/切片返回元素类型。
+     - 注入 `cp_index_assign(container, key, value)`，利用 comptime 反射自动对 Map/Dict 调用 `.set(k, v)`，对数组调用索引赋值。
+   - **空值合并 `??` 与通用比较**：
+     - 注入 `CpNullCoalesceReturn` 与 `cp_null_coalesce`，完美解决 `dict["key"] ?? fallback` 中 `Message` 与字面量类型的联合统一。
+     - 升级 `cp_eq` 自动解包 `?Message`，原生支持与 `i32`、`f32`、`bool`、`string` 及另一 `Message` 跨类型智能比较。
+   - **安全 RAII 自动释放**：`Map`、`Set`、`Dict` 结构体均定义了 `pub fn release(self: *Self) void`，由编译器现有的自动 `defer` 机制保障在离开作用域时精确释放堆内存，杜绝内存泄漏。
+   - **编写并运行测试**：编写 [`cap/test/test_map_set_dict.cp`](file:///data/dev/cp/cap/test/test_map_set_dict.cp)，全面覆盖 Map、Set ES6 接口、`#{}` 动态字典字面量、索引读写、字典展开及 `??` 兜底，执行 `./bin/cap test/test_map_set_dict.cp`，全部顺利通过！

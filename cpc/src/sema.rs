@@ -518,10 +518,14 @@ impl Analyzer {
                     self.analyze_expr(el)?;
                 }
             }
-            Expr::Object(fields) => {
+            Expr::Object(fields) | Expr::Dict(fields) => {
                 for f in fields {
                     self.analyze_expr(&f.val)?;
                 }
+            }
+            Expr::Index { obj, index } => {
+                self.analyze_expr(obj)?;
+                self.analyze_expr(index)?;
             }
             Expr::Await(inner)
             | Expr::Question(inner)
@@ -892,16 +896,45 @@ impl Analyzer {
                 lifetimes: vec![],
             }))),
             Expr::Object(fields) => {
-                let mut fs = Vec::new();
+                let mut fs: Vec<Field> = Vec::new();
                 for f in fields {
-                    let ty = self.infer_type(&f.val)?;
-                    fs.push(Field {
-                        span: f.key.span,
-                        ident: f.key.clone(),
-                        ty,
-                    });
+                    if f.is_spread {
+                        let sp_ty = self.infer_type(&f.val)?;
+                        if let Type::Object(sub_fs) = sp_ty {
+                            for sf in sub_fs {
+                                if let Some(pos) = fs.iter().position(|existing| existing.ident.sym == sf.ident.sym) {
+                                    fs[pos] = sf;
+                                } else {
+                                    fs.push(sf);
+                                }
+                            }
+                        }
+                    } else if let Some(k) = &f.key {
+                        let ty = self.infer_type(&f.val)?;
+                        let new_f = Field {
+                            span: k.span,
+                            ident: k.clone(),
+                            ty,
+                        };
+                        if let Some(pos) = fs.iter().position(|existing| existing.ident.sym == k.sym) {
+                            fs[pos] = new_f;
+                        } else {
+                            fs.push(new_f);
+                        }
+                    }
                 }
                 Ok(Type::Object(fs))
+            }
+            Expr::Dict(_) => {
+                Ok(Type::Dict(Box::new(Type::String), Box::new(Type::Any)))
+            }
+            Expr::Index { obj, .. } => {
+                let o_ty = self.infer_type(obj)?;
+                match o_ty {
+                    Type::Array(elem) => Ok(*elem),
+                    Type::Map(_, v) | Type::Dict(_, v) => Ok(Type::Optional(v)),
+                    _ => Ok(Type::Any),
+                }
             }
             Expr::Array(elements) => {
                 let mut tys = Vec::new();

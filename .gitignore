@@ -1,18 +1,18 @@
 # Design
-GEMINI.md
 GEMINI-BAK.md
-cp_ref.md
 
 # Build
 cpc/target/
 cpc/**/*.rs.bk
 cap/**/*.zig.bk
 cap/*.cp.zig
-cap/.con-build/ 
+cap/.con-build/
+cap/zig-out/
 #zig-out/
 .zig-cache/
 bin/
 build/
+temp/
 dist/
 obj/
 _ref/

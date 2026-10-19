@@ -624,6 +624,7 @@ impl Codegen {
 
         self.globals.insert("Math".to_string());
         self.globals.insert("Map".to_string());
+        self.globals.insert("Dict".to_string());
         self.globals.insert("Set".to_string());
         self.globals.insert("PID".to_string());
         self.globals.insert("Message".to_string());
@@ -743,6 +744,23 @@ impl Codegen {
         self.writeln("    }");
         self.writeln("};");
         self.writeln("");
+        self.writeln("const Message = union(enum) {");
+        self.writeln("    int: i32, float: f32, string: []const u8, boolean: bool, any: *anyopaque,");
+        self.writeln("    pub fn to_string(self: Message) []const u8 { return switch (self) { .string => |s| s, else => \"\", }; }");
+        self.writeln("    pub fn to_int(self: Message) i32 { return switch (self) { .int => |i| i, else => 0, }; }");
+        self.writeln("    pub fn format(self: Message, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {");
+        self.writeln("        _ = fmt; _ = options;");
+        self.writeln("        switch (self) {");
+        self.writeln("            .int => |i| try writer.print(\"{d}\", .{i}),");
+        self.writeln("            .float => |f| try writer.print(\"{d}\", .{f}),");
+        self.writeln("            .string => |s| try writer.print(\"{s}\", .{s}),");
+        self.writeln("            .boolean => |b| try writer.print(\"{}\", .{b}),");
+        self.writeln("            .any => |a| try writer.print(\"any@{*}\", .{a}),");
+        self.writeln("        }");
+        self.writeln("    }");
+        self.writeln("};");
+        self.writeln("const MessageEntry = struct { key: Message, value: Message };");
+        self.writeln("");
         self.writeln("const Map = struct {");
         self.writeln("    allocator: std.mem.Allocator,");
         self.writeln("    _map: std.HashMap(Message, Message, MessageContext, std.hash_map.default_max_load_percentage),");
@@ -762,15 +780,19 @@ impl Codegen {
         self.writeln("        _ = self;");
         self.writeln("    }");
         self.writeln("    ");
+        self.writeln("    pub fn release(self: *Map) void {");
+        self.writeln("        self._map.deinit();");
+        self.writeln("        self.allocator.destroy(self);");
+        self.writeln("    }");
+        self.writeln("    ");
         self.writeln("    pub fn set(self: *Map, key: anytype, value: anytype) *Map {");
         self.writeln("        self._map.put(cp_message_from(key), cp_message_from(value)) catch unreachable;");
         self.writeln("        self.size = @intCast(self._map.count());");
         self.writeln("        return self;");
         self.writeln("    }");
         self.writeln("    ");
-        self.writeln("    pub fn get(self: *Map, key: anytype) Message {");
-        self.writeln("        if (self._map.get(cp_message_from(key))) |v| return v;");
-        self.writeln("        return .{ .any = undefined };");
+        self.writeln("    pub fn get(self: *Map, key: anytype) ?Message {");
+        self.writeln("        return self._map.get(cp_message_from(key));");
         self.writeln("    }");
         self.writeln("    ");
         self.writeln("    pub fn has(self: *Map, key: anytype) bool {");
@@ -787,7 +809,50 @@ impl Codegen {
         self.writeln("        self._map.clearRetainingCapacity();");
         self.writeln("        self.size = 0;");
         self.writeln("    }");
+        self.writeln("    ");
+        self.writeln("    pub fn put_all(self: *Map, other: *Map) void {");
+        self.writeln("        var it = other._map.iterator();");
+        self.writeln("        while (it.next()) |entry| {");
+        self.writeln("            self._map.put(entry.key_ptr.*, entry.value_ptr.*) catch unreachable;");
+        self.writeln("        }");
+        self.writeln("        self.size = @intCast(self._map.count());");
+        self.writeln("    }");
+        self.writeln("    ");
+        self.writeln("    pub fn keys(self: *Map) []Message {");
+        self.writeln("        const list = self.allocator.alloc(Message, self._map.count()) catch unreachable;");
+        self.writeln("        var it = self._map.keyIterator();");
+        self.writeln("        var i: usize = 0;");
+        self.writeln("        while (it.next()) |k| {");
+        self.writeln("            list[i] = k.*;");
+        self.writeln("            i += 1;");
+        self.writeln("        }");
+        self.writeln("        return list;");
+        self.writeln("    }");
+        self.writeln("    ");
+        self.writeln("    pub fn values(self: *Map) []Message {");
+        self.writeln("        const list = self.allocator.alloc(Message, self._map.count()) catch unreachable;");
+        self.writeln("        var it = self._map.valueIterator();");
+        self.writeln("        var i: usize = 0;");
+        self.writeln("        while (it.next()) |v| {");
+        self.writeln("            list[i] = v.*;");
+        self.writeln("            i += 1;");
+        self.writeln("        }");
+        self.writeln("        return list;");
+        self.writeln("    }");
+        self.writeln("    ");
+        self.writeln("    pub fn entries(self: *Map) []MessageEntry {");
+        self.writeln("        const list = self.allocator.alloc(MessageEntry, self._map.count()) catch unreachable;");
+        self.writeln("        var it = self._map.iterator();");
+        self.writeln("        var i: usize = 0;");
+        self.writeln("        while (it.next()) |entry| {");
+        self.writeln("            list[i] = .{ .key = entry.key_ptr.*, .value = entry.value_ptr.* };");
+        self.writeln("            i += 1;");
+        self.writeln("        }");
+        self.writeln("        return list;");
+        self.writeln("    }");
         self.writeln("};");
+        self.writeln("");
+        self.writeln("const Dict = Map;");
         self.writeln("");
         self.writeln("const Set = struct {");
         self.writeln("    allocator: std.mem.Allocator,");
@@ -806,6 +871,11 @@ impl Codegen {
         self.writeln("    ");
         self.writeln("    pub fn init(self: *Set) void {");
         self.writeln("        _ = self;");
+        self.writeln("    }");
+        self.writeln("    ");
+        self.writeln("    pub fn release(self: *Set) void {");
+        self.writeln("        self._map.deinit();");
+        self.writeln("        self.allocator.destroy(self);");
         self.writeln("    }");
         self.writeln("    ");
         self.writeln("    pub fn add(self: *Set, value: anytype) *Set {");
@@ -828,10 +898,46 @@ impl Codegen {
         self.writeln("        self._map.clearRetainingCapacity();");
         self.writeln("        self.size = 0;");
         self.writeln("    }");
+        self.writeln("    ");
+        self.writeln("    pub fn values(self: *Set) []Message {");
+        self.writeln("        const list = self.allocator.alloc(Message, self._map.count()) catch unreachable;");
+        self.writeln("        var it = self._map.keyIterator();");
+        self.writeln("        var i: usize = 0;");
+        self.writeln("        while (it.next()) |k| {");
+        self.writeln("            list[i] = k.*;");
+        self.writeln("            i += 1;");
+        self.writeln("        }");
+        self.writeln("        return list;");
+        self.writeln("    }");
         self.writeln("};");
         self.writeln("");
         self.writeln("const PID = struct { node_id: u32, local_id: u32 };");
-        self.writeln("const Message = union(enum) { int: i32, float: f32, string: []const u8, boolean: bool, any: *anyopaque, pub fn to_string(self: Message) []const u8 { return switch (self) { .string => |s| s, else => \"\", }; } pub fn to_int(self: Message) i32 { return switch (self) { .int => |i| i, else => 0, }; } };");
+        self.writeln("fn CpIndexReturnType(comptime T: type) type {");
+        self.writeln("    if (@typeInfo(T) == .pointer) {");
+        self.writeln("        const Child = @typeInfo(T).pointer.child;");
+        self.writeln("        if (@typeInfo(Child) == .@\"struct\" and @hasDecl(Child, \"get\")) return ?Message;");
+        self.writeln("        if (@typeInfo(Child) == .array) return @typeInfo(Child).array.child;");
+        self.writeln("    }");
+        self.writeln("    if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child;");
+        self.writeln("    if (@typeInfo(T) == .array) return @typeInfo(T).array.child;");
+        self.writeln("    return ?Message;");
+        self.writeln("}");
+        self.writeln("fn cp_index_get(container: anytype, key: anytype) CpIndexReturnType(@TypeOf(container)) {");
+        self.writeln("    const T = @TypeOf(container);");
+        self.writeln("    if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@\"struct\" and @hasDecl(@typeInfo(T).pointer.child, \"get\"))) {");
+        self.writeln("        return container.get(key);");
+        self.writeln("    } else {");
+        self.writeln("        return container[@as(usize, @intCast(key))];");
+        self.writeln("    }");
+        self.writeln("}");
+        self.writeln("fn cp_index_assign(container: anytype, key: anytype, value: anytype) void {");
+        self.writeln("    const T = @TypeOf(container);");
+        self.writeln("    if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@\"struct\" and @hasDecl(@typeInfo(T).pointer.child, \"set\"))) {");
+        self.writeln("        _ = container.set(key, value);");
+        self.writeln("    } else {");
+        self.writeln("        container[@as(usize, @intCast(key))] = value;");
+        self.writeln("    }");
+        self.writeln("}");
         self.writeln("fn cp_message_from(v: anytype) Message {");
         self.writeln("    const T = @TypeOf(v);");
         self.writeln("    if (T == Message) return v;");
@@ -868,6 +974,8 @@ impl Codegen {
         self.writeln("fn cp_is_null_val(v: anytype) bool { const T = @TypeOf(v); if (comptime is_cp_result(T)) { if (v != .ok) return false; const OkT = @FieldType(T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok == null; } else { return false; } } else if (comptime @typeInfo(T) == .optional) { return v == null; } else { return false; } }");
         self.writeln("fn cp_convert_err(comptime TargetErr: type, err_val: anytype) TargetErr { const SrcType = @TypeOf(err_val); if (comptime SrcType == TargetErr) { return err_val; } else if (comptime TargetErr == Error) { if (comptime (@typeInfo(SrcType) == .@\"union\" or @typeInfo(SrcType) == .@\"enum\")) { return Error{ .code = @intCast(@intFromEnum(std.meta.activeTag(err_val))), .msg = @tagName(err_val) }; } else { return Error{ .code = -1, .msg = \"error\" }; } } else if (comptime @typeInfo(TargetErr) == .@\"union\" and @hasDecl(TargetErr, \"__from\")) { return TargetErr.__from(err_val); } else { return err_val; } }");
         self.writeln("fn cp_not(v: anytype) bool { const T = @TypeOf(v); if (comptime T == bool) { return !v; } else if (comptime @typeInfo(T) == .optional) { return v == null; } else if (comptime is_string_like(T)) { return to_string_slice(v).len == 0; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return v == 0; } else { return false; } }");
+        self.writeln("fn CpNullCoalesceReturn(comptime TOpt: type, comptime TFb: type) type { if (@typeInfo(TOpt) == .optional) { const Child = @typeInfo(TOpt).optional.child; if (Child == Message) return Message; if (is_string_like(Child)) return []const u8; return Child; } return CpValType(TFb); }");
+        self.writeln("fn cp_null_coalesce(opt_val: anytype, fallback: anytype) CpNullCoalesceReturn(@TypeOf(opt_val), @TypeOf(fallback)) { const TOpt = @TypeOf(opt_val); const RType = CpNullCoalesceReturn(TOpt, @TypeOf(fallback)); if (comptime @typeInfo(TOpt) == .optional) { if (opt_val) |v| { if (comptime RType == Message) { return v; } else if (comptime is_string_like(RType)) { return to_string_slice(v); } else { return v; } } else { if (comptime RType == Message) { return cp_message_from(fallback); } else if (comptime is_string_like(RType)) { return to_string_slice(fallback); } else { return fallback; } } } return cp_val(fallback); }");
 
         self.writeln("fn cp_math_random() f32 {");
         self.writeln("    return 0.5; // Stub");
@@ -875,13 +983,20 @@ impl Codegen {
 
         self.writeln("fn cp_eq(a: anytype, b: anytype) bool {");
         self.writeln("    const Ta = @TypeOf(a); const Tb = @TypeOf(b);");
+        self.writeln("    if (comptime @typeInfo(Ta) == .optional and @typeInfo(Ta).optional.child == Message) { if (a) |unwrapped_a| return cp_eq(unwrapped_a, b); return false; }");
+        self.writeln("    if (comptime @typeInfo(Tb) == .optional and @typeInfo(Tb).optional.child == Message) { if (b) |unwrapped_b| return cp_eq(a, unwrapped_b); return false; }");
         self.writeln("    if (comptime Ta == Message and is_string_like(Tb)) { return switch (a) { .string => |s| std.mem.eql(u8, s, to_string_slice(b)), else => false, }; }");
         self.writeln("    if (comptime Tb == Message and is_string_like(Ta)) { return switch (b) { .string => |s| std.mem.eql(u8, to_string_slice(a), s), else => false, }; }");
         self.writeln("    if (comptime Ta == Message and (Tb == i32 or Tb == comptime_int)) { return switch (a) { .int => |i| i == b, else => false, }; }");
         self.writeln("    if (comptime Tb == Message and (Ta == i32 or Ta == comptime_int)) { return switch (b) { .int => |i| a == i, else => false, }; }");
+        self.writeln("    if (comptime Ta == Message and (Tb == f32 or Tb == comptime_float)) { return switch (a) { .float => |f| f == b, else => false, }; }");
+        self.writeln("    if (comptime Tb == Message and (Ta == f32 or Ta == comptime_float)) { return switch (b) { .float => |f| a == f, else => false, }; }");
+        self.writeln("    if (comptime Ta == Message and Tb == bool) { return switch (a) { .boolean => |bl| bl == b, else => false, }; }");
+        self.writeln("    if (comptime Tb == Message and Ta == bool) { return switch (b) { .boolean => |bl| a == bl, else => false, }; }");
+        self.writeln("    if (comptime Ta == Message and Tb == Message) { return MessageContext.eql(.{}, a, b); }");
         self.writeln("    if (comptime is_string_like(Ta) and is_string_like(Tb)) { return std.mem.eql(u8, to_string_slice(a), to_string_slice(b)); }");
-        self.writeln("        if (comptime (@typeInfo(Ta) == .int or Ta == comptime_int) and (@typeInfo(Tb) == .int or Tb == comptime_int)) { return a == b; }
-    if (comptime (@typeInfo(Ta) == .float or Ta == comptime_float) and (@typeInfo(Tb) == .float or Tb == comptime_float)) { return a == b; }");
+        self.writeln("    if (comptime (@typeInfo(Ta) == .int or Ta == comptime_int) and (@typeInfo(Tb) == .int or Tb == comptime_int)) { return a == b; }");
+        self.writeln("    if (comptime (@typeInfo(Ta) == .float or Ta == comptime_float) and (@typeInfo(Tb) == .float or Tb == comptime_float)) { return a == b; }");
         self.writeln("    if (comptime Ta != Tb) return false;");
         self.writeln("    return a == b;");
         self.writeln("}");
@@ -1837,6 +1952,9 @@ impl Codegen {
             Expr::Lit(Lit::Str(_)) => Some(Type::String),
             Expr::Lit(Lit::Bool(_)) => Some(Type::Bool),
             Expr::Ident(id) => {
+                if id.sym == "true" || id.sym == "false" {
+                    return Some(Type::Bool);
+                }
                 if id.sym == "this" || id.sym == "_" {
                     return self.current_class_name.as_ref().map(|c| {
                         Type::Ref(Ident {
@@ -1900,6 +2018,12 @@ impl Codegen {
                         if self.enum_defs.contains_key(&oid.sym) {
                             return Some(Type::Ref(oid.clone()));
                         }
+                        if mem.prop.sym == "get" {
+                            return Some(Type::Optional(Box::new(Type::Ref(Ident {
+                                span: Span { start: 0, end: 0 },
+                                sym: "Message".to_string(),
+                            }))));
+                        }
                         let tname_opt = self.resolve_var_type_name(&oid.sym).or_else(|| {
                             if self.class_defs.contains_key(&oid.sym) {
                                 Some(oid.sym.clone())
@@ -1924,7 +2048,19 @@ impl Codegen {
                 None
             }
             Expr::Member(mem) => {
+                if let Some(obj_ty) = self.infer_cp_type(&mem.obj) {
+                    if let Type::Object(fields) = obj_ty {
+                        if let Some(f) = fields.iter().find(|f| f.ident.sym == mem.prop.sym) {
+                            return Some(f.ty.clone());
+                        }
+                    }
+                }
                 if let Expr::Ident(oid) = &*mem.obj {
+                    if let Some(Type::Object(fields)) = self.var_cp_types.get(&oid.sym) {
+                        if let Some(f) = fields.iter().find(|f| f.ident.sym == mem.prop.sym) {
+                            return Some(f.ty.clone());
+                        }
+                    }
                     if self.enum_defs.contains_key(&oid.sym)
                         || self.error_sets.contains_key(&oid.sym)
                     {
@@ -2101,6 +2237,53 @@ impl Codegen {
                     }
                 }
                 None
+            }
+            Expr::Object(fields) => {
+                let mut fs: Vec<Field> = Vec::new();
+                for f in fields {
+                    if f.is_spread {
+                        if let Some(Type::Object(sub_fs)) = self.infer_cp_type(&f.val) {
+                            for sf in sub_fs {
+                                if let Some(pos) = fs.iter().position(|existing| existing.ident.sym == sf.ident.sym) {
+                                    fs[pos] = sf;
+                                } else {
+                                    fs.push(sf);
+                                }
+                            }
+                        }
+                    } else if let Some(k) = &f.key {
+                        let ty = self.infer_cp_type(&f.val).unwrap_or(Type::Any);
+                        let new_f = Field {
+                            span: k.span,
+                            ident: k.clone(),
+                            ty,
+                        };
+                        if let Some(pos) = fs.iter().position(|existing| existing.ident.sym == k.sym) {
+                            fs[pos] = new_f;
+                        } else {
+                            fs.push(new_f);
+                        }
+                    }
+                }
+                Some(Type::Object(fs))
+            }
+            Expr::Dict(_) => Some(Type::Ref(Ident {
+                span: Span { start: 0, end: 0 },
+                sym: "Dict".to_string(),
+            })),
+            Expr::Index { obj, .. } => {
+                let obj_ty = self.infer_cp_type(obj);
+                match obj_ty {
+                    Some(Type::Dict(_, v)) | Some(Type::Map(_, v)) => Some(Type::Optional(v)),
+                    Some(Type::Array(inner)) => Some(*inner),
+                    Some(Type::Ref(id)) if id.sym == "Dict" || id.sym == "Map" => {
+                        Some(Type::Optional(Box::new(Type::Ref(Ident {
+                            span: Span { start: 0, end: 0 },
+                            sym: "Message".to_string(),
+                        }))))
+                    }
+                    _ => None,
+                }
             }
             _ => None,
         }
@@ -3547,6 +3730,53 @@ impl Codegen {
                                 }
                             }
                         }
+                        Pattern::Object(props) => {
+                            let tmp_id = self.tmp_counter;
+                            self.tmp_counter += 1;
+                            self.write_to_case(&format!(
+                                "const _tmp_obj{} = {};",
+                                tmp_id,
+                                if is_try {
+                                    format!("try {}", final_expr)
+                                } else {
+                                    final_expr.clone()
+                                }
+                            ));
+                            let init_ty = self.infer_cp_type(init);
+                            for prop in props {
+                                let bound_name = if let Some(sub_pat) = &prop.val {
+                                    if let Pattern::Ident(id) = sub_pat {
+                                        id.sym.clone()
+                                    } else {
+                                        prop.key.sym.clone()
+                                    }
+                                } else {
+                                    prop.key.sym.clone()
+                                };
+                                self.var_scope_depth.insert(bound_name.clone(), self.current_scope_depth);
+                                if let Some(Type::Object(fields)) = &init_ty {
+                                    if let Some(f) = fields.iter().find(|f| f.ident.sym == prop.key.sym) {
+                                        self.var_cp_types.insert(bound_name.clone(), f.ty.clone());
+                                    }
+                                }
+                                let lhs = if self.is_state_machine {
+                                    format!("ctx.{}", bound_name)
+                                } else {
+                                    let keyword = match var.kind {
+                                        crate::ast::VarDeclKind::Const => "const",
+                                        _ => "var",
+                                    };
+                                    format!("{} {}", keyword, bound_name)
+                                };
+                                self.write_to_case(&format!(
+                                    "{} = _tmp_obj{}.{};",
+                                    lhs, tmp_id, prop.key.sym
+                                ));
+                                if !self.is_state_machine {
+                                    self.write_to_case(&format!("_ = &{};", bound_name));
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -3651,8 +3881,14 @@ impl Codegen {
                     }
                     let r = self.generate_expr(&bin.right);
                     self.expected_box_trait = old_box;
-                    let l = self.generate_expr(&bin.left);
-                    self.write_to_case(&format!("{} = {};", l, r));
+                    if let Expr::Index { obj, index } = &*bin.left {
+                        let obj_code = self.generate_expr(obj);
+                        let idx_code = self.generate_expr(index);
+                        self.write_to_case(&format!("_ = cp_index_assign({}, {}, {});", obj_code, idx_code, r));
+                    } else {
+                        let l = self.generate_expr(&bin.left);
+                        self.write_to_case(&format!("{} = {};", l, r));
+                    }
 
                     if let Expr::Ident(id) = &*bin.right {
                         let is_id_borrow = self.var_borrow_sources.contains_key(&id.sym)
@@ -5124,11 +5360,7 @@ impl Codegen {
                 let l_code = self.generate_expr(left);
                 self.in_try_region = old_in_try;
                 let r_code = self.generate_expr(right);
-                let id = self.lambda_counter;
-                self.lambda_counter += 1;
-                format!(
-                    "(blk_nc_{id}: {{ const __l_{id} = {l_code}; if (__l_{id}) |__v_{id}| break :blk_nc_{id} __v_{id}; break :blk_nc_{id} cp_val({r_code}); }})"
-                )
+                format!("cp_null_coalesce({}, {})", l_code, r_code)
             }
             Expr::Catch {
                 expr: inner,
@@ -5552,7 +5784,12 @@ impl Codegen {
                     "length" => "len",
                     _ => &member.prop.sym,
                 };
-                format!("{}.{}", obj, prop)
+                let obj_ty = self.infer_zig_type(None, Some(&member.obj));
+                if obj_ty.starts_with('?') {
+                    format!("cp_opt_unwrap({}).{}", obj, prop)
+                } else {
+                    format!("{}.{}", obj, prop)
+                }
             }
             Expr::Builtin(call) => match call.name.as_str() {
                 "@not" => {
@@ -5561,15 +5798,19 @@ impl Codegen {
                 }
                 "@print" => {
                     let fmt = self.generate_expr(&call.args[0]);
-                    let mut args = String::from(".{ ");
-                    for idx in 1..call.args.len() {
-                        args.push_str(&self.generate_expr(&call.args[idx]));
-                        if idx < call.args.len() - 1 {
-                            args.push_str(", ");
+                    if call.args.len() == 1 {
+                        format!("std.debug.print(\"{{s}}\\n\", .{{ {} }})", fmt)
+                    } else {
+                        let mut args = String::from(".{ ");
+                        for idx in 1..call.args.len() {
+                            args.push_str(&self.generate_expr(&call.args[idx]));
+                            if idx < call.args.len() - 1 {
+                                args.push_str(", ");
+                            }
                         }
+                        args.push_str(" }");
+                        format!("std.debug.print({} ++ \"\\n\", {})", fmt, args)
                     }
-                    args.push_str(" }");
-                    format!("std.debug.print({} ++ \"\\n\", {})", fmt, args)
                 }
                 "@spawn" => {
                     let callee = match &call.args[0] {
@@ -5797,7 +6038,6 @@ impl Codegen {
                 }
                 "@net_connect" => "(blk: { break :blk 1; })".to_string(),
                 "@net_send" => "(blk: { break :blk {}; })".to_string(),
-                "@net_close" => "(blk: { break :blk {}; })".to_string(),
                 "@worker_spawn" => {
                     let entry = self.generate_expr(&call.args[0]);
                     format!("(blk: {{ const wid = global_next_worker_id.fetchAdd(1, .monotonic); const _Runner = struct {{ pub fn run(w_id: u32) void {{ current_node_id = w_id; next_local_id = 2; const worker_ctx = std.heap.page_allocator.create({0}_Context) catch unreachable; worker_ctx.* = undefined; worker_ctx.pc = 0; worker_ctx._self = PID{{ .node_id = w_id, .local_id = 1 }}; worker_ctx.arena = null; worker_ctx._parent = null; worker_ctx._parent_fn = null; worker_ctx.received_msg = null; worker_ctx.received_sender = null; schedule(@ptrCast(&{0}), @ptrCast(worker_ctx)); while (true) {{ drain_cross_thread_mailbox(); while (queue_len > 0) {{ const task = task_queue[0]; for (task_queue[1..queue_len], 0..) |t, j| {{ task_queue[j] = t; }} queue_len -= 1; task.run(task.ctx) catch unreachable; }} drain_cross_thread_mailbox(); if (active_fds == 0 and queue_len == 0 and waiting_count == 0) break; if (queue_len == 0 and waiting_count > 0 and active_fds == 0) {{ const ts = std.os.linux.timespec{{ .sec = 0, .nsec = 500_000 }}; _ = std.os.linux.nanosleep(&ts, null); }} if (active_fds > 0) {{ const ready_count = std.posix.poll(poll_fds[0..active_fds], 10) catch 0; if (ready_count > 0) {{ var i: usize = 0; while (i < active_fds) {{ if (poll_fds[i].revents != 0) {{ schedule(fd_to_run[i], fd_to_ctx[i]); poll_fds[i] = poll_fds[active_fds - 1]; fd_to_ctx[i] = fd_to_ctx[active_fds - 1]; fd_to_run[i] = fd_to_run[active_fds - 1]; active_fds -= 1; }} else {{ i += 1; }} }} }} }} }} }} }}; const _t = @import(\"std\").Thread.spawn(.{{}}, _Runner.run, .{{wid}}) catch unreachable; _t.detach(); break :blk PID{{ .node_id = wid, .local_id = 1 }}; }})", entry)
@@ -5966,16 +6206,71 @@ impl Codegen {
                 lambda_name
             }
             Expr::Object(fields) => {
+                let mut prop_map: Vec<(String, String)> = Vec::new();
+                for field in fields {
+                    if field.is_spread {
+                        let base_code = self.generate_expr(&field.val);
+                        let base_ty = self.infer_cp_type(&field.val);
+                        if let Some(Type::Object(sub_fs)) = base_ty {
+                            for sf in sub_fs {
+                                let key = sf.ident.sym.clone();
+                                let val_code = format!("{}.{}", base_code, key);
+                                if let Some(pos) = prop_map.iter().position(|(k, _)| k == &key) {
+                                    prop_map[pos] = (key, val_code);
+                                } else {
+                                    prop_map.push((key, val_code));
+                                }
+                            }
+                        } else if let Some(Type::Ref(cid)) = base_ty {
+                            if let Some(cls) = self.class_defs.get(&cid.sym).cloned() {
+                                for fl in cls.fields {
+                                    let key = fl.ident.sym.clone();
+                                    let val_code = format!("{}.{}", base_code, key);
+                                    if let Some(pos) = prop_map.iter().position(|(k, _)| k == &key) {
+                                        prop_map[pos] = (key, val_code);
+                                    } else {
+                                        prop_map.push((key, val_code));
+                                    }
+                                }
+                            }
+                        }
+                    } else if let Some(key) = &field.key {
+                        let val_code = self.generate_expr(&field.val);
+                        if let Some(pos) = prop_map.iter().position(|(k, _)| k == &key.sym) {
+                            prop_map[pos] = (key.sym.clone(), val_code);
+                        } else {
+                            prop_map.push((key.sym.clone(), val_code));
+                        }
+                    }
+                }
                 let mut s = String::from(".{ ");
-                for (idx, field) in fields.iter().enumerate() {
-                    s.push_str(&format!(".{} = {}", field.key.sym, self.generate_expr(&field.val)));
-                    if idx < fields.len() - 1 {
+                for (idx, (k, v)) in prop_map.iter().enumerate() {
+                    s.push_str(&format!(".{} = {}", k, v));
+                    if idx + 1 < prop_map.len() {
                         s.push_str(", ");
                     }
                 }
                 s.push_str(" }");
                 s
-            },
+            }
+            Expr::Dict(fields) => {
+                let mut sets = String::new();
+                for field in fields {
+                    if field.is_spread {
+                        let base_code = self.generate_expr(&field.val);
+                        sets.push_str(&format!("_dict.put_all({}); ", base_code));
+                    } else if let Some(key) = &field.key {
+                        let val_code = self.generate_expr(&field.val);
+                        sets.push_str(&format!("_ = _dict.set(\"{}\", {}); ", key.sym, val_code));
+                    }
+                }
+                format!("(blk: {{ const _dict = Dict._create(std.heap.page_allocator) catch unreachable; {}break :blk _dict; }})", sets)
+            }
+            Expr::Index { obj, index } => {
+                let obj_code = self.generate_expr(obj);
+                let idx_code = self.generate_expr(index);
+                format!("cp_index_get({}, {})", obj_code, idx_code)
+            }
             Expr::Array(items) => {
                 let mut s = String::from(".{ ");
                 for (idx, item) in items.iter().enumerate() {
@@ -5998,13 +6293,14 @@ impl Codegen {
         match call_arg {
             Expr::Object(fields) => {
                 for f in fields {
-                    if f.key.sym == "port" {
-                        port_expr = self.generate_expr(&f.val);
-                    } else if f.key.sym == "fetch" {
-                        match &f.val {
-                            Expr::Ident(id) => {
-                                fetch_fn_name = id.sym.clone();
-                            }
+                    if let Some(key) = &f.key {
+                        if key.sym == "port" {
+                            port_expr = self.generate_expr(&f.val);
+                        } else if key.sym == "fetch" {
+                            match &f.val {
+                                Expr::Ident(id) => {
+                                    fetch_fn_name = id.sym.clone();
+                                }
                             Expr::Arrow(arrow) => {
                                 let handler_name = format!("http_handler_{}", self.lambda_counter);
                                 self.lambda_counter += 1;
@@ -6056,6 +6352,7 @@ impl Codegen {
                         }
                     }
                 }
+            }
             }
             _ => match call_arg {
                 Expr::Ident(id) => fetch_fn_name = id.sym.clone(),
@@ -6253,13 +6550,19 @@ impl Codegen {
                             return "*Socket".to_string();
                         }
                         if mem.prop.sym == "get" {
-                            return "Message".to_string();
+                            return "?Message".to_string();
                         }
                         if mem.prop.sym == "has" || mem.prop.sym == "delete" {
                             return "bool".to_string();
                         }
                         if mem.prop.sym == "size" {
                             return "i32".to_string();
+                        }
+                        if mem.prop.sym == "keys" || mem.prop.sym == "values" {
+                            return "[]Message".to_string();
+                        }
+                        if mem.prop.sym == "entries" {
+                            return "[]MessageEntry".to_string();
                         }
                         if mem.prop.sym == "read" {
                             return "[]const u8".to_string();
@@ -6320,6 +6623,9 @@ impl Codegen {
                     return self.infer_zig_type(None, Some(inner));
                 }
                 Expr::Ident(id) => {
+                    if id.sym == "true" || id.sym == "false" {
+                        return "bool".to_string();
+                    }
                     if id.sym == "@self" || id.sym == "@sender" {
                         return "PID".to_string();
                     }
@@ -6411,19 +6717,26 @@ impl Codegen {
                             }
                         }
                         Pattern::Object(fields) => {
-                            if let Some(Type::Object(tys)) = v.ty.as_ref() {
+                            let init_cp_ty = v.init.as_ref().and_then(|e| self.infer_cp_type(e));
+                            let obj_fields = match v.ty.as_ref().or(init_cp_ty.as_ref()) {
+                                Some(Type::Object(fs)) => Some(fs),
+                                _ => None,
+                            };
+                            if let Some(tys) = obj_fields {
                                 for p in fields {
                                     let ident = if let Some(Pattern::Ident(i)) = &p.val {
                                         i
                                     } else {
                                         &p.key
                                     };
-                                    let t_str = tys
-                                        .iter()
-                                        .find(|t| t.ident.sym == p.key.sym)
+                                    let f_opt = tys.iter().find(|t| t.ident.sym == p.key.sym);
+                                    let t_str = f_opt
                                         .map(|t| self.map_type(&t.ty))
                                         .unwrap_or_else(|| "i32".to_string());
                                     self.locals.insert(ident.sym.clone(), t_str);
+                                    if let Some(f) = f_opt {
+                                        self.var_cp_types.insert(ident.sym.clone(), f.ty.clone());
+                                    }
                                 }
                             } else {
                                 for p in fields {
@@ -6539,7 +6852,12 @@ impl Codegen {
                             writeln!(output, "    {}: {},", ident.sym, ty_str).unwrap();
                         }
                         Pattern::Tuple(el) => {
-                            if let Some(Type::Tuple(tys)) = var.ty.as_ref() {
+                            let init_cp_ty = var.init.as_ref().and_then(|e| self.infer_cp_type(e));
+                            let tup_tys = match var.ty.as_ref().or(init_cp_ty.as_ref()) {
+                                Some(Type::Tuple(tys)) => Some(tys),
+                                _ => None,
+                            };
+                            if let Some(tys) = tup_tys {
                                 for (idx, p) in el.iter().enumerate() {
                                     if let Pattern::Ident(ident) = p {
                                         let t_str = if idx < tys.len() {
@@ -6551,10 +6869,22 @@ impl Codegen {
                                         writeln!(output, "    {}: {},", ident.sym, t_str).unwrap();
                                     }
                                 }
+                            } else {
+                                for p in el {
+                                    if let Pattern::Ident(ident) = p {
+                                        self.locals.insert(ident.sym.clone(), "i32".to_string());
+                                        writeln!(output, "    {}: i32,", ident.sym).unwrap();
+                                    }
+                                }
                             }
                         }
                         Pattern::Object(fields) => {
-                            if let Some(Type::Object(tys)) = var.ty.as_ref() {
+                            let init_cp_ty = var.init.as_ref().and_then(|e| self.infer_cp_type(e));
+                            let obj_fields = match var.ty.as_ref().or(init_cp_ty.as_ref()) {
+                                Some(Type::Object(fs)) => Some(fs),
+                                _ => None,
+                            };
+                            if let Some(tys) = obj_fields {
                                 for p in fields {
                                     let ident = if let Some(Pattern::Ident(i)) = &p.val {
                                         i
@@ -6568,6 +6898,16 @@ impl Codegen {
                                         .unwrap_or_else(|| "i32".to_string());
                                     self.locals.insert(ident.sym.clone(), t_str.clone());
                                     writeln!(output, "    {}: {},", ident.sym, t_str).unwrap();
+                                }
+                            } else {
+                                for p in fields {
+                                    let ident = if let Some(Pattern::Ident(i)) = &p.val {
+                                        i
+                                    } else {
+                                        &p.key
+                                    };
+                                    self.locals.insert(ident.sym.clone(), "i32".to_string());
+                                    writeln!(output, "    {}: i32,", ident.sym).unwrap();
                                 }
                             }
                         }
@@ -6617,6 +6957,9 @@ impl Codegen {
             Type::Void => "void".to_string(),
             Type::Any => "*anyopaque".to_string(),
             Type::Array(inner) => format!("[]const {}", self.map_type(inner)),
+            Type::Map(_, _) => "*Map".to_string(),
+            Type::Dict(_, _) => "*Dict".to_string(),
+            Type::Set(_) => "*Set".to_string(),
             Type::Ref(ident) => {
                 if ident.sym == "PID"
                     || ident.sym == "Message"

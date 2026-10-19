@@ -245,6 +245,11 @@ pub enum Expr {
     },
     Array(Vec<Expr>),
     Object(Vec<ObjectField>),
+    Dict(Vec<ObjectField>),
+    Index {
+        obj: Box<Expr>,
+        index: Box<Expr>,
+    },
     Arrow(Box<ArrowExpr>),
     EnumInit(EnumInitExpr),
     Template(TemplateLit),
@@ -263,8 +268,9 @@ pub struct BuiltinCall {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectField {
-    pub key: Ident,
+    pub key: Option<Ident>,
     pub val: Expr,
+    pub is_spread: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -415,6 +421,8 @@ pub enum Type {
     Any,
     Array(Box<Type>),
     Map(Box<Type>, Box<Type>),
+    Dict(Box<Type>, Box<Type>),
+    Set(Box<Type>),
     Tuple(Vec<Type>),   // [T1, T2]
     Object(Vec<Field>), // {k: T}
     Ref(Ident),

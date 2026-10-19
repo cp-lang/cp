@@ -58,3 +58,61 @@ export fn mkdir(path: string): void {
 export fn exists(path: string): bool {
     return @fs_exists(path);
 }
+
+export fn remove(path: string): void {
+    @fs_remove(path);
+}
+
+export fn rmdir(path: string): void {
+    @fs_rmdir(path);
+}
+
+export fn rename(oldPath: string, newPath: string): void {
+    @fs_rename(oldPath, newPath);
+}
+
+export fn copyFile(src: string, dest: string): void {
+    @fs_copy_file(src, dest);
+}
+
+// 异步版
+export async fn removeAsync(path: string): void {
+    if (@is_beam) {
+        await @yield_to_beam(@intFromEnum(SystemAction.FS_REMOVE), path);
+    } else {
+        @fs_remove(path);
+    }
+}
+
+export async fn rmdirAsync(path: string): void {
+    if (@is_beam) {
+        await @yield_to_beam(@intFromEnum(SystemAction.FS_RMDIR), path);
+    } else {
+        @fs_rmdir(path);
+    }
+}
+
+export async fn renameAsync(oldPath: string, newPath: string): void {
+    if (@is_beam) {
+        // Mock payload passing
+        await @yield_to_beam(@intFromEnum(SystemAction.FS_RENAME), oldPath);
+    } else {
+        @fs_rename(oldPath, newPath);
+    }
+}
+
+export async fn copyFileAsync(src: string, dest: string): void {
+    if (@is_beam) {
+        await @yield_to_beam(@intFromEnum(SystemAction.FS_COPY), src);
+    } else {
+        @fs_copy_file(src, dest);
+    }
+}
+
+export fn statSize(path: string): i32 {
+    return @fs_stat_size(path);
+}
+
+export fn isDirectory(path: string): bool {
+    return @fs_is_dir(path);
+}

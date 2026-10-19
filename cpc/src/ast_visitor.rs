@@ -78,10 +78,14 @@ pub fn find_referenced_vars_in_expr(expr: &Expr, vars: &mut HashSet<String>) {
                 find_referenced_vars_in_expr(a, vars);
             }
         }
-        Expr::Object(obj) => {
+        Expr::Object(obj) | Expr::Dict(obj) => {
             for f in obj {
                 find_referenced_vars_in_expr(&f.val, vars);
             }
+        }
+        Expr::Index { obj, index } => {
+            find_referenced_vars_in_expr(obj, vars);
+            find_referenced_vars_in_expr(index, vars);
         }
         Expr::EnumInit(e) => {
             if let Some(f) = &e.fields {

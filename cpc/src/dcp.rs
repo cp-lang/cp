@@ -200,6 +200,8 @@ impl DcpEmitter {
             Type::Unknown => "unknown".to_string(),
             Type::Array(inner) => format!("[]{}", self.format_type(inner)),
             Type::Map(k, v) => format!("Map<{}, {}>", self.format_type(k), self.format_type(v)),
+            Type::Dict(k, v) => format!("Dict<{}, {}>", self.format_type(k), self.format_type(v)),
+            Type::Set(t) => format!("Set<{}>", self.format_type(t)),
             Type::Tuple(elements) => {
                 let mut s = String::from("[");
                 for (i, el) in elements.iter().enumerate() {

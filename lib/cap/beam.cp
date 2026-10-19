@@ -1,7 +1,7 @@
 export enum SystemAction {
     WAKE = 1, SLEEP = 2, STOP = 3, YIELD = 4,
     NET_CONNECT = 10, NET_READ = 11, NET_WRITE = 12, NET_LISTEN = 13,
-    FS_READ = 20, FS_WRITE = 21, FS_MKDIR = 22,
+    FS_READ = 20, FS_WRITE = 21, FS_MKDIR = 22, FS_REMOVE = 23, FS_RMDIR = 24, FS_RENAME = 25, FS_COPY = 26,
     HTTP_FETCH = 30, HTTP_SERVE = 31,
     ERROR = 99
 }
