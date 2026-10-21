@@ -2353,3 +2353,71 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
      - 升级 `cp_eq` 自动解包 `?Message`，原生支持与 `i32`、`f32`、`bool`、`string` 及另一 `Message` 跨类型智能比较。
    - **安全 RAII 自动释放**：`Map`、`Set`、`Dict` 结构体均定义了 `pub fn release(self: *Self) void`，由编译器现有的自动 `defer` 机制保障在离开作用域时精确释放堆内存，杜绝内存泄漏。
    - **编写并运行测试**：编写 [`cap/test/test_map_set_dict.cp`](file:///data/dev/cp/cap/test/test_map_set_dict.cp)，全面覆盖 Map、Set ES6 接口、`#{}` 动态字典字面量、索引读写、字典展开及 `??` 兜底，执行 `./bin/cap test/test_map_set_dict.cp`，全部顺利通过！
+
+
+---
+
+### 用户指令 11
+> 我们继续完善cp语言高级设计, 记住, 我发给你的内容, 仅供你设计时参考 借鉴,不是最终设计版本, 你作为编程语言设计大师, 需通过我发的参考,明白我的目的, 结合你的经验和专业能力, 对比 参考 rust es6 Typescript zig等编程语言, 结合是zig 独特强大的comptime 编译期运行能力, 在高级功能设计中, 功能上超越rust, 安全性与rust类似, 同时保持Typescript 简洁语法, 设计的cp语言要优美, 并确保cp 完整 完美实现如下相关功能.
+> 你先通过我发的下文, 理解我的目的, 完成相关几个部分的设计, 制定分阶段实现方案, 分步骤来实现, 避免一次性实现功能太多, 导致不完整. 
+> 跟之前一样,需要编写功能测试和代码示例.
+
+### 执行结果汇报
+1. **多语言维度对比与架构破局**：
+   - 深度对比了 Rust（proc-macro 笨重、编译极慢、语法繁复 `#[...]`、缺少运行时反射）、TypeScript（装饰器全在运行时执行、严重依赖 `reflect-metadata` 导致体积膨胀与循环依赖）、Zig（comptime 强悍但缺失高阶声明式语法糖）、C#（`[Attribute]` 依赖重量级反射与复杂 Source Generator）。
+   - 确立了“**以 Zig comptime 为基石、TS 装饰器与注解为表象、双态反射（编译期透明 + 运行时按需裁剪）为内省模型**”的顶层元编程架构。
+2. **“@” 符号文法解耦**：
+   - `@builtin`（小写/下划线）映射为编译器特权原生指令；
+   - `@MetaAnnotation(...)` 映射为纯静态键值数据标记（不执行代码、不修改类型）；
+   - `@decorator(...)` 映射为编译期 AST 转换函数（包装方法、AOP 拦截）；
+   - 废除 Rust 冗长的 `#[...]` 语法，保持优雅统一的 `@Identifier(...)`。
+3. **确立四阶段演进蓝图**：
+   - 阶段一：MetaAnnotation 核心系统（基础底座）；
+   - 阶段二：双态反射模型与 CT 沙箱基础（内省底座）；
+   - 阶段三：编译期装饰器与 AOP（转换系统）；
+   - 阶段四：类型感知宏与循环安全派生（生成系统）。
+
+---
+
+### 用户指令 12
+> 如下信息, 你分析一下, 相关设计 是否合理 完整, 哪些可以采纳,哪些不需要,哪些需要完善补充优化.
+> 所描述的问题,是否存在, 如何避免.
+> （CT Runtime + const fn 规范 + 编译循环依赖规避方案）
+
+### 执行结果汇报
+1. **问题确证**：
+   - 确证了场景 A（宏产物触发宏引发无限递归展开）与场景 B（互引类型的类型感知宏引发编译死锁）在真实工业级编译器中 100% 存在，正是 Rust 过程宏被迫退化为 Pre-TypeCheck 纯语法宏的根源。
+2. **采纳、剔除与升维裁决**：
+   - **采纳**：宏产物严禁附加宏注解（Macro Hygiene 铁律）；两阶段宏时序（Pre-TypeCheck vs Post-TypeCheck）；Phase 2 宏严禁创建新类型（仅允许新增 `impl`）；宏展开调用栈追踪与 128 层递归熔断。
+   - **剔除**：废除独立的 `const fn` 关键字，避免函数染色，统一只保留 `fn`，由编译器根据入参常量性自动推入 CT 模式；废除独立的 `ct struct` 关键字，由编译器的死代码消除（DCE）自然抹除仅在编译期使用的结构体内存布局。
+   - **优化**：将原本过于严苛的“禁止分配堆内存”放宽为“编译期 Arena 内存池”，展开后一次性归还；将互引死锁升级为“Two-Tier TypeInfo（分级内省模型）”，区分 Tier 1 声明符号级与 Tier 2 物理内存排布级，彻底解除业务实体相互引用的死锁。
+
+---
+
+### 用户指令 13 & 14
+> 实现阶段一：MetaAnnotation 核心系统（基础底座）
+> 实现前, 先看下这个问题, annotation 关键字比较长,写起来费劲,有更简洁的关键字吗? 包括使用, 也要尽量简洁, 减少编写代码.
+> 采用 meta 作为关键字很好
+> @ReflectEnable 太长了, @Repeatable 也很长,这个关键字的作用是什么
+> @Target(Method) 这行作用是?
+> 你提供的上述优化非常好, 针对阶段一, 重新审核一下你之前生成的方案, 避免出现我上面提到的类似问题.
+> 很好, 确认你的这套方案.
+
+### 执行结果汇报
+1. **深入重审与五大极简铁律确立**：
+   - **铁律 1（极短关键字）**：采用 4 字母的 `meta` 关键字声明元注解，无参免写空括号 `()`（如 `meta JsonIgnore;`）。
+   - **铁律 2（消灭 `@Repeatable`）**：废除长单词 `@Repeatable`，编译器天生支持同名注解多次书写并自动聚合为数组，反向提供 `@once` 满足全局唯一性约束。
+   - **铁律 3（消灭 `@ReflectEnable`）**：统一为极短的 `@reflect`（仅 7 个字母，免括号）。
+   - **铁律 4（目标约束全通与小写）**：解释了 `@Target` 作为编译期防呆安全锁的作用；重构为默认全通（免写），仅在防呆时采用直观小写 `@target(method, class)`。
+   - **铁律 5（使用端三免法则）**：无参免 `()`、单参免形参键名、脚本免预先声明直接即兴使用（Ad-hoc 双轨制）。
+2. **编译器前端与语义检查全链路实装完成**：
+   - **词法分析**：在 `cpc/src/lexer.rs` 中注册 `Token::Meta` (`meta`)。
+   - **AST 升级**：在 `cpc/src/ast.rs` 中增加 `MetaDef`、`MetaParam`、`MetaItem`、`MetaArg`，在 `Decl` 增加 `Decl::Meta`，并为 `Class`、`Function`、`Field`、`Param`、`TraitDecl`、`EnumDecl` 统一注入 `meta: Vec<MetaItem>`。
+   - **语法解析与消歧**：在 `cpc/src/parser.rs` 中支持 `meta Name;` 与 `meta Name(params);`；实现 `clone_lookahead` 与 `is_decl_keyword` 预测分析，消解顶层 `@builtin` 与 `@Meta` 歧义；在类成员（方法、属性）及函数入参中支持前置 `@meta` 解析并挂载；支持无参免括号与参数位置/具名混合解析。
+   - **语义防呆与静态校验**：在 `cpc/src/sema.rs` 中建立 `MetaDefInfo` 并在符号分析器预置内置 `@target`、`@once`、`@reflect`；第一遍扫描注册所有 `meta` 定义；严格校验元注解参数必须为编译期已知常量；严格校验目标合法性（放错位置报错中断）；严格校验 `@once` 唯一性；支持同名注解天然聚合数组与 Ad-hoc 免声明即用。
+   - **零成本代码生成**：`cpc/src/codegen.rs` 将 `Decl::Meta` 视作纯编译期无操作（No-op），阶段一保证 100% 零运行时机器码损耗。
+3. **测试验证全线通过**：
+   - 编写正向综合测试 [`cap/test/test_meta_pass.cp`](file:///data/dev/cp/cap/test/test_meta_pass.cp)，覆盖 `meta` 声明、`@target`、`@reflect`、`@once`、无参免 `()`、单参免键名、同名多注解聚合数组及 Ad-hoc 免声明即用，执行 `./bin/cap test/test_meta_pass.cp`，一次性通过！
+   - 编写反向目标违规测试 [`cap/test/test_meta_fail_target.cp`](file:///data/dev/cp/cap/test/test_meta_fail_target.cp)，精准拦截并输出 `Compile Error: Meta '@Get' can only be applied to method, but was applied to class`。
+   - 编写反向 `@once` 重复测试 [`cap/test/test_meta_fail_once.cp`](file:///data/dev/cp/cap/test/test_meta_fail_once.cp)，精准拦截并输出 `Compile Error: Meta '@Unique' is marked with '@once' and cannot be applied multiple times`。
+   - 全局回归测试（`test_static_object.cp`、`test_map_set_dict.cp`、`test_trait_class_pass.cp`、`test_lifetime_pass.cp`），全部 100% 编译通过并正常运行。

@@ -30,6 +30,37 @@ pub enum Decl {
     Enum(EnumDecl),
     Interface(Interface),
     ErrorSet(ErrorSetDecl),
+    Meta(MetaDef),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetaDef {
+    pub span: Span,
+    pub ident: Ident,
+    pub params: Vec<MetaParam>,
+    #[serde(default)]
+    pub meta: Vec<MetaItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetaParam {
+    pub span: Span,
+    pub ident: Ident,
+    pub ty: Type,
+    pub default: Option<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetaItem {
+    pub span: Span,
+    pub name: Ident,
+    pub args: Vec<MetaArg>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum MetaArg {
+    Positional(Expr),
+    Named(Ident, Expr),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -37,6 +68,8 @@ pub struct TraitDecl {
     pub span: Span,
     pub ident: Ident,
     pub methods: Vec<MethodSig>,
+    #[serde(default)]
+    pub meta: Vec<MetaItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -52,6 +85,8 @@ pub struct EnumDecl {
     pub span: Span,
     pub ident: Ident,
     pub variants: Vec<EnumVariant>,
+    #[serde(default)]
+    pub meta: Vec<MetaItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -91,6 +126,8 @@ pub struct Class {
     pub extends: Option<Ident>,
     #[serde(default)]
     pub is_ref: bool,
+    #[serde(default)]
+    pub meta: Vec<MetaItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -103,6 +140,8 @@ pub struct Function {
     pub is_async: bool,
     #[serde(default)]
     pub is_static: bool,
+    #[serde(default)]
+    pub meta: Vec<MetaItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -453,6 +492,8 @@ pub struct Param {
     pub is_comptime: bool,
     pub is_mut: bool,
     pub is_move: bool,
+    #[serde(default)]
+    pub meta: Vec<MetaItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -460,6 +501,8 @@ pub struct Field {
     pub span: Span,
     pub ident: Ident,
     pub ty: Type,
+    #[serde(default)]
+    pub meta: Vec<MetaItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

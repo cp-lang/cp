@@ -23,9 +23,21 @@ pub enum SemaError {
     CannotMutateReadOnlyBorrow(String, Span),
     #[error("Cannot borrow '{0}' as mutable because it is also borrowed as immutable in the current scope at {1:?}")]
     MutableBorrowConflict(String, Span),
+    #[error("Compile Error: Meta '@{0}' can only be applied to {1}, but was applied to {2} at {3:?}")]
+    MetaInvalidTarget(String, String, String, Span),
+    #[error("Compile Error: Meta '@{0}' is marked with '@once' and cannot be applied multiple times at {1:?}")]
+    MetaDuplicateOnce(String, Span),
+    #[error("Compile Error: Argument to meta '@{0}' must be a compile-time constant at {1:?}")]
+    MetaArgNotConstant(String, Span),
 }
 
 pub type SemaResult<T> = Result<T, SemaError>;
+
+#[derive(Clone, Debug)]
+pub struct MetaDefInfo {
+    pub allowed_targets: std::collections::HashSet<String>,
+    pub is_once: bool,
+}
 
 #[derive(Clone)]
 pub enum SymbolKind {
@@ -48,15 +60,47 @@ pub struct Analyzer {
     classes: HashMap<String, Class>,
     current_fn_is_async: bool,
     pub symbol_map: HashMap<Span, SymbolKind>,
+    pub meta_defs: HashMap<String, MetaDefInfo>,
 }
 
 impl Analyzer {
     pub fn new() -> Self {
+        let mut meta_defs = HashMap::new();
+        let mut target_targets = std::collections::HashSet::new();
+        target_targets.insert("meta".to_string());
+        meta_defs.insert(
+            "target".to_string(),
+            MetaDefInfo {
+                allowed_targets: target_targets,
+                is_once: true,
+            },
+        );
+        let mut once_targets = std::collections::HashSet::new();
+        once_targets.insert("meta".to_string());
+        meta_defs.insert(
+            "once".to_string(),
+            MetaDefInfo {
+                allowed_targets: once_targets,
+                is_once: true,
+            },
+        );
+        let mut reflect_targets = std::collections::HashSet::new();
+        reflect_targets.insert("class".to_string());
+        reflect_targets.insert("struct".to_string());
+        meta_defs.insert(
+            "reflect".to_string(),
+            MetaDefInfo {
+                allowed_targets: reflect_targets,
+                is_once: true,
+            },
+        );
+
         Self {
             scopes: vec![HashMap::new()],
             classes: HashMap::new(),
             current_fn_is_async: false,
             symbol_map: HashMap::new(),
+            meta_defs,
         }
     }
 
@@ -73,6 +117,7 @@ impl Analyzer {
             implements: vec![],
             extends: None,
             is_ref: false,
+            meta: Vec::new(),
         };
         self.classes
             .insert("RegExp".to_string(), regex_class.clone());
@@ -88,6 +133,7 @@ impl Analyzer {
             implements: vec![],
             extends: None,
             is_ref: false,
+            meta: Vec::new(),
         };
         self.classes.insert("Set".to_string(), set_class.clone());
         self.scopes[0].insert("Set".to_string(), SymbolKind::Class(set_class));
@@ -103,6 +149,7 @@ impl Analyzer {
             implements: vec![],
             extends: None,
             is_ref: false,
+            meta: Vec::new(),
         };
         self.classes.insert("Map".to_string(), map_class.clone());
         self.scopes[0].insert("Map".to_string(), SymbolKind::Class(map_class));
@@ -121,6 +168,7 @@ impl Analyzer {
                         sym: "code".to_string(),
                     },
                     ty: Type::I32,
+                    meta: Vec::new(),
                 },
                 crate::ast::Field {
                     span: mock_span.clone(),
@@ -129,12 +177,14 @@ impl Analyzer {
                         sym: "msg".to_string(),
                     },
                     ty: Type::String,
+                    meta: Vec::new(),
                 },
             ],
             methods: vec![],
             implements: vec![],
             extends: None,
             is_ref: false,
+            meta: Vec::new(),
         };
         self.classes
             .insert("Error".to_string(), error_class.clone());
@@ -151,12 +201,16 @@ impl Analyzer {
             implements: vec![],
             extends: None,
             is_ref: false,
+            meta: Vec::new(),
         };
         self.classes.insert("Box".to_string(), box_class.clone());
         self.scopes[0].insert("Box".to_string(), SymbolKind::Class(box_class));
 
         for item in &module.body {
             match item {
+                ModuleItem::Decl(Decl::Meta(m)) => {
+                    self.register_meta_def(m)?;
+                }
                 ModuleItem::Decl(Decl::Class(c)) => {
                     self.classes.insert(c.ident.sym.clone(), c.clone());
                     self.define(
@@ -198,9 +252,118 @@ impl Analyzer {
         Ok(())
     }
 
+    fn is_const_expr(expr: &Expr) -> bool {
+        match expr {
+            Expr::Lit(_) => true,
+            Expr::Ident(_) => true,
+            Expr::Array(elements) => elements.iter().all(Self::is_const_expr),
+            Expr::Object(fields) => fields.iter().all(|f| Self::is_const_expr(&f.val)),
+            Expr::Dict(fields) => fields.iter().all(|f| Self::is_const_expr(&f.val)),
+            _ => false,
+        }
+    }
+
+    fn register_meta_def(&mut self, m: &MetaDef) -> SemaResult<()> {
+        let mut allowed_targets = std::collections::HashSet::new();
+        let mut is_once = false;
+
+        self.validate_meta_items(&m.meta, "meta")?;
+
+        for item in &m.meta {
+            if item.name.sym.to_lowercase() == "target" {
+                for arg in &item.args {
+                    let target_name = match arg {
+                        MetaArg::Positional(Expr::Ident(id)) => id.sym.to_lowercase(),
+                        MetaArg::Named(_, Expr::Ident(id)) => id.sym.to_lowercase(),
+                        _ => continue,
+                    };
+                    allowed_targets.insert(target_name);
+                }
+            } else if item.name.sym.to_lowercase() == "once" {
+                is_once = true;
+            }
+        }
+
+        if allowed_targets.is_empty() {
+            allowed_targets.insert("class".to_string());
+            allowed_targets.insert("struct".to_string());
+            allowed_targets.insert("function".to_string());
+            allowed_targets.insert("method".to_string());
+            allowed_targets.insert("field".to_string());
+            allowed_targets.insert("param".to_string());
+        }
+
+        self.meta_defs.insert(
+            m.ident.sym.clone(),
+            MetaDefInfo {
+                allowed_targets,
+                is_once,
+            },
+        );
+        Ok(())
+    }
+
+    fn validate_meta_items(&self, items: &[MetaItem], target: &str) -> SemaResult<()> {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for item in items {
+            *counts.entry(item.name.sym.clone()).or_insert(0) += 1;
+
+            for arg in &item.args {
+                let expr = match arg {
+                    MetaArg::Positional(e) => e,
+                    MetaArg::Named(_, e) => e,
+                };
+                if !Self::is_const_expr(expr) {
+                    return Err(SemaError::MetaArgNotConstant(item.name.sym.clone(), item.span));
+                }
+            }
+
+            if let Some(def) = self.meta_defs.get(&item.name.sym) {
+                let matches_target = def.allowed_targets.contains(target)
+                    || (target == "struct" && def.allowed_targets.contains("class"))
+                    || (target == "class" && def.allowed_targets.contains("struct"))
+                    || (target == "method" && def.allowed_targets.contains("function"))
+                    || (target == "function" && def.allowed_targets.contains("method"));
+                if !matches_target {
+                    let mut allowed: Vec<String> = def.allowed_targets.iter().cloned().collect();
+                    allowed.sort();
+                    return Err(SemaError::MetaInvalidTarget(
+                        item.name.sym.clone(),
+                        allowed.join(", "),
+                        target.to_string(),
+                        item.span,
+                    ));
+                }
+            }
+        }
+
+        for (name, count) in counts {
+            if count > 1 {
+                if let Some(def) = self.meta_defs.get(&name) {
+                    if def.is_once {
+                        let span = items
+                            .iter()
+                            .find(|i| i.name.sym == name)
+                            .map(|i| i.span)
+                            .unwrap_or(Span { start: 0, end: 0 });
+                        return Err(SemaError::MetaDuplicateOnce(name, span));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn analyze_decl(&mut self, decl: &Decl) -> SemaResult<()> {
         match decl {
+            Decl::Meta(m) => {
+                self.validate_meta_items(&m.meta, "meta")?;
+            }
             Decl::Func(f) => {
+                self.validate_meta_items(&f.meta, "function")?;
+                for p in &f.params {
+                    self.validate_meta_items(&p.meta, "param")?;
+                }
                 let params = f.params.iter().map(|p| p.ty.clone()).collect();
                 let kind = SymbolKind::Func {
                     params,
@@ -228,6 +391,17 @@ impl Analyzer {
                 self.current_fn_is_async = old_async;
             }
             Decl::Class(c) => {
+                let target = if c.is_ref { "struct" } else { "class" };
+                self.validate_meta_items(&c.meta, target)?;
+                for f in &c.fields {
+                    self.validate_meta_items(&f.meta, "field")?;
+                }
+                for m in &c.methods {
+                    self.validate_meta_items(&m.meta, "method")?;
+                    for p in &m.params {
+                        self.validate_meta_items(&p.meta, "param")?;
+                    }
+                }
                 for m in &c.methods {
                     let old_async = self.current_fn_is_async;
                     self.current_fn_is_async = m.is_async;
@@ -322,6 +496,12 @@ impl Analyzer {
                     self.exit_scope();
                     self.current_fn_is_async = old_async;
                 }
+            }
+            Decl::Trait(t) => {
+                self.validate_meta_items(&t.meta, "trait")?;
+            }
+            Decl::Enum(e) => {
+                self.validate_meta_items(&e.meta, "enum")?;
             }
             _ => {}
         }
@@ -915,6 +1095,7 @@ impl Analyzer {
                             span: k.span,
                             ident: k.clone(),
                             ty,
+                            meta: Vec::new(),
                         };
                         if let Some(pos) = fs.iter().position(|existing| existing.ident.sym == k.sym) {
                             fs[pos] = new_f;

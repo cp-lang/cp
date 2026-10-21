@@ -152,3 +152,41 @@
 ### 新增文件 (Added)
 - [`cap/test/test_static_object.cp`](file:///data/dev/cp/cap/test/test_static_object.cp): 静态匿名对象字面量、`.` 属性访问、解构赋值与 `...` 展开覆盖测试。
 - [`cap/test/test_map_set_dict.cp`](file:///data/dev/cp/cap/test/test_map_set_dict.cp): `Map` 与 `Set` 完整 ES6 接口、`#{ ... }` 动态字典、下标索引读写、字典展开及 `??` 空值合并测试。
+
+---
+
+## [2026-10-21] 阶段一：MetaAnnotation 极简元注解系统 (Phase 1: MetaAnnotation Core System)
+
+### 修改文件 (Modified)
+- [`cpc/src/lexer.rs`](file:///data/dev/cp/cpc/src/lexer.rs):
+  - 新增 `Token::Meta` (`meta` 关键字)。
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs):
+  - 新增 `MetaDef`（元注解定义节点，含无参及参数列表）、`MetaParam`、`MetaItem` 与 `MetaArg`（支持位置参数与具名参数）；
+  - `Decl` 枚举新增 `Decl::Meta(MetaDef)` 变体；
+  - 为 `Class`、`Function`、`Field`、`Param`、`TraitDecl`、`EnumDecl` 统一注入 `#[serde(default)] pub meta: Vec<MetaItem>` 字段。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - 支持解析顶层 `meta Name;`（无参免写空括号）与 `meta Name(params);`（支持默认值）；
+  - 实现 `parse_meta_list` 与 `parse_meta_item`，支持解析 `@Ident` 与 `@Ident(args)`，支持参数省略键名、位置传参和具名传参；
+  - 实现 `clone_lookahead` 与 `is_decl_keyword` 预测分析，精准消除顶层 `@builtin(...)` 表达式语句与元注解 `@Meta` 的文法歧义；
+  - 在类成员（方法、字段）和函数参数（`parse_params`）中支持前置 `@meta` 解析并挂载至 AST。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 新增 `SemaError::MetaInvalidTarget`、`SemaError::MetaDuplicateOnce`、`SemaError::MetaArgNotConstant` 语义诊断错误；
+  - 新增 `MetaDefInfo` 结构并在 `Analyzer::new` 预置内置元注解 `@target`、`@once`、`@reflect`；
+  - 在第一遍 AST 扫描中自动收集用户定义的 `meta` 并解析提取 `@target(class, method, field, param)` 允许目标与 `@once` 唯一性约束（未声明目标时默认全通）；
+  - 在声明与成员检查阶段，严密校验：
+    1. 元注解参数必须为编译期常量字面量（`Expr::Lit`、常量标识符、字面量数组、字面量匿名对象）；
+    2. 校验元注解应用目标（如 `@target(method)` 挂在类上精准报错拦截）；
+    3. 校验 `@once` 唯一性，同名多次书写直接报错拦截；
+    4. 允许多次书写同名注解，编译器天生支持自动聚合为数组，废除繁琐的 `@Repeatable`；
+    5. 支持脚本及快速原型免预定义直接打注解（双轨制）。
+- [`cpc/src/dcp.rs`](file:///data/dev/cp/cpc/src/dcp.rs):
+  - 增加对 `Decl::Meta` 的 `.d.cp` 类型定义输出支持。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 适配 `Decl::Meta`，阶段一保持 100% 零运行时代码输出、零开销、零体积膨胀。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 新增第十二章《MetaAnnotation 极简元注解系统规范》，完整记录 `meta` 关键字、`@target`、`@once`、`@reflect`、三免法则与多值聚合规范。
+
+### 新增文件 (Added)
+- [`cap/test/test_meta_pass.cp`](file:///data/dev/cp/cap/test/test_meta_pass.cp): 元注解 `meta` 声明、`@target` 目标约束、`@reflect`、`@once`、无参免 `()`、单参免键名、同名注解天然多重收集为数组及 Ad-hoc 免声明即用正向综合测试。
+- [`cap/test/test_meta_fail_target.cp`](file:///data/dev/cp/cap/test/test_meta_fail_target.cp): 将 `@target(method)` 元注解非法附着在类上触发编译期语义拦截反向测试。
+- [`cap/test/test_meta_fail_once.cp`](file:///data/dev/cp/cap/test/test_meta_fail_once.cp): 将 `@once` 元注解重复多次标注触发编译期语义拦截反向测试。

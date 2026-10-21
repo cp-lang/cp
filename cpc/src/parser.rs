@@ -106,13 +106,195 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn clone_lookahead(&self) -> Parser<'a> {
+        Parser {
+            lexer: self.lexer.clone(),
+            input: self.input,
+            peeked: self.peeked.clone(),
+            in_match_guard: self.in_match_guard,
+        }
+    }
+
+    fn is_decl_keyword(t: &Token) -> bool {
+        matches!(
+            t,
+            Token::Fn
+                | Token::Async
+                | Token::Static
+                | Token::Class
+                | Token::Struct
+                | Token::Ref
+                | Token::Meta
+                | Token::Trait
+                | Token::Impl
+                | Token::Enum
+                | Token::Interface
+                | Token::ErrorKw
+        )
+    }
+
+    fn parse_meta_ident(&mut self) -> ParseResult<Ident> {
+        let (tok, span) = self.bump()?;
+        let sym = match tok {
+            Token::Ident(s) => s,
+            Token::Class => "class".to_string(),
+            Token::Struct => "struct".to_string(),
+            Token::Fn => "fn".to_string(),
+            Token::Ref => "ref".to_string(),
+            Token::Let => "let".to_string(),
+            Token::Const => "const".to_string(),
+            _ => {
+                return Err(ParseError::ExpectedToken(
+                    Token::Ident("identifier".to_string()),
+                    tok,
+                    span,
+                ))
+            }
+        };
+        Ok(Ident { span, sym })
+    }
+
+    fn parse_meta_arg(&mut self) -> ParseResult<MetaArg> {
+        let is_ident_like = matches!(
+            self.peek(),
+            Some(Token::Ident(_))
+                | Some(Token::Class)
+                | Some(Token::Struct)
+                | Some(Token::Fn)
+                | Some(Token::Ref)
+        );
+        if is_ident_like {
+            let ident = self.parse_meta_ident()?;
+            if self.peek() == Some(&Token::Colon) {
+                self.bump()?; // consume Colon
+                let expr = self.parse_primary_expr()?;
+                return Ok(MetaArg::Named(ident, expr));
+            } else {
+                return Ok(MetaArg::Positional(Expr::Ident(ident)));
+            }
+        }
+        let expr = self.parse_primary_expr()?;
+        Ok(MetaArg::Positional(expr))
+    }
+
+    fn parse_meta_item(&mut self) -> ParseResult<MetaItem> {
+        let start = self.expect(Token::At)?.start;
+        let name = self.parse_meta_ident()?;
+        let mut args = Vec::new();
+        if self.peek() == Some(&Token::LParen) {
+            self.bump()?;
+            while self.peek() != Some(&Token::RParen) && self.peek().is_some() {
+                args.push(self.parse_meta_arg()?);
+                if self.peek() == Some(&Token::Comma) {
+                    self.bump()?;
+                }
+            }
+            self.expect(Token::RParen)?;
+        }
+        let end = self.peek_span().start;
+        Ok(MetaItem {
+            span: Span { start, end },
+            name,
+            args,
+        })
+    }
+
+    fn parse_meta_list(&mut self) -> ParseResult<Vec<MetaItem>> {
+        let mut list = Vec::new();
+        while self.peek() == Some(&Token::At) {
+            list.push(self.parse_meta_item()?);
+        }
+        Ok(list)
+    }
+
+    fn parse_meta_def(&mut self, meta_list: Vec<MetaItem>) -> ParseResult<MetaDef> {
+        let start = self.expect(Token::Meta)?.start;
+        let ident = self.parse_ident()?;
+        let mut params = Vec::new();
+        if self.peek() == Some(&Token::LParen) {
+            self.bump()?;
+            while self.peek() != Some(&Token::RParen) && self.peek().is_some() {
+                let p_start = self.peek_span().start;
+                let p_ident = self.parse_ident()?;
+                self.expect(Token::Colon)?;
+                let ty = self.parse_type()?;
+                let mut default = None;
+                if self.peek() == Some(&Token::Assign) {
+                    self.bump()?;
+                    default = Some(self.parse_primary_expr()?);
+                }
+                params.push(MetaParam {
+                    span: Span {
+                        start: p_start,
+                        end: self.peek_span().start,
+                    },
+                    ident: p_ident,
+                    ty,
+                    default,
+                });
+                if self.peek() == Some(&Token::Comma) {
+                    self.bump()?;
+                }
+            }
+            self.expect(Token::RParen)?;
+        }
+        if self.peek() == Some(&Token::Semicolon) {
+            self.bump()?;
+        }
+        let end = self.peek_span().start;
+        Ok(MetaDef {
+            span: Span { start, end },
+            ident,
+            params,
+            meta: meta_list,
+        })
+    }
+
     fn parse_module_item(&mut self) -> ParseResult<ModuleItem> {
         if self.peek() == Some(&Token::Export) {
             self.bump()?;
         }
+        if self.peek() == Some(&Token::At) {
+            let mut clone = self.clone_lookahead();
+            let mut has_decl = false;
+            while clone.peek() == Some(&Token::At) {
+                if clone.bump().is_err() {
+                    break;
+                }
+                if clone.bump().is_err() {
+                    break;
+                }
+                if clone.peek() == Some(&Token::LParen) {
+                    if clone.bump().is_err() {
+                        break;
+                    }
+                    let mut depth = 1;
+                    while depth > 0 && clone.peek().is_some() {
+                        if clone.peek() == Some(&Token::LParen) {
+                            depth += 1;
+                        } else if clone.peek() == Some(&Token::RParen) {
+                            depth -= 1;
+                        }
+                        if clone.bump().is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            if let Some(tok) = clone.peek() {
+                if Self::is_decl_keyword(tok) {
+                    has_decl = true;
+                }
+            }
+            if has_decl {
+                let meta_list = self.parse_meta_list()?;
+                return Ok(ModuleItem::Decl(self.parse_decl(meta_list)?));
+            }
+        }
         match self.peek() {
             Some(Token::Import) => Ok(ModuleItem::Import(self.parse_import_stmt()?)),
-            Some(Token::Fn)
+            Some(Token::Meta)
+            | Some(Token::Fn)
             | Some(Token::Class)
             | Some(Token::Struct)
             | Some(Token::Ref)
@@ -121,7 +303,8 @@ impl<'a> Parser<'a> {
             | Some(Token::Trait)
             | Some(Token::Impl)
             | Some(Token::Enum)
-            | Some(Token::Async) => Ok(ModuleItem::Decl(self.parse_decl()?)),
+            | Some(Token::Async)
+            | Some(Token::Static) => Ok(ModuleItem::Decl(self.parse_decl(vec![])?)),
             _ => Ok(ModuleItem::Stmt(self.parse_stmt()?)),
         }
     }
@@ -159,15 +342,30 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_decl(&mut self) -> ParseResult<Decl> {
+    fn parse_decl(&mut self, meta: Vec<MetaItem>) -> ParseResult<Decl> {
         match self.peek() {
-            Some(Token::Fn) | Some(Token::Async) => Ok(Decl::Func(self.parse_function()?)),
-            Some(Token::Class) | Some(Token::Struct) | Some(Token::Ref) => {
-                Ok(Decl::Class(self.parse_class()?))
+            Some(Token::Meta) => Ok(Decl::Meta(self.parse_meta_def(meta)?)),
+            Some(Token::Fn) | Some(Token::Async) | Some(Token::Static) => {
+                let mut f = self.parse_function()?;
+                f.meta = meta;
+                Ok(Decl::Func(f))
             }
-            Some(Token::Trait) => Ok(Decl::Trait(self.parse_trait()?)),
+            Some(Token::Class) | Some(Token::Struct) | Some(Token::Ref) => {
+                let mut c = self.parse_class()?;
+                c.meta = meta;
+                Ok(Decl::Class(c))
+            }
+            Some(Token::Trait) => {
+                let mut t = self.parse_trait()?;
+                t.meta = meta;
+                Ok(Decl::Trait(t))
+            }
             Some(Token::Impl) => Ok(Decl::Impl(self.parse_impl()?)),
-            Some(Token::Enum) => Ok(Decl::Enum(self.parse_enum()?)),
+            Some(Token::Enum) => {
+                let mut e = self.parse_enum()?;
+                e.meta = meta;
+                Ok(Decl::Enum(e))
+            }
             Some(Token::ErrorKw) => Ok(Decl::ErrorSet(self.parse_error_set()?)),
             _ => Err(ParseError::UnexpectedToken(
                 self.bump()?.0,
@@ -216,6 +414,7 @@ impl<'a> Parser<'a> {
             body,
             is_async,
             is_static,
+            meta: Vec::new(),
         })
     }
 
@@ -223,6 +422,7 @@ impl<'a> Parser<'a> {
         self.expect(Token::LParen)?;
         let mut params = Vec::new();
         while self.peek() != Some(&Token::RParen) {
+            let meta = self.parse_meta_list()?;
             let mut is_mut = false;
             let mut is_move = false;
 
@@ -250,6 +450,7 @@ impl<'a> Parser<'a> {
                 is_comptime: false,
                 is_mut,
                 is_move,
+                meta,
             });
             if self.peek() == Some(&Token::Comma) {
                 self.bump()?;
@@ -408,6 +609,7 @@ impl<'a> Parser<'a> {
                     span: f_ident.span,
                     ident: f_ident,
                     ty,
+                    meta: Vec::new(),
                 });
                 if self.peek() == Some(&Token::Comma) {
                     self.bump()?;
@@ -959,12 +1161,15 @@ impl<'a> Parser<'a> {
         let mut fields = Vec::new();
         let mut methods = Vec::new();
         self.expect(Token::LBrace)?;
-        while self.peek() != Some(&Token::RBrace) {
+        while self.peek() != Some(&Token::RBrace) && self.peek().is_some() {
+            let meta_list = self.parse_meta_list()?;
             if matches!(
                 self.peek(),
                 Some(Token::Fn) | Some(Token::Async) | Some(Token::Static)
             ) {
-                methods.push(self.parse_function()?);
+                let mut method = self.parse_function()?;
+                method.meta = meta_list;
+                methods.push(method);
             } else {
                 let f_ident = self.parse_ident()?;
                 self.expect(Token::Colon)?;
@@ -979,6 +1184,7 @@ impl<'a> Parser<'a> {
                     span: f_ident.span,
                     ident: f_ident,
                     ty,
+                    meta: meta_list,
                 });
             }
         }
@@ -991,6 +1197,7 @@ impl<'a> Parser<'a> {
             implements,
             extends,
             is_ref,
+            meta: Vec::new(),
         })
     }
 
@@ -1031,6 +1238,7 @@ impl<'a> Parser<'a> {
             span: Span { start, end },
             ident,
             methods,
+            meta: Vec::new(),
         })
     }
 
@@ -1078,6 +1286,7 @@ impl<'a> Parser<'a> {
                         span: f_ident.span,
                         ident: f_ident,
                         ty,
+                        meta: Vec::new(),
                     });
                     if self.peek() == Some(&Token::Comma) {
                         self.bump()?;
@@ -1112,6 +1321,7 @@ impl<'a> Parser<'a> {
             span: Span { start, end },
             ident,
             variants,
+            meta: Vec::new(),
         })
     }
 

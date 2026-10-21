@@ -566,6 +566,7 @@ impl Codegen {
                                 body: default_body.clone(),
                                 is_async: false,
                                 is_static: false,
+                                meta: Vec::new(),
                             };
                             if let Some(cls) = self.class_defs.get_mut(c_name) {
                                 cls.methods.push(synth_fn);
@@ -2257,6 +2258,7 @@ impl Codegen {
                             span: k.span,
                             ident: k.clone(),
                             ty,
+                            meta: Vec::new(),
                         };
                         if let Some(pos) = fs.iter().position(|existing| existing.ident.sym == k.sym) {
                             fs[pos] = new_f;

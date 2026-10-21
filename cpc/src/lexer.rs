@@ -40,6 +40,8 @@ pub enum Token {
     Static,
     #[token("super")]
     Super,
+    #[token("meta")]
+    Meta,
 
     #[token("export")]
     Export,

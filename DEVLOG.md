@@ -512,3 +512,54 @@ TypeScript 将这两者混为一谈，导致 V8 引擎需要引入极其复杂�
 1. 编写测试 [`cap/test/test_static_object.cp`](file:///data/dev/cp/cap/test/test_static_object.cp)，覆盖静态匿名对象初始化、`.` 访问、模式解构及多重展开覆盖，运行 `./bin/cap test/test_static_object.cp`，全部通过。
 2. 编写测试 [`cap/test/test_map_set_dict.cp`](file:///data/dev/cp/cap/test/test_map_set_dict.cp)，覆盖 Map、Set 完整 ES6 方法、`#{}` 动态字典、下标索引读写、字典展开及 `??` 空值合并，运行 `./bin/cap test/test_map_set_dict.cp`，全部通过。
 3. 全局回归测试（[`test_map_set.cp`](file:///data/dev/cp/cap/test/test_map_set.cp)、[`example_showcase.cp`](file:///data/dev/cp/cap/test/example_showcase.cp)、[`test_lifetime_pass.cp`](file:///data/dev/cp/cap/test/test_lifetime_pass.cp)、[`test_trait_class_pass.cp`](file:///data/dev/cp/cap/test/test_trait_class_pass.cp)），全部 100% 编译通过并正常运行。
+
+---
+
+## 2026-10-21: 阶段一 MetaAnnotation 极简元注解系统架构设计与落地实现
+
+### 1. 架构定位与破局哲学
+传统面向对象语言（Java、C#）的注解（Annotation / Attribute）存在两大典型弊端：
+1. **语法极其厚重**：冗长的 `annotation` 关键字（10 字母）、必须写 `@Repeatable` 声明、繁琐的键名（`path = "..."`）、即使无参也必须写空括号 `()`；
+2. **运行时开销失控**：全量反射导致元数据塞满二进制文件，严重阻碍 Native AOT 极致裁剪；
+3. **宏与注解语义混乱**：Rust 使用丑陋的 `#[...]` 语法将属性与过程宏混淆在一起，而 TypeScript 则将装饰器完全推入运行时，依靠性能低劣且存在严重循环依赖风险的 `reflect-metadata`。
+
+为此，CP 语言确立了“**MetaAnnotation 纯静态元数据层**”的设计哲学：
+- **纯粹数据挂载**：元注解只负责向程序元素（Class、Struct、Method、Field、Param 等）挂载结构化静态键值元数据，**不执行任何可执行代码，不篡改类/方法结构，不注入隐式逻辑**；
+- **极简 4 字母关键字 `meta`**：彻底废除 `annotation`，声明使用 `meta Route(path: string);`，与 `enum`、`type`、`move` 长度对齐，优雅直观；
+- **天生多值聚合（彻底废除 `@Repeatable`）**：在同一个元素上连续多次打同名注解（如 `@Get("/a")` 与 `@Get("/b")`），编译器原生自动将其聚合为元数据数组，消灭静默覆盖缺陷，反向提供 `@once` 满足全局唯一性约束；
+- **目标约束默认全通与小写直观语法**：不声明 `@target` 时默认允许挂载任意目标，需防呆时采用极简的小写 `@target(method, class)`；
+- **使用端三免法则**：无参免写 `()`（如 `@JsonIgnore`、`@reflect`）、单参/首参免写形参键名（如 `@Route("/user")`）、脚本与小型原型免预先声明直接即兴使用（Ad-hoc 双轨制）；
+- **零成本二进制裁剪**：阶段一保持 100% 零运行时机器码损耗，仅在后续阶段配合 `@reflect` 按需生成只读静态数据表。
+
+---
+
+### 2. 编译管线全链路改造细节
+
+1. **词法分析与关键字解耦 (`cpc/src/lexer.rs`)**：
+   - 增加 `Token::Meta` (`meta`) 关键字。
+2. **AST 核心数据结构升级 (`cpc/src/ast.rs`)**：
+   - 新增 `MetaDef`（定义节点）、`MetaParam`（支持可选默认常量）、`MetaItem`（使用端节点）与 `MetaArg`（支持位置传参与具名传参）；
+   - 在 `Decl` 增加 `Decl::Meta(MetaDef)`；
+   - 为 `Class`、`Function`、`Field`、`Param`、`TraitDecl`、`EnumDecl` 统一注入 `#[serde(default)] pub meta: Vec<MetaItem>`，保持向前序列化与测试构建兼容。
+3. **语法解析与前瞻消歧 (`cpc/src/parser.rs`)**：
+   - 实现 `clone_lookahead` 与 `is_decl_keyword`：当在顶层遇到 `Token::At` (`@`) 时，自动前瞻扫描整段 `@...` 链条；若其紧邻 `fn`、`class`、`struct`、`ref`、`meta`、`trait`、`enum` 等声明关键字，则精准解析为声明的元注解，否则平滑降级为顶层表达式语句（如 `@print(...)`），彻底消除语法歧义；
+   - 在类成员（方法、属性）及函数入参（`parse_params`）循环体内注入 `parse_meta_list`，原生支持 `@JsonIgnore`、`@Column("id")` 与 `@Valid param: User`；
+   - 实现无参免括号解析与参数位置/具名混合解析。
+4. **语义分析与静态防呆检查 (`cpc/src/sema.rs`)**：
+   - 增加 `MetaDefInfo` 并在符号分析器中内置 `@target`、`@once`、`@reflect`；
+   - 第一遍扫描自动注册所有 `Decl::Meta`，抽取允许的目标集合与唯一性约束；
+   - 检查参数必须为编译期已知常量（字面量、匿名对象、常量标识符），拦截非法动态参数；
+   - 严格根据目标类别（`class`、`struct`、`method`、`function`、`field`、`param`、`meta`）校验应用合法性，放错位置直接报错中断编译并给出清晰建议；
+   - 校验 `@once` 唯一性，同名多次书写直接报错拦截。
+5. **类型输出与代码生成 (`cpc/src/dcp.rs`, `cpc/src/codegen.rs`)**：
+   - `dcp.rs` 增加对 `Decl::Meta` 导出支持；
+   - `codegen.rs` 中 `Decl::Meta` 编译为纯无操作（No-op），确保阶段一 100% 零运行时惩罚。
+
+---
+
+### 3. 验证与回归测试
+
+1. 编写正向综合测试 [`cap/test/test_meta_pass.cp`](file:///data/dev/cp/cap/test/test_meta_pass.cp)，覆盖 `meta` 声明、`@target` 目标约束、`@reflect`、`@once`、无参免 `()`、单参免键名、同名多注解天生收集为数组以及 Ad-hoc 免声明即用，执行 `./bin/cap test/test_meta_pass.cp`，一次性通过！
+2. 编写反向目标违规拦截测试 [`cap/test/test_meta_fail_target.cp`](file:///data/dev/cp/cap/test/test_meta_fail_target.cp)，验证将 `@target(method)` 挂在类上时被编译器精准拦截并输出 `Compile Error: Meta '@Get' can only be applied to method, but was applied to class`。
+3. 编写反向 `@once` 违规拦截测试 [`cap/test/test_meta_fail_once.cp`](file:///data/dev/cp/cap/test/test_meta_fail_once.cp)，验证重复标注 `@once` 元注解时被编译器精准拦截并输出 `Compile Error: Meta '@Unique' is marked with '@once' and cannot be applied multiple times`。
+4. 全量回归既有测试套件（`test_static_object.cp`、`test_map_set_dict.cp`、`test_trait_class_pass.cp`、`test_lifetime_pass.cp`），全部 100% 编译通过并正常运行。
