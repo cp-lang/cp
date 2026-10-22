@@ -2421,3 +2421,64 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
    - 编写反向目标违规测试 [`cap/test/test_meta_fail_target.cp`](file:///data/dev/cp/cap/test/test_meta_fail_target.cp)，精准拦截并输出 `Compile Error: Meta '@Get' can only be applied to method, but was applied to class`。
    - 编写反向 `@once` 重复测试 [`cap/test/test_meta_fail_once.cp`](file:///data/dev/cp/cap/test/test_meta_fail_once.cp)，精准拦截并输出 `Compile Error: Meta '@Unique' is marked with '@once' and cannot be applied multiple times`。
    - 全局回归测试（`test_static_object.cp`、`test_map_set_dict.cp`、`test_trait_class_pass.cp`、`test_lifetime_pass.cp`），全部 100% 编译通过并正常运行。
+
+---
+
+## 2026-10-22
+
+### 用户指令
+> 重新评审一下 第二阶段设计方案：双态反射模型（Reflection: 编译期内省 + @reflect 运行时零成本裁剪）, 类似你针对第一阶段的优化 简洁化
+> 确认
+
+### 执行结果汇报
+1. **方案重审与极简原则达成**：
+   - 确立 `reflect.type<T>()`（4 字母）与 `reflect.of(val)`（2 字母）极简双入口；
+   - 确立扁平化反射模型：`TypeInfo`、`FieldInfo`、`MethodInfo`，杜绝深层递归结构；
+   - `target.meta` 彻底复用 CP 原生动态字典 `Dict<string, any>`（`*Map`），消灭中间层 `MetaCollection`；
+   - 多值注解天生聚合为数组（`target.meta["Get"][0]`），单值注解自动为标量；
+   - 未标注 `@reflect` 的类或实例在调用反射 API 时，触发编译期精准拦截报错，零代码与零数据生成。
+2. **编译器 AST、文法、语义与代码生成实现**：
+   - **AST 与 Parser (`cpc/src/ast.rs`, `cpc/src/parser.rs`)**：
+     - 在 `Expr` 中增加 `ReflectType` 与 `ReflectOf` 变体；
+     - 在成员表达式解析处支持解析 `reflect.type<T>()` 与 `reflect.of(val)`；
+     - 在 `parse_ident` 中放行 `Token::Meta => "meta".to_string()`，允许用户在代码中书写 `info.meta`、`f.meta`、`m.meta`。
+   - **语义检查与硬屏障 (`cpc/src/sema.rs`)**：
+     - 新增 `SemaError::ReflectNotEnabled`，在类型检查期严格检查反射目标是否标记 `@reflect`，未标记时精准报错拦截：
+       `Compile Error: Type '{0}' cannot be reflected at runtime. Add '@reflect' to the class definition to enable runtime reflection.`；
+     - 预置 `TypeInfo`、`FieldInfo`、`MethodInfo` 并在 `infer_type` 中推导为 `TypeInfo` 引用。
+   - **Zig 机器码生成与静态反射表 (`cpc/src/codegen.rs`)**：
+     - 在 Zig 运行时前导声明中注入 `FieldInfo`、`MethodInfo`、`TypeInfo`（含 `getField` 与 `getMethod` 查找方法）；
+     - 升级 `Message` 与 `MessageContext` 支持 `.array: []Message`，并在 `cp_index_get` 中支持数组与字典的下标读取；
+     - 实现 `generate_reflection_tables`：为每个 `@reflect` 标记的 Class/Struct 生成单例 `_get_typeinfo_<ClassName>()` 与 `_typeinfo_<ClassName>`；
+     - 自动过滤内部合成方法与析构，清洗非 receiver 参数名；
+     - 彻底复用 `Dict<string, any>`（`*Map`），实现同名多次注解自动聚合成 `Message.array`；
+     - 在 `generate_expr`、`infer_zig_type`、`infer_cp_type` 中打通 `Expr::ReflectType` 与 `Expr::ReflectOf`。
+   - **标准库模块 (`lib/cap/reflect.cp`)**：提供标准库反射声明。
+   - **文档更新 (`cp_ref.md`)**：新增第十三章《Dual-State Reflection 双态反射模型规范》。
+3. **测试验证全线通过**：
+   - 编写正向综合测试 [`cap/test/test_reflect_pass.cp`](file:///data/dev/cp/cap/test/test_reflect_pass.cp)，测试并通过：
+     - `reflect.type<UserController>()`
+     - `info.name`、`info.isRef`
+     - `info.meta.has("Singleton")`、`info.meta["Controller"]`
+     - `info.fields`、`f.name`、`f.typeName`、`f.meta["Column"]`
+     - `info.methods`、`m.name`、`m.returnTypeName`、`m.isAsync`、`m.isStatic`
+     - 同名注解数组收集：`m0.meta["Get"][0] == "/list"`、`m0.meta["Get"][1] == "/all"`
+     - `getField` 与 `getMethod` 查找方法
+     - `reflect.of(ctrl)` 实例反射
+     - `ref class RefSession` 引用结构体反射
+   - 编写反向测试 [`cap/test/test_reflect_fail_unmarked.cp`](file:///data/dev/cp/cap/test/test_reflect_fail_unmarked.cp)，未标注 `@reflect` 的类调用 `reflect.type<T>()` 时被编译期精准拦截。
+   - 编写反向测试 [`cap/test/test_reflect_fail_of_unmarked.cp`](file:///data/dev/cp/cap/test/test_reflect_fail_of_unmarked.cp)，未标注 `@reflect` 的实例调用 `reflect.of(val)` 时被编译期精准拦截。
+   - 全量回归测试（`test_meta_pass.cp`、`test_map_set_dict.cp`、`hello.cp` 等），全部 100% 绿色通过，无任何回归。
+
+---
+
+## 2026-10-22
+
+### 用户指令
+> 提交
+
+### 执行结果汇报
+1. 阶段二（双态反射模型：`reflect.type<T>()`、`reflect.of(val)`、原生字典复用、同名多注解聚合数组、`@reflect` 零成本裁剪与硬屏障）成果全部通过编译与端到端测试；
+2. 规范更新 `CHANGELOG.md`、`DEVLOG.md` 与 `SESSION.md`，执行 Git 提交，将第二阶段成果完整沉淀至代码库。
+
+

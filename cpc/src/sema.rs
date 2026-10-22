@@ -23,12 +23,16 @@ pub enum SemaError {
     CannotMutateReadOnlyBorrow(String, Span),
     #[error("Cannot borrow '{0}' as mutable because it is also borrowed as immutable in the current scope at {1:?}")]
     MutableBorrowConflict(String, Span),
-    #[error("Compile Error: Meta '@{0}' can only be applied to {1}, but was applied to {2} at {3:?}")]
+    #[error(
+        "Compile Error: Meta '@{0}' can only be applied to {1}, but was applied to {2} at {3:?}"
+    )]
     MetaInvalidTarget(String, String, String, Span),
     #[error("Compile Error: Meta '@{0}' is marked with '@once' and cannot be applied multiple times at {1:?}")]
     MetaDuplicateOnce(String, Span),
     #[error("Compile Error: Argument to meta '@{0}' must be a compile-time constant at {1:?}")]
     MetaArgNotConstant(String, Span),
+    #[error("Compile Error: Type '{0}' cannot be reflected at runtime. Add '@reflect' to the class definition to enable runtime reflection at {1:?}")]
+    ReflectNotEnabled(String, Span),
 }
 
 pub type SemaResult<T> = Result<T, SemaError>;
@@ -206,6 +210,31 @@ impl Analyzer {
         self.classes.insert("Box".to_string(), box_class.clone());
         self.scopes[0].insert("Box".to_string(), SymbolKind::Class(box_class));
 
+        for reflect_name in &["TypeInfo", "FieldInfo", "MethodInfo"] {
+            let cls = crate::ast::Class {
+                span: mock_span.clone(),
+                ident: crate::ast::Ident {
+                    span: mock_span.clone(),
+                    sym: reflect_name.to_string(),
+                },
+                fields: vec![],
+                methods: vec![],
+                implements: vec![],
+                extends: None,
+                is_ref: false,
+                meta: vec![crate::ast::MetaItem {
+                    span: mock_span.clone(),
+                    name: crate::ast::Ident {
+                        span: mock_span.clone(),
+                        sym: "reflect".to_string(),
+                    },
+                    args: vec![],
+                }],
+            };
+            self.classes.insert(reflect_name.to_string(), cls.clone());
+            self.scopes[0].insert(reflect_name.to_string(), SymbolKind::Class(cls));
+        }
+
         for item in &module.body {
             match item {
                 ModuleItem::Decl(Decl::Meta(m)) => {
@@ -314,7 +343,10 @@ impl Analyzer {
                     MetaArg::Named(_, e) => e,
                 };
                 if !Self::is_const_expr(expr) {
-                    return Err(SemaError::MetaArgNotConstant(item.name.sym.clone(), item.span));
+                    return Err(SemaError::MetaArgNotConstant(
+                        item.name.sym.clone(),
+                        item.span,
+                    ));
                 }
             }
 
@@ -754,6 +786,53 @@ impl Analyzer {
                     self.analyze_expr(arg)?;
                 }
             }
+            Expr::ReflectType { span, target_ty } => {
+                let type_name = match target_ty {
+                    Type::Ref(id) => id.sym.clone(),
+                    _ => {
+                        return Err(SemaError::ReflectNotEnabled(
+                            format!("{:?}", target_ty),
+                            *span,
+                        ));
+                    }
+                };
+                if let Some(cls) = self.classes.get(&type_name) {
+                    let has_reflect = cls.meta.iter().any(|m| m.name.sym == "reflect");
+                    if !has_reflect {
+                        return Err(SemaError::ReflectNotEnabled(type_name, *span));
+                    }
+                } else {
+                    return Err(SemaError::UndefinedSymbol(type_name, *span));
+                }
+            }
+            Expr::ReflectOf { span, expr } => {
+                self.analyze_expr(expr)?;
+                let ty = self.infer_type(expr)?;
+                let type_name = match ty {
+                    Type::Ref(id) => id.sym,
+                    Type::BorrowType { inner, .. } => {
+                        if let Type::Ref(id) = &*inner {
+                            id.sym.clone()
+                        } else {
+                            return Err(SemaError::ReflectNotEnabled(
+                                format!("{:?}", inner),
+                                *span,
+                            ));
+                        }
+                    }
+                    _ => {
+                        return Err(SemaError::ReflectNotEnabled(format!("{:?}", ty), *span));
+                    }
+                };
+                if let Some(cls) = self.classes.get(&type_name) {
+                    let has_reflect = cls.meta.iter().any(|m| m.name.sym == "reflect");
+                    if !has_reflect {
+                        return Err(SemaError::ReflectNotEnabled(type_name, *span));
+                    }
+                } else {
+                    return Err(SemaError::UndefinedSymbol(type_name, *span));
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -951,6 +1030,7 @@ impl Analyzer {
                     || ident.sym == "Box"
                     || ident.sym == "Err"
                     || ident.sym == "Error"
+                    || ident.sym == "reflect"
                 {
                     return Ok(Type::Any);
                 }
@@ -1082,7 +1162,10 @@ impl Analyzer {
                         let sp_ty = self.infer_type(&f.val)?;
                         if let Type::Object(sub_fs) = sp_ty {
                             for sf in sub_fs {
-                                if let Some(pos) = fs.iter().position(|existing| existing.ident.sym == sf.ident.sym) {
+                                if let Some(pos) = fs
+                                    .iter()
+                                    .position(|existing| existing.ident.sym == sf.ident.sym)
+                                {
                                     fs[pos] = sf;
                                 } else {
                                     fs.push(sf);
@@ -1097,7 +1180,9 @@ impl Analyzer {
                             ty,
                             meta: Vec::new(),
                         };
-                        if let Some(pos) = fs.iter().position(|existing| existing.ident.sym == k.sym) {
+                        if let Some(pos) =
+                            fs.iter().position(|existing| existing.ident.sym == k.sym)
+                        {
                             fs[pos] = new_f;
                         } else {
                             fs.push(new_f);
@@ -1106,9 +1191,7 @@ impl Analyzer {
                 }
                 Ok(Type::Object(fs))
             }
-            Expr::Dict(_) => {
-                Ok(Type::Dict(Box::new(Type::String), Box::new(Type::Any)))
-            }
+            Expr::Dict(_) => Ok(Type::Dict(Box::new(Type::String), Box::new(Type::Any))),
             Expr::Index { obj, .. } => {
                 let o_ty = self.infer_type(obj)?;
                 match o_ty {
@@ -1169,6 +1252,10 @@ impl Analyzer {
                 }
                 _ => Ok(Type::Unknown),
             },
+            Expr::ReflectType { span, .. } | Expr::ReflectOf { span, .. } => Ok(Type::Ref(Ident {
+                span: *span,
+                sym: "TypeInfo".to_string(),
+            })),
             _ => Ok(Type::Any),
         }
     }
@@ -1179,6 +1266,7 @@ fn inner_span(expr: &Expr) -> Span {
         Expr::Ident(i) => i.span,
         Expr::Lit(_) => Span { start: 0, end: 0 },
         Expr::Bin(b) => b.span,
+        Expr::ReflectType { span, .. } | Expr::ReflectOf { span, .. } => *span,
         _ => Span { start: 0, end: 0 },
     }
 }

@@ -563,3 +563,49 @@ TypeScript 将这两者混为一谈，导致 V8 引擎需要引入极其复杂�
 2. 编写反向目标违规拦截测试 [`cap/test/test_meta_fail_target.cp`](file:///data/dev/cp/cap/test/test_meta_fail_target.cp)，验证将 `@target(method)` 挂在类上时被编译器精准拦截并输出 `Compile Error: Meta '@Get' can only be applied to method, but was applied to class`。
 3. 编写反向 `@once` 违规拦截测试 [`cap/test/test_meta_fail_once.cp`](file:///data/dev/cp/cap/test/test_meta_fail_once.cp)，验证重复标注 `@once` 元注解时被编译器精准拦截并输出 `Compile Error: Meta '@Unique' is marked with '@once' and cannot be applied multiple times`。
 4. 全量回归既有测试套件（`test_static_object.cp`、`test_map_set_dict.cp`、`test_trait_class_pass.cp`、`test_lifetime_pass.cp`），全部 100% 编译通过并正常运行。
+
+---
+
+## 2026-10-22 - 阶段二：Dual-State Reflection 双态反射模型实现
+
+### 1. 任务背景与架构目标
+
+阶段一已成功建立起纯静态零开销的 `meta` 元注解基础设施。阶段二的目标是实现**双态反射模型（Reflection: 编译期内省 + `@reflect` 运行时零成本裁剪）**：
+- **入口极简**：提供 `reflect.type<T>()`（4 字母）与 `reflect.of(val)`（2 字母）作为双入口；
+- **扁平反射数据模型**：设计包含 `TypeInfo`、`FieldInfo`、`MethodInfo` 的扁平化反射结构，杜绝递归复杂的反射对象；
+- **复用原生字典**：`target.meta` 彻底复用 CP 原生动态字典 `Dict<string, any>`（`*Map`），原生支持 `#{}`、`[]`、`.has()`、`.keys()`、`??` 等语法；
+- **多值自动聚合**：同名多次书写的注解（如 `@Get("/list")` 与 `@Get("/all")`）在反射字典中自动聚合为数组 `[ "/list", "/all" ]`；
+- **零成本安全硬屏障**：只有标记了 `@reflect` 的类才会在运行时生成 `TypeInfo` 静态单例表；未标注的类在调用 `reflect.type<T>()` 或 `reflect.of(val)` 时，编译期立即报错拦截，杜绝二进制体积膨胀。
+
+### 2. 核心技术实现
+
+1. **AST 与文法解析扩展 (`cpc/src/ast.rs`, `cpc/src/parser.rs`)**：
+   - 在 `Expr` 中增加 `ReflectType { span: Span, target_ty: Type }` 与 `ReflectOf { span: Span, expr: Box<Expr> }`；
+   - 在 `parser.rs` 的成员表达式解析处侦测 `reflect.type<T>()` 与 `reflect.of(val)`；
+   - 在 `parse_ident` 中放行 `Token::Meta => "meta".to_string()`，允许用户代码书写 `info.meta`、`f.meta`、`m.meta`。
+2. **语义分析与硬屏障检查 (`cpc/src/sema.rs`)**：
+   - 增加 `SemaError::ReflectNotEnabled`，当在编译期遇到针对未标注 `@reflect` 的类型或实例进行反射时，立即输出：
+     `Compile Error: Type '{0}' cannot be reflected at runtime. Add '@reflect' to the class definition to enable runtime reflection.`；
+   - 符号分析器内置 `TypeInfo`、`FieldInfo`、`MethodInfo` 以及 `reflect` 关键字。
+3. **原生代码生成与静态反射表构造 (`cpc/src/codegen.rs`)**：
+   - 在 Zig 运行时前导声明中注入 `FieldInfo`、`MethodInfo`、`TypeInfo`（含 `getField` 与 `getMethod` 快捷查找方法）；
+   - 升级 `Message` 与 `MessageContext` 支持 `.array: []Message`，并在 `cp_index_get` 中支持数组与字典的无缝下标读取；
+   - 实现 `generate_reflection_tables`：为每个标注了 `@reflect` 的 Class/Struct 生成惰性单例 `_get_typeinfo_<ClassName>()` 与 `_typeinfo_<ClassName>`；
+   - 自动过滤内部合成方法与析构函数，清洗非 receiver 参数名；
+   - 在 `generate_expr` 中将 `Expr::ReflectType` 与 `Expr::ReflectOf` 映射为单例获取调用，并完善 `infer_zig_type` 与 `infer_cp_type`。
+
+### 3. 测试验证
+
+1. 编写正向综合测试 [`cap/test/test_reflect_pass.cp`](file:///data/dev/cp/cap/test/test_reflect_pass.cp)，测试并通过：
+   - `reflect.type<UserController>()` 读取名称、`isRef`、元数据字典；
+   - 原生字典读取与存在性判断：`info.meta.has("Singleton")`、`info.meta["Controller"]`；
+   - 字段反射：`info.fields[0].name == "secret"`、`f.typeName == "string"`、`f.meta["Column"] == "pwd_hash"`；
+   - 方法反射：`info.methods[0].name == "list"`、`m.returnTypeName == "string"`；
+   - 多值聚合：`m0.meta["Get"][0] == "/list"`、`m0.meta["Get"][1] == "/all"`；
+   - `getField` 与 `getMethod` 查找；
+   - `reflect.of(ctrl)` 实例反射；
+   - `ref class RefSession` 引用结构体反射（`isRef == true`）。
+2. 编写反向测试 [`cap/test/test_reflect_fail_unmarked.cp`](file:///data/dev/cp/cap/test/test_reflect_fail_unmarked.cp)，验证对未标注 `@reflect` 的类型调用 `reflect.type<UnmarkedUser>()` 被编译器精准拦截。
+3. 编写反向测试 [`cap/test/test_reflect_fail_of_unmarked.cp`](file:///data/dev/cp/cap/test/test_reflect_fail_of_unmarked.cp)，验证对未标注 `@reflect` 的实例调用 `reflect.of(acc)` 被编译器精准拦截。
+4. 全量运行既有测试套件，保持 100% 绿色通过，无任何回归。
+

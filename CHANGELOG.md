@@ -190,3 +190,37 @@
 - [`cap/test/test_meta_pass.cp`](file:///data/dev/cp/cap/test/test_meta_pass.cp): 元注解 `meta` 声明、`@target` 目标约束、`@reflect`、`@once`、无参免 `()`、单参免键名、同名注解天然多重收集为数组及 Ad-hoc 免声明即用正向综合测试。
 - [`cap/test/test_meta_fail_target.cp`](file:///data/dev/cp/cap/test/test_meta_fail_target.cp): 将 `@target(method)` 元注解非法附着在类上触发编译期语义拦截反向测试。
 - [`cap/test/test_meta_fail_once.cp`](file:///data/dev/cp/cap/test/test_meta_fail_once.cp): 将 `@once` 元注解重复多次标注触发编译期语义拦截反向测试。
+
+## [Unreleased] - 2026-10-22
+
+### 阶段二：Dual-State Reflection 双态反射模型规范与实现
+
+### 修改文件 (Modified)
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs):
+  - 在 `Expr` 枚举中新增 `ReflectType { span: Span, target_ty: Type }` 与 `ReflectOf { span: Span, expr: Box<Expr> }` 表达式节点。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - 在后缀成员解析中支持解析 `reflect.type<T>()` 与 `reflect.of(val)`；
+  - 在 `parse_ident` 中加入 `Token::Meta => "meta".to_string()`，允许 `meta` 作为合法成员属性名（如 `info.meta`）。
+- [`cpc/src/ast_visitor.rs`](file:///data/dev/cp/cpc/src/ast_visitor.rs):
+  - 适配 `Expr::ReflectType` 与 `Expr::ReflectOf` 的变量引用收集。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 新增 `SemaError::ReflectNotEnabled` 错误变体；
+  - 针对 `reflect.type<T>()` 与 `reflect.of(val)` 执行编译期反射开关硬检验：若目标类/结构体未标记 `@reflect`，直接报错拦截；
+  - 预置 `TypeInfo`、`FieldInfo`、`MethodInfo` 类型识别并将 `reflect` 设为合法内置标识符。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 在 Zig 运行时前导声明中引入 `FieldInfo`、`MethodInfo`、`TypeInfo`（含 `getField` 与 `getMethod` 方法）；
+  - 升级 `Message` 与 `MessageContext` 支持 `.array: []Message`，支持下标直接读取多值注解数组；
+  - 实现 `generate_reflection_tables`：为每个 `@reflect` 标记的类生成惰性分配的单例 `_get_typeinfo_<ClassName>()` 与 `_typeinfo_<ClassName>`；
+  - 彻底复用 CP 原生动态字典 `Dict<string, any>`（`*Map`），同名多次出现的注解自动聚合为 `Message.array`，单值注解自动解构为标量；
+  - 在 `generate_expr`、`infer_zig_type`、`infer_cp_type` 中打通 `Expr::ReflectType`、`Expr::ReflectOf` 及相关字段/方法类型推导。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 新增第十三章《Dual-State Reflection 双态反射模型规范》，详细记录反射入口、扁平反射模型、原生字典复用与零成本安全屏障。
+- [`cpc/src/dcp.rs`](file:///data/dev/cp/cpc/src/dcp.rs):
+  - 代码格式化适配。
+
+### 新增文件 (Added)
+- [`lib/cap/reflect.cp`](file:///data/dev/cp/lib/cap/reflect.cp): CP 标准库反射声明模块（`cap:reflect`）。
+- [`cap/test/test_reflect_pass.cp`](file:///data/dev/cp/cap/test/test_reflect_pass.cp): 双态反射正向综合测试，验证 `reflect.type<T>()`、`reflect.of(val)`、`info.name`、`info.isRef`、`info.meta` 字典读取与存在性判断、`info.fields`、`info.methods`、同名注解数组收集、`getField` 与 `getMethod` 以及 `ref class` 反射。
+- [`cap/test/test_reflect_fail_unmarked.cp`](file:///data/dev/cp/cap/test/test_reflect_fail_unmarked.cp): 未标记 `@reflect` 的类调用 `reflect.type<T>()` 触发编译期精准拦截反向测试。
+- [`cap/test/test_reflect_fail_of_unmarked.cp`](file:///data/dev/cp/cap/test/test_reflect_fail_of_unmarked.cp): 未标记 `@reflect` 的实例调用 `reflect.of(val)` 触发编译期精准拦截反向测试。
+

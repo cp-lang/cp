@@ -117,6 +117,10 @@ pub fn find_referenced_vars_in_expr(expr: &Expr, vars: &mut HashSet<String>) {
             ArrowBody::Expr(e) => find_referenced_vars_in_expr(e, vars),
             ArrowBody::Block(b) => find_referenced_vars_in_block(b, vars),
         },
+        Expr::ReflectType { .. } => {}
+        Expr::ReflectOf { expr, .. } => {
+            find_referenced_vars_in_expr(expr, vars);
+        }
         _ => {}
     }
 }

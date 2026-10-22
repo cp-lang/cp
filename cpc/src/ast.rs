@@ -296,6 +296,14 @@ pub enum Expr {
     Move(Box<Expr>),
     Borrow(Box<Expr>, bool),
     Builtin(BuiltinCall),
+    ReflectType {
+        span: Span,
+        target_ty: Type,
+    },
+    ReflectOf {
+        span: Span,
+        expr: Box<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

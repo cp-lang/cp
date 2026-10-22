@@ -1436,6 +1436,35 @@ impl<'a> Parser<'a> {
                             left = Expr::BoxNew(Box::new(inner));
                             continue;
                         }
+                        if obj_id.sym == "reflect" {
+                            if prop.sym == "type" && self.peek() == Some(&Token::Less) {
+                                self.bump()?; // consume '<'
+                                let target_ty = self.parse_type()?;
+                                self.expect(Token::Greater)?;
+                                self.expect(Token::LParen)?;
+                                let end_tok = self.expect(Token::RParen)?;
+                                left = Expr::ReflectType {
+                                    span: Span {
+                                        start: obj_id.span.start,
+                                        end: end_tok.end,
+                                    },
+                                    target_ty,
+                                };
+                                continue;
+                            } else if prop.sym == "of" && self.peek() == Some(&Token::LParen) {
+                                self.bump()?; // consume '('
+                                let inner = self.parse_expr()?;
+                                let end_tok = self.expect(Token::RParen)?;
+                                left = Expr::ReflectOf {
+                                    span: Span {
+                                        start: obj_id.span.start,
+                                        end: end_tok.end,
+                                    },
+                                    expr: Box::new(inner),
+                                };
+                                continue;
+                            }
+                        }
                     }
                     if (prop.sym == "downcast" || prop.sym == "downcast_mut")
                         && self.peek() == Some(&Token::Less)
@@ -2079,6 +2108,7 @@ impl<'a> Parser<'a> {
             Token::New => "new".to_string(),
             Token::From => "from".to_string(),
             Token::As => "as".to_string(),
+            Token::Meta => "meta".to_string(),
             _ => {
                 return Err(ParseError::ExpectedToken(
                     Token::Ident("Ident".to_string()),
@@ -2144,6 +2174,7 @@ fn left_span(expr: &Expr) -> Span {
         Expr::Move(e) => left_span(e),
         Expr::Borrow(e, _) => left_span(e),
         Expr::Builtin(b) => b.span,
+        Expr::ReflectType { span, .. } | Expr::ReflectOf { span, .. } => *span,
     }
 }
 
@@ -2177,5 +2208,6 @@ fn right_span(expr: &Expr) -> Span {
         Expr::Move(e) => right_span(e),
         Expr::Borrow(e, _) => right_span(e),
         Expr::Builtin(b) => b.span,
+        Expr::ReflectType { span, .. } | Expr::ReflectOf { span, .. } => *span,
     }
 }
