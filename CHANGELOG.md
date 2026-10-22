@@ -224,3 +224,38 @@
 - [`cap/test/test_reflect_fail_unmarked.cp`](file:///data/dev/cp/cap/test/test_reflect_fail_unmarked.cp): 未标记 `@reflect` 的类调用 `reflect.type<T>()` 触发编译期精准拦截反向测试。
 - [`cap/test/test_reflect_fail_of_unmarked.cp`](file:///data/dev/cp/cap/test/test_reflect_fail_of_unmarked.cp): 未标记 `@reflect` 的实例调用 `reflect.of(val)` 触发编译期精准拦截反向测试。
 
+## [Unreleased] - 2026-10-22
+
+### 阶段三：极简装饰器系统与 AOP 静态合成规范与实现
+
+### 修改文件 (Modified)
+- [`cpc/src/lexer.rs`](file:///data/dev/cp/cpc/src/lexer.rs):
+  - 注册 `Token::Dec` (`dec` 3 字母关键字)。
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs):
+  - 在 `Decl` 中新增 `Decl::Dec(DecDef)` 变体；
+  - 为 `Param` 新增可选参数默认值字段 `pub default: Option<Expr>`。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - `is_decl_keyword` 与顶层解析放行 `Token::Dec`；
+  - 实现 `parse_dec_def`，支持 `dec name(params) { body }`；
+  - `parse_params` 支持 untyped `next` 参数（免写 `: any`）与参数默认值 `= expr` 解析；
+  - `parse_primary_expr` 支持 `Token::Fn` 解析匿名函数表达式 `fn(params) { body }` 为 `Expr::Arrow`。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 新增 `SemaError::DecInvalidTarget` 错误变体；
+  - 在 `Analyzer` 中增加 `dec_defs` 注册表，第一遍扫描记录所有 `dec` 声明并分配函数符号；
+  - 严格校验装饰器挂载目标合法性（当前阶段支持方法与函数，修饰字段等非法目标时精准报错）；
+  - 独立作用域分析 `dec` 内部逻辑与参数定义。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 实现 `generate_function_decorated` 与 `prepare_decorator_stmts`；
+  - 建立编译期静态合成 AOP 机制：原逻辑保留为 `_raw_<name>`，逐层展开装饰器切面代码合成为 `_wrap_k_<name>` 与最终公开入口 `<name>`；
+  - 实现洋葱执行模型（Onion Execution Model）：外层装饰器先进入、最后退出；
+  - `next()` 调用自动透传目标函数的参数与返回值；支持直接带参风格与高阶闭包工厂风格参数绑定；
+  - 在 `infer_zig_type` 与 `infer_cp_type` 中打通 `next()` 返回类型推导。
+- [`cpc/src/dcp.rs`](file:///data/dev/cp/cpc/src/dcp.rs):
+  - 增加对 `Decl::Dec` 的 `.d.cp` 类型声明输出支持。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 新增第十四章《Decorators 极简装饰器与 AOP 静态合成规范》，详细记录 `dec` 关键字、三免法则、洋葱模型、双轨参数风格与静态合成机制。
+
+### 新增文件 (Added)
+- [`cap/test/test_dec_pass.cp`](file:///data/dev/cp/cap/test/test_dec_pass.cp): 极简装饰器正向综合测试，验证无参直接装饰器 `@doubleResult`、直接带参装饰器 `@tag("SERVICE")`、高阶工厂装饰器 `@prefixFactory("GLOBAL")`、洋葱模型多装饰器堆叠 `@outerWrap` + `@innerWrap`、类方法修饰、顶层独立函数修饰及与 `@reflect` / `@Route` 元注解共存。
+- [`cap/test/test_dec_fail_target.cp`](file:///data/dev/cp/cap/test/test_dec_fail_target.cp): 将方法装饰器非法附着在类字段上触发编译期语义拦截反向测试。
+

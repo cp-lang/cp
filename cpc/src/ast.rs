@@ -31,6 +31,18 @@ pub enum Decl {
     Interface(Interface),
     ErrorSet(ErrorSetDecl),
     Meta(MetaDef),
+    Dec(DecDef),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DecDef {
+    pub span: Span,
+    pub ident: Ident,
+    pub params: Vec<Param>,
+    pub return_type: Option<Type>,
+    pub body: BlockStmt,
+    #[serde(default)]
+    pub meta: Vec<MetaItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -502,6 +514,8 @@ pub struct Param {
     pub is_move: bool,
     #[serde(default)]
     pub meta: Vec<MetaItem>,
+    #[serde(default)]
+    pub default: Option<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

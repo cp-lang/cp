@@ -42,6 +42,8 @@ pub enum Token {
     Super,
     #[token("meta")]
     Meta,
+    #[token("dec")]
+    Dec,
 
     #[token("export")]
     Export,

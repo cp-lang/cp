@@ -57,6 +57,9 @@ pub struct Codegen {
     pub current_fn_ret_ty: Option<Type>,
     pub current_stmt_idx: usize,
     pub last_use_map: HashMap<String, usize>,
+    pub dec_defs: HashMap<String, DecDef>,
+    pub current_next_callee: Option<String>,
+    pub current_forward_params: Vec<String>,
 }
 
 impl Codegen {
@@ -107,6 +110,9 @@ impl Codegen {
             current_fn_ret_ty: None,
             current_stmt_idx: 0,
             last_use_map: HashMap::new(),
+            dec_defs: HashMap::new(),
+            current_next_callee: None,
+            current_forward_params: Vec::new(),
         }
     }
 
@@ -444,6 +450,9 @@ impl Codegen {
             }
             if let ModuleItem::Decl(Decl::Impl(i)) = item {
                 impl_decls.push(i.clone());
+            }
+            if let ModuleItem::Decl(Decl::Dec(d)) = item {
+                self.dec_defs.insert(d.ident.sym.clone(), d.clone());
             }
         }
 
@@ -1268,6 +1277,7 @@ impl Codegen {
                 ModuleItem::Decl(Decl::Func(f)) => {
                     self.generate_function(f);
                 }
+                ModuleItem::Decl(Decl::Dec(_)) => {}
                 ModuleItem::Import(imp) => {
                     let mut specs = String::new();
                     for (v_idx, s) in imp.specifiers.iter().enumerate() {
@@ -1556,7 +1566,7 @@ impl Codegen {
             class.ident.sym
         ));
         for m in &class.methods {
-            self.generate_function_logic(m, Some(&class.ident.sym));
+            self.generate_function_decorated(m, Some(&class.ident.sym));
         }
         self.dedent();
         self.writeln("};");
@@ -2304,6 +2314,9 @@ impl Codegen {
             Expr::Move(inner) | Expr::Borrow(inner, _) => self.infer_cp_type(inner),
             Expr::Call(c) => {
                 if let Expr::Ident(fid) = &*c.callee {
+                    if fid.sym == "next" {
+                        return self.current_fn_ret_ty.clone();
+                    }
                     if fid.sym == "Error" {
                         return Some(Type::Ref(Ident {
                             span: Span { start: 0, end: 0 },
@@ -3525,8 +3538,161 @@ impl Codegen {
         }
     }
 
+    fn prepare_decorator_stmts(&self, dec_def: &DecDef, dec_item: &MetaItem) -> Vec<Stmt> {
+        let mut stmts = Vec::new();
+
+        // Check if dec_def is higher-order: return fn(next) { ... } or return (next) => { ... }
+        let mut is_higher_order = false;
+        let mut inner_stmts = Vec::new();
+
+        if let Some(Stmt::Return(ret_stmt)) = dec_def.body.body.last() {
+            if let Some(Expr::Arrow(arrow)) = &ret_stmt.arg {
+                is_higher_order = true;
+                match &*arrow.body {
+                    ArrowBody::Block(b) => {
+                        inner_stmts = b.body.clone();
+                    }
+                    ArrowBody::Expr(e) => {
+                        inner_stmts = vec![Stmt::Return(ReturnStmt {
+                            span: Span { start: 0, end: 0 },
+                            arg: Some(e.clone()),
+                        })];
+                    }
+                }
+            }
+        }
+
+        let arg_params: &[Param] = if is_higher_order {
+            &dec_def.params
+        } else {
+            if !dec_def.params.is_empty() && dec_def.params[0].ident.sym == "next" {
+                &dec_def.params[1..]
+            } else {
+                &dec_def.params
+            }
+        };
+
+        for (idx, p) in arg_params.iter().enumerate() {
+            let mut arg_val: Option<Expr> = None;
+            for arg in &dec_item.args {
+                match arg {
+                    MetaArg::Named(id, val) if id.sym == p.ident.sym => {
+                        arg_val = Some(val.clone());
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if arg_val.is_none() {
+                if idx < dec_item.args.len() {
+                    match &dec_item.args[idx] {
+                        MetaArg::Positional(val) => {
+                            arg_val = Some(val.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if arg_val.is_none() {
+                arg_val = p.default.clone();
+            }
+
+            if let Some(val) = arg_val {
+                stmts.push(Stmt::Var(VarDecl {
+                    span: p.span,
+                    pat: Pattern::Ident(p.ident.clone()),
+                    ty: Some(p.ty.clone()),
+                    init: Some(val),
+                    kind: VarDeclKind::Let,
+                }));
+            }
+        }
+
+        if is_higher_order {
+            stmts.extend(inner_stmts);
+        } else {
+            stmts.extend(dec_def.body.body.clone());
+        }
+
+        stmts
+    }
+
+    fn generate_function_decorated(&mut self, func: &Function, class_name: Option<&String>) {
+        let active_decs: Vec<&MetaItem> = func
+            .meta
+            .iter()
+            .filter(|m| self.dec_defs.contains_key(&m.name.sym))
+            .collect();
+
+        if active_decs.is_empty() {
+            self.generate_function_logic(func, class_name);
+            return;
+        }
+
+        let raw_name = format!("_raw_{}", func.ident.sym);
+        let mut raw_func = func.clone();
+        raw_func.ident.sym = raw_name.clone();
+        raw_func.meta.clear();
+
+        self.generate_function_logic(&raw_func, class_name);
+
+        let n = active_decs.len();
+        let forward_params: Vec<String> = func
+            .params
+            .iter()
+            .filter(|p| p.ident.sym != "this" && p.ident.sym != "_")
+            .map(|p| p.ident.sym.clone())
+            .collect();
+
+        for i in (0..n).rev() {
+            let dec_item = active_decs[i];
+            let dec_def = self.dec_defs.get(&dec_item.name.sym).unwrap().clone();
+
+            let wrapper_name = if i == 0 {
+                func.ident.sym.clone()
+            } else {
+                format!("_wrap_{}_{}", i, func.ident.sym)
+            };
+
+            let next_target = if i == n - 1 {
+                raw_name.clone()
+            } else {
+                format!("_wrap_{}_{}", i + 1, func.ident.sym)
+            };
+
+            let wrapper_stmts = self.prepare_decorator_stmts(&dec_def, dec_item);
+
+            let wrapper_func = Function {
+                span: func.span,
+                ident: Ident {
+                    span: func.ident.span,
+                    sym: wrapper_name,
+                },
+                params: func.params.clone(),
+                return_type: func.return_type.clone(),
+                body: BlockStmt {
+                    span: func.body.span,
+                    body: wrapper_stmts,
+                },
+                is_async: func.is_async,
+                is_static: func.is_static,
+                meta: vec![],
+            };
+
+            let old_callee = self.current_next_callee.clone();
+            let old_forward = self.current_forward_params.clone();
+            self.current_next_callee = Some(next_target);
+            self.current_forward_params = forward_params.clone();
+
+            self.generate_function_logic(&wrapper_func, class_name);
+
+            self.current_next_callee = old_callee;
+            self.current_forward_params = old_forward;
+        }
+    }
+
     fn generate_function(&mut self, func: &Function) {
-        self.generate_function_logic(func, None);
+        self.generate_function_decorated(func, None);
     }
 
     fn generate_function_logic(&mut self, func: &Function, class_name: Option<&String>) {
@@ -5569,6 +5735,34 @@ impl Codegen {
                     );
                 }
 
+                if callee == "next" {
+                    if let Some(next_fn) = self.current_next_callee.clone() {
+                        let mut args_str = String::new();
+                        if call.args.is_empty() {
+                            for p in &self.current_forward_params {
+                                if !args_str.is_empty() {
+                                    args_str.push_str(", ");
+                                }
+                                args_str.push_str(p);
+                            }
+                        } else {
+                            for arg in &call.args {
+                                if !args_str.is_empty() {
+                                    args_str.push_str(", ");
+                                }
+                                args_str.push_str(&self.generate_expr(arg));
+                            }
+                        }
+                        if self.is_class_method {
+                            return format!("self.{}({})", next_fn, args_str);
+                        } else if let Some(c) = &self.current_class_name {
+                            return format!("{}.{}({})", c, next_fn, args_str);
+                        } else {
+                            return format!("{}({})", next_fn, args_str);
+                        }
+                    }
+                }
+
                 // 4. Free function call: check Trait conformance and `mut` / `move` parameter modifiers
                 let fn_sig_opt = self.fn_sigs.get(&callee).cloned();
                 let mut args = String::new();
@@ -6936,6 +7130,13 @@ impl Codegen {
                 }
                 Expr::Call(call) => {
                     if let Expr::Ident(id) = &*call.callee {
+                        if id.sym == "next" {
+                            if let Some(ret_ty) = &self.current_fn_ret_ty {
+                                return self.map_type(ret_ty);
+                            } else {
+                                return "void".to_string();
+                            }
+                        }
                         if let Some(sig) = self.fn_sigs.get(&id.sym) {
                             if let Some(ret_ty) = &sig.return_type {
                                 return self.map_type(ret_ty);

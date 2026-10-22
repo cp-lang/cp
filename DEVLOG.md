@@ -609,3 +609,51 @@ TypeScript 将这两者混为一谈，导致 V8 引擎需要引入极其复杂�
 3. 编写反向测试 [`cap/test/test_reflect_fail_of_unmarked.cp`](file:///data/dev/cp/cap/test/test_reflect_fail_of_unmarked.cp)，验证对未标注 `@reflect` 的实例调用 `reflect.of(acc)` 被编译器精准拦截。
 4. 全量运行既有测试套件，保持 100% 绿色通过，无任何回归。
 
+---
+
+## 2026-10-22 - 阶段三：极简装饰器系统与 AOP 静态合成 (Decorators & AOP Synthesis)
+
+### 1. 任务背景与架构理念重审
+
+阶段一与阶段二分别打通了编译期数据标记（`meta`）与运行时反射（`reflect`）。阶段三的核心任务是建立**装饰器系统（Decorators & AOP）**。
+在对原草案进行全面审查后，我们确立了以下四项极简与高性能核心原则：
+1. **极短关键字 `dec`（3 字母）**：对标 `meta`（4 字母）与 `fn`（2 字母），弃用冗长的 `decorator`；
+2. **消灭样板嵌套的洋葱切面模型**：
+   - 无参装饰器直写切面函数 `dec timer(next) { ... let res = next(); ... return res; }`，入参直接就是调用句柄 `next`，自动透传原函数参数与返回值；
+   - 带参装饰器通过配置闭包 `dec tag(prefix: string) { return fn(next) { ... }; }` 或直写 `dec tag(next, prefix: string) { ... }` 优雅实现；
+   - 三免法则：无参免括号（`@timer`）、单参免键名（`@retry(3)`）、多装饰器天然洋葱堆叠；
+3. **编译期静态合成架构 (Static Synthesis AOP)**：
+   - 彻底摒弃动态代理（Dynamic Proxy）、Monkey-patching 和运行时闭包分配；
+   - 编译器在编译期将原方法保留为 `_raw_xxx`，并将装饰器切面代码静态合成为包装函数（`_wrap_k_xxx` 与最终的公共入口）；
+   - 在 Zig 机器码层面达到手写内联代码的极限性能，零动态派发开销，强类型安全；
+4. **元注解与装饰器天然共存**：
+   - 编译器根据符号声明区分数据（`meta`）与切面（`dec`）；
+   - 同一方法可同时修饰切面（如 `@log`）与元数据（如 `@Get("/users")`），互不干扰、和谐统一。
+
+### 2. 实施方案与步骤规划
+
+1. **词法与 AST 扩展**：
+   - 在 `cpc/src/lexer.rs` 注册 `Token::Dec` (`dec`)；
+   - 在 `cpc/src/ast.rs` 中为 `Decl` 增加 `Dec(DecDef)` 变体；
+   - 为 `Param` 增加可选的默认值表达式 `pub default: Option<Expr>`；
+2. **语法解析器扩展 (`cpc/src/parser.rs`)**：
+   - `is_decl_keyword` 识别 `Token::Dec`；
+   - 实现 `parse_dec_def`，支持解析 `dec name(params) { body }`；
+   - `parse_params` 支持 untyped `next` 标识符及默认值 `= expr` 解析；
+   - `parse_primary_expr` 支持 `Token::Fn` 解析匿名函数表达式 `fn(params) { body }` 为 `Expr::Arrow`；
+3. **语义分析与符号管理 (`cpc/src/sema.rs`)**：
+   - 在 `Sema` 中建立 `dec_defs: HashMap<String, DecDef>`，首轮扫描注册所有装饰器定义；
+   - 校验装饰器切面作用目标合法性（当前阶段支持 `method` 与 `function`，非法目标精准报错）；
+   - 识别 `next` 标识符调用；
+4. **代码生成与 AOP 静态合成 (`cpc/src/codegen.rs`)**：
+   - 在函数与类方法生成前扫描其关联的 `meta` 列表，提取匹配 `dec_defs` 的装饰器序列；
+   - 若存在装饰器，按照洋葱模型逆序合成包装链：
+     - 生成保留原始实现的内部函数 `_raw_<name>`；
+     - 逐层展开装饰器切面逻辑并绑定参数，设置 `current_next_callee` 将 `next()` 转换为对下一层的静态调用（自动转发 `self` 与形参）；
+     - 最终合成公共入口函数 `<name>`；
+   - 完善 `infer_zig_type` 与 `infer_cp_type`，使 `let res = next();` 精准推导为原函数返回类型；
+5. **测试用例编写与验证**：
+   - 编写无参方法计时/日志装饰器、带参前缀装饰器、洋葱模型多装饰器堆叠、普通函数装饰、与 `@reflect` 结合正向综合测试；
+   - 编写非法目标反向测试并验证精准拦截。
+
+

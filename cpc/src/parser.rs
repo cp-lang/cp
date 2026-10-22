@@ -125,6 +125,7 @@ impl<'a> Parser<'a> {
                 | Token::Struct
                 | Token::Ref
                 | Token::Meta
+                | Token::Dec
                 | Token::Trait
                 | Token::Impl
                 | Token::Enum
@@ -250,6 +251,27 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn parse_dec_def(&mut self, meta_list: Vec<MetaItem>) -> ParseResult<DecDef> {
+        let start = self.expect(Token::Dec)?.start;
+        let ident = self.parse_ident()?;
+        let params = self.parse_params()?;
+        let mut return_type = None;
+        if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Arrow) {
+            self.bump()?;
+            return_type = Some(self.parse_type()?);
+        }
+        let body = self.parse_block_stmt()?;
+        let end = body.span.end;
+        Ok(DecDef {
+            span: Span { start, end },
+            ident,
+            params,
+            return_type,
+            body,
+            meta: meta_list,
+        })
+    }
+
     fn parse_module_item(&mut self) -> ParseResult<ModuleItem> {
         if self.peek() == Some(&Token::Export) {
             self.bump()?;
@@ -294,6 +316,7 @@ impl<'a> Parser<'a> {
         match self.peek() {
             Some(Token::Import) => Ok(ModuleItem::Import(self.parse_import_stmt()?)),
             Some(Token::Meta)
+            | Some(Token::Dec)
             | Some(Token::Fn)
             | Some(Token::Class)
             | Some(Token::Struct)
@@ -345,6 +368,7 @@ impl<'a> Parser<'a> {
     fn parse_decl(&mut self, meta: Vec<MetaItem>) -> ParseResult<Decl> {
         match self.peek() {
             Some(Token::Meta) => Ok(Decl::Meta(self.parse_meta_def(meta)?)),
+            Some(Token::Dec) => Ok(Decl::Dec(self.parse_dec_def(meta)?)),
             Some(Token::Fn) | Some(Token::Async) | Some(Token::Static) => {
                 let mut f = self.parse_function()?;
                 f.meta = meta;
@@ -435,13 +459,21 @@ impl<'a> Parser<'a> {
             }
 
             let p_ident = self.parse_ident()?;
-            let ty = if (p_ident.sym == "this" || p_ident.sym == "_")
+            let ty = if (p_ident.sym == "this" || p_ident.sym == "_" || p_ident.sym == "next")
                 && self.peek() != Some(&Token::Colon)
             {
                 Type::Any
-            } else {
-                self.expect(Token::Colon)?;
+            } else if self.peek() == Some(&Token::Colon) {
+                self.bump()?;
                 self.parse_type()?
+            } else {
+                Type::Any
+            };
+            let default = if self.peek() == Some(&Token::Assign) {
+                self.bump()?;
+                Some(self.parse_primary_expr()?)
+            } else {
+                None
             };
             params.push(Param {
                 span: p_ident.span,
@@ -451,6 +483,7 @@ impl<'a> Parser<'a> {
                 is_mut,
                 is_move,
                 meta,
+                default,
             });
             if self.peek() == Some(&Token::Comma) {
                 self.bump()?;
@@ -1846,6 +1879,27 @@ impl<'a> Parser<'a> {
             Token::Match | Token::Switch => {
                 let match_expr = self.parse_match_expr()?;
                 Ok(Expr::Match(Box::new(match_expr)))
+            }
+            Token::Fn => {
+                let params = self.parse_params()?;
+                let mut _return_type = None;
+                if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Arrow) {
+                    self.bump()?;
+                    _return_type = Some(self.parse_type()?);
+                }
+                let body = ArrowBody::Block(self.parse_block_stmt()?);
+                let pat_params = params
+                    .into_iter()
+                    .map(|p| Pattern::Ident(p.ident))
+                    .collect();
+                Ok(Expr::Arrow(Box::new(ArrowExpr {
+                    span: Span {
+                        start: span.start,
+                        end: self.peek_span().end,
+                    },
+                    params: pat_params,
+                    body: Box::new(body),
+                })))
             }
             Token::LParen => {
                 let checkpoint = self.lexer.clone();

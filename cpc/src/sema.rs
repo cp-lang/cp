@@ -33,6 +33,8 @@ pub enum SemaError {
     MetaArgNotConstant(String, Span),
     #[error("Compile Error: Type '{0}' cannot be reflected at runtime. Add '@reflect' to the class definition to enable runtime reflection at {1:?}")]
     ReflectNotEnabled(String, Span),
+    #[error("Compile Error: Decorator '@{0}' can only be applied to {1}, but was applied to {2} at {3:?}")]
+    DecInvalidTarget(String, String, String, Span),
 }
 
 pub type SemaResult<T> = Result<T, SemaError>;
@@ -65,6 +67,7 @@ pub struct Analyzer {
     current_fn_is_async: bool,
     pub symbol_map: HashMap<Span, SymbolKind>,
     pub meta_defs: HashMap<String, MetaDefInfo>,
+    pub dec_defs: HashMap<String, DecDef>,
 }
 
 impl Analyzer {
@@ -105,6 +108,7 @@ impl Analyzer {
             current_fn_is_async: false,
             symbol_map: HashMap::new(),
             meta_defs,
+            dec_defs: HashMap::new(),
         }
     }
 
@@ -240,6 +244,18 @@ impl Analyzer {
                 ModuleItem::Decl(Decl::Meta(m)) => {
                     self.register_meta_def(m)?;
                 }
+                ModuleItem::Decl(Decl::Dec(d)) => {
+                    self.dec_defs.insert(d.ident.sym.clone(), d.clone());
+                    self.define(
+                        d.ident.sym.clone(),
+                        SymbolKind::Func {
+                            params: d.params.iter().map(|p| p.ty.clone()).collect(),
+                            ret: d.return_type.clone(),
+                            is_async: false,
+                        },
+                        d.ident.span,
+                    )?;
+                }
                 ModuleItem::Decl(Decl::Class(c)) => {
                     self.classes.insert(c.ident.sym.clone(), c.clone());
                     self.define(
@@ -350,7 +366,17 @@ impl Analyzer {
                 }
             }
 
-            if let Some(def) = self.meta_defs.get(&item.name.sym) {
+            if self.dec_defs.contains_key(&item.name.sym) {
+                let matches_target = target == "method" || target == "function";
+                if !matches_target {
+                    return Err(SemaError::DecInvalidTarget(
+                        item.name.sym.clone(),
+                        "method, function".to_string(),
+                        target.to_string(),
+                        item.span,
+                    ));
+                }
+            } else if let Some(def) = self.meta_defs.get(&item.name.sym) {
                 let matches_target = def.allowed_targets.contains(target)
                     || (target == "struct" && def.allowed_targets.contains("class"))
                     || (target == "class" && def.allowed_targets.contains("struct"))
@@ -390,6 +416,20 @@ impl Analyzer {
         match decl {
             Decl::Meta(m) => {
                 self.validate_meta_items(&m.meta, "meta")?;
+            }
+            Decl::Dec(d) => {
+                self.validate_meta_items(&d.meta, "dec")?;
+                self.enter_scope();
+                for p in &d.params {
+                    let p_kind = SymbolKind::Var {
+                        ty: p.ty.clone(),
+                        kind: VarDeclKind::Let,
+                    };
+                    self.define(p.ident.sym.clone(), p_kind.clone(), p.ident.span)?;
+                    self.symbol_map.insert(p.ident.span, p_kind);
+                }
+                self.analyze_block(&d.body)?;
+                self.exit_scope();
             }
             Decl::Func(f) => {
                 self.validate_meta_items(&f.meta, "function")?;

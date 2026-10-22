@@ -2481,4 +2481,62 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 1. 阶段二（双态反射模型：`reflect.type<T>()`、`reflect.of(val)`、原生字典复用、同名多注解聚合数组、`@reflect` 零成本裁剪与硬屏障）成果全部通过编译与端到端测试；
 2. 规范更新 `CHANGELOG.md`、`DEVLOG.md` 与 `SESSION.md`，执行 Git 提交，将第二阶段成果完整沉淀至代码库。
 
+---
+
+## 2026-10-22
+
+### 用户指令
+> 先对阶段三的设计方案进行类似的极简与优雅化重审
+> 符合,按照此方案编码实现,并编写功能测试与示例代码文件,通过测试.
+
+### 执行结果汇报
+1. **阶段三设计极简与优雅化重审确立**：
+   - 确立 3 字母的 `dec` 极简关键字声明装饰器，取代长单词 `decorator`；
+   - 彻底摒弃动态代理与猴子补丁，确立**编译期静态合成 (Static Synthesis AOP)** 架构；
+   - 确立洋葱切面模型（Onion Model），外层装饰器先进入、最后退出；
+   - 支持无参直接切面（`dec timer(next)`）、直接带参风格（`dec tag(next, prefix: string)`）与高阶工厂闭包风格（`dec retry(...) { return fn(next) { ... }; }`）；
+   - 确立调用端三免法则与 `meta`/`dec`/`reflect` 和谐共存机制。
+2. **编译器前端与静态合成全链路实装完成**：
+   - **词法与 AST (`cpc/src/lexer.rs`, `cpc/src/ast.rs`)**：
+     - 注册 `Token::Dec` (`dec`)；
+     - 在 `Decl` 增加 `Decl::Dec(DecDef)`；
+     - 为 `Param` 增加默认值支持 `pub default: Option<Expr>`。
+   - **语法解析 (`cpc/src/parser.rs`)**：
+     - 放行 `Token::Dec` 顶层声明并实现 `parse_dec_def`；
+     - `parse_params` 支持 untyped `next` 参数与默认值 `= expr` 解析；
+     - `parse_primary_expr` 增加 `Token::Fn` 支持匿名闭包表达式 `fn(params) { body }`。
+   - **语义检查 (`cpc/src/sema.rs`)**：
+     - 新增 `SemaError::DecInvalidTarget`，校验装饰器挂载目标合法性（当前阶段支持方法与函数，挂载到字段精准报错拦截）；
+     - 在 `Analyzer` 中管理 `dec_defs`，第一遍扫描注册符号，并在独立作用域下分析装饰器逻辑。
+   - **AOP 静态合成代码生成 (`cpc/src/codegen.rs`)**：
+     - 增加 `generate_function_decorated` 与 `prepare_decorator_stmts`；
+     - 遇到方法/函数修饰器时，将原始实现保留为 `_raw_<name>`，逐层静态合成为 `_wrap_k_<name>` 与最终公开入口 `<name>`；
+     - 实现多装饰器洋葱模型顺序调用，`next()` 自动无损透传目标函数参数并返回结果；
+     - 完善 `infer_zig_type` 与 `infer_cp_type`，使 `let res = next();` 能够精准推导原函数返回类型。
+   - **接口声明 (`cpc/src/dcp.rs`)**：输出 `export dec ...` 接口声明。
+   - **规范文档 (`cp_ref.md`)**：新增第十四章《Decorators 极简装饰器与 AOP 静态合成规范》。
+3. **测试验证全线通过**：
+   - 编写正向综合测试 [`cap/test/test_dec_pass.cp`](file:///data/dev/cp/cap/test/test_dec_pass.cp)，测试并通过：
+     - 类方法无参装饰器 `@doubleResult`：`(100 + 10 + 20) * 2 = 260`；
+     - 直接带参装饰器 `@tag("SERVICE")`：`[SERVICE] msg=ok`；
+     - 洋葱模型多装饰器堆叠 `@outerWrap` + `@innerWrap`：`OUTER(INNER(item-99))`；
+     - 高阶工厂闭包装饰器 `@prefixFactory("GLOBAL")` 修饰顶层函数：`GLOBAL:Hello CP`；
+     - 顶层函数堆叠装饰器 `@addTen` + `@doubleResult`：`(5 * 2) + 10 = 20`；
+     - 与 `@reflect`、`@Route` 元注解无缝共存与反射内省验证。
+   - 编写反向测试 [`cap/test/test_dec_fail_target.cp`](file:///data/dev/cp/cap/test/test_dec_fail_target.cp)，验证将装饰器附着在字段上时被编译器精准拦截并输出 `Compile Error: Decorator '@log' can only be applied to method, function, but was applied to field`。
+   - 全量回归测试（`test_meta_pass.cp`、`test_reflect_pass.cp`、`test_map_set_dict.cp`、`hello.cp` 等），100% 保持绿色通过。
+
+---
+
+## 2026-10-22
+
+### 用户指令
+> 提交
+
+### 执行结果汇报
+1. 阶段三（极简装饰器系统：`dec` 关键字、洋葱切面模型、静态合成 AOP、双轨参数绑定、调用端三免法则及目标校验）成果全部通过编译与端到端测试；
+2. 规范更新 `CHANGELOG.md`、`DEVLOG.md` 与 `SESSION.md`，执行 Git 提交，将第三阶段成果完整沉淀至代码库。
+
+
+
 
