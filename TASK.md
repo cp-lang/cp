@@ -957,3 +957,73 @@ class B {
 3. 宏拆成两个阶段：Phase1（类型检查前，可新建类型，无完整 TypeInfo）；Phase2（类型检查后，拥有完整 TypeInfo，但只能生成 impl，不能新建类型）。
 4. 编译器维护**宏展开栈 + 类型依赖图**，自动检测循环，及时报错。
 5. 禁止宏生成的 AST 节点挂载宏注解，从根源杜绝无限宏展开。
+
+### 阶段一：MetaAnnotation 核心系统 (本次优先实施基石)
+
+1.  词法与语法分析：
+    • 新增 annotation 关键字与 Token。
+    • 解析 @Ident(args) 与 @Target、@Repeatable 基础语法。
+2.  AST 结构扩展：
+    • 增加 AnnotationDef 声明节点。
+    • 为 Class、Struct、Function、Field、Method 等增加 meta: MetaCollection 字段。
+3.  语义分析与静态校验：
+    • 检查参数是否为常量字面量。
+    • 校验 @Target 约束（如 @Target(Method) 放置在 Class 上时产生清晰友好的编译报错）。
+    • 实现默认覆盖与 @Repeatable 数组聚合机制。
+4.  测试套件：编写测试验证元注解解析、参数收集、作用域合法性与反向非法放置拦截。
+    ──────
+
+### 阶段二：双态反射模型 (Reflection)
+
+1.  反射标准库 reflect：
+    • 定义 TypeInfo、FieldInfo、MethodInfo 等内省数据结构。
+2.  编译期反射透传：
+    • 在编译期允许对任意类型调用 reflect.typeInfo<T>() 获取结构。
+3.  运行时反射与零成本裁剪：
+    • 内置 @ReflectEnable 注解；
+    • 仅对标记 @ReflectEnable 的类型在 Zig 代码中输出静态只读元数据常量表，其余类型完全剔除，保障二进制极度小巧。
+4.  测试套件：编写反射查询、运行时路由扫描模拟测试。
+    ──────
+
+### 阶段三：编译期装饰器 (Decorator & AOP)
+
+1.  词法与语法扩展：新增 decorator 关键字，解析装饰器定义函数。
+2.  AST 转换管道：
+    • 在类型检查前，遍历被修饰的方法和类，执行装饰器转换函数；
+    • 实现方法包装（AOP 前后置逻辑注入）。
+3.  语义安全边界守护：
+    • 严格拦截修改 extends 和 implements 的非法操作。
+4.  测试套件：编写日志包装器、耗时监控器等综合 AOP 测试。
+    ──────
+
+### 阶段四：编译期宏与派生生成 (Macro & Derive)
+
+1.  AST 构造 API (ast.*)：提供受限的沙箱 AST 节点构造接口。
+2.  宏展开管线：支持类似 @Derive!(Trait) 自动生成 impl 块。
+3.  递归检测与沙箱防护：设置最大展开深度，杜绝死循环递归展开。
+4.  测试套件：编写类似 JSON 自动序列化的宏派生测试。
+    ──────
+
+四、 调整后的四阶段落地实施方案（Roadmap）
+
+结合前后的完整设计，我们将前一轮的四阶段路线升级为更加坚固的工程演进图：
+
+• 阶段一：MetaAnnotation 核心系统（基础底座）
+• 实装 annotation 关键字与 @Ident(...) 语法解析；
+• 实装 @Target（位置约束）与 @Repeatable（数组收集）内置元注解；
+• 建立 AST 的 MetaCollection 静态元数据挂载表；
+• 参数仅限编译期常量字面量（确保可重现）。
+• 阶段二：双态反射与 CT 沙箱基础（内省底座）
+• 定义 TypeInfo、FieldInfo、MethodInfo 标准反射结构；
+• 实现编译期 reflect.typeInfo<T>()（Tier 1 声明内省）；
+• 实现 @ReflectEnable 运行时零成本裁剪机制（未标记类型完全剔除，标记类型生成只读静态表）；
+• 搭建 CT Runtime 纯计算沙箱环境与 Arena 分配器。
+• 阶段三：Phase 1 编译期装饰器（转换系统）
+• 实装 decorator 声明语法与 AST 包装函数；
+• 运行在类型检查之前，支持方法 AOP 包装（注入前后置逻辑）；
+• 严禁篡改 extends 单继承链与 implements Trait 列表。
+• 阶段四：Phase 2 类型感知宏与循环安全系统（生成系统）
+• 实装 macro 声明语法；
+• 接入 Phase 2 执行管线，支持读取完整 TypeInfo 自动派生 impl Trait for Target 代码；
+• 实装“宏展开调用栈追踪”与“128 层递归熔断器”；
+• 实装“宏产物禁止携带宏注解”硬核防线。

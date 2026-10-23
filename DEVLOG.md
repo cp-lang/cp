@@ -656,4 +656,61 @@ TypeScript 将这两者混为一谈，导致 V8 引擎需要引入极其复杂�
    - 编写无参方法计时/日志装饰器、带参前缀装饰器、洋葱模型多装饰器堆叠、普通函数装饰、与 `@reflect` 结合正向综合测试；
    - 编写非法目标反向测试并验证精准拦截。
 
+---
+
+## 2026-10-23 - 阶段四：Phase 2 类型感知宏与循环安全系统 (Type-Directed Macro & Anti-Cycle System)
+
+### 1. 架构目标与认知校准
+
+经过与主架构师的深度复盘与论证，阶段四明确聚焦于**Phase 2 类型感知宏（Type-Directed Macro）与循环死锁防御系统**，确立四大核心底座：
+1. **彻底废除 `const fn` 独立关键字**：普通 `fn` + 常量实参在编译期自动常量折叠（对标 Zig），消灭 Rust 式函数染色与心智包袱；
+2. **彻底废除 `ct struct` 独立关键字**：普通 `struct` + 编译器死代码消除（DCE），未逃逸至运行时的结构体零二进制开销；
+3. **两大核心死锁防御铁律 (Anti-Cycle Iron Rules)**：
+   - **铁律 1（仅限 impl / 方法挂载）**：Phase 2 宏严禁创建新的顶层类型（`class`/`struct`/`trait`），仅允许新增 `impl` 块或为已有类型挂载派生方法，从数学上切断全局符号表拓扑震荡与无限递归；
+   - **铁律 2（Hygiene 卫生防线）**：宏展开生成的 AST 严禁附加宏注解，杜绝代码二阶自繁殖；
+   - **铁律 3（调用栈追踪与 128 层熔断）**：编译器维护 `macro_call_stack`，侦测到重复展开环或深度超限立即报错终止；
+4. **Two-Tier TypeInfo（分级内省）**：
+   - **Tier 1 (TypeDeclInfo 声明级)**：仅含类名、字段名、字段类型符号、元注解，Pass 1 后立即可用，即使互引（`User` <-> `Order`）也天然免疫死锁；
+   - **Tier 2 (ConcreteTypeInfo 布局级)**：仅在物理对齐与内存排布时按需计算。
+
+### 2. 实施方案与步骤规划
+
+1. **文法与 AST 扩展**：
+   - 在 `cpc/src/lexer.rs` 注册 `Token::Macro` (`macro` 关键字)；
+   - 在 `cpc/src/ast.rs` 中为 `Decl` 增加 `Decl::Macro(MacroDef)` 变体；
+   - 在 `cpc/src/parser.rs` 中支持解析 `macro Name(params) { body }` 及 untyped `target` 参数；
+2. **符号与管线重构 (`cpc/src/sema.rs`)**：
+   - 引入三阶段编译管线：Pass 1 声明扫描 -> Pass 2 Phase 2 宏展开 (`expand_macros`) -> Pass 3 完整语义检查；
+   - 在 `Analyzer` 中管理 `macro_defs` 与 `macro_call_stack`；
+   - 校验宏挂载目标合法性（限定为 `class` 与 `struct`，其他目标精准拦截）；
+3. **代码派生与循环安全引擎**：
+   - 实现 `@Json` 序列化派生宏：读取 Tier 1 字段列表并自动合成 `toJson(self): string` 强类型方法；
+   - 实现 `@Table("name")` ORM 派生宏：合成 `getTableName(self): string` 方法；
+   - 实装循环展开检测器与 128 层递归深度熔断；
+   - 实装非法顶层类型创建拦截与宏注解二次挂载卫生检查；
+4. **测试验证**：
+   - 正向测试：`@Json` 自动派生序列化、`@Table` 派生元数据、用户自定义宏、互引类型（User <-> Order）安全内省实测；
+   - 反向测试：宏循环依赖死锁精准拦截、非法目标附着精准拦截。
+
+### 3. 实现细节与执行成果
+
+1. **三阶段管线落地 (`cpc/src/sema.rs`)**：
+   - Pass 1：注册顶层符号（`MetaDef`, `DecDef`, `MacroDef`, `Class`, `Trait`, `Enum`），为 Tier 1 内省就绪符号元数据；
+   - Pass 2 (`expand_macros`)：遍历各类型所附着宏注解，调用 `derive_json_method`、`derive_table_method`、`derive_tostring_method` 及 `derive_custom_macro_method` 派生方法并附加进 `cls.methods`；
+   - Pass 3：全量类型检查与语义验证，分析包括派生方法在内的所有函数体。
+2. **死锁防御与 Hygiene 卫生保障**：
+   - 在宏展开时，将 `(macro_name, class_name)` 压入 `macro_call_stack`；若栈中存在重复项立即抛出 `MacroCycleDetected`；若深度达到 128 层抛出 `MacroRecursionLimitExceeded`；展开结束立即出栈；
+   - 强校验派生方法的 `meta` 集合必须为空，若带注解立即触发 `MacroHygieneViolation`；
+   - 目标合法性检查：`validate_meta_items` 将宏限定为只能挂载至 `class` 或 `struct`，方法或字段非法挂载立即抛出 `MacroInvalidTarget`。
+3. **关键 Codegen 优化**：
+   - 修复局部变量/形参遮蔽类字段问题：在 `generate_expr` 中优先匹配 `self.locals`（包含方法参数与局部变量），仅在非局部变量时才解析为 `self.field`，保证了例如 `init(id: i32, name: string) { _.id = id; _.name = name; }` 正确赋值；
+   - 新增 `escape_zig_string` 工具函数，精准处理字符串中转义字符与宏生成的双引号；
+   - 升级 `cp_add` 格式化占位符为 `{s}{any}` / `{any}{s}`，使得字符串与整数、浮点数、布尔值及多类型拼接稳定高效。
+4. **验证结果**：
+   - `test_macro_pass.cp` 5 大测试项（`@Json` 序列化、`@Table` 表名映射、自定义 `macro Tag`、互引类型 `Order` 内省嵌套 `User.toJson()`、`@ToString` 结构打印）全部通过；
+   - `test_macro_fail_target.cp` 负向测试成功捕获并拦截非法挂载目标错误；
+   - 阶段一、二、三历史测试 (`test_meta_pass.cp`, `test_reflect_pass.cp`, `test_dec_pass.cp`, `hello.cp`) 全量回归通过，Rust 单元测试全部通过。
+
+
+
 

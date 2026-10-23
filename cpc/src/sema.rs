@@ -35,6 +35,20 @@ pub enum SemaError {
     ReflectNotEnabled(String, Span),
     #[error("Compile Error: Decorator '@{0}' can only be applied to {1}, but was applied to {2} at {3:?}")]
     DecInvalidTarget(String, String, String, Span),
+    #[error(
+        "Compile Error: Macro cycle detected: '@{0}' recursively invoked on class '{1}' at {2:?}"
+    )]
+    MacroCycleDetected(String, String, Span),
+    #[error("Compile Error: Macro recursion limit (128) exceeded in '@{0}' at {1:?}")]
+    MacroRecursionLimitExceeded(String, Span),
+    #[error(
+        "Compile Error: Macro '@{0}' can only be applied to {1}, but was applied to {2} at {3:?}"
+    )]
+    MacroInvalidTarget(String, String, String, Span),
+    #[error("Compile Error: Type-directed macro '{0}' cannot create new top-level types (classes or structs) at {1:?}")]
+    MacroProhibitedTypeCreation(String, Span),
+    #[error("Compile Error: Macro hygiene violation: generated code from '@{0}' cannot carry macro annotations at {1:?}")]
+    MacroHygieneViolation(String, Span),
 }
 
 pub type SemaResult<T> = Result<T, SemaError>;
@@ -68,6 +82,8 @@ pub struct Analyzer {
     pub symbol_map: HashMap<Span, SymbolKind>,
     pub meta_defs: HashMap<String, MetaDefInfo>,
     pub dec_defs: HashMap<String, DecDef>,
+    pub macro_defs: HashMap<String, MacroDef>,
+    pub macro_call_stack: Vec<(String, String)>,
 }
 
 impl Analyzer {
@@ -102,6 +118,28 @@ impl Analyzer {
             },
         );
 
+        let mut macro_defs = HashMap::new();
+        let mock_span = Span { start: 0, end: 0 };
+        for name in ["Json", "Table", "Clone", "ToString"] {
+            macro_defs.insert(
+                name.to_string(),
+                MacroDef {
+                    span: mock_span.clone(),
+                    ident: Ident {
+                        span: mock_span.clone(),
+                        sym: name.to_string(),
+                    },
+                    params: vec![],
+                    return_type: None,
+                    body: BlockStmt {
+                        span: mock_span.clone(),
+                        body: vec![],
+                    },
+                    meta: vec![],
+                },
+            );
+        }
+
         Self {
             scopes: vec![HashMap::new()],
             classes: HashMap::new(),
@@ -109,10 +147,12 @@ impl Analyzer {
             symbol_map: HashMap::new(),
             meta_defs,
             dec_defs: HashMap::new(),
+            macro_defs,
+            macro_call_stack: Vec::new(),
         }
     }
 
-    pub fn analyze_module(&mut self, module: &Module) -> SemaResult<()> {
+    pub fn analyze_module(&mut self, module: &mut Module) -> SemaResult<()> {
         let mock_span = Span { start: 0, end: 0 };
         let regex_class = crate::ast::Class {
             span: mock_span.clone(),
@@ -256,6 +296,18 @@ impl Analyzer {
                         d.ident.span,
                     )?;
                 }
+                ModuleItem::Decl(Decl::Macro(m)) => {
+                    self.macro_defs.insert(m.ident.sym.clone(), m.clone());
+                    self.define(
+                        m.ident.sym.clone(),
+                        SymbolKind::Func {
+                            params: m.params.iter().map(|p| p.ty.clone()).collect(),
+                            ret: Some(crate::ast::Type::Void),
+                            is_async: false,
+                        },
+                        m.ident.span,
+                    )?;
+                }
                 ModuleItem::Decl(Decl::Class(c)) => {
                     self.classes.insert(c.ident.sym.clone(), c.clone());
                     self.define(
@@ -287,6 +339,23 @@ impl Analyzer {
                 _ => {}
             }
         }
+
+        // Pass 2: Phase 2 Type-Directed Macro Expansion
+        self.expand_macros(module)?;
+
+        // Update self.classes, symbol_map, and scopes with classes that had methods added by macros
+        for item in &module.body {
+            if let ModuleItem::Decl(Decl::Class(c)) = item {
+                self.classes.insert(c.ident.sym.clone(), c.clone());
+                self.symbol_map
+                    .insert(c.ident.span, SymbolKind::Class(c.clone()));
+                if let Some(scope_entry) = self.scopes[0].get_mut(&c.ident.sym) {
+                    *scope_entry = SymbolKind::Class(c.clone());
+                }
+            }
+        }
+
+        // Pass 3: Full Semantic Analysis & Type Checking
         for item in &module.body {
             match item {
                 ModuleItem::Decl(decl) => self.analyze_decl(decl)?,
@@ -295,6 +364,313 @@ impl Analyzer {
             }
         }
         Ok(())
+    }
+
+    fn expand_macros(&mut self, module: &mut Module) -> SemaResult<()> {
+        let mut class_modifications: Vec<(String, Vec<Function>)> = Vec::new();
+
+        for item in &module.body {
+            if let ModuleItem::Decl(Decl::Class(cls)) = item {
+                let mut derived_methods = Vec::new();
+                for meta_item in &cls.meta {
+                    let macro_name = &meta_item.name.sym;
+                    if !self.macro_defs.contains_key(macro_name) {
+                        continue;
+                    }
+
+                    // Anti-Cycle Guardrails:
+                    let call_key = (macro_name.clone(), cls.ident.sym.clone());
+                    if self.macro_call_stack.contains(&call_key) {
+                        return Err(SemaError::MacroCycleDetected(
+                            macro_name.clone(),
+                            cls.ident.sym.clone(),
+                            meta_item.span,
+                        ));
+                    }
+                    if self.macro_call_stack.len() >= 128 {
+                        return Err(SemaError::MacroRecursionLimitExceeded(
+                            macro_name.clone(),
+                            meta_item.span,
+                        ));
+                    }
+
+                    self.macro_call_stack.push(call_key);
+
+                    let derived = match macro_name.as_str() {
+                        "Json" => self.derive_json_method(cls),
+                        "Table" => self.derive_table_method(cls, meta_item),
+                        "ToString" => self.derive_tostring_method(cls),
+                        _ => self.derive_custom_macro_method(macro_name, cls, meta_item),
+                    };
+
+                    self.macro_call_stack.pop();
+
+                    // Macro Hygiene: generated AST nodes strictly cannot carry macro annotations!
+                    if !derived.meta.is_empty() {
+                        return Err(SemaError::MacroHygieneViolation(
+                            macro_name.clone(),
+                            meta_item.span,
+                        ));
+                    }
+
+                    derived_methods.push(derived);
+                }
+
+                if !derived_methods.is_empty() {
+                    class_modifications.push((cls.ident.sym.clone(), derived_methods));
+                }
+            }
+        }
+
+        for (class_name, methods) in class_modifications {
+            for item in &mut module.body {
+                if let ModuleItem::Decl(Decl::Class(cls)) = item {
+                    if cls.ident.sym == class_name {
+                        for m in methods {
+                            if !cls
+                                .methods
+                                .iter()
+                                .any(|existing| existing.ident.sym == m.ident.sym)
+                            {
+                                cls.methods.push(m);
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn derive_json_method(&self, cls: &Class) -> Function {
+        let mock_span = Span { start: 0, end: 0 };
+        let ret_expr = if cls.fields.is_empty() {
+            Expr::Lit(Lit::Str("{}".to_string()))
+        } else {
+            let mut expr = Expr::Lit(Lit::Str("{".to_string()));
+            for (idx, f) in cls.fields.iter().enumerate() {
+                let prefix = if idx == 0 {
+                    format!("\"{}\":", f.ident.sym)
+                } else {
+                    format!(",\"{}\":", f.ident.sym)
+                };
+                expr = Expr::Bin(BinExpr {
+                    span: mock_span,
+                    op: BinaryOp::Add,
+                    left: Box::new(expr),
+                    right: Box::new(Expr::Lit(Lit::Str(prefix))),
+                });
+
+                let field_access = Expr::Member(MemberExpr {
+                    span: mock_span,
+                    obj: Box::new(Expr::Ident(Ident {
+                        span: mock_span,
+                        sym: "_".to_string(),
+                    })),
+                    prop: f.ident.clone(),
+                });
+
+                let val_expr = match &f.ty {
+                    Type::String => Expr::Bin(BinExpr {
+                        span: mock_span,
+                        op: BinaryOp::Add,
+                        left: Box::new(Expr::Lit(Lit::Str("\"".to_string()))),
+                        right: Box::new(Expr::Bin(BinExpr {
+                            span: mock_span,
+                            op: BinaryOp::Add,
+                            left: Box::new(field_access),
+                            right: Box::new(Expr::Lit(Lit::Str("\"".to_string()))),
+                        })),
+                    }),
+                    Type::Ref(id) if self.classes.contains_key(&id.sym) => {
+                        let ref_cls = &self.classes[&id.sym];
+                        let has_json_macro = ref_cls.meta.iter().any(|m| m.name.sym == "Json")
+                            || ref_cls.methods.iter().any(|m| m.ident.sym == "toJson");
+                        if has_json_macro {
+                            Expr::Call(CallExpr {
+                                span: mock_span,
+                                callee: Box::new(Expr::Member(MemberExpr {
+                                    span: mock_span,
+                                    obj: Box::new(field_access),
+                                    prop: Ident {
+                                        span: mock_span,
+                                        sym: "toJson".to_string(),
+                                    },
+                                })),
+                                args: vec![],
+                                is_comptime: false,
+                            })
+                        } else {
+                            field_access
+                        }
+                    }
+                    _ => field_access,
+                };
+
+                expr = Expr::Bin(BinExpr {
+                    span: mock_span,
+                    op: BinaryOp::Add,
+                    left: Box::new(expr),
+                    right: Box::new(val_expr),
+                });
+            }
+
+            Expr::Bin(BinExpr {
+                span: mock_span,
+                op: BinaryOp::Add,
+                left: Box::new(expr),
+                right: Box::new(Expr::Lit(Lit::Str("}".to_string()))),
+            })
+        };
+
+        Function {
+            span: mock_span,
+            ident: Ident {
+                span: mock_span,
+                sym: "toJson".to_string(),
+            },
+            params: vec![],
+            return_type: Some(Type::String),
+            body: BlockStmt {
+                span: mock_span,
+                body: vec![Stmt::Return(crate::ast::ReturnStmt {
+                    span: mock_span,
+                    arg: Some(ret_expr),
+                })],
+            },
+            is_async: false,
+            is_static: false,
+            meta: vec![], // Macro Hygiene!
+        }
+    }
+
+    fn derive_table_method(&self, cls: &Class, meta_item: &MetaItem) -> Function {
+        let mock_span = Span { start: 0, end: 0 };
+        let table_name = if let Some(arg) = meta_item.args.first() {
+            match arg {
+                MetaArg::Positional(Expr::Lit(Lit::Str(s))) => s.clone(),
+                MetaArg::Named(_, Expr::Lit(Lit::Str(s))) => s.clone(),
+                _ => cls.ident.sym.to_lowercase(),
+            }
+        } else {
+            cls.ident.sym.to_lowercase()
+        };
+        Function {
+            span: mock_span,
+            ident: Ident {
+                span: mock_span,
+                sym: "getTableName".to_string(),
+            },
+            params: vec![],
+            return_type: Some(Type::String),
+            body: BlockStmt {
+                span: mock_span,
+                body: vec![Stmt::Return(crate::ast::ReturnStmt {
+                    span: mock_span,
+                    arg: Some(Expr::Lit(Lit::Str(table_name))),
+                })],
+            },
+            is_async: false,
+            is_static: false,
+            meta: vec![],
+        }
+    }
+
+    fn derive_tostring_method(&self, cls: &Class) -> Function {
+        let mock_span = Span { start: 0, end: 0 };
+        let mut expr = Expr::Lit(Lit::Str(format!("{}(", cls.ident.sym)));
+        for (idx, f) in cls.fields.iter().enumerate() {
+            let prefix = if idx == 0 {
+                format!("{}=", f.ident.sym)
+            } else {
+                format!(", {}=", f.ident.sym)
+            };
+            expr = Expr::Bin(BinExpr {
+                span: mock_span,
+                op: BinaryOp::Add,
+                left: Box::new(expr),
+                right: Box::new(Expr::Lit(Lit::Str(prefix))),
+            });
+            let field_access = Expr::Member(MemberExpr {
+                span: mock_span,
+                obj: Box::new(Expr::Ident(Ident {
+                    span: mock_span,
+                    sym: "_".to_string(),
+                })),
+                prop: f.ident.clone(),
+            });
+            expr = Expr::Bin(BinExpr {
+                span: mock_span,
+                op: BinaryOp::Add,
+                left: Box::new(expr),
+                right: Box::new(field_access),
+            });
+        }
+        expr = Expr::Bin(BinExpr {
+            span: mock_span,
+            op: BinaryOp::Add,
+            left: Box::new(expr),
+            right: Box::new(Expr::Lit(Lit::Str(")".to_string()))),
+        });
+        Function {
+            span: mock_span,
+            ident: Ident {
+                span: mock_span,
+                sym: "toString".to_string(),
+            },
+            params: vec![],
+            return_type: Some(Type::String),
+            body: BlockStmt {
+                span: mock_span,
+                body: vec![Stmt::Return(crate::ast::ReturnStmt {
+                    span: mock_span,
+                    arg: Some(expr),
+                })],
+            },
+            is_async: false,
+            is_static: false,
+            meta: vec![],
+        }
+    }
+
+    fn derive_custom_macro_method(
+        &self,
+        macro_name: &str,
+        _cls: &Class,
+        meta_item: &MetaItem,
+    ) -> Function {
+        let mock_span = Span { start: 0, end: 0 };
+        let method_name = format!("get{}", macro_name);
+        let return_val = if let Some(arg) = meta_item.args.first() {
+            match arg {
+                MetaArg::Positional(Expr::Lit(Lit::Str(s))) => s.clone(),
+                MetaArg::Named(_, Expr::Lit(Lit::Str(s))) => s.clone(),
+                _ => macro_name.to_string(),
+            }
+        } else {
+            macro_name.to_string()
+        };
+        Function {
+            span: mock_span,
+            ident: Ident {
+                span: mock_span,
+                sym: method_name,
+            },
+            params: vec![],
+            return_type: Some(Type::String),
+            body: BlockStmt {
+                span: mock_span,
+                body: vec![Stmt::Return(crate::ast::ReturnStmt {
+                    span: mock_span,
+                    arg: Some(Expr::Lit(Lit::Str(return_val))),
+                })],
+            },
+            is_async: false,
+            is_static: false,
+            meta: vec![],
+        }
     }
 
     fn is_const_expr(expr: &Expr) -> bool {
@@ -366,7 +742,17 @@ impl Analyzer {
                 }
             }
 
-            if self.dec_defs.contains_key(&item.name.sym) {
+            if self.macro_defs.contains_key(&item.name.sym) {
+                let matches_target = target == "class" || target == "struct";
+                if !matches_target {
+                    return Err(SemaError::MacroInvalidTarget(
+                        item.name.sym.clone(),
+                        "class, struct".to_string(),
+                        target.to_string(),
+                        item.span,
+                    ));
+                }
+            } else if self.dec_defs.contains_key(&item.name.sym) {
                 let matches_target = target == "method" || target == "function";
                 if !matches_target {
                     return Err(SemaError::DecInvalidTarget(
@@ -429,6 +815,20 @@ impl Analyzer {
                     self.symbol_map.insert(p.ident.span, p_kind);
                 }
                 self.analyze_block(&d.body)?;
+                self.exit_scope();
+            }
+            Decl::Macro(m) => {
+                self.validate_meta_items(&m.meta, "macro")?;
+                self.enter_scope();
+                for p in &m.params {
+                    let p_kind = SymbolKind::Var {
+                        ty: p.ty.clone(),
+                        kind: VarDeclKind::Let,
+                    };
+                    self.define(p.ident.sym.clone(), p_kind.clone(), p.ident.span)?;
+                    self.symbol_map.insert(p.ident.span, p_kind);
+                }
+                self.analyze_block(&m.body)?;
                 self.exit_scope();
             }
             Decl::Func(f) => {

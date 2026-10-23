@@ -60,14 +60,14 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 
             resolve_imports(&input, &include, &mut all_items, &mut processed_sources)?;
 
-            let module = Module {
+            let mut module = Module {
                 span: cpc::Span { start: 0, end: 0 },
                 body: all_items,
             };
 
             let mut analyzer = Analyzer::new();
             analyzer
-                .analyze_module(&module)
+                .analyze_module(&mut module)
                 .map_err(|e| anyhow::anyhow!("Semantic Error: {}", e))?;
 
             let mut codegen = Codegen::new();
@@ -82,11 +82,11 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Check { input } => {
             let code = fs::read_to_string(&input)?;
             let mut parser = CPParser::new(&code);
-            let module = parser
+            let mut module = parser
                 .parse_module()
                 .map_err(|e| anyhow::anyhow!("Parse Error in {:?}: {}", input, e))?;
             let mut analyzer = Analyzer::new();
-            analyzer.analyze_module(&module)?;
+            analyzer.analyze_module(&mut module)?;
             println!("Check successful");
         }
         Commands::EmitTypes { input, output } => {

@@ -1044,7 +1044,7 @@ impl Codegen {
         self.writeln("fn CpValType(comptime T: type) type { if (is_string_like(T)) return []const u8; if (T == comptime_int) return i32; if (T == comptime_float) return f32; return T; }");
         self.writeln("fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == comptime_int) { return @as(i32, v); } else if (comptime T == comptime_float) { return @as(f32, v); } else { return v; } }");
         self.writeln("fn CpAddReturn(comptime Ta: type, comptime Tb: type) type { if (is_string_like(Ta) or is_string_like(Tb)) return []const u8; if (Ta == comptime_int and Tb == comptime_int) return i32; if (Ta == comptime_int) return Tb; if (Tb == comptime_int) return Ta; if (Ta == comptime_float and Tb == comptime_float) return f32; if (Ta == comptime_float) return Tb; if (Tb == comptime_float) return Ta; return Ta; }");
-        self.writeln("fn cp_add(a: anytype, b: anytype) CpAddReturn(@TypeOf(a), @TypeOf(b)) { const Ta = @TypeOf(a); const Tb = @TypeOf(b); if (comptime (is_string_like(Ta) and is_string_like(Tb))) { return std.fmt.allocPrint(std.heap.page_allocator, \"{s}{s}\", .{ to_string_slice(a), to_string_slice(b) }) catch unreachable; } else if (comptime is_string_like(Ta)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{s}{d}\", .{ to_string_slice(a), b }) catch unreachable; } else if (comptime is_string_like(Tb)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{d}{s}\", .{ a, to_string_slice(b) }) catch unreachable; } else { return a + b; } }");
+        self.writeln("fn cp_add(a: anytype, b: anytype) CpAddReturn(@TypeOf(a), @TypeOf(b)) { const Ta = @TypeOf(a); const Tb = @TypeOf(b); if (comptime (is_string_like(Ta) and is_string_like(Tb))) { return std.fmt.allocPrint(std.heap.page_allocator, \"{s}{s}\", .{ to_string_slice(a), to_string_slice(b) }) catch unreachable; } else if (comptime is_string_like(Ta)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{s}{any}\", .{ to_string_slice(a), b }) catch unreachable; } else if (comptime is_string_like(Tb)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{any}{s}\", .{ a, to_string_slice(b) }) catch unreachable; } else { return a + b; } }");
         self.writeln("fn CpUnwrapOkType(comptime T: type) type { if (is_cp_result(T)) { const OkT = @FieldType(T, \"ok\"); if (@typeInfo(OkT) == .optional) return @typeInfo(OkT).optional.child; return OkT; } if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child; return T; }");
         self.writeln("fn cp_has_ok_val(v: anytype) bool { const T = @TypeOf(v); if (comptime is_cp_result(T)) { if (v != .ok) return false; const OkT = @FieldType(T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok != null; } else { return true; } } else if (comptime @typeInfo(T) == .optional) { return v != null; } else { return true; } }");
         self.writeln("fn cp_unwrap_ok_val(v: anytype) CpUnwrapOkType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_cp_result(T)) { const OkT = @FieldType(T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok.?; } else { return v.ok; } } else if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; } }");
@@ -1278,6 +1278,7 @@ impl Codegen {
                     self.generate_function(f);
                 }
                 ModuleItem::Decl(Decl::Dec(_)) => {}
+                ModuleItem::Decl(Decl::Macro(_)) => {}
                 ModuleItem::Import(imp) => {
                     let mut specs = String::new();
                     for (v_idx, s) in imp.specifiers.iter().enumerate() {
@@ -2968,6 +2969,27 @@ impl Codegen {
         }
     }
 
+    pub fn escape_zig_string(s: &str) -> String {
+        let mut out = String::new();
+        let chars: Vec<char> = s.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '\\' && i + 1 < chars.len() && chars[i + 1] == '\"' {
+                out.push('\\');
+                out.push('\"');
+                i += 2;
+            } else if chars[i] == '\"' {
+                out.push('\\');
+                out.push('\"');
+                i += 1;
+            } else {
+                out.push(chars[i]);
+                i += 1;
+            }
+        }
+        out
+    }
+
     fn generate_pattern_match(
         &self,
         val_expr: &str,
@@ -2983,7 +3005,7 @@ impl Codegen {
             Pattern::Lit(Lit::Float(f)) => (format!("cp_eq({}, {})", val_expr, f), String::new()),
             Pattern::Lit(Lit::Bool(b)) => (format!("cp_eq({}, {})", val_expr, b), String::new()),
             Pattern::Lit(Lit::Str(s)) => (
-                format!("cp_eq({}, \"{}\")", val_expr, s.replace('\"', "\\\"")),
+                format!("cp_eq({}, \"{}\")", val_expr, Self::escape_zig_string(s)),
                 String::new(),
             ),
             Pattern::Range {
@@ -4931,7 +4953,7 @@ impl Codegen {
                     format!("{}.0", s)
                 }
             }
-            Expr::Lit(Lit::Str(s)) => format!("\"{}\"", s.replace('\"', "\\\"")),
+            Expr::Lit(Lit::Str(s)) => format!("\"{}\"", Self::escape_zig_string(s)),
             Expr::Lit(Lit::Bool(b)) => {
                 if *b {
                     "true".to_string()
@@ -4990,8 +5012,12 @@ impl Codegen {
                     || self.globals.contains(&i.sym)
                 {
                     i.sym.clone()
-                } else if self.is_state_machine && self.locals.contains_key(&i.sym) {
-                    format!("ctx.{}", i.sym)
+                } else if self.locals.contains_key(&i.sym) {
+                    if self.is_state_machine {
+                        format!("ctx.{}", i.sym)
+                    } else {
+                        i.sym.clone()
+                    }
                 } else if self.is_class_field(&i.sym) {
                     if self.moved_vars.contains("this") || self.moved_vars.contains("_") {
                         panic!(

@@ -200,7 +200,7 @@ impl Backend {
 
         let mut parser = Parser::new(&text);
         match parser.parse_module() {
-            Ok(module) => {
+            Ok(mut module) => {
                 // Resolve dependencies (load .d.cp files)
                 if let Ok(path) = uri.to_file_path() {
                     let mut items = Vec::new();
@@ -226,16 +226,16 @@ impl Backend {
                     }
 
                     // Pre-fill analyzer with dependency items
-                    let dep_module = Module {
+                    let mut dep_module = Module {
                         span: crate::Span { start: 0, end: 0 },
                         body: items,
                     };
-                    if let Err(_e) = analyzer.analyze_module(&dep_module) {
+                    if let Err(_e) = analyzer.analyze_module(&mut dep_module) {
                         // Some dependency analysis errors, maybe log?
                     }
 
                     // Now analyze the current file's items
-                    if let Err(e) = analyzer.analyze_module(&module) {
+                    if let Err(e) = analyzer.analyze_module(&mut module) {
                         diagnostics.push(Diagnostic {
                             range: Range::default(),
                             severity: Some(DiagnosticSeverity::ERROR),

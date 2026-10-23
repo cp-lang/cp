@@ -47,6 +47,7 @@ bun.lockb          # 如果使用 bun
 # IDE
 .vscode/
 .idea/
+.agy/
 *.swp
 *.swo
 

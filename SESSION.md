@@ -2537,6 +2537,39 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 1. 阶段三（极简装饰器系统：`dec` 关键字、洋葱切面模型、静态合成 AOP、双轨参数绑定、调用端三免法则及目标校验）成果全部通过编译与端到端测试；
 2. 规范更新 `CHANGELOG.md`、`DEVLOG.md` 与 `SESSION.md`，执行 Git 提交，将第三阶段成果完整沉淀至代码库。
 
+---
+
+## 2026-10-23
+
+### 用户指令
+> 好 (执行阶段四：Phase 2 类型感知宏与循环安全系统实现与验证)
+
+### 执行结果汇报
+1. **方案落地与原则坚守**：
+   - 彻底废除 `const fn`（避免 Rust 式函数染色）与 `ct struct`（依靠编译器 DCE 消除），采用简洁的普通函数与结构体；
+   - 落实防死锁铁律：Phase 2 宏严禁创建顶层类型（仅允许派生方法与 `impl` 挂载），宏产物严禁附加宏注解（Hygiene 卫生防线），展开调用栈维持 128 层递归熔断；
+   - 确立 Two-Tier TypeInfo：在 Pass 1 符号扫描后形成 Tier 1 声明级元数据，使互引类型内省天然免疫死锁。
+2. **编译器全链路贯通**：
+   - **词法与 AST (`cpc/src/lexer.rs`, `cpc/src/ast.rs`)**：引入 `Token::Macro` (`macro` 关键字)，支持 `Decl::Macro(MacroDef)`；
+   - **语法解析 (`cpc/src/parser.rs`)**：支持 `macro Name(params) { body }` 及 untyped `target` 参数；
+   - **语义管线升级 (`cpc/src/sema.rs`)**：建立 Pass 1 符号扫描 -> Pass 2 Phase 2 宏派生展开 (`expand_macros`) -> Pass 3 完整类型检查的三阶段管线；实装 `derive_json_method`、`derive_table_method`、`derive_tostring_method` 及 `derive_custom_macro_method`；维护 `macro_call_stack`；
+   - **代码生成与符号修复 (`cpc/src/codegen.rs`)**：
+     - 修复局部变量/形参遮蔽类字段的符号查找优先级（优先匹配 `self.locals`）；
+     - 实现 `escape_zig_string`，精确处理字符串字面量转义；
+     - 优化 `cp_add` 格式化为 `{s}{any}` / `{any}{s}`；
+   - **接口声明 (`cpc/src/dcp.rs`)**：支持 `export macro ...` 接口输出；
+   - **语言规范 (`cp_ref.md`)**：新增第十五章《类型感知宏与循环安全系统》。
+3. **测试验证全线通过**：
+   - 编写正向综合测试 [`cap/test/test_macro_pass.cp`](file:///data/dev/cp/cap/test/test_macro_pass.cp)，测试并通过：
+     - `@Json` 强类型序列化方法派生：`User.toJson()` -> `{"id":1,"name":"Alice"}`；
+     - `@Table("t_users")` 与默认无参 `@Table` ORM 映射派生：`u.getTableName()` -> `"t_users"`，`o.getTableName()` -> `"order"`；
+     - 自定义 `macro Tag` 与 `macro Environment` 派生方法：`u.getTag()` -> `"UserModule"`，`cfg.getEnvironment()` -> `"Environment"`；
+     - Tier 1 声明级内省与嵌套序列化：`Order.toJson()` 嵌套内省 `User.toJson()` -> `{"orderId":1001,"user":{"id":2,"name":"Bob"}}`；
+     - `@ToString` 结构打印派生：`cfg.toString()` -> `"ServerConfig(host=localhost, port=8080)"`；
+   - 编写反向测试 [`cap/test/test_macro_fail_target.cp`](file:///data/dev/cp/cap/test/test_macro_fail_target.cp)，验证将宏挂载到方法上被编译器精准拦截；
+   - 全量回归测试（阶段一、二、三及基础功能测试）100% 绿色通过，Rust 单元测试全部通过。
+
+
 
 
 

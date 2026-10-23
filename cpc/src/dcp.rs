@@ -177,6 +177,18 @@ impl DcpEmitter {
                 }
                 self.output.push_str(");\n\n");
             }
+            Decl::Macro(m) => {
+                self.output
+                    .push_str(&format!("export macro {}(", m.ident.sym));
+                for (i, p) in m.params.iter().enumerate() {
+                    self.output
+                        .push_str(&format!("{}: {}", p.ident.sym, self.format_type(&p.ty)));
+                    if i < m.params.len() - 1 {
+                        self.output.push_str(", ");
+                    }
+                }
+                self.output.push_str(");\n\n");
+            }
             _ => {}
         }
     }

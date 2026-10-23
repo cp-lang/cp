@@ -32,6 +32,18 @@ pub enum Decl {
     ErrorSet(ErrorSetDecl),
     Meta(MetaDef),
     Dec(DecDef),
+    Macro(MacroDef),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MacroDef {
+    pub span: Span,
+    pub ident: Ident,
+    pub params: Vec<Param>,
+    pub return_type: Option<Type>,
+    pub body: BlockStmt,
+    #[serde(default)]
+    pub meta: Vec<MetaItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

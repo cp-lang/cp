@@ -126,6 +126,7 @@ impl<'a> Parser<'a> {
                 | Token::Ref
                 | Token::Meta
                 | Token::Dec
+                | Token::Macro
                 | Token::Trait
                 | Token::Impl
                 | Token::Enum
@@ -272,6 +273,27 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn parse_macro_def(&mut self, meta_list: Vec<MetaItem>) -> ParseResult<MacroDef> {
+        let start = self.expect(Token::Macro)?.start;
+        let ident = self.parse_ident()?;
+        let params = self.parse_params()?;
+        let mut return_type = None;
+        if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Arrow) {
+            self.bump()?;
+            return_type = Some(self.parse_type()?);
+        }
+        let body = self.parse_block_stmt()?;
+        let end = body.span.end;
+        Ok(MacroDef {
+            span: Span { start, end },
+            ident,
+            params,
+            return_type,
+            body,
+            meta: meta_list,
+        })
+    }
+
     fn parse_module_item(&mut self) -> ParseResult<ModuleItem> {
         if self.peek() == Some(&Token::Export) {
             self.bump()?;
@@ -317,6 +339,7 @@ impl<'a> Parser<'a> {
             Some(Token::Import) => Ok(ModuleItem::Import(self.parse_import_stmt()?)),
             Some(Token::Meta)
             | Some(Token::Dec)
+            | Some(Token::Macro)
             | Some(Token::Fn)
             | Some(Token::Class)
             | Some(Token::Struct)
@@ -369,6 +392,7 @@ impl<'a> Parser<'a> {
         match self.peek() {
             Some(Token::Meta) => Ok(Decl::Meta(self.parse_meta_def(meta)?)),
             Some(Token::Dec) => Ok(Decl::Dec(self.parse_dec_def(meta)?)),
+            Some(Token::Macro) => Ok(Decl::Macro(self.parse_macro_def(meta)?)),
             Some(Token::Fn) | Some(Token::Async) | Some(Token::Static) => {
                 let mut f = self.parse_function()?;
                 f.meta = meta;
@@ -459,7 +483,10 @@ impl<'a> Parser<'a> {
             }
 
             let p_ident = self.parse_ident()?;
-            let ty = if (p_ident.sym == "this" || p_ident.sym == "_" || p_ident.sym == "next")
+            let ty = if (p_ident.sym == "this"
+                || p_ident.sym == "_"
+                || p_ident.sym == "next"
+                || p_ident.sym == "target")
                 && self.peek() != Some(&Token::Colon)
             {
                 Type::Any

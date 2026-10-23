@@ -259,3 +259,43 @@
 - [`cap/test/test_dec_pass.cp`](file:///data/dev/cp/cap/test/test_dec_pass.cp): 极简装饰器正向综合测试，验证无参直接装饰器 `@doubleResult`、直接带参装饰器 `@tag("SERVICE")`、高阶工厂装饰器 `@prefixFactory("GLOBAL")`、洋葱模型多装饰器堆叠 `@outerWrap` + `@innerWrap`、类方法修饰、顶层独立函数修饰及与 `@reflect` / `@Route` 元注解共存。
 - [`cap/test/test_dec_fail_target.cp`](file:///data/dev/cp/cap/test/test_dec_fail_target.cp): 将方法装饰器非法附着在类字段上触发编译期语义拦截反向测试。
 
+## [Unreleased] - 2026-10-23
+
+### 阶段四：类型感知宏与循环安全系统 (Type-Directed Macro & Anti-Cycle System)
+
+### 修改文件 (Modified)
+- [`cpc/src/lexer.rs`](file:///data/dev/cp/cpc/src/lexer.rs):
+  - 注册 `Token::Macro` (`macro` 关键字)。
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs):
+  - 在 `Decl` 中新增 `Decl::Macro(MacroDef)` 变体；
+  - 新增 `MacroDef` 结构体，支持包含元注解、标识符、参数列表及展开函数体。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - `is_decl_keyword` 与顶层声明解析放行 `Token::Macro`；
+  - 实现 `parse_macro_def`，支持 `macro Name(params) { body }`；
+  - `parse_params` 允许 untyped `target` 参数（无类型注解直通）。
+- [`cpc/src/dcp.rs`](file:///data/dev/cp/cpc/src/dcp.rs):
+  - 增加对 `Decl::Macro` 的 `.d.cp` 符号声明格式化支持。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 顶层跳过 `Decl::Macro` 代码生成（宏纯编译期展开，零运行时二进制开销）；
+  - 新增 `escape_zig_string` 转义工具函数，精准处理字符串字面量中既有转义与宏合成双引号；
+  - 修复方法内本地变量/参数遮蔽（Shadowing）类字段的符号优先级问题；
+  - 升级 `cp_add` 格式化支持 `{s}{any}` / `{any}{s}`，无缝支持字符串与多类型数据高效拼接。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 新增 `MacroCycleDetected`、`MacroRecursionLimitExceeded`、`MacroInvalidTarget`、`MacroProhibitedTypeCreation`、`MacroHygieneViolation` 语义错误变体；
+  - 构建三阶段编译管线：Pass 1 顶层符号扫描 -> Pass 2 Phase 2 宏代码派生展开 (`expand_macros`) -> Pass 3 完整语义检查；
+  - 维护 `macro_call_stack`，提供 128 层递归熔断与递归展开环路探测；
+  - 严格校验宏挂载目标（仅允许挂载于 `class` 或 `struct`）；
+  - 实装 `@Json` 强类型序列化派生宏（合成 `toJson(): string` 方法）、`@Table` ORM 映射派生宏（合成 `getTableName(): string` 方法）、`@ToString` 结构打印派生宏以及用户自定义宏派生方法；
+  - 严守 Macro Hygiene 铁律，强校验派生产物严禁携带任何宏注解。
+- [`cpc/src/main.rs`](file:///data/dev/cp/cpc/src/main.rs):
+  - `analyze_module` 适配 `&mut Module` 签名，确保宏展开修改 AST 直接回传 codegen。
+- [`cpc/src/lsp.rs`](file:///data/dev/cp/cpc/src/lsp.rs):
+  - `analyze_module` 适配 `&mut Module` 签名。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 新增第十五章《类型感知宏与循环安全系统》，详细规范宏语法、内建派生宏、四大防死锁循环安全铁律。
+
+### 新增文件 (Added)
+- [`cap/test/test_macro_pass.cp`](file:///data/dev/cp/cap/test/test_macro_pass.cp): 类型感知宏与循环安全正向综合测试，验证 `@Json` 序列化派生、`@Table("t_users")` 表名映射、无参 `@Table` 默认类名映射、`@ToString` 结构打印、用户自定义 `macro Tag` 与 `macro Environment` 派生方法、以及互引类型（Tier 1 TypeDeclInfo）安全内省实测。
+- [`cap/test/test_macro_fail_target.cp`](file:///data/dev/cp/cap/test/test_macro_fail_target.cp): 将类宏 `@Json` 非法附着在类方法上触发编译期语义拦截反向测试。
+
+
