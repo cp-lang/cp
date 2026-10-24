@@ -49,6 +49,8 @@ pub enum SemaError {
     MacroProhibitedTypeCreation(String, Span),
     #[error("Compile Error: Macro hygiene violation: generated code from '@{0}' cannot carry macro annotations at {1:?}")]
     MacroHygieneViolation(String, Span),
+    #[error("Compile Error: Pipeline placeholder '.' can only be used on the right-hand side of a pipeline ('|>') operator at {0:?}")]
+    PipePlaceholderOutsidePipeline(Span),
 }
 
 pub type SemaResult<T> = Result<T, SemaError>;
@@ -1127,7 +1129,15 @@ impl Analyzer {
             }
             Expr::Bin(bin) => {
                 self.analyze_expr(&bin.left)?;
-                self.analyze_expr(&bin.right)?;
+                if bin.op == BinaryOp::Pipe {
+                    let transformed = transform_pipeline_rhs(&bin.right, "__pipe_mock");
+                    self.analyze_expr(&transformed)?;
+                } else {
+                    self.analyze_expr(&bin.right)?;
+                }
+            }
+            Expr::PipePlaceholder(span) => {
+                return Err(SemaError::PipePlaceholderOutsidePipeline(*span));
             }
             Expr::Call(call) | Expr::OptCall(call) => {
                 self.analyze_expr(&call.callee)?;
@@ -1491,6 +1501,10 @@ impl Analyzer {
                 }
             }
             Expr::Bin(bin) => {
+                if bin.op == BinaryOp::Pipe {
+                    let transformed = transform_pipeline_rhs(&bin.right, "__pipe_mock");
+                    return self.infer_type(&transformed);
+                }
                 let left = self.infer_type(&bin.left)?;
                 let right = self.infer_type(&bin.right)?;
                 if bin.op == BinaryOp::Assign {
@@ -1707,6 +1721,7 @@ fn inner_span(expr: &Expr) -> Span {
         Expr::Lit(_) => Span { start: 0, end: 0 },
         Expr::Bin(b) => b.span,
         Expr::ReflectType { span, .. } | Expr::ReflectOf { span, .. } => *span,
+        Expr::PipePlaceholder(span) => *span,
         _ => Span { start: 0, end: 0 },
     }
 }

@@ -711,6 +711,63 @@ TypeScript 将这两者混为一谈，导致 V8 引擎需要引入极其复杂�
    - `test_macro_fail_target.cp` 负向测试成功捕获并拦截非法挂载目标错误；
    - 阶段一、二、三历史测试 (`test_meta_pass.cp`, `test_reflect_pass.cp`, `test_dec_pass.cp`, `hello.cp`) 全量回归通过，Rust 单元测试全部通过。
 
+## 2026-10-24: 管道操作符 (`|>`) 与轻量主题占位符 (`.`) 架构落地与流式数据处理系统
+
+### 1. 业务痛点与技术价值
+在智能体（AI Agent）编程场景中，核心计算模式高度呈现为**数据流驱动（Dataflow Driven）**的认知多阶段流转：Prompt 清洗 -> RAG 向量检索 -> 上下文注入 -> LLM 推理 -> 工具调用 -> 结果校验。
+传统的嵌套函数调用结构：
+```cp
+let reply = simulate_agent(build_context("PROMPT", retrieve_rag("kb", sanitize_prompt(raw), 5)));
+```
+不仅存在逆序阅读的认知负担，而且当流水线参数复杂时，深层括号极易出错。
+通过引入管道操作符 `|>` 与独立主题占位符 `.`，开发者能够以人类最直观的从左至右、自顶向下的线性方式构建流水线：
+```cp
+let reply = raw
+    |> sanitize_prompt
+    |> retrieve_rag("kb", ., 5)
+    |> build_context("PROMPT", .)
+    |> simulate_agent;
+```
+
+### 2. 方案规划与实现原理
+
+1. **语法设计与三级降糖策略 (3-Tier Desugaring)**：
+   - 管道操作符：`|>`，左结合，操作符优先级设定为 3（高于比较操作符 2，低于加减法 4）。
+   - 规则一（裸标识符）：`a |> f` 降糖为 `f(a)`；
+   - 规则二（无占位符调用）：`a |> f(b)` 降糖为 `f(a, b)`（上游作为默认首参注入）；
+   - 规则三（显式占位符 `.`）：`a |> f(b, .)` 降糖为 `f(b, a)`；`obj |> .method()` 降糖为 `obj.method()`；`point |> .x * .y` 降糖为 `point.x * point.y`。
+2. **严格单次求值（Single Evaluation / No Double Evaluation）**：
+   - 上游表达式可能包含昂贵的外部 I/O 或有副作用的调用（如 `fetchData() |> process(., .)`）。
+   - 代码生成阶段将 `left |> right` 转换为 Zig 单赋值 SSA 标签块：
+     ```zig
+     (blk_p_N: { const __pipe_N = <left>; break :blk_p_N <right_with_pipe_N>; })
+     ```
+     确保上游有且仅有一次求值，且所有管道变量均在栈上以不可变常量存在，零运行时堆分配。
+3. **占位符的作用域卫生边界（Scope Hygiene）**：
+   - 裸 `.` 仅在 `in_pipeline_rhs > 0` 的管道右侧表达式中被识别为主题占位符 `Expr::PipePlaceholder`；
+   - 一旦离开管道右侧，裸 `.` 恢复普通属性访问与枚举简写本义，任何外部非法调用（如 `let x = .;`）均在编译期被拦截。
+4. **管道类型推导上下文强化 (`infer_cp_type_with_mock`)**：
+   - 为避免对象方法调用（如 `tw |> .prefix("CP")`）或字段运算在 CPS 状态机局部变量扫描时因无法获取中间管道变量类型而退化为 `*anyopaque`，在代码生成器中引入 `infer_cp_type_with_mock`。
+   - 动态将上游推导出的具体类型（如 `Type::Ref("TextWrapper")`）注入管道推导环境，使方法调用与字段运算能够精准定位目标类的方法签名与返回类型，生成完全强类型的 Zig 结构体字段（如 `[]const u8`、`i32`）。
+
+### 3. 测试验证与成果
+1. **正向综合测试 (`test_pipe_pass.cp`)**：
+   - 测试 1：规则一裸函数调用 (`21 |> double_num` -> 42)；
+   - 测试 2：规则二无占位符默认首参 (`100 |> add_num(50)` -> 150)；
+   - 测试 3：规则三任意参数槽位显式 `.` 注入 (`5 |> sub_num(30, .)` -> 25, `30 |> sub_num(., 5)` -> 25)；
+   - 测试 4：对象成员方法链式流转 (`tw |> .prefix("CP")` -> "CP:agent_core")；
+   - 测试 5：字段访问与算术解构 (`pt |> .x * .y` -> 42)；
+   - 测试 6：多行链式流水线混合降糖（4 次连续流转 -> 140）；
+   - 测试 7：单次求值与副作用防御验证（`cnt.get_seed() |> combine_two(., .)` 执行次数严格为 1，结果为 77）；
+   - 测试 8：AI Agent RAG 认知流水线综合模拟（Prompt 清洗 -> 向量检索 -> 上下文注入 -> LLM 推理 -> 结果校验）；
+   - 全部 8 大测试项 100% 通过。
+2. **反向测试 (`test_pipe_fail_placeholder.cp`)**：
+   - 在管道外部调用 `add_num(., 5)`，成功触发编译期报错：`Parse error: Pipeline placeholder '.' can only be used on the right-hand side of a pipeline ('|>') operator`。
+3. **全量回归验证**：
+   - 历史全量测试（`test_macro_pass.cp`, `test_dec_pass.cp`, `test_reflect_pass.cp`, `test_meta_pass.cp`, `hello.cp`）100% 回归通过；
+   - `cargo test` 单元测试通过，`cargo fmt` 格式化规范检查通过。
+
+
 
 
 

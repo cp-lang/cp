@@ -2273,12 +2273,23 @@ impl Codegen {
     }
 
     fn infer_cp_type(&self, expr: &Expr) -> Option<Type> {
+        self.infer_cp_type_with_mock(expr, &HashMap::new())
+    }
+
+    fn infer_cp_type_with_mock(
+        &self,
+        expr: &Expr,
+        mock_types: &HashMap<String, Type>,
+    ) -> Option<Type> {
         match expr {
             Expr::Lit(Lit::Int(_)) => Some(Type::I32),
             Expr::Lit(Lit::Float(_)) => Some(Type::F32),
             Expr::Lit(Lit::Str(_)) => Some(Type::String),
             Expr::Lit(Lit::Bool(_)) => Some(Type::Bool),
             Expr::Ident(id) => {
+                if let Some(t) = mock_types.get(&id.sym) {
+                    return Some(t.clone());
+                }
                 if id.sym == "true" || id.sym == "false" {
                     return Some(Type::Bool);
                 }
@@ -2312,7 +2323,9 @@ impl Codegen {
                 lifetimes: vec![],
             }))),
             Expr::EnumInit(ei) => Some(Type::Ref(ei.enum_name.clone())),
-            Expr::Move(inner) | Expr::Borrow(inner, _) => self.infer_cp_type(inner),
+            Expr::Move(inner) | Expr::Borrow(inner, _) => {
+                self.infer_cp_type_with_mock(inner, mock_types)
+            }
             Expr::Call(c) => {
                 if let Expr::Ident(fid) = &*c.callee {
                     if fid.sym == "next" {
@@ -2366,13 +2379,27 @@ impl Codegen {
                                 sym: "MethodInfo".to_string(),
                             }))));
                         }
-                        let tname_opt = self.resolve_var_type_name(&oid.sym).or_else(|| {
-                            if self.class_defs.contains_key(&oid.sym) {
-                                Some(oid.sym.clone())
-                            } else {
-                                None
+                        let tname_opt = if let Some(mty) = mock_types.get(&oid.sym) {
+                            match mty {
+                                Type::Ref(id) | Type::BoxDyn(id) => Some(id.sym.clone()),
+                                Type::BorrowType { inner, .. } => {
+                                    if let Type::Ref(id) | Type::BoxDyn(id) = &**inner {
+                                        Some(id.sym.clone())
+                                    } else {
+                                        None
+                                    }
+                                }
+                                _ => None,
                             }
-                        });
+                        } else {
+                            self.resolve_var_type_name(&oid.sym).or_else(|| {
+                                if self.class_defs.contains_key(&oid.sym) {
+                                    Some(oid.sym.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                        };
                         if let Some(tname) = tname_opt {
                             if let Some((_, Some(rt), _)) =
                                 self.lookup_method(&tname, &mem.prop.sym)
@@ -2390,7 +2417,7 @@ impl Codegen {
                 None
             }
             Expr::Member(mem) => {
-                if let Some(obj_ty) = self.infer_cp_type(&mem.obj) {
+                if let Some(obj_ty) = self.infer_cp_type_with_mock(&mem.obj, mock_types) {
                     if let Type::Object(fields) = &obj_ty {
                         if let Some(f) = fields.iter().find(|f| f.ident.sym == mem.prop.sym) {
                             return Some(f.ty.clone());
@@ -2398,6 +2425,12 @@ impl Codegen {
                     }
                     if let Type::Ref(id) = &obj_ty {
                         let tname = &id.sym;
+                        if let Some(cls) = self.class_defs.get(tname) {
+                            if let Some(f) = cls.fields.iter().find(|f| f.ident.sym == mem.prop.sym)
+                            {
+                                return Some(f.ty.clone());
+                            }
+                        }
                         if tname == "TypeInfo" {
                             if mem.prop.sym == "fields" {
                                 return Some(Type::Array(Box::new(Type::Ref(Ident {
@@ -2455,6 +2488,28 @@ impl Codegen {
                     }
                 }
                 if let Expr::Ident(oid) = &*mem.obj {
+                    if let Some(mty) = mock_types.get(&oid.sym) {
+                        let tname_opt = match mty {
+                            Type::Ref(id) | Type::BoxDyn(id) => Some(id.sym.clone()),
+                            Type::BorrowType { inner, .. } => {
+                                if let Type::Ref(id) | Type::BoxDyn(id) = &**inner {
+                                    Some(id.sym.clone())
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        };
+                        if let Some(tname) = tname_opt {
+                            if let Some(cls) = self.class_defs.get(&tname) {
+                                if let Some(f) =
+                                    cls.fields.iter().find(|f| f.ident.sym == mem.prop.sym)
+                                {
+                                    return Some(f.ty.clone());
+                                }
+                            }
+                        }
+                    }
                     if let Some(Type::Object(fields)) = self.var_cp_types.get(&oid.sym) {
                         if let Some(f) = fields.iter().find(|f| f.ident.sym == mem.prop.sym) {
                             return Some(f.ty.clone());
@@ -2539,7 +2594,7 @@ impl Codegen {
                 None
             }
             Expr::OptMember(mem) => {
-                if let Some(obj_ty) = self.infer_cp_type(&mem.obj) {
+                if let Some(obj_ty) = self.infer_cp_type_with_mock(&mem.obj, mock_types) {
                     let mut base_ty = &obj_ty;
                     while let Type::Optional(inner) | Type::BorrowType { inner, .. } = base_ty {
                         base_ty = inner;
@@ -2560,7 +2615,7 @@ impl Codegen {
             }
             Expr::OptCall(call) => {
                 if let Expr::Member(mem) | Expr::OptMember(mem) = &*call.callee {
-                    if let Some(obj_ty) = self.infer_cp_type(&mem.obj) {
+                    if let Some(obj_ty) = self.infer_cp_type_with_mock(&mem.obj, mock_types) {
                         let mut base_ty = &obj_ty;
                         while let Type::Optional(inner) | Type::BorrowType { inner, .. } = base_ty {
                             base_ty = inner;
@@ -2580,7 +2635,7 @@ impl Codegen {
                 None
             }
             Expr::Question(inner) => {
-                if let Some(inner_ty) = self.infer_cp_type(inner) {
+                if let Some(inner_ty) = self.infer_cp_type_with_mock(inner, mock_types) {
                     let fn_bubbles_null = self.try_catch_target.is_none()
                         && match &self.current_fn_ret_ty {
                             Some(Type::ResultType { ok: fn_ok, .. }) => {
@@ -2605,7 +2660,7 @@ impl Codegen {
                 fallback,
                 is_return_fallback,
             } => {
-                if let Some(inner_ty) = self.infer_cp_type(inner) {
+                if let Some(inner_ty) = self.infer_cp_type_with_mock(inner, mock_types) {
                     return match inner_ty {
                         Type::ResultType { ok, .. } => match *ok {
                             Type::Optional(opt_in) => Some(*opt_in),
@@ -2616,21 +2671,21 @@ impl Codegen {
                     };
                 }
                 if !*is_return_fallback {
-                    return self.infer_cp_type(fallback);
+                    return self.infer_cp_type_with_mock(fallback, mock_types);
                 }
                 None
             }
             Expr::NullCoalesce { left, right } => {
-                if let Some(l_ty) = self.infer_cp_type(left) {
+                if let Some(l_ty) = self.infer_cp_type_with_mock(left, mock_types) {
                     if let Type::Optional(opt_in) = l_ty {
                         return Some(*opt_in);
                     }
                     return Some(l_ty);
                 }
-                self.infer_cp_type(right)
+                self.infer_cp_type_with_mock(right, mock_types)
             }
             Expr::Catch { expr: inner, .. } => {
-                if let Some(inner_ty) = self.infer_cp_type(inner) {
+                if let Some(inner_ty) = self.infer_cp_type_with_mock(inner, mock_types) {
                     if let Type::ResultType { ok, .. } = inner_ty {
                         return Some(*ok);
                     }
@@ -2639,9 +2694,18 @@ impl Codegen {
                 None
             }
             Expr::Bin(bin) => {
+                if bin.op == BinaryOp::Pipe {
+                    let l_ty = self.infer_cp_type_with_mock(&bin.left, mock_types);
+                    let transformed = transform_pipeline_rhs(&bin.right, "__pipe_mock");
+                    let mut next_mocks = mock_types.clone();
+                    if let Some(ty) = l_ty {
+                        next_mocks.insert("__pipe_mock".to_string(), ty);
+                    }
+                    return self.infer_cp_type_with_mock(&transformed, &next_mocks);
+                }
                 if bin.op == BinaryOp::Add {
-                    let l_ty = self.infer_cp_type(&bin.left);
-                    let r_ty = self.infer_cp_type(&bin.right);
+                    let l_ty = self.infer_cp_type_with_mock(&bin.left, mock_types);
+                    let r_ty = self.infer_cp_type_with_mock(&bin.right, mock_types);
                     if matches!(l_ty, Some(Type::String)) || matches!(r_ty, Some(Type::String)) {
                         return Some(Type::String);
                     }
@@ -2658,13 +2722,13 @@ impl Codegen {
                 ) {
                     return Some(Type::Bool);
                 }
-                self.infer_cp_type(&bin.left)
+                self.infer_cp_type_with_mock(&bin.left, mock_types)
             }
             Expr::Match(m) => {
-                let disc_ty = self.infer_cp_type(&m.disc);
+                let disc_ty = self.infer_cp_type_with_mock(&m.disc, mock_types);
                 for arm in &m.arms {
                     if let Stmt::Expr(e) = &*arm.body {
-                        if let Some(t) = self.infer_cp_type(e) {
+                        if let Some(t) = self.infer_cp_type_with_mock(e, mock_types) {
                             return Some(t);
                         }
                         if let (Pattern::Ident(pid), Expr::Ident(eid)) = (&arm.pat, e) {
@@ -2683,7 +2747,7 @@ impl Codegen {
                         }
                     } else if let Stmt::Block(b) = &*arm.body {
                         if let Some(Stmt::Expr(e)) = b.body.last() {
-                            if let Some(t) = self.infer_cp_type(e) {
+                            if let Some(t) = self.infer_cp_type_with_mock(e, mock_types) {
                                 return Some(t);
                             }
                         }
@@ -2695,7 +2759,9 @@ impl Codegen {
                 let mut fs: Vec<Field> = Vec::new();
                 for f in fields {
                     if f.is_spread {
-                        if let Some(Type::Object(sub_fs)) = self.infer_cp_type(&f.val) {
+                        if let Some(Type::Object(sub_fs)) =
+                            self.infer_cp_type_with_mock(&f.val, mock_types)
+                        {
                             for sf in sub_fs {
                                 if let Some(pos) = fs
                                     .iter()
@@ -2708,7 +2774,9 @@ impl Codegen {
                             }
                         }
                     } else if let Some(k) = &f.key {
-                        let ty = self.infer_cp_type(&f.val).unwrap_or(Type::Any);
+                        let ty = self
+                            .infer_cp_type_with_mock(&f.val, mock_types)
+                            .unwrap_or(Type::Any);
                         let new_f = Field {
                             span: k.span,
                             ident: k.clone(),
@@ -2731,7 +2799,7 @@ impl Codegen {
                 sym: "Dict".to_string(),
             })),
             Expr::Index { obj, .. } => {
-                let obj_ty = self.infer_cp_type(obj);
+                let obj_ty = self.infer_cp_type_with_mock(obj, mock_types);
                 match obj_ty {
                     Some(Type::Dict(_, v)) | Some(Type::Map(_, v)) => Some(Type::Optional(v)),
                     Some(Type::Array(inner)) => Some(*inner),
@@ -2988,6 +3056,29 @@ impl Codegen {
             }
         }
         out
+    }
+
+    fn generate_pipeline(&mut self, left: &Expr, right: &Expr) -> String {
+        let pipe_id = self.lambda_counter;
+        self.lambda_counter += 1;
+        let pipe_var = format!("__pipe_{}", pipe_id);
+        let l_code = self.generate_expr(left);
+        let left_ty = self.infer_cp_type(left);
+        if let Some(ref ty) = left_ty {
+            self.var_cp_types.insert(pipe_var.clone(), ty.clone());
+        }
+        let transformed_rhs = transform_pipeline_rhs(right, &pipe_var);
+        let r_code = self.generate_expr(&transformed_rhs);
+        if left_ty.is_some() {
+            self.var_cp_types.remove(&pipe_var);
+        }
+        format!(
+            "(blk_p_{id}: {{ const {var} = {l_code}; break :blk_p_{id} {r_code}; }})",
+            id = pipe_id,
+            var = pipe_var,
+            l_code = l_code,
+            r_code = r_code
+        )
     }
 
     fn generate_pattern_match(
@@ -5007,6 +5098,7 @@ impl Codegen {
                     || i.sym == "false"
                     || i.sym == "null"
                     || i.sym.starts_with('@')
+                    || i.sym.starts_with("__pipe_")
                     || i.sym.ends_with("_Context")
                     || self.is_comptime
                     || self.globals.contains(&i.sym)
@@ -5111,6 +5203,9 @@ impl Codegen {
                 }
             }
             Expr::Bin(bin) => {
+                if bin.op == BinaryOp::Pipe {
+                    return self.generate_pipeline(&bin.left, &bin.right);
+                }
                 let l = self.generate_expr(&bin.left);
                 let r = self.generate_expr(&bin.right);
                 match bin.op {

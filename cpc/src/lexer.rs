@@ -195,6 +195,8 @@ pub enum Token {
     At,
     #[token("&")]
     Ampersand,
+    #[token("|>")]
+    Pipeline,
     #[token("|")]
     Pipe,
 

@@ -298,4 +298,38 @@
 - [`cap/test/test_macro_pass.cp`](file:///data/dev/cp/cap/test/test_macro_pass.cp): 类型感知宏与循环安全正向综合测试，验证 `@Json` 序列化派生、`@Table("t_users")` 表名映射、无参 `@Table` 默认类名映射、`@ToString` 结构打印、用户自定义 `macro Tag` 与 `macro Environment` 派生方法、以及互引类型（Tier 1 TypeDeclInfo）安全内省实测。
 - [`cap/test/test_macro_fail_target.cp`](file:///data/dev/cp/cap/test/test_macro_fail_target.cp): 将类宏 `@Json` 非法附着在类方法上触发编译期语义拦截反向测试。
 
+## [Unreleased] - 2026-10-24
+
+### 管道操作符与主题占位符系统 (Pipeline Operator `|>` & Topic Placeholder `.`)
+
+### 修改文件 (Modified)
+- [`cpc/src/lexer.rs`](file:///data/dev/cp/cpc/src/lexer.rs):
+  - 注册 `Token::Pipeline` (`|>` 操作符)，排在 `Token::Pipe` (`|`) 之前以优先匹配长符号。
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs):
+  - 在 `BinaryOp` 中新增 `BinaryOp::Pipe`；
+  - 在 `Expr` 中新增 `Expr::PipePlaceholder(Span)` 变体；
+  - 实现 `has_pipe_placeholder`、`substitute_pipe_placeholder` 与 `transform_pipeline_rhs` 工具函数，完备支持三级降糖策略（规则 1 裸标识符、规则 2 默认首参、规则 3 显式占位符 `.`、方法调用与多字段计算）。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - 在 `Parser` 中增加 `in_pipeline_rhs` 状态栈追踪；
+  - 设定 `|>` 优先级为 3（高于比较操作符 2，低于加减法 4）；
+  - `parse_bin_expr` 在解析管道右侧表达式时维护 `in_pipeline_rhs` 计数；
+  - `parse_primary_expr` 区分 `.` 的上下文语义：管道右侧识别为 `Expr::PipePlaceholder` 或前置成员访问，非管道右侧拦截非法使用并报错 `Pipeline placeholder '.' can only be used on the right-hand side of a pipeline ('|>') operator`；
+  - `ParseError` 新增 `Generic` 变体以规范化清晰的错误诊断。
+- [`cpc/src/ast_visitor.rs`](file:///data/dev/cp/cpc/src/ast_visitor.rs):
+  - `ASTVisitor` 适配 `Expr::PipePlaceholder`，防止未绑定变量误报。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 新增 `PipePlaceholderOutsidePipeline` 错误；
+  - 适配 `BinaryOp::Pipe` 与 `Expr::PipePlaceholder` 的类型检查与类型推断。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 升级 `Expr::Ident` 生成逻辑，识别 SSA 局部管道临时变量（`__pipe_` 前缀）直通输出；
+  - 实现 `generate_pipeline`，将 `left |> right` 转换为 Zig 单次求值标签块 `(blk_p_N: { const __pipe_N = <left>; break :blk_p_N <right>; })`，彻底杜绝双重求值副作用；
+  - 实现 `infer_cp_type_with_mock`，建立管道推断上下文环境，精准推导流水线各阶段以及对象方法/字段访问的返回类型，消除 Zig `*anyopaque` 类型失配。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 新增第十六章《管道操作符与主题占位符》，规范操作符优先级、3-Tier 降糖规则、单次求值保证与 AI Agent 数据流工程范式。
+
+### 新增文件 (Added)
+- [`cap/test/test_pipe_pass.cp`](file:///data/dev/cp/cap/test/test_pipe_pass.cp): 管道与占位符完整正向综合功能测试，覆盖裸函数、默认首参、显式占位符槽位、对象成员方法流、字段访问算术、多行链式流水线、副作用单次求值（`get_seed() |> combine(., .)` 执行次数严格为 1）以及 AI Agent RAG 认知流水线实测。
+- [`cap/test/test_pipe_fail_placeholder.cp`](file:///data/dev/cp/cap/test/test_pipe_fail_placeholder.cp): 在管道操作符外部非法使用主题占位符 `.` 的编译期语义拦截反向测试。
+
+
 

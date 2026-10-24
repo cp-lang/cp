@@ -11,6 +11,8 @@ pub enum ParseError {
     ExpectedToken(Token, Token, Span),
     #[error("End of input reached unexpectedly")]
     EndOfInput,
+    #[error("Parse error: {0} at {1:?}")]
+    Generic(String, Span),
 }
 
 pub type ParseResult<T> = Result<T, ParseError>;
@@ -20,6 +22,7 @@ pub struct Parser<'a> {
     input: &'a str,
     peeked: Option<(Token, Span)>,
     in_match_guard: bool,
+    in_pipeline_rhs: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -29,6 +32,7 @@ impl<'a> Parser<'a> {
             input,
             peeked: None,
             in_match_guard: false,
+            in_pipeline_rhs: 0,
         }
     }
 
@@ -112,6 +116,7 @@ impl<'a> Parser<'a> {
             input: self.input,
             peeked: self.peeked.clone(),
             in_match_guard: self.in_match_guard,
+            in_pipeline_rhs: self.in_pipeline_rhs,
         }
     }
 
@@ -1749,7 +1754,14 @@ impl<'a> Parser<'a> {
                 break;
             }
             self.bump()?;
+            let is_pipe = op == BinaryOp::Pipe;
+            if is_pipe {
+                self.in_pipeline_rhs += 1;
+            }
             let right = self.parse_bin_expr(prec + 1)?;
+            if is_pipe {
+                self.in_pipeline_rhs -= 1;
+            }
             let start = left_span(&left).start;
             let end = right_span(&right).end;
             left = Expr::Bin(BinExpr {
@@ -1787,16 +1799,66 @@ impl<'a> Parser<'a> {
                 }))
             }
             Token::Dot => {
-                let variant_name = self.parse_ident()?;
-                Ok(Expr::EnumInit(EnumInitExpr {
-                    span,
-                    enum_name: Ident {
-                        span,
-                        sym: String::new(),
-                    },
-                    variant_name,
-                    fields: None,
-                }))
+                if self.in_pipeline_rhs > 0 {
+                    if let Some(Token::Ident(_)) = self.peek() {
+                        let prop = self.parse_ident()?;
+                        if self.peek() == Some(&Token::LBrace) {
+                            self.bump()?;
+                            let mut fields = Vec::new();
+                            while self.peek() != Some(&Token::RBrace) {
+                                let key = self.parse_ident()?;
+                                self.expect(Token::Colon)?;
+                                let val = self.parse_expr()?;
+                                fields.push(EnumInitField { key, val });
+                                if self.peek() == Some(&Token::Comma) {
+                                    self.bump()?;
+                                }
+                            }
+                            let end = self.expect(Token::RBrace)?.end;
+                            Ok(Expr::EnumInit(EnumInitExpr {
+                                span: Span {
+                                    start: span.start,
+                                    end,
+                                },
+                                enum_name: Ident {
+                                    span,
+                                    sym: String::new(),
+                                },
+                                variant_name: prop,
+                                fields: Some(fields),
+                            }))
+                        } else {
+                            Ok(Expr::Member(MemberExpr {
+                                span: Span {
+                                    start: span.start,
+                                    end: prop.span.end,
+                                },
+                                obj: Box::new(Expr::PipePlaceholder(span)),
+                                prop,
+                            }))
+                        }
+                    } else {
+                        Ok(Expr::PipePlaceholder(span))
+                    }
+                } else {
+                    if let Some(Token::Ident(_)) = self.peek() {
+                        let variant_name = self.parse_ident()?;
+                        Ok(Expr::EnumInit(EnumInitExpr {
+                            span,
+                            enum_name: Ident {
+                                span,
+                                sym: String::new(),
+                            },
+                            variant_name,
+                            fields: None,
+                        }))
+                    } else {
+                        return Err(ParseError::Generic(
+                            "Pipeline placeholder '.' can only be used on the right-hand side of a pipeline ('|>') operator".to_string(),
+                            span,
+                        ));
+                    }
+                }
             }
             Token::Super => Ok(Expr::Ident(Ident {
                 span,
@@ -2214,6 +2276,7 @@ impl<'a> Parser<'a> {
             Some(Token::LessEq) => Some(BinaryOp::LtEq),
             Some(Token::Greater) => Some(BinaryOp::Gt),
             Some(Token::GreaterEq) => Some(BinaryOp::GtEq),
+            Some(Token::Pipeline) => Some(BinaryOp::Pipe),
             _ => None,
         }
     }
@@ -2222,7 +2285,8 @@ impl<'a> Parser<'a> {
         match op {
             BinaryOp::Assign => 1,
             BinaryOp::Eq | BinaryOp::NotEq => 2,
-            BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq => 3,
+            BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq => 2,
+            BinaryOp::Pipe => 3,
             BinaryOp::Add | BinaryOp::Sub => 4,
             BinaryOp::Mul | BinaryOp::Div => 5,
         }
@@ -2256,6 +2320,7 @@ fn left_span(expr: &Expr) -> Span {
         Expr::Borrow(e, _) => left_span(e),
         Expr::Builtin(b) => b.span,
         Expr::ReflectType { span, .. } | Expr::ReflectOf { span, .. } => *span,
+        Expr::PipePlaceholder(span) => *span,
     }
 }
 
@@ -2290,5 +2355,6 @@ fn right_span(expr: &Expr) -> Span {
         Expr::Borrow(e, _) => right_span(e),
         Expr::Builtin(b) => b.span,
         Expr::ReflectType { span, .. } | Expr::ReflectOf { span, .. } => *span,
+        Expr::PipePlaceholder(span) => *span,
     }
 }

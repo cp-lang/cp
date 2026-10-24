@@ -328,6 +328,7 @@ pub enum Expr {
         span: Span,
         expr: Box<Expr>,
     },
+    PipePlaceholder(Span),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -415,6 +416,7 @@ pub enum BinaryOp {
     Gt,
     LtEq,
     GtEq,
+    Pipe,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -547,4 +549,168 @@ pub struct MethodSig {
     pub return_type: Option<Type>,
     #[serde(default)]
     pub default_body: Option<BlockStmt>,
+}
+
+pub fn has_pipe_placeholder(expr: &Expr) -> bool {
+    match expr {
+        Expr::PipePlaceholder(_) => true,
+        Expr::Bin(b) => has_pipe_placeholder(&b.left) || has_pipe_placeholder(&b.right),
+        Expr::Call(c) | Expr::OptCall(c) | Expr::New(c) => {
+            has_pipe_placeholder(&c.callee) || c.args.iter().any(has_pipe_placeholder)
+        }
+        Expr::Member(m) | Expr::OptMember(m) => has_pipe_placeholder(&m.obj),
+        Expr::Slice(s) => {
+            has_pipe_placeholder(&s.obj)
+                || s.start.as_ref().map_or(false, |e| has_pipe_placeholder(e))
+                || s.end.as_ref().map_or(false, |e| has_pipe_placeholder(e))
+        }
+        Expr::Match(m) => has_pipe_placeholder(&m.disc),
+        Expr::Question(q)
+        | Expr::ErrWrap(q)
+        | Expr::BoxNew(q)
+        | Expr::Await(q)
+        | Expr::Move(q)
+        | Expr::Borrow(q, _) => has_pipe_placeholder(q),
+        Expr::QuestionFallback { expr, fallback, .. } => {
+            has_pipe_placeholder(expr) || has_pipe_placeholder(fallback)
+        }
+        Expr::NullCoalesce { left, right } => {
+            has_pipe_placeholder(left) || has_pipe_placeholder(right)
+        }
+        Expr::Catch { expr, .. } => has_pipe_placeholder(expr),
+        Expr::Array(elements) => elements.iter().any(has_pipe_placeholder),
+        Expr::Object(fields) | Expr::Dict(fields) => {
+            fields.iter().any(|f| has_pipe_placeholder(&f.val))
+        }
+        Expr::Index { obj, index } => has_pipe_placeholder(obj) || has_pipe_placeholder(index),
+        Expr::Builtin(b) => b.args.iter().any(has_pipe_placeholder),
+        _ => false,
+    }
+}
+
+pub fn substitute_pipe_placeholder(expr: &Expr, pipe_var: &str) -> Expr {
+    match expr {
+        Expr::PipePlaceholder(span) => Expr::Ident(Ident {
+            span: *span,
+            sym: pipe_var.to_string(),
+        }),
+        Expr::Bin(b) => Expr::Bin(BinExpr {
+            span: b.span,
+            op: b.op.clone(),
+            left: Box::new(substitute_pipe_placeholder(&b.left, pipe_var)),
+            right: Box::new(substitute_pipe_placeholder(&b.right, pipe_var)),
+        }),
+        Expr::Call(c) => Expr::Call(CallExpr {
+            span: c.span,
+            callee: Box::new(substitute_pipe_placeholder(&c.callee, pipe_var)),
+            args: c
+                .args
+                .iter()
+                .map(|a| substitute_pipe_placeholder(a, pipe_var))
+                .collect(),
+            is_comptime: c.is_comptime,
+        }),
+        Expr::OptCall(c) => Expr::OptCall(CallExpr {
+            span: c.span,
+            callee: Box::new(substitute_pipe_placeholder(&c.callee, pipe_var)),
+            args: c
+                .args
+                .iter()
+                .map(|a| substitute_pipe_placeholder(a, pipe_var))
+                .collect(),
+            is_comptime: c.is_comptime,
+        }),
+        Expr::New(c) => Expr::New(CallExpr {
+            span: c.span,
+            callee: Box::new(substitute_pipe_placeholder(&c.callee, pipe_var)),
+            args: c
+                .args
+                .iter()
+                .map(|a| substitute_pipe_placeholder(a, pipe_var))
+                .collect(),
+            is_comptime: c.is_comptime,
+        }),
+        Expr::Member(m) => Expr::Member(MemberExpr {
+            span: m.span,
+            obj: Box::new(substitute_pipe_placeholder(&m.obj, pipe_var)),
+            prop: m.prop.clone(),
+        }),
+        Expr::OptMember(m) => Expr::OptMember(MemberExpr {
+            span: m.span,
+            obj: Box::new(substitute_pipe_placeholder(&m.obj, pipe_var)),
+            prop: m.prop.clone(),
+        }),
+        Expr::Question(q) => Expr::Question(Box::new(substitute_pipe_placeholder(q, pipe_var))),
+        Expr::Await(a) => Expr::Await(Box::new(substitute_pipe_placeholder(a, pipe_var))),
+        Expr::Move(m) => Expr::Move(Box::new(substitute_pipe_placeholder(m, pipe_var))),
+        Expr::Borrow(b, is_mut) => {
+            Expr::Borrow(Box::new(substitute_pipe_placeholder(b, pipe_var)), *is_mut)
+        }
+        Expr::Index { obj, index } => Expr::Index {
+            obj: Box::new(substitute_pipe_placeholder(obj, pipe_var)),
+            index: Box::new(substitute_pipe_placeholder(index, pipe_var)),
+        },
+        Expr::Array(elements) => Expr::Array(
+            elements
+                .iter()
+                .map(|e| substitute_pipe_placeholder(e, pipe_var))
+                .collect(),
+        ),
+        Expr::Builtin(b) => Expr::Builtin(BuiltinCall {
+            span: b.span,
+            name: b.name.clone(),
+            args: b
+                .args
+                .iter()
+                .map(|a| substitute_pipe_placeholder(a, pipe_var))
+                .collect(),
+        }),
+        other => other.clone(),
+    }
+}
+
+pub fn transform_pipeline_rhs(right: &Expr, pipe_var: &str) -> Expr {
+    let mock_span = Span { start: 0, end: 0 };
+    let pipe_ident = Expr::Ident(Ident {
+        span: mock_span,
+        sym: pipe_var.to_string(),
+    });
+
+    if has_pipe_placeholder(right) {
+        substitute_pipe_placeholder(right, pipe_var)
+    } else {
+        match right {
+            Expr::Ident(id) => Expr::Call(CallExpr {
+                span: id.span,
+                callee: Box::new(Expr::Ident(id.clone())),
+                args: vec![pipe_ident],
+                is_comptime: false,
+            }),
+            Expr::Call(call) => {
+                let mut new_call = call.clone();
+                new_call.args.insert(0, pipe_ident);
+                Expr::Call(new_call)
+            }
+            Expr::OptCall(call) => {
+                let mut new_call = call.clone();
+                new_call.args.insert(0, pipe_ident);
+                Expr::OptCall(new_call)
+            }
+            Expr::Member(mem) => Expr::Call(CallExpr {
+                span: mem.span,
+                callee: Box::new(Expr::Member(mem.clone())),
+                args: vec![pipe_ident],
+                is_comptime: false,
+            }),
+            Expr::Await(inner) => {
+                let transformed_inner = transform_pipeline_rhs(inner, pipe_var);
+                Expr::Await(Box::new(transformed_inner))
+            }
+            Expr::Question(inner) => {
+                let transformed_inner = transform_pipeline_rhs(inner, pipe_var);
+                Expr::Question(Box::new(transformed_inner))
+            }
+            _ => right.clone(),
+        }
+    }
 }
