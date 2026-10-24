@@ -121,6 +121,10 @@ pub fn find_referenced_vars_in_expr(expr: &Expr, vars: &mut HashSet<String>) {
         Expr::ReflectOf { expr, .. } => {
             find_referenced_vars_in_expr(expr, vars);
         }
+        Expr::Range { start, end, .. } => {
+            find_referenced_vars_in_expr(start, vars);
+            find_referenced_vars_in_expr(end, vars);
+        }
         _ => {}
     }
 }
@@ -143,6 +147,10 @@ pub fn find_referenced_vars_in_stmt(stmt: &Stmt, vars: &mut HashSet<String>) {
         Stmt::While(w) => {
             find_referenced_vars_in_expr(&w.test, vars);
             find_referenced_vars_in_stmt(&w.body, vars);
+        }
+        Stmt::For(f) => {
+            find_referenced_vars_in_expr(&f.expr, vars);
+            find_referenced_vars_in_stmt(&f.body, vars);
         }
         Stmt::Return(r) => {
             if let Some(arg) = &r.arg {
@@ -218,7 +226,34 @@ pub fn get_declared_vars_in_block(block: &BlockStmt) -> HashSet<String> {
                     vars.extend(get_declared_vars_in_block(b));
                 }
             }
+        } else if let Stmt::For(f) = stmt {
+            extract_idents_from_pat(&f.pat, &mut vars);
+            if let Stmt::Block(b) = &*f.body {
+                vars.extend(get_declared_vars_in_block(b));
+            }
         }
     }
     vars
+}
+
+pub fn extract_idents_from_pat(pat: &Pattern, vars: &mut HashSet<String>) {
+    match pat {
+        Pattern::Ident(i) => {
+            vars.insert(i.sym.clone());
+        }
+        Pattern::Array(pats) | Pattern::Tuple(pats) | Pattern::Or(pats) => {
+            for p in pats {
+                extract_idents_from_pat(p, vars);
+            }
+        }
+        Pattern::Object(props) => {
+            for p in props {
+                vars.insert(p.key.sym.clone());
+            }
+        }
+        Pattern::Rest(inner) => {
+            extract_idents_from_pat(inner, vars);
+        }
+        _ => {}
+    }
 }

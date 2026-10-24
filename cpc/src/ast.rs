@@ -175,6 +175,7 @@ pub enum Stmt {
     Return(ReturnStmt),
     If(IfStmt),
     While(WhileStmt),
+    For(ForStmt),
     Match(MatchExpr),
     Spawn(SpawnExpr),
     Defer(Box<Stmt>),
@@ -268,6 +269,22 @@ pub struct WhileStmt {
     pub body: Box<Stmt>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IterMode {
+    Borrow,    // for x of list
+    MutBorrow, // for &x of list
+    Move,      // for move x of list
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForStmt {
+    pub span: Span,
+    pub mode: IterMode,
+    pub pat: Pattern,
+    pub expr: Expr,
+    pub body: Box<Stmt>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Expr {
     Ident(Ident),
@@ -329,6 +346,12 @@ pub enum Expr {
         expr: Box<Expr>,
     },
     PipePlaceholder(Span),
+    Range {
+        span: Span,
+        start: Box<Expr>,
+        end: Box<Expr>,
+        inclusive: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -583,6 +606,7 @@ pub fn has_pipe_placeholder(expr: &Expr) -> bool {
             fields.iter().any(|f| has_pipe_placeholder(&f.val))
         }
         Expr::Index { obj, index } => has_pipe_placeholder(obj) || has_pipe_placeholder(index),
+        Expr::Range { start, end, .. } => has_pipe_placeholder(start) || has_pipe_placeholder(end),
         Expr::Builtin(b) => b.args.iter().any(has_pipe_placeholder),
         _ => false,
     }
@@ -665,6 +689,17 @@ pub fn substitute_pipe_placeholder(expr: &Expr, pipe_var: &str) -> Expr {
                 .map(|a| substitute_pipe_placeholder(a, pipe_var))
                 .collect(),
         }),
+        Expr::Range {
+            span,
+            start,
+            end,
+            inclusive,
+        } => Expr::Range {
+            span: *span,
+            start: Box::new(substitute_pipe_placeholder(start, pipe_var)),
+            end: Box::new(substitute_pipe_placeholder(end, pipe_var)),
+            inclusive: *inclusive,
+        },
         other => other.clone(),
     }
 }

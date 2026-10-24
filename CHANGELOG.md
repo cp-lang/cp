@@ -331,5 +331,42 @@
 - [`cap/test/test_pipe_pass.cp`](file:///data/dev/cp/cap/test/test_pipe_pass.cp): 管道与占位符完整正向综合功能测试，覆盖裸函数、默认首参、显式占位符槽位、对象成员方法流、字段访问算术、多行链式流水线、副作用单次求值（`get_seed() |> combine(., .)` 执行次数严格为 1）以及 AI Agent RAG 认知流水线实测。
 - [`cap/test/test_pipe_fail_placeholder.cp`](file:///data/dev/cp/cap/test/test_pipe_fail_placeholder.cp): 在管道操作符外部非法使用主题占位符 `.` 的编译期语义拦截反向测试。
 
+## [Unreleased] - 2026-10-25
+
+### 迭代系统规范与实现 (Iteration System: Borrow, In-Place MutBorrow, Move & Range)
+
+### 修改文件 (Modified)
+- [`cpc/src/lexer.rs`](file:///data/dev/cp/cpc/src/lexer.rs):
+  - 注册 `Token::Of` (`of`) 与 `Token::In` (`in`) 关键字。
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs):
+  - 新增 `IterMode` 枚举 (`Borrow`, `MutBorrow`, `Move`)；
+  - 新增 `ForStmt` 抽象语法树节点 (`span`, `mode`, `pat`, `expr`, `body`) 与 `Stmt::For(ForStmt)`；
+  - 新增 `Expr::Range { span, start, end, inclusive }` 表达式节点；
+  - 适配管道占位符检测与替换逻辑。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - 实现 `parse_for_stmt`，支持三维借用修饰符 (`for x`, `for &x`, `for move x`)、可选声明关键字 (`let`/`const`)、可选括号风格 (`for (...)`) 以及区间范围语法 (`0..10` / `0..=10`)；
+  - 在 `parse_ident` 中加入 `Token::Of` 与 `Token::In` 上下文关键字支持，保证 `reflect.of` 等已有代码不发生词法冲突。
+- [`cpc/src/ast_visitor.rs`](file:///data/dev/cp/cpc/src/ast_visitor.rs):
+  - 适配 `Expr::Range` 与 `Stmt::For` 的变量引用收集与局部变量声明提取。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 新增 `SemaError::MutateWhileBorrowedInFor` 错误变体；
+  - 引入 `loop_borrowed_vars` 集合并在循环体内对被迭代集合施加只读借用锁，拦截任何 `push`、`clear`、`delete`、重赋值等结构性改变；
+  - 针对 `IterMode::Move` 将集合登记至 `moved_vars`，禁止循环后再次使用（拦截 Use-After-Move）；
+  - 适配模式解构作用域绑定与 `Expr::Range` 语义检查。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 在 Zig 运行时前导声明中注入 `cp_iter_slice` 与 `cp_mut_slice`（带 `@constCast` 支持），无缝支持切片、静态数组及不可变数组的原地安全可变切片迭代；
+  - 统一区间循环为独立局部块 `{ var i: i32 = start; while (i < end) : (i += 1) { ... } }`，彻底杜绝多次区间循环的局部变量命名重定义；
+  - 优化循环变量为块级原生捕获 `for (target) |item|` 与 `for (target) |*item|`，避免状态机 `ctx` 上下文全局命名冲突；
+  - 引入 `mut_borrow_loop_vars` 作用域集合，在表达式和赋值中自动生成解引用操作（`x.* = ...` 与 `(x.*)`），支持标量及结构体的就地原地修改；
+  - 在 `Expr::Array` 中统一输出为 `&.{ ... }`，完美兼顾静态元组解构访问与切片类型自动转换。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 新增第十七章《迭代系统》，详尽记录三维借用语义表、语法包容性、区间范围、模式解构与编译期安全铁律。
+
+### 新增文件 (Added)
+- [`cap/test/test_for_pass.cp`](file:///data/dev/cp/cap/test/test_for_pass.cp): 涵盖只读借用 `for x of list`、原地可变借用 `for &x of list`、所有权转移 `for move x of list`、半开区间 `0..5`、闭区间 `1..=5`、动态变量区间、对象模式解构以及可选小括号与 `let` 语法糖的正向综合功能测试。
+- [`cap/test/test_for_fail_mutate.cp`](file:///data/dev/cp/cap/test/test_for_fail_mutate.cp): 在 `for x of list` 只读借用循环体内试图调用 `list.push(...)` 触发 `MutateWhileBorrowedInFor` 语义拦截反向测试。
+- [`cap/test/test_for_fail_use_after_move.cp`](file:///data/dev/cp/cap/test/test_for_fail_use_after_move.cp): 在 `for move x of list` 所有权转移后试图再次读取 `list` 触发 `UseOfMovedVar` 语义拦截反向测试。
+
+
 
 

@@ -51,6 +51,10 @@ pub enum SemaError {
     MacroHygieneViolation(String, Span),
     #[error("Compile Error: Pipeline placeholder '.' can only be used on the right-hand side of a pipeline ('|>') operator at {0:?}")]
     PipePlaceholderOutsidePipeline(Span),
+    #[error(
+        "Compile Error: Cannot mutate '{0}' while it is borrowed in 'for ... of' loop at {1:?}"
+    )]
+    MutateWhileBorrowedInFor(String, Span),
 }
 
 pub type SemaResult<T> = Result<T, SemaError>;
@@ -86,6 +90,8 @@ pub struct Analyzer {
     pub dec_defs: HashMap<String, DecDef>,
     pub macro_defs: HashMap<String, MacroDef>,
     pub macro_call_stack: Vec<(String, String)>,
+    pub loop_borrowed_vars: std::collections::HashSet<String>,
+    pub moved_vars: std::collections::HashSet<String>,
 }
 
 impl Analyzer {
@@ -151,6 +157,8 @@ impl Analyzer {
             dec_defs: HashMap::new(),
             macro_defs,
             macro_call_stack: Vec::new(),
+            loop_borrowed_vars: std::collections::HashSet::new(),
+            moved_vars: std::collections::HashSet::new(),
         }
     }
 
@@ -1043,6 +1051,39 @@ impl Analyzer {
         }
     }
 
+    fn bind_for_pattern(&mut self, pat: &Pattern, elem_ty: &Type) {
+        match pat {
+            Pattern::Ident(id) => {
+                let _ = self.define(
+                    id.sym.clone(),
+                    SymbolKind::Var {
+                        ty: elem_ty.clone(),
+                        kind: VarDeclKind::Let,
+                    },
+                    id.span,
+                );
+            }
+            Pattern::Tuple(pats) | Pattern::Array(pats) => {
+                for p in pats {
+                    self.bind_for_pattern(p, &Type::Any);
+                }
+            }
+            Pattern::Object(props) => {
+                for p in props {
+                    let _ = self.define(
+                        p.key.sym.clone(),
+                        SymbolKind::Var {
+                            ty: Type::Any,
+                            kind: VarDeclKind::Let,
+                        },
+                        p.key.span,
+                    );
+                }
+            }
+            _ => self.bind_match_pattern(pat),
+        }
+    }
+
     fn analyze_stmt(&mut self, stmt: &Stmt) -> SemaResult<()> {
         match stmt {
             Stmt::Var(var) => {
@@ -1071,6 +1112,45 @@ impl Analyzer {
                 self.infer_type(&w.test)?;
                 self.analyze_expr(&w.test)?;
                 self.analyze_stmt(&w.body)?;
+            }
+            Stmt::For(f) => {
+                let coll_ty = self.infer_type(&f.expr)?;
+                self.analyze_expr(&f.expr)?;
+
+                let coll_var_opt = if let Expr::Ident(id) = &f.expr {
+                    if self.moved_vars.contains(&id.sym) {
+                        return Err(SemaError::UseOfMovedValue(id.sym.clone(), id.span));
+                    }
+                    if f.mode == IterMode::Move {
+                        self.moved_vars.insert(id.sym.clone());
+                    }
+                    Some(id.sym.clone())
+                } else {
+                    None
+                };
+
+                let elem_ty = match &coll_ty {
+                    Type::Array(inner) => (**inner).clone(),
+                    _ => Type::Any,
+                };
+
+                if let Some(ref coll_name) = coll_var_opt {
+                    if f.mode != IterMode::Move {
+                        self.loop_borrowed_vars.insert(coll_name.clone());
+                    }
+                }
+
+                self.enter_scope();
+                self.bind_for_pattern(&f.pat, &elem_ty);
+                let res = self.analyze_stmt(&f.body);
+                self.exit_scope();
+
+                if let Some(ref coll_name) = coll_var_opt {
+                    if f.mode != IterMode::Move {
+                        self.loop_borrowed_vars.remove(coll_name);
+                    }
+                }
+                res?;
             }
             Stmt::Return(r) => {
                 if let Some(arg) = &r.arg {
@@ -1123,11 +1203,24 @@ impl Analyzer {
     fn analyze_expr(&mut self, expr: &Expr) -> SemaResult<()> {
         match expr {
             Expr::Ident(ident) => {
+                if self.moved_vars.contains(&ident.sym) {
+                    return Err(SemaError::UseOfMovedValue(ident.sym.clone(), ident.span));
+                }
                 if let Some(kind) = self.resolve(&ident.sym) {
                     self.symbol_map.insert(ident.span, kind.clone());
                 }
             }
             Expr::Bin(bin) => {
+                if bin.op == BinaryOp::Assign {
+                    if let Expr::Ident(id) = &*bin.left {
+                        if self.loop_borrowed_vars.contains(&id.sym) {
+                            return Err(SemaError::MutateWhileBorrowedInFor(
+                                id.sym.clone(),
+                                id.span,
+                            ));
+                        }
+                    }
+                }
                 self.analyze_expr(&bin.left)?;
                 if bin.op == BinaryOp::Pipe {
                     let transformed = transform_pipeline_rhs(&bin.right, "__pipe_mock");
@@ -1140,6 +1233,23 @@ impl Analyzer {
                 return Err(SemaError::PipePlaceholderOutsidePipeline(*span));
             }
             Expr::Call(call) | Expr::OptCall(call) => {
+                if let Expr::Member(mem) = &*call.callee {
+                    if let Expr::Ident(id) = &*mem.obj {
+                        if self.loop_borrowed_vars.contains(&id.sym) {
+                            let prop = mem.prop.sym.as_str();
+                            if prop == "push"
+                                || prop == "clear"
+                                || prop == "delete"
+                                || prop == "pop"
+                            {
+                                return Err(SemaError::MutateWhileBorrowedInFor(
+                                    id.sym.clone(),
+                                    mem.prop.span,
+                                ));
+                            }
+                        }
+                    }
+                }
                 self.analyze_expr(&call.callee)?;
                 for arg in &call.args {
                     self.analyze_expr(arg)?;
@@ -1282,6 +1392,10 @@ impl Analyzer {
                 } else {
                     return Err(SemaError::UndefinedSymbol(type_name, *span));
                 }
+            }
+            Expr::Range { start, end, .. } => {
+                self.analyze_expr(start)?;
+                self.analyze_expr(end)?;
             }
             _ => {}
         }
@@ -1710,6 +1824,7 @@ impl Analyzer {
                 span: *span,
                 sym: "TypeInfo".to_string(),
             })),
+            Expr::Range { .. } => Ok(Type::I32),
             _ => Ok(Type::Any),
         }
     }
@@ -1722,6 +1837,7 @@ fn inner_span(expr: &Expr) -> Span {
         Expr::Bin(b) => b.span,
         Expr::ReflectType { span, .. } | Expr::ReflectOf { span, .. } => *span,
         Expr::PipePlaceholder(span) => *span,
+        Expr::Range { span, .. } => *span,
         _ => Span { start: 0, end: 0 },
     }
 }

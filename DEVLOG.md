@@ -767,6 +767,87 @@ let reply = raw
    - 历史全量测试（`test_macro_pass.cp`, `test_dec_pass.cp`, `test_reflect_pass.cp`, `test_meta_pass.cp`, `hello.cp`）100% 回归通过；
    - `cargo test` 单元测试通过，`cargo fmt` 格式化规范检查通过。
 
+## 2026-10-25: 迭代系统 (Iteration System) 架构落地与所有权/借用检查机制
+
+### 1. 架构定位与设计哲学
+迭代（Iteration）是任何现代工业级编程语言最高频的核心控制流之一。CP 语言定位于“TS 的优雅 + Rust 的安全 + Zig 的底层控制”。
+传统语言的妥协：
+- **JavaScript / TypeScript**：提供了极佳的 `for (const x of list)` 语法与解构体验，但在底层完全丧失了对变量生命周期与原地修改（In-Place Mutation）的控制力，且极易出现遍历中动态修改集合导致的迭代器失效；
+- **Rust**：虽然提供了精准的 `for x in &list` (只读借用)、`for x in &mut list` (可变借用)、`for x in list` (所有权消费)，但其所有权生命周期标记与解引操作符 `*x` 心智负担较重；
+- **Zig**：支持 `for (list) |x|` 与 `for (&list) |*x|`，具有极致的零开销与硬件亲和力，但缺少更高层级的集合抽象与自动生命周期守卫。
+
+为此，主架构师拍板确立了 CP 语言最优雅的迭代语法方案：
+1. **只读借用 (Default Borrow)**：`for x of list`
+2. **原地可变借用 (In-Place MutBorrow)**：`for &x of list`
+3. **所有权转移 (Ownership Transfer)**：`for move x of list`
+4. **TS 语法最大兼容度**：可选带小括号 `for (x of list)`，可选带声明关键字 `for let x of list`。
+
+---
+
+### 2. 方案规划与底层实现原理
+
+#### 1. 词法与语法解析器 (Lexer & Parser)
+- 引入 `Token::Of` (`of`) 与 `Token::In` (`in`)。
+- 在 `parse_for_stmt` 中统一处理：
+  - 括号探针：若首 Token 为 `(`，记录并在语句头结束时匹配对应 `)`；
+  - 声明关键字探针：容忍可选的 `let` 或 `const`；
+  - 借用模式识别：
+    - 首 Token 为 `&` -> `IterMode::MutBorrow`
+    - 首 Token 为 `move` -> `IterMode::Move`
+    - 缺省 -> `IterMode::Borrow`
+  - 模式解析：无缝接入现有的 `parse_pattern`，天然支持标识符、元组 `[k, v]` 与对象 `{ id, name }` 解构；
+  - 表达式解析：支持集合表达式与区间语法 `0..10`、`1..=10`；
+  - 上下文关键字卫生隔离：在 `parse_ident` 中将 `Token::Of` 与 `Token::In` 注册为上下文关键字，确保如 `reflect.of` 等已有反射方法和同名属性不发生冲突。
+
+#### 2. 语义分析与编译期安全守卫 (Semantic Analyzer & Borrow Lock)
+- **只读借用锁 (`loop_borrowed_vars`)**：
+  在 `for x of list` 进入循环体时，将集合变量 `list` 记录到 `loop_borrowed_vars` 中。在循环体内：
+  - 任何针对 `list` 的重新赋值（`list = other`）直接报错；
+  - 任何针对 `list` 的结构性变异方法调用（如 `list.push(...)`、`list.clear()`、`list.delete(...)`、`list.pop()`）立即触发 `SemaError::MutateWhileBorrowedInFor` 编译期硬性拦截；
+  - 离开循环体后，借用锁自动解除。
+- **所有权转移追踪 (`moved_vars`)**：
+  在 `for move x of list` 中，将 `list` 加入 `moved_vars` 集合。循环之后任何针对 `list` 的读取与使用立即触发 `UseOfMovedVar` 编译拦截，从源头杜绝悬垂指针与重复消费。
+
+#### 3. 代码生成与 Zig 原生状态机对接 (Codegen)
+- **多态切片适配器 (`cp_iter_slice` & `cp_mut_slice`)**：
+  为了抹平静态数组（`[N]T`）、切片（`[]T`）、不可变切片（`[]const T`）在 Zig 底层的类型差异：
+  - `cp_iter_slice`：通过 Zig 编译期 `@typeInfo` 分析，将数组、切片统一收敛为只读切片；
+  - `cp_mut_slice`：通过 `@constCast` 支持不可变切片安全升级为可变切片，并确保静态数组取地址切片，使 `for (&list) |*x|` 原地可变借用在任意数据形态下均能工作。
+- **作用域卫生与块级变量捕获 (Block-Scoped Variable Hygiene)**：
+  - 摒弃了将循环内部局部变量加入状态机全局上下文 `ctx` 的做法（彻底消灭了多个循环共用同一变量名导致的 `*i32` 与 `i32` 类型冲突）；
+  - 将 `for` 循环变量直接映射为原生块级捕获 `for (target) |item|` 与 `for (target) |*item|`，零上下文结构体污染；
+  - 区间循环（`Expr::Range`）统一包裹在独立的块作用域 `{ var i: i32 = start; while (i < end) : (i += 1) { ... } }` 中，消灭了多次循环重定义变量名冲突。
+- **原地修改解引用 (`mut_borrow_loop_vars`)**：
+  当处于 `IterMode::MutBorrow` 时，循环变量被登记至 `mut_borrow_loop_vars`：
+  - 赋值语句 `x = 20` 自动生成为 `(x.*) = 20;`；
+  - 表达式读取 `x` 自动生成为 `(x.*)`；
+  - 成员修改 `x.field = 10` 自动生成为 `(x.*).field = 10;`；
+  完美实现无需用户手写 `*x` 的全自动原地修改体验。
+
+---
+
+### 3. 测试验证与全量回归成果
+
+1. **正向综合测试 (`test_for_pass.cp`)**：
+   - 验证 1（区间范围）：半开区间 `0..5` (和为 10)、闭区间 `1..=5` (和为 15)、动态变量区间 `start..end` (和为 18)、括号语法 `for (i of 0..3)`；
+   - 验证 2（只读借用）：`for x of nums` 正确求和，验证集合在迭代结束后完好无损可进行后续多轮迭代；
+   - 验证 3（原地可变借用）：`for &x of mut_list` 原地修改元素（`x = x * 10` 与 `x = x + 5`），原底层内存成功更新；
+   - 验证 4（所有权转移）：`for move x of move_list` 正确消费元素与求和；
+   - 验证 5（对象模式解构）：`for { id, score } of players` 正确解构对象属性并累加分值；
+   - 正向测试 100% 运行通过。
+2. **反向安全测试**：
+   - `test_for_fail_mutate.cp`：在循环体内调用 `list.push(4)` 成功触发 `Compile Error: Cannot mutate 'list' while it is borrowed in 'for ... of' loop`；
+   - `test_for_fail_use_after_move.cp`：在 `for move` 消费集合后试图访问 `list` 成功触发 `Compile Error: Use of moved value 'list'`。
+3. **历史功能全量回归**：
+   - `test_pipe_pass.cp` (管道与占位符) 100% 通过；
+   - `test_macro_pass.cp` (宏与类型内省) 100% 通过；
+   - `test_dec_pass.cp` (装饰器与 AOP) 100% 通过；
+   - `test_reflect_pass.cp` (双态反射) 100% 通过；
+   - `test_meta_pass.cp` (元注解系统) 100% 通过；
+   - `hello.cp` 100% 通过；
+   - Rust 编译器单元测试全量通过，代码规范 `cargo fmt` 检查通过。
+
+
 
 
 

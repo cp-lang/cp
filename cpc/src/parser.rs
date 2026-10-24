@@ -525,6 +525,7 @@ impl<'a> Parser<'a> {
         Ok(params)
     }
 
+    #[allow(dead_code)]
     fn is_type_start(t: &Token) -> bool {
         matches!(
             t,
@@ -778,6 +779,7 @@ impl<'a> Parser<'a> {
         match self.peek() {
             Some(Token::Let) | Some(Token::Const) => Ok(Stmt::Var(self.parse_var_decl()?)),
             Some(Token::While) => Ok(Stmt::While(self.parse_while_stmt()?)),
+            Some(Token::For) => Ok(Stmt::For(self.parse_for_stmt()?)),
             Some(Token::If) => Ok(Stmt::If(self.parse_if_stmt()?)),
             Some(Token::Return) => Ok(Stmt::Return(self.parse_return_stmt()?)),
             Some(Token::Try) => {
@@ -1166,6 +1168,63 @@ impl<'a> Parser<'a> {
         Ok(WhileStmt {
             span: Span { start, end: 0 },
             test,
+            body: Box::new(body),
+        })
+    }
+
+    fn parse_for_stmt(&mut self) -> ParseResult<ForStmt> {
+        let start = self.expect(Token::For)?.start;
+        let has_paren = if self.peek() == Some(&Token::LParen) {
+            self.bump()?;
+            true
+        } else {
+            false
+        };
+        if self.peek() == Some(&Token::Let) || self.peek() == Some(&Token::Const) {
+            self.bump()?;
+        }
+        let mode = if self.peek() == Some(&Token::Ampersand) {
+            self.bump()?;
+            IterMode::MutBorrow
+        } else if self.peek() == Some(&Token::Move) {
+            self.bump()?;
+            IterMode::Move
+        } else {
+            IterMode::Borrow
+        };
+        let pat = self.parse_pattern()?;
+        if matches!(self.peek(), Some(Token::Of) | Some(Token::In)) {
+            self.bump()?;
+        } else {
+            return Err(ParseError::Generic(
+                "Expected 'of' in for loop, e.g. 'for x of list'".to_string(),
+                self.peek_span(),
+            ));
+        }
+        let mut expr = self.parse_expr()?;
+        if self.peek() == Some(&Token::DotDot) || self.peek() == Some(&Token::DotDotEq) {
+            let inclusive = self.bump()?.0 == Token::DotDotEq;
+            let end_expr = self.parse_expr()?;
+            let span = Span {
+                start: left_span(&expr).start,
+                end: right_span(&end_expr).end,
+            };
+            expr = Expr::Range {
+                span,
+                start: Box::new(expr),
+                end: Box::new(end_expr),
+                inclusive,
+            };
+        }
+        if has_paren {
+            self.expect(Token::RParen)?;
+        }
+        let body = self.parse_stmt()?;
+        Ok(ForStmt {
+            span: Span { start, end: 0 },
+            mode,
+            pat,
+            expr,
             body: Box::new(body),
         })
     }
@@ -2252,6 +2311,8 @@ impl<'a> Parser<'a> {
             Token::From => "from".to_string(),
             Token::As => "as".to_string(),
             Token::Meta => "meta".to_string(),
+            Token::Of => "of".to_string(),
+            Token::In => "in".to_string(),
             _ => {
                 return Err(ParseError::ExpectedToken(
                     Token::Ident("Ident".to_string()),
@@ -2321,6 +2382,7 @@ fn left_span(expr: &Expr) -> Span {
         Expr::Builtin(b) => b.span,
         Expr::ReflectType { span, .. } | Expr::ReflectOf { span, .. } => *span,
         Expr::PipePlaceholder(span) => *span,
+        Expr::Range { span, .. } => *span,
     }
 }
 
@@ -2356,5 +2418,6 @@ fn right_span(expr: &Expr) -> Span {
         Expr::Builtin(b) => b.span,
         Expr::ReflectType { span, .. } | Expr::ReflectOf { span, .. } => *span,
         Expr::PipePlaceholder(span) => *span,
+        Expr::Range { span, .. } => *span,
     }
 }

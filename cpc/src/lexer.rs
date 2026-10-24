@@ -71,6 +71,10 @@ pub enum Token {
     Impl,
     #[token("for")]
     For,
+    #[token("of")]
+    Of,
+    #[token("in")]
+    In,
     #[token("enum")]
     Enum,
     #[token("interface")]

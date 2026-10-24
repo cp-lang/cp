@@ -2636,6 +2636,59 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 1. 管道操作符（`|>`）与主题占位符（`.`）三级降糖、单次求值防副作用、语法卫生隔离、类型推导环境与全量测试套件成果全部提交；
 2. 执行 Git 提交并生成提交记录：`feat: implement Pipeline Operator (|>) and Topic Placeholder (.) with single-evaluation guarantee` (`3f23acf`)，代码库已安全更新。
 
+---
+
+## 2026-10-25
+
+### 用户指令
+> 迭代是编程语言中非常重要的功能.
+> 借鉴rust 和 es6 Typescript中的迭代, 设计cp的迭代功能.
+> 需注意变量的只读借用 可变借用 和 变量所有权, 确保迭代中没有悬挂指针
+> 
+> 你这个设计过于复杂
+> 1. 是否类似Typescript 需要 () 小括号
+> 2. 简化 只读借用 可变借用与move
+> 
+> for x of list 只读借用
+> for &x of list 可变借用
+> for move x of list 更改所有权
+> 这样如何
+> 
+> 开工
+
+### 执行结果汇报
+1. **方案裁决与极简架构确立**：
+   - 全面拥抱主架构师提出的三维迭代修饰符模型：
+     - `for x of list`：**只读借用 (Default Borrow)**，被遍历集合施加只读借用锁（`loop_borrowed_vars`），杜绝循环中结构性修改与迭代器失效；
+     - `for &x of list`：**原地可变借用 (In-Place MutBorrow)**，映射为 Zig `for (&list) |*x|`，循环体对 `x = val` 或 `x.field = val` 进行就地物理更新；
+     - `for move x of list`：**所有权转移 (Ownership Transfer)**，集合被即刻标记为移交（`moved_vars`），杜绝 Use-After-Move；
+   - 语法宽容性与 TS 兼容：支持可选带小括号 `for (x of list)`，可选带声明关键字 `for let x of list`；
+   - 区间循环支持：半开区间 `0..N` 与闭区间 `1..=N`，统一映射为独立块作用域下的高效 `while` 循环；
+   - 模式解构支持：元组 `[k, v]`（兼容 `Map.entries()`）与对象 `{ id, score }` 模式解构迭代。
+2. **底层编译架构实现**：
+   - 词法与语法分析（`lexer.rs` & `parser.rs`）：注册 `Token::Of` 与 `Token::In`，实现 `parse_for_stmt` 并将其在 `parse_ident` 中声明为上下文关键字，保证 `reflect.of` 等已有反射方法零破坏；
+   - 语义安全分析（`sema.rs`）：实装 `loop_borrowed_vars` 集合借用锁（拦截只读迭代中调用 `push`/`clear`/`delete`/重赋值等操作，抛出 `MutateWhileBorrowedInFor`）与 `moved_vars` 所有权消费检测（抛出 `UseOfMovedVar`）；
+   - 代码生成与状态机适配（`codegen.rs`）：
+     - 注入 `cp_iter_slice` 与带 `@constCast` 的 `cp_mut_slice` 前导函数，兼容切片、静态数组与不可变数组的原地安全修改；
+     - 将循环变量映射为块级作用域原生捕获，消除 `Context` 全局结构体命名与类型冲突；
+     - 注入 `mut_borrow_loop_vars` 自动将标量/结构体赋值与读取转化为指针解引用 `(x.*) = ...;`；
+     - 区间循环包裹于独立局部块中，消除多循环变量重定义冲突。
+3. **测试验证全线飘绿**：
+   - 编写正向综合测试 [`cap/test/test_for_pass.cp`](file:///data/dev/cp/cap/test/test_for_pass.cp)，测试并通过全部 5 大项：
+     - 测试 1：半开区间 `0..5`（和 10）、闭区间 `1..=5`（和 15）、动态变量区间 `start..end`（和 18）、小括号语法 `for (i of 0..3)`；
+     - 测试 2：只读借用 `for x of nums` 求和 60，多轮迭代验证集合完好无损；
+     - 测试 3：原地可变借用 `for &x of mut_list` 原地倍增（10, 20, 30）及累加（15, 25, 35）；
+     - 测试 4：所有权转移 `for move x of move_list` 正确消费元素并求和；
+     - 测试 5：对象属性模式解构 `for { id, score } of players` 正确解构求和。
+   - 编写反向安全测试：
+     - [`cap/test/test_for_fail_mutate.cp`](file:///data/dev/cp/cap/test/test_for_fail_mutate.cp)：只读循环中调用 `list.push(4)` 成功被编译器精准拦截并报错 `Compile Error: Cannot mutate 'list' while it is borrowed in 'for ... of' loop`；
+     - [`cap/test/test_for_fail_use_after_move.cp`](file:///data/dev/cp/cap/test/test_for_fail_use_after_move.cp)：`for move` 消费后再次使用 `list` 成功被编译器精准拦截并报错 `Compile Error: Use of moved value 'list'`。
+   - 历史全量回归测试（`test_pipe_pass.cp`, `test_macro_pass.cp`, `test_dec_pass.cp`, `test_reflect_pass.cp`, `test_meta_pass.cp`, `hello.cp`）100% 绿色通过，Rust 编译器测试与代码格式化检查全部通过。
+4. **规范与文档更新**：
+   - 规范参考手册 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md) 新增第十七章《迭代系统》；
+   - 严谨按规范追加记录到 [`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md) 与 [`SESSION.md`](file:///data/dev/cp/SESSION.md)。
+
+
 
 
 
