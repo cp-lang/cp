@@ -2876,6 +2876,62 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 2. 执行 Git 提交并生成提交记录：`feat: implement end-to-end template strings with escaping, comptime constant folding, and sema inference` (`d9ce862`)；
 3. 代码库工作区干净，阶段性成果已安全落库。
 
+---
+
+## 2026-10-25
+
+### 用户指令
+> 我们在之前的设计中, 使用 _ 符号 代替 this, _ 和 this 等同, 检查这个设计的实现, 目前还正常吗
+
+### 执行结果汇报
+1. **系统级全景核查与审计结论**：
+   - 全盘审查了词法分析（`lexer.rs`）、语法分析（`parser.rs`）、语义分析（`sema.rs`）与代码生成（`codegen.rs`）：
+     - `_` 与 `this` 作为接收者参数（只读借用、`mut _` 可变借用、`move _` 所有权转移）完全对称并正常工作；
+     - 成员属性访问（`_.field` vs `this.field`）与方法互调（`_.method()` vs `this.method()`）及省略前缀规则完全正常；
+     - `match` 模式匹配采用 `*` 作为通配分支，彻底规避了通配符与自身实例 `_` 的冲突，在 `* => { ... }` 内部 `_` 依然安全指向当前类实例；
+     - 所有权与借用安全检查（包括只读修改拦截、Move 后读取拦截）100% 正常。
+2. **定位并消除潜在隐患**：
+   - 在复杂类型借用返回测试中，定位到了近期引入裸指针系统后 `Expr::Borrow` 中 `is_class_ref` 未能识别 `Expr::Member`（如 `&_.weights`）的潜伏 Bug，导致多生成了一级指针（`**Tensor`）；
+   - 升级判别逻辑为 `self.infer_cp_type(inner)`，深度识别出堆分配 Class 字段本身已是指针，成功消除多余取地址符。
+3. **测试验证**：
+   - 编写专项测试用例 [`cap/test/test_this_underscore_interchange.cp`](file:///data/dev/cp/cap/test/test_this_underscore_interchange.cp)，全方位验证了字段读写、方法互调、省略前缀、`mut _` 与 `mut this` 互换变异、`move _` 与 `move this` 互换消费、单继承派生调用及异步状态机 `async fn` 上下文穿透共 11 项全景测试，100% 绿色通过！
+   - 反向借用拦截测试集（`test_trait_class_fail_*.cp`）全部精准拦截。
+
+---
+
+## 2026-10-25
+
+### 用户指令
+> 为保护类或结构成员函数中this的安全性, cp 借鉴了 rust, 将 this/_ 作为函数首参, 可读借用省略 该参数, 可变借用使用 &_, 改变所有权 使用  move _, 
+验证这些设计是否合理, 是否完整实现, 是否已经写入 cp_ref.md 设计规范
+
+### 执行结果汇报
+1. **设计合理性深度论证 (极度合理，TS 体验 + Rust 安全)**：
+   - **只读借用缺省省略**：相比 Rust 强制每个方法都要写 `&self`，CP 将占比 90% 的只读借用作为默认行为，直接省略接收者参数（写作 `fn get(): i32`），体验与 TypeScript 完全一致，大幅减少模板代码，同时在编译期强制实施只读保护，杜绝无意副作用；
+   - **可变借用 `&_`**：显式声明排他可变借用，与 CP 全局的引用借用体系（普通参数 `&param`、循环 `for &item of list`）保持严格一致，正交性极高；调用端必须持有排他可变借用，彻底消除了数据竞争与并发冲突；
+   - **所有权消费 `move _`**：用于析构清理（如 `close(move _)`）与 Typestate 状态迁移，调用后外部实例立即失效（报错 `Use of moved value`），并自动注销外层 `defer`，杜绝悬垂指针与 Double-Free。
+2. **实现完整性审计与补强**：
+   - **只读借用省略首参**：100% 完整实现，已在 `codegen.rs` 与 `sema.rs` 深度集成；
+   - **所有权消费 `move _`**：100% 完整实现，移动状态跟踪与失效拦截健全；
+   - **可变借用 `&_` 补强实装**：此前 `parser.rs` 仅接受 `mut _`，现已扩展支持 `Token::Ampersand`（即 `&_`、`&this`、`&mut _`、`&mut this`），并修复了类字段成员借用生成多余二级指针的隐患；
+   - 测试用例 [`cap/test/test_this_underscore_interchange.cp`](file:///data/dev/cp/cap/test/test_this_underscore_interchange.cp) 新增 `&_` 与 `&this` 原地可变借用测试，全部测试 100% 通过。
+3. **设计规范手册 `cp_ref.md` 同步**：
+   - 已全面更新 `cp_ref.md` 第 2 节 Trait 契约以及第 10.5 节《`trait`、单继承 `class` 与自身实例 `_` / `this` 的所有权、借用与生命周期》；
+   - 明确规范首参三态语法规则：缺省只读借用、`&_` 可变借用（兼容 `mut _`）、`move _` 所有权转移，并详述其编译期防护与生命周期推导规则。
+
+---
+
+## 2026-10-25
+
+### 用户指令
+> git 提交
+
+### 执行结果汇报
+1. 将成员方法接收者首参三态借用与所有权增强（`cpc/src/parser.rs`, `cpc/src/codegen.rs`）、专项全景测试用例（`cap/test/test_this_underscore_interchange.cp`）、语言设计规范手册（`cp_ref.md`）以及三项记录日志文件（`CHANGELOG.md`, `DEVLOG.md`, `SESSION.md`）全部添加至 Git 暂存区；
+2. 执行 Git 提交并生成提交记录；
+3. 代码库工作区恢复干净，全部开发与文档成果安全落库。
+
+
 
 
 

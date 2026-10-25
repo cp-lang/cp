@@ -5419,7 +5419,9 @@ impl Codegen {
                     }
                 }
                 let inner_code = self.generate_expr(inner);
-                let is_class_ref = if let Expr::Ident(id) = &**inner {
+                let is_class_ref = if let Some(Type::Ref(cid)) = self.infer_cp_type(inner) {
+                    self.class_defs.get(&cid.sym).map_or(false, |c| !c.is_ref)
+                } else if let Expr::Ident(id) = &**inner {
                     if let Some(Type::Ref(cid)) = self.var_cp_types.get(&id.sym) {
                         self.class_defs.get(&cid.sym).map_or(false, |c| !c.is_ref)
                     } else {

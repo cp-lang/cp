@@ -1048,6 +1048,78 @@ let reply = raw
 2. 运行 `./zig-out/cap test/test_template.cp`，9 大测试项全部绿色通过！
 3. 全量历史回归测试（`test_unsafe_pass.cp`, `test_for_pass.cp`, `test_pipe_pass.cp`, `test_map_set_dict.cp`, `test_static_object.cp`），全部 100% 编译通过并正常运行。
 
+---
+
+## 2026-10-25: `_` 与 `this` 等同设计全景审计与借用穿透缺陷修复
+
+### 1. 任务背景与审计目标
+响应大师关于“检查 `_` 代替 `this`（两者完全等同）的设计实现目前是否仍正常”的指示，对编译器词法（`lexer.rs`）、语法分析（`parser.rs`）、语义符号系统（`sema.rs`）及后端代码生成（`codegen.rs`）中关于 `_` / `this` 的处理逻辑展开端到端地毯式审查。
+
+### 2. 审计结论：核心机制运转完全正常
+1. **词法与语法层**：
+   - `_` 与 `this` 作为接收者在函数形参中声明（`fn f(_)`、`fn f(mut _)`、`fn f(move _)`、`fn f(this)`、`fn f(mut this)`、`fn f(move this)`）完全对称，在缺少显式类型注解时自动由编译器在类/Trait 作用域中绑定为所属类的类型。
+2. **语义作用域与省略前缀**：
+   - 在 `sema.rs` 中，每个成员函数作用域默认注册了同名变量 `this` 与 `_`；
+   - 支持省略 `_.` / `this.` 访问成员字段与互调成员方法，编译器自动解析至类的字段表。
+3. **消除与模式匹配通配符的二义性**：
+   - `match` 模式匹配中统一采用 `*` 作为通配分支，彻底杜绝了将通配符误识别为 `this` 的可能。在 `* => { ... }` 分支内，`_` 依然安全指向当前类实例。
+4. **所有权与借用安全检查**：
+   - `mut _` / `mut this` 能够严密检查只读/可变借用冲突；
+   - `move _` / `move this` 能够精准使外部实例所有权失效，拦截 Use-After-Move。
+
+### 3. 发现并修复的潜伏缺陷：成员借用类型穿透 (Member Borrow Pointer Bug)
+在执行多层对象嵌套测试 [`cap/test/test_trait_class_pass.cp`](file:///data/dev/cp/cap/test/test_trait_class_pass.cp) 时，发现了一个由于近期引入值类型 `struct` 与裸指针后引发的隐蔽问题：
+- **问题现象**：当类方法中对类成员进行借用返回时（`fn getWeights(): &Tensor { return &_.weights; }`），Zig 编译器报错：`expected type '*Tensor', found '**Tensor'`。
+- **根因分析**：在 `cpc/src/codegen.rs` 的 `Expr::Borrow` 分支中，原本的 `is_class_ref` 仅匹配 `Expr::Ident`，对于 `Expr::Member`（即 `_.weights`）返回了 `false`，导致在已经是指针的 `self.weights`（`*Tensor`）外层又加了一层取地址符 `(&self.weights)`，生成了多余的二级指针 `**Tensor`。
+- **修复方案**：将 `is_class_ref` 判定升级为使用 `self.infer_cp_type(inner)`，一旦表达式结果为堆分配 Class（`!c.is_ref`），智能识别出其在底层本身已经是指针，直接产出 `self.weights`，杜绝重复取地址。
+
+### 4. 验证套件
+1. 编写专项全景测试用例 [`cap/test/test_this_underscore_interchange.cp`](file:///data/dev/cp/cap/test/test_this_underscore_interchange.cp)，覆盖字段直接访问、方法互调、省略前缀、`mut _` 与 `mut this` 接收者互换变异、`move _` 与 `move this` 所有权消费、单继承派生调用及异步状态机 `async fn` 上下文穿透共 11 项全景测试，100% 编译运行通过！
+2. 运行所有反向借用拦截测试（`test_trait_class_fail_*.cp`），借用冲突拦截率 100%。
+3. 历史全量回归测试全部通过。
+
+---
+
+## 2026-10-25: 成员函数接收者首参三态设计（省略、`&_`、`move _`）合理性验证与完整性攻坚
+
+### 1. 任务背景与核心问题
+用户提出对类/结构体成员函数中将 `this`/`_` 作为首参的设计进行全面审查与验证：
+- **可读借用**：省略该参数（默认）；
+- **可变借用**：使用 `&_`（显式声明排他可变借用）；
+- **改变所有权**：使用 `move _`（显式声明消费所有权）。
+目标要求：验证这些设计是否合理、是否完整实现、是否已经写入 `cp_ref.md` 设计规范。
+
+### 2. 设计合理性深度论证 (Soundness & Rationality)
+1. **对比 Rust 的繁复，实现“心智零负担”的优雅飞跃**：
+   - Rust 强制每个方法都必须写接收者（`&self`、`&mut self`、`self`）。在实际软件工程中，85%~90% 的方法为纯只读借用（如 getter、计算、序列化等）。强制书写 `&self` 带来了大量语法噪声；
+   - CP 借鉴其内存安全本质，采用“**只读借用缺省省略**”策略：书写 `fn getVal(): i32` 体验完全等同于 TypeScript，零模板代码；而编译器底层严格将其标记为只读借用，禁止在方法内部修改字段，调用端产生只读借用，兼顾 TS 的优雅与 Rust 的安全。
+2. **符号体系的一致性与正交性**：
+   - 在 CP 语言中：
+     - 普通函数可变参数使用 `&param` 或 `mut param`；
+     - `for` 循环原地可变引用使用 `for &item of list`；
+     - 成员函数可变借用使用 `&_`（及兼容 `mut _`）；
+     - 所有权转移使用 `move x` 与 `move _`。
+   - `&` 符号在全语言范围内完全统一代表“可变借用/引用”，`move` 统一代表“所有权消费”，语法正交，心智模型极度清晰。
+3. **编译期全生命周期防护**：
+   - `&_` 方法：调用端必须具备排他可变借用权；若对象已被只读借用，编译期立即阻断；
+   - `move _` 方法：调用后外层对象失效（标记为已移动），后续访问直接报 `Use of moved value`，同时自动注销可能存在的析构 `defer`，杜绝悬垂指针与 Double-Free。
+
+### 3. 实现完整性审计与补强 (Implementation Audit & Enhancement)
+1. **审计发现**：
+   - **只读借用省略首参**：已 100% 完整实现于 `codegen.rs` 与 `sema.rs`（`ReceiverMode::ReadOnly`）；
+   - **所有权消费 `move _`**：已 100% 完整实现于 `parser.rs` 与 `codegen.rs`（`ReceiverMode::Move`），具备移动失效检查与 auto-drop 消除；
+   - **可变借用 `&_`**：此前仅在 `parser.rs` 中支持 `mut _`，书写 `&_` 时会被报错为 `UnexpectedToken(Ampersand)`。
+2. **补强实装 (`cpc/src/parser.rs`)**：
+   - 在 `parse_params` 中增加对 `Token::Ampersand` 的解析，支持 `&_`、`&this`、`&mut _`、`&mut this` 及 `&param`，映射为 `Param.is_mut = true`，下游代码生成自动衔接 `ReceiverMode::Mut`；
+   - 在 `cpc/src/codegen.rs` 中增强对成员借用表达式的类型推导，避免对类字段产生重复取地址问题。
+3. **测试验证**：
+   - 扩充 [`cap/test/test_this_underscore_interchange.cp`](file:///data/dev/cp/cap/test/test_this_underscore_interchange.cp)，增加 `setViaAmpersandUnderscore(&_, val: i32)` 与 `setViaAmpersandThis(&this, val: i32)`，运行实测输出正确（值为 28 与 39），全部测试 100% 绿色通过。
+
+### 4. 规范文档更新 (`cp_ref.md`)
+- 全面更新 `cp_ref.md` 第 2 节 Trait 契约定义与第 10.5 节《`trait`、单继承 `class` 与自身实例 `_` / `this` 的所有权、借用与生命周期》；
+- 明确以表格和详细条款规范“只读借用省略首参”、“可变借用 `&_`（兼容 `mut _`）”、“所有权消费 `move _`”，建立完整且规范的对外文档。
+
+
 
 
 

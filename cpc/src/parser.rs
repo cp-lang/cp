@@ -517,6 +517,12 @@ impl<'a> Parser<'a> {
             } else if self.peek() == Some(&Token::Move) {
                 self.bump()?;
                 is_move = true;
+            } else if self.peek() == Some(&Token::Ampersand) {
+                self.bump()?;
+                is_mut = true;
+                if self.peek() == Some(&Token::Mut) {
+                    self.bump()?;
+                }
             }
 
             let p_ident = self.parse_ident()?;
