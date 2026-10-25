@@ -38,6 +38,8 @@ pub enum Token {
     Struct,
     #[token("static")]
     Static,
+    #[token("unsafe")]
+    Unsafe,
     #[token("super")]
     Super,
     #[token("meta")]

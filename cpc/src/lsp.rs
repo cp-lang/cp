@@ -142,12 +142,16 @@ fn format_symbol_kind(kind: &SymbolKind) -> String {
             params,
             ret,
             is_async,
+            is_unsafe,
         } => {
-            let mut s = if *is_async {
-                "async fn (".to_string()
-            } else {
-                "fn (".to_string()
-            };
+            let mut s = String::new();
+            if *is_unsafe {
+                s.push_str("unsafe ");
+            }
+            if *is_async {
+                s.push_str("async ");
+            }
+            s.push_str("fn (");
             for (i, p) in params.iter().enumerate() {
                 s.push_str(&format_type(p));
                 if i < params.len() - 1 {

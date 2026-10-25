@@ -55,6 +55,8 @@ pub enum SemaError {
         "Compile Error: Cannot mutate '{0}' while it is borrowed in 'for ... of' loop at {1:?}"
     )]
     MutateWhileBorrowedInFor(String, Span),
+    #[error("Compile Error: {0} at {1:?}")]
+    UnsafeRequired(String, Span),
 }
 
 pub type SemaResult<T> = Result<T, SemaError>;
@@ -75,6 +77,7 @@ pub enum SymbolKind {
         params: Vec<Type>,
         ret: Option<Type>,
         is_async: bool,
+        is_unsafe: bool,
     },
     Class(Class),
     Trait(TraitDecl),
@@ -85,6 +88,8 @@ pub struct Analyzer {
     scopes: Vec<HashMap<String, SymbolKind>>,
     classes: HashMap<String, Class>,
     current_fn_is_async: bool,
+    current_fn_is_unsafe: bool,
+    unsafe_depth: usize,
     pub symbol_map: HashMap<Span, SymbolKind>,
     pub meta_defs: HashMap<String, MetaDefInfo>,
     pub dec_defs: HashMap<String, DecDef>,
@@ -152,6 +157,8 @@ impl Analyzer {
             scopes: vec![HashMap::new()],
             classes: HashMap::new(),
             current_fn_is_async: false,
+            current_fn_is_unsafe: false,
+            unsafe_depth: 0,
             symbol_map: HashMap::new(),
             meta_defs,
             dec_defs: HashMap::new(),
@@ -160,6 +167,10 @@ impl Analyzer {
             loop_borrowed_vars: std::collections::HashSet::new(),
             moved_vars: std::collections::HashSet::new(),
         }
+    }
+
+    pub fn is_in_unsafe(&self) -> bool {
+        self.current_fn_is_unsafe || self.unsafe_depth > 0
     }
 
     pub fn analyze_module(&mut self, module: &mut Module) -> SemaResult<()> {
@@ -302,6 +313,7 @@ impl Analyzer {
                             params: d.params.iter().map(|p| p.ty.clone()).collect(),
                             ret: d.return_type.clone(),
                             is_async: false,
+                            is_unsafe: false,
                         },
                         d.ident.span,
                     )?;
@@ -314,6 +326,7 @@ impl Analyzer {
                             params: m.params.iter().map(|p| p.ty.clone()).collect(),
                             ret: Some(crate::ast::Type::Void),
                             is_async: false,
+                            is_unsafe: false,
                         },
                         m.ident.span,
                     )?;
@@ -552,6 +565,7 @@ impl Analyzer {
             },
             is_async: false,
             is_static: false,
+            is_unsafe: false,
             meta: vec![], // Macro Hygiene!
         }
     }
@@ -584,6 +598,7 @@ impl Analyzer {
             },
             is_async: false,
             is_static: false,
+            is_unsafe: false,
             meta: vec![],
         }
     }
@@ -641,6 +656,7 @@ impl Analyzer {
             },
             is_async: false,
             is_static: false,
+            is_unsafe: false,
             meta: vec![],
         }
     }
@@ -679,6 +695,7 @@ impl Analyzer {
             },
             is_async: false,
             is_static: false,
+            is_unsafe: false,
             meta: vec![],
         }
     }
@@ -851,12 +868,15 @@ impl Analyzer {
                     params,
                     ret: f.return_type.clone(),
                     is_async: f.is_async,
+                    is_unsafe: f.is_unsafe,
                 };
                 self.define(f.ident.sym.clone(), kind.clone(), f.ident.span)?;
                 self.symbol_map.insert(f.ident.span, kind);
 
                 let old_async = self.current_fn_is_async;
+                let old_unsafe = self.current_fn_is_unsafe;
                 self.current_fn_is_async = f.is_async;
+                self.current_fn_is_unsafe = f.is_unsafe;
                 self.enter_scope();
                 for p in &f.params {
                     let p_kind = SymbolKind::Var {
@@ -871,6 +891,7 @@ impl Analyzer {
                 }
                 self.exit_scope();
                 self.current_fn_is_async = old_async;
+                self.current_fn_is_unsafe = old_unsafe;
             }
             Decl::Class(c) => {
                 let target = if c.is_ref { "struct" } else { "class" };
@@ -886,7 +907,9 @@ impl Analyzer {
                 }
                 for m in &c.methods {
                     let old_async = self.current_fn_is_async;
+                    let old_unsafe = self.current_fn_is_unsafe;
                     self.current_fn_is_async = m.is_async;
+                    self.current_fn_is_unsafe = m.is_unsafe;
                     self.enter_scope();
                     // Define receiver aliases `this` and `_`
                     let self_ty = Type::Ref(c.ident.clone());
@@ -932,6 +955,7 @@ impl Analyzer {
                                     params,
                                     ret: cm.return_type.clone(),
                                     is_async: cm.is_async,
+                                    is_unsafe: cm.is_unsafe,
                                 },
                                 cm.ident.span,
                             );
@@ -958,6 +982,7 @@ impl Analyzer {
                                         params,
                                         ret: tm.return_type.clone(),
                                         is_async: false,
+                                        is_unsafe: tm.is_unsafe,
                                     },
                                     tm.ident.span,
                                 );
@@ -977,6 +1002,7 @@ impl Analyzer {
                     }
                     self.exit_scope();
                     self.current_fn_is_async = old_async;
+                    self.current_fn_is_unsafe = old_unsafe;
                 }
             }
             Decl::Trait(t) => {
@@ -1100,6 +1126,12 @@ impl Analyzer {
                 self.analyze_expr(expr)?;
             }
             Stmt::Block(block) => self.analyze_block(block)?,
+            Stmt::UnsafeBlock(block) => {
+                self.unsafe_depth += 1;
+                let res = self.analyze_block(block);
+                self.unsafe_depth -= 1;
+                res?;
+            }
             Stmt::If(i) => {
                 self.infer_type(&i.test)?;
                 self.analyze_expr(&i.test)?;
@@ -1233,6 +1265,22 @@ impl Analyzer {
                 return Err(SemaError::PipePlaceholderOutsidePipeline(*span));
             }
             Expr::Call(call) | Expr::OptCall(call) => {
+                if let Expr::Ident(fid) = &*call.callee {
+                    if let Some(SymbolKind::Func {
+                        is_unsafe: true, ..
+                    }) = self.resolve(&fid.sym)
+                    {
+                        if !self.is_in_unsafe() {
+                            return Err(SemaError::UnsafeRequired(
+                                format!(
+                                    "Call to unsafe function '{}' requires an unsafe block or unsafe function",
+                                    fid.sym
+                                ),
+                                call.span,
+                            ));
+                        }
+                    }
+                }
                 if let Expr::Member(mem) = &*call.callee {
                     if let Expr::Ident(id) = &*mem.obj {
                         if self.loop_borrowed_vars.contains(&id.sym) {
@@ -1396,6 +1444,38 @@ impl Analyzer {
             Expr::Range { start, end, .. } => {
                 self.analyze_expr(start)?;
                 self.analyze_expr(end)?;
+            }
+            Expr::Cast {
+                expr,
+                target_ty,
+                span,
+            } => {
+                self.analyze_expr(expr)?;
+                if matches!(target_ty, Type::RawPtr { .. }) && !self.is_in_unsafe() {
+                    return Err(SemaError::UnsafeRequired(
+                        "Cast to raw pointer requires an unsafe block or unsafe function"
+                            .to_string(),
+                        *span,
+                    ));
+                }
+            }
+            Expr::Deref(inner) => {
+                self.analyze_expr(inner)?;
+                if let Ok(ty) = self.infer_type(inner) {
+                    if matches!(ty, Type::RawPtr { .. }) && !self.is_in_unsafe() {
+                        return Err(SemaError::UnsafeRequired(
+                            "Dereferencing raw pointer requires an unsafe block or unsafe function"
+                                .to_string(),
+                            inner_span(inner),
+                        ));
+                    }
+                }
+            }
+            Expr::Unsafe(block) => {
+                self.unsafe_depth += 1;
+                let res = self.analyze_block(block);
+                self.unsafe_depth -= 1;
+                res?;
             }
             _ => {}
         }
@@ -1600,11 +1680,7 @@ impl Analyzer {
                 }
                 match self.resolve(&ident.sym) {
                     Some(SymbolKind::Var { ty, .. }) => Ok(ty.clone()),
-                    Some(SymbolKind::Func {
-                        params,
-                        ret,
-                        is_async: _,
-                    }) => Ok(Type::Fn(
+                    Some(SymbolKind::Func { params, ret, .. }) => Ok(Type::Fn(
                         params.clone(),
                         Box::new(ret.clone().unwrap_or(Type::I32)),
                     )),
@@ -1654,6 +1730,11 @@ impl Analyzer {
                 }
             }
             Expr::Call(call) => {
+                if let Expr::Ident(fid) = &*call.callee {
+                    if let Some(SymbolKind::Func { ret: Some(ret), .. }) = self.resolve(&fid.sym) {
+                        return Ok(ret.clone());
+                    }
+                }
                 let callee_ty = self.infer_type(&call.callee)?;
                 match callee_ty {
                     Type::Fn(_, ret) => Ok(*ret),
@@ -1825,6 +1906,32 @@ impl Analyzer {
                 sym: "TypeInfo".to_string(),
             })),
             Expr::Range { .. } => Ok(Type::I32),
+            Expr::Cast { target_ty, .. } => Ok(target_ty.clone()),
+            Expr::Deref(inner) => {
+                let inner_ty = self.infer_type(inner)?;
+                match inner_ty {
+                    Type::RawPtr { inner, depth } => {
+                        if depth > 1 {
+                            Ok(Type::RawPtr {
+                                inner,
+                                depth: depth - 1,
+                            })
+                        } else {
+                            Ok(*inner)
+                        }
+                    }
+                    Type::BorrowType { inner, .. } => Ok(*inner),
+                    other => Ok(other),
+                }
+            }
+            Expr::Unsafe(b) => {
+                if let Some(Stmt::Return(r)) = b.body.last() {
+                    if let Some(arg) = &r.arg {
+                        return self.infer_type(arg);
+                    }
+                }
+                Ok(Type::Void)
+            }
             _ => Ok(Type::Any),
         }
     }

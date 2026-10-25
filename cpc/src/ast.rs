@@ -165,6 +165,8 @@ pub struct Function {
     #[serde(default)]
     pub is_static: bool,
     #[serde(default)]
+    pub is_unsafe: bool,
+    #[serde(default)]
     pub meta: Vec<MetaItem>,
 }
 
@@ -182,6 +184,7 @@ pub enum Stmt {
     ErrDefer(Box<Stmt>),
     ComptimeBlock(BlockStmt),
     Block(BlockStmt),
+    UnsafeBlock(BlockStmt),
     TryCatch {
         span: Span,
         try_block: BlockStmt,
@@ -352,6 +355,13 @@ pub enum Expr {
         end: Box<Expr>,
         inclusive: bool,
     },
+    Cast {
+        span: Span,
+        expr: Box<Expr>,
+        target_ty: Type,
+    },
+    Deref(Box<Expr>),
+    Unsafe(BlockStmt),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -539,6 +549,10 @@ pub enum Type {
     Shared(Box<Type>),
     BoxDyn(Ident),
     BareDyn(Ident),
+    RawPtr {
+        inner: Box<Type>,
+        depth: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -572,6 +586,8 @@ pub struct MethodSig {
     pub return_type: Option<Type>,
     #[serde(default)]
     pub default_body: Option<BlockStmt>,
+    #[serde(default)]
+    pub is_unsafe: bool,
 }
 
 pub fn has_pipe_placeholder(expr: &Expr) -> bool {
@@ -606,6 +622,8 @@ pub fn has_pipe_placeholder(expr: &Expr) -> bool {
             fields.iter().any(|f| has_pipe_placeholder(&f.val))
         }
         Expr::Index { obj, index } => has_pipe_placeholder(obj) || has_pipe_placeholder(index),
+        Expr::Deref(d) => has_pipe_placeholder(d),
+        Expr::Cast { expr, .. } => has_pipe_placeholder(expr),
         Expr::Range { start, end, .. } => has_pipe_placeholder(start) || has_pipe_placeholder(end),
         Expr::Builtin(b) => b.args.iter().any(has_pipe_placeholder),
         _ => false,
@@ -689,6 +707,16 @@ pub fn substitute_pipe_placeholder(expr: &Expr, pipe_var: &str) -> Expr {
                 .map(|a| substitute_pipe_placeholder(a, pipe_var))
                 .collect(),
         }),
+        Expr::Deref(d) => Expr::Deref(Box::new(substitute_pipe_placeholder(d, pipe_var))),
+        Expr::Cast {
+            span,
+            expr,
+            target_ty,
+        } => Expr::Cast {
+            span: *span,
+            expr: Box::new(substitute_pipe_placeholder(expr, pipe_var)),
+            target_ty: target_ty.clone(),
+        },
         Expr::Range {
             span,
             start,

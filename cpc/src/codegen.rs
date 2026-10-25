@@ -175,6 +175,7 @@ impl Codegen {
             | Type::Array(inner)
             | Type::Shared(inner)
             | Type::ErrorUnion(inner)
+            | Type::RawPtr { inner, .. }
             | Type::BorrowType { inner, .. } => {
                 self.check_type_validity_and_collect_errors(inner);
             }
@@ -199,7 +200,7 @@ impl Codegen {
                     self.check_type_validity_and_collect_errors(t);
                 }
             }
-            Stmt::Block(b) => {
+            Stmt::Block(b) | Stmt::UnsafeBlock(b) => {
                 for s in &b.body {
                     self.scan_stmt_types(s);
                 }
@@ -578,6 +579,7 @@ impl Codegen {
                                 body: default_body.clone(),
                                 is_async: false,
                                 is_static: false,
+                                is_unsafe: tm.is_unsafe,
                                 meta: Vec::new(),
                             };
                             if let Some(cls) = self.class_defs.get_mut(c_name) {
@@ -1889,7 +1891,7 @@ impl Codegen {
                     self.last_use_map.insert(r, idx);
                 }
             }
-            Stmt::Block(b) => self.compute_last_uses_block(b, counter),
+            Stmt::Block(b) | Stmt::UnsafeBlock(b) => self.compute_last_uses_block(b, counter),
             Stmt::If(i) => {
                 crate::ast_visitor::find_referenced_vars_in_expr(&i.test, &mut refs);
                 for r in refs {
@@ -2335,6 +2337,24 @@ impl Codegen {
                 lifetimes: vec![],
             }))),
             Expr::EnumInit(ei) => Some(Type::Ref(ei.enum_name.clone())),
+            Expr::Cast { target_ty, .. } => Some(target_ty.clone()),
+            Expr::Deref(inner) => {
+                let inner_ty = self.infer_cp_type_with_mock(inner, mock_types)?;
+                match inner_ty {
+                    Type::RawPtr { inner, depth } => {
+                        if depth > 1 {
+                            Some(Type::RawPtr {
+                                inner,
+                                depth: depth - 1,
+                            })
+                        } else {
+                            Some(*inner)
+                        }
+                    }
+                    Type::BorrowType { inner, .. } => Some(*inner),
+                    other => Some(other),
+                }
+            }
             Expr::Move(inner) | Expr::Borrow(inner, _) => {
                 self.infer_cp_type_with_mock(inner, mock_types)
             }
@@ -3458,7 +3478,7 @@ impl Codegen {
                         self.current_case_content = saved;
                         ret_s
                     }
-                    Stmt::Block(b) => {
+                    Stmt::Block(b) | Stmt::UnsafeBlock(b) => {
                         let saved = self.current_case_content.clone();
                         self.current_case_content.clear();
                         let len = b.body.len();
@@ -3810,6 +3830,7 @@ impl Codegen {
                 },
                 is_async: func.is_async,
                 is_static: func.is_static,
+                is_unsafe: func.is_unsafe,
                 meta: vec![],
             };
 
@@ -4190,7 +4211,7 @@ impl Codegen {
                     self.collect_expr_error_types(a, out);
                 }
             }
-            Stmt::Block(b) => {
+            Stmt::Block(b) | Stmt::UnsafeBlock(b) => {
                 for s in &b.body {
                     self.collect_stmt_error_types(s, out);
                 }
@@ -4562,10 +4583,23 @@ impl Codegen {
                                 } else if self.current_fn_params.contains(&obj_id.sym)
                                     && !self.mutable_fn_params.contains(&obj_id.sym)
                                 {
-                                    panic!(
-                                        "CP Compile Error: Cannot mutate field '{}' of read-only parameter '{}' (mark parameter as 'mut {}')",
-                                        mem.prop.sym, obj_id.sym, obj_id.sym
-                                    );
+                                    let is_pointer_or_mut_borrow = if let Some(param_ty) =
+                                        self.var_cp_types.get(&obj_id.sym)
+                                    {
+                                        matches!(
+                                            param_ty,
+                                            Type::RawPtr { .. }
+                                                | Type::BorrowType { is_mut: true, .. }
+                                        )
+                                    } else {
+                                        false
+                                    };
+                                    if !is_pointer_or_mut_borrow {
+                                        panic!(
+                                            "CP Compile Error: Cannot mutate field '{}' of read-only parameter '{}' (mark parameter as 'mut {}')",
+                                            mem.prop.sym, obj_id.sym, obj_id.sym
+                                        );
+                                    }
                                 }
                                 self.check_borrow_conflict(&obj_id.sym, true);
                             }
@@ -4677,7 +4711,7 @@ impl Codegen {
                     self.write_to_case(&format!("_ = {};", e));
                 }
             },
-            Stmt::Block(b) => {
+            Stmt::Block(b) | Stmt::UnsafeBlock(b) => {
                 self.current_scope_depth += 1;
                 if !self.is_state_machine {
                     self.write_to_case("{");
@@ -5349,7 +5383,21 @@ impl Codegen {
                         self.check_borrow_conflict(&i.sym, *is_mut);
                     }
                 }
-                self.generate_expr(inner)
+                let inner_code = self.generate_expr(inner);
+                let is_class_ref = if let Expr::Ident(id) = &**inner {
+                    if let Some(Type::Ref(cid)) = self.var_cp_types.get(&id.sym) {
+                        self.class_defs.get(&cid.sym).map_or(false, |c| !c.is_ref)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if is_class_ref {
+                    inner_code
+                } else {
+                    format!("(&{})", inner_code)
+                }
             }
             Expr::Move(expr) => {
                 if let Expr::Ident(i) = &**expr {
@@ -6366,7 +6414,7 @@ impl Codegen {
                         self.current_case_content = saved;
                         ret_s
                     }
-                    Stmt::Block(b) => {
+                    Stmt::Block(b) | Stmt::UnsafeBlock(b) => {
                         let saved = self.current_case_content.clone();
                         self.current_case_content.clear();
                         let len = b.body.len();
@@ -6506,8 +6554,8 @@ impl Codegen {
             }
             Expr::EnumInit(ei) => {
                 let fields_slice = ei.fields.as_deref().unwrap_or(&[]);
-                if ei.enum_name.sym == "Error" {
-                    let mut s = String::from("Error{ ");
+                if ei.variant_name.sym.is_empty() && !ei.enum_name.sym.is_empty() {
+                    let mut s = format!("{}{{ ", ei.enum_name.sym);
                     for (idx, f) in fields_slice.iter().enumerate() {
                         s.push_str(&format!(".{} = {}", f.key.sym, self.generate_expr(&f.val)));
                         if idx + 1 < fields_slice.len() {
@@ -7270,6 +7318,63 @@ impl Codegen {
                 }
             }
             Expr::Range { .. } => "0".to_string(),
+            Expr::Cast {
+                expr,
+                target_ty,
+                ..
+            } => {
+                let target_zig_ty = self.map_type(target_ty);
+                match &**expr {
+                    Expr::Borrow(inner, _) => {
+                        let inner_code = self.generate_expr(inner);
+                        let is_class_ref = if let Expr::Ident(id) = &**inner {
+                            if let Some(Type::Ref(cid)) = self.var_cp_types.get(&id.sym) {
+                                self.class_defs.get(&cid.sym).map_or(false, |c| !c.is_ref)
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+                        if is_class_ref && matches!(target_ty, Type::RawPtr { depth: 1, .. }) {
+                            format!(
+                                "@as({}, @ptrCast(@alignCast({})))",
+                                target_zig_ty, inner_code
+                            )
+                        } else {
+                            format!(
+                                "@as({}, @ptrCast(@alignCast(&({}))))",
+                                target_zig_ty, inner_code
+                            )
+                        }
+                    }
+                    _ => {
+                        let inner_code = self.generate_expr(expr);
+                        format!(
+                            "@as({}, @ptrCast(@alignCast({})))",
+                            target_zig_ty, inner_code
+                        )
+                    }
+                }
+            }
+            Expr::Deref(inner) => {
+                let inner_code = self.generate_expr(inner);
+                if matches!(&**inner, Expr::Ident(_) | Expr::Member(_) | Expr::Deref(_)) {
+                    format!("{}.*", inner_code)
+                } else {
+                    format!("({}).*", inner_code)
+                }
+            }
+            Expr::Unsafe(b) => {
+                let saved = self.current_case_content.clone();
+                self.current_case_content.clear();
+                for s in &b.body {
+                    self.generate_stmt(s);
+                }
+                let body_str = self.current_case_content.clone();
+                self.current_case_content = saved;
+                format!("(blk: {{\n{}\n}})", body_str)
+            }
             _ => "0".to_string(),
         }
     }
@@ -7767,7 +7872,7 @@ impl Codegen {
                     }
                     self.expected_box_trait = old_box;
                 }
-                Stmt::Block(b) => self.extract_locals_simple(b),
+                Stmt::Block(b) | Stmt::UnsafeBlock(b) => self.extract_locals_simple(b),
                 Stmt::If(i) => {
                     if let Stmt::Block(b) = &*i.cons {
                         self.extract_locals_simple(b);
@@ -7933,7 +8038,7 @@ impl Codegen {
                         _ => {}
                     }
                 }
-                Stmt::Block(b) => self.extract_local_vars_to_str(b, output),
+                Stmt::Block(b) | Stmt::UnsafeBlock(b) => self.extract_local_vars_to_str(b, output),
                 Stmt::For(f) => {
                     if let Stmt::Block(b) = &*f.body {
                         self.extract_local_vars_to_str(b, output);
@@ -7996,6 +8101,7 @@ impl Codegen {
                     || ident.sym == "Error"
                     || ident.sym.starts_with("__AnonErr_")
                     || ident.sym.starts_with("__UnionErr_")
+                    || self.ref_classes.contains(&ident.sym)
                     || self.enum_defs.contains_key(&ident.sym)
                     || self.error_sets.contains_key(&ident.sym)
                     || self.trait_defs.contains_key(&ident.sym)
@@ -8033,7 +8139,27 @@ impl Codegen {
                     .collect();
                 format!("struct {{ {} }}", mapped.join(", "))
             }
+            Type::RawPtr { inner, depth } => {
+                let base = self.map_raw_ptr_base(inner);
+                format!("{}{}", "*".repeat(*depth), base)
+            }
             _ => "i32".to_string(),
+        }
+    }
+
+    fn map_raw_ptr_base(&self, ty: &Type) -> String {
+        match ty {
+            Type::I32 => "i32".to_string(),
+            Type::U32 => "u32".to_string(),
+            Type::U64 => "u64".to_string(),
+            Type::F32 => "f32".to_string(),
+            Type::F64 => "f64".to_string(),
+            Type::USize => "usize".to_string(),
+            Type::Bool => "bool".to_string(),
+            Type::String => "[]const u8".to_string(),
+            Type::Void | Type::Any => "anyopaque".to_string(),
+            Type::Ref(id) => id.sym.clone(),
+            _ => self.map_type(ty),
         }
     }
 
@@ -8077,6 +8203,14 @@ fn type_to_display_string(ty: &Type) -> String {
         Type::ErrorUnion(inner) => format!("!{}", type_to_display_string(inner)),
         Type::BorrowType { inner, .. } => type_to_display_string(inner),
         Type::Shared(inner) => type_to_display_string(inner),
+        Type::RawPtr { inner, depth } => {
+            format!(
+                "{}{}{}",
+                "*".repeat(*depth),
+                type_to_display_string(inner),
+                "!"
+            )
+        }
         _ => "any".to_string(),
     }
 }

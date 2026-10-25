@@ -847,6 +847,85 @@ let reply = raw
    - `hello.cp` 100% 通过；
    - Rust 编译器单元测试全量通过，代码规范 `cargo fmt` 检查通过。
 
+---
+
+## 2026-10-25 - Unsafe 与裸指针系统深度设计与落地实现 (Unsafe & Raw Pointer System)
+
+### 1. 业务需求与架构考量 (Problem & Design Strategy)
+
+在百万级 AI Agent 高并发与异构加速器互联生态中，CP 语言除了拥有 TS 的高层表达力与 Rust 级的零开销所有权管理外，必须在 1% 的底层场景（如直接映射 GPU 物理显存、零拷贝 C/Zig NIF 扩展、高速底层网络驱动）中提供直接操纵物理裸指针的能力。
+针对裸指针语法，在经过深入对比与架构推演后，确立了 **“前置 `*` 标识指针寻址深度，尾置 `!` 标识非托管裸属性”** 的设计：
+1. **符号正交性**：
+   - 安全借用：`&T`（只读借用）、`*T`（可变借用）；
+   - 模式匹配：`*` 作为通配符；
+   - 裸指针：`*T!`（1级）、`**T!`（2级）、`***T!`（3级）。前置 `*` 的数量精准对应层级，尾置 `!` 赋予非托管属性，彻底与借用检查器解耦。
+2. **与三态错误返回 `!` 彻底解耦**：
+   在函数签名中（如 `unsafe fn getFalliblePtr(): *User! ! AllocError`），前面的 `*User!` 是裸指针返回类型，后面的 `! AllocError` 是错误联合。通过在词法与解析器中引入双向 lookahead，根据末尾是否紧跟标识符/错误类型进行严格判定，消除语法二义性。
+3. **语法易用性与 TypeScript 体验**：
+   - 结构体裸指针自动属性解引用：`p.age = val`，无须手写晦涩的 `(*p).age`；
+   - 标量与多级指针显式解引用：`p.* = val`，`pp.*.age = val`；
+   - 强制显式强转：`&user as *User!`，从安全领域迈入裸指针领域必须通过 `as` 显式确认。
+4. **安全沙盒拦截 (Safe by Default, Opt-in Unsafe)**：
+   - `unsafe fn` 与 `unsafe { ... }` 作为安全沙盒；
+   - 任何未授权调用 unsafe 函数、裸指针 cast 或解引用行为，在语义分析（Sema）阶段直接拦截并报告清晰的编译错误。
+
+---
+
+### 2. 核心攻坚与编译器实现细节
+
+#### 1. 词法、AST 与解析器重构 (Lexer, AST & Parser)
+- **Token 注册与 Lookahead**：
+  在 `lexer.rs` 中注册 `Token::Unsafe`。为 `Parser` 增加了双 Token 前瞻缓冲区 `peeked2` 与 `peek_next(&mut self)`。
+- **裸指针类型解析与歧义消解**：
+  在 `parse_base_type` 中，循环统计前置 `*` 深度；随后解析基类型；通过 `is_raw_ptr_bang` 探测紧随其后的 `!`（如果下一个 token 是标识符如 `AllocError`，则属于错误联合体分隔符；如果不是，则归属裸指针类型属性 `*T!`），构建 `Type::RawPtr { inner, depth }`。
+- **一元借用与类型转换优先级解耦 (Critical Parser Architecture Refactor)**：
+  在解决 `&user as *User!` 解析时，定位到一个关键的优先级设计问题：原 `Token::Ampersand` 直接调用 `parse_expr()`，导致一元 `&` 贪婪吞入了二元 `as`，解析成了 `& (user as *User!)`。
+  重构方案：提取了纯粹的后缀解析器 `parse_postfix_expr`（仅循环处理 `()`、`[]`、`.`、`?.`），使 `Token::Ampersand`、`Token::Move`、`Token::Star` 仅作用于后缀主表达式，随后二元 `parse_bin_expr` 将 `Expr::Borrow` 作为左操作数整体包装入 `Expr::Cast { expr: &user, target_ty: *User! }`，与 Codegen 设计严丝合缝。
+- **解引用与强转语法**：
+  - 遇到 `.*` 解析为 `Expr::Deref(Box<Expr>)`；
+  - 遇到 `as` 解析为 `Expr::Cast { expr, target_ty }`；
+  - 遇到 `unsafe { ... }` 解析为 `Expr::Unsafe` 或 `Stmt::UnsafeBlock`；
+  - 遇到 `struct User { ... }` 默认设定 `is_ref = true`（值类型数据容器）。
+
+#### 2. 语义分析与编译期安全守卫 (Sema Safety Enforcement)
+- **Unsafe 上下文追踪**：
+  在 `Analyzer` 中引入 `unsafe_depth: usize` 与 `current_fn_is_unsafe: bool`，定义 `is_in_unsafe(&self) -> bool`。
+- **硬性拦截守卫**：
+  - `Expr::Call`：调用 `is_unsafe: true` 的函数时，若 `!self.is_in_unsafe()`，报错 `Call to unsafe function requires an unsafe block or unsafe function`；
+  - `Expr::Cast`：强转目标为 `Type::RawPtr` 时，若 `!self.is_in_unsafe()`，报错 `Cast to raw pointer requires an unsafe block or unsafe function`；
+  - `Expr::Deref` 与 `Expr::Member`：对裸指针进行 `.*` 解引用或属性访问时，若 `!self.is_in_unsafe()`，报错 `Dereferencing raw pointer requires an unsafe block or unsafe function`。
+
+#### 3. 代码生成与状态机深度适配 (Codegen)
+- **状态机上下文局部变量深度收集**：
+  在编译 `cp_main` 等 CPS 状态机函数时，原 `extract_locals_simple` 与 `compute_last_uses_block` 遗漏了 `Stmt::UnsafeBlock` 分支，导致 `unsafe` 块内的局部变量未被登记进 `locals` 与 `cp_main_Context` 结构体。修复后，支持完整递归扫描 `Stmt::UnsafeBlock`，正确生成上下文变量与 `ctx.var` 状态追踪。
+- **参数解引用变异检查修复**：
+  在赋值语句 `p.age = val` 检查中，原逻辑只要参数未声明 `mut` 便报 `Cannot mutate field of read-only parameter`。
+  修复：当参数类型为 `Type::RawPtr` 或可变借用时，修改的是其指向的内存（pointee），而非参数变量本身，因而合法放行。
+- **值类型映射修复**：
+  在 `map_type` 中，修复了遗漏 `self.ref_classes`（包括 `struct`）导致将值类型错误映射为 `*User` 指针的问题，确保 `User{age: 20}` 产出干净的 Zig 值结构体。
+
+---
+
+### 3. 测试验证与全量回归成果
+
+1. **正向综合功能测试 (`test_unsafe_pass.cp`)**：
+   - 验证 1（一级裸指针）：`setAge(p: *User!, 30)` 成功通过自动成员解引用修改值，输出 `User age after setAge: 30`；
+   - 验证 2（二级裸指针）：`modifyViaDoublePtr(pp: **User!, 45)` 成功通过 `pp.*.age = 45` 修改值，输出 `User age after modifyViaDoublePtr: 45`；
+   - 验证 3（标量裸指针）：`setScalar(pnum: *i32!, 200)` 成功通过 `p.* = 200` 修改整数，输出 `Scalar num after setScalar: 200`；
+   - 验证 4（三态错误与裸指针共存）：`unsafe fn getFalliblePtr(): *User! ! AllocError` 成功通过 `switch` 解构匹配出 `ok`，输出 `Fallible ptr: ok`；
+   - 正向测试 100% 编译运行通过。
+2. **反向安全拦截测试**：
+   - `test_unsafe_fail_call.cp`：在 unsafe 块外部调用 `unsafe fn` 成功被编译期精准拦截，报错 `Compile Error: Call to unsafe function 'setAge' requires an unsafe block or unsafe function`；
+   - `test_unsafe_fail_cast.cp`：在 unsafe 块外部执行 `&num as *i32!` 成功被编译期精准拦截，报错 `Compile Error: Cast to raw pointer requires an unsafe block or unsafe function`；
+   - `test_unsafe_fail_deref.cp`：在 unsafe 块外部执行 `p.*` 成功被编译期精准拦截，报错 `Compile Error: Dereferencing raw pointer requires an unsafe block or unsafe function`。
+3. **历史功能全量回归**：
+   - `test_for_pass.cp` (迭代系统) 100% 通过；
+   - `test_pipe_pass.cp` (管道操作符) 100% 通过；
+   - `test_error_box_switch_pass.cp` (错误系统与 Box) 100% 通过；
+   - `test_lifetime_pass.cp` (零摩擦生命周期) 100% 通过；
+   - `cpc` 单元测试与代码规范 `cargo fmt` 检查全部通过。
+
+
 
 
 

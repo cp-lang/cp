@@ -2700,6 +2700,80 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 2. 执行 Git 提交并生成提交记录：`feat: implement Iteration System (for x, for &x, for move x) with borrow safety and range loops` (`8680912`)；
 3. 代码库工作区干净，阶段性成果已安全落库。
 
+---
+
+## 2026-10-25
+
+### 用户指令
+> rust的unsafe 能放宽内存保护限制, 使用裸指针, 我们cp语言, 是否应该要实现unsfe 代码块, 如实现, 给出你的设计方案, 还是跟之前一样, 简洁 优雅 安全
+> 裸指针 应该使用什么符号? *号已经用于可变借用, 在switch 模式匹配中,*用于通用匹配
+> 可变借用*号使用示例:
+> let i = 10;
+> 1. let v = &i;  可读借用
+> 2. let p = *i;  可变借用
+> 3. p.* = 20; 修改i的值
+> 4. const user = { a: 99 };
+>    let p = *user;
+>    p.a = 20;
+> 
+> struct User {
+>   age: i32
+> }
+> 
+> // ✅ 参数标注裸指针类型
+> unsafe fn setAge(p: *User!, val: i32) {
+> p.age = val;
+> }
+> 
+> unsafe fn getPtr(): *User! { // ✅ 返回裸指针
+> let u = User{age: 10};
+> return &u as *User!;
+> }
+> 
+> fn main() {
+> let user = User{age: 20};
+> 
+>     unsafe {
+>         let p: *User! = &user as *User!; // ✅ 变量显式标注裸指针类型
+>         setAge(p, 30);
+>     }
+> 
+> }
+> 以上代码示例, 与 ^ 相比, 你评估一下, 哪个更合适编程, 使用更方便, 体验更好.
+> 
+> 二级裸指针需写成 **User!, 不使用 **User!! 如何?
+> 
+> 1. 按这个方案实现 unsave
+> 2. 注意感叹号不要与函数返回的错误类型分隔符感叹号混淆
+> 3. 实现的规范, 写入 cp_ref.md.
+> 4. 检查之前实现的功能, 是否写入 cp_ref.md
+
+### 执行结果汇报
+1. **方案裁决与语法系统确立**：
+   - 裁决确立前置 `*` 深度 + 尾置 `!` 属性的裸指针语法：一级 `*T!`、二级 `**T!`、多级 `***T!`，相比 `^` 具备与 C/Zig 底层完全一致的心智模型，同时利用尾置 `!` 显式赋予底层非托管属性，彻底与生命周期借用检查器解耦；
+   - 确立结构体指针自动成员解引用（`p.age = val`）与标量/多级指针显式解引用（`p.* = val`、`pp.*.age = val`）；
+   - 确立 `unsafe fn` 与 `unsafe { ... }` 作用域保护体系与 `&x as *T!` 显式强转机制；
+   - 语法解析端实现双向 Lookahead，彻底消解了 `*User!` 与三态错误返回 `*User! ! AllocError` 中错误联合分隔符 `!` 的语法混淆；
+   - 检查确认历史所有实现功能（元注解 Chapter 12、双态反射 Chapter 13、装饰器与 AOP Chapter 14、类型感知宏 Chapter 15、管道操作符 Chapter 16、迭代系统 Chapter 17）均已完备写入 `cp_ref.md`，并将本章作为第十八章规范追加落库。
+2. **底层编译架构实现与问题攻坚**：
+   - 词法与语法分析（`lexer.rs` & `parser.rs`）：注册 `unsafe` 关键字，实现 `*T!` / `**T!` 类型解析，提取独立后缀解析器 `parse_postfix_expr` 解决一元借用 `&` 贪婪吞入 `as` 导致强转外层反向包裹借用的优先级 Bug，实现 `as` 显式强转与 `.*` 解引用；
+   - 语义安全分析（`sema.rs`）：实装上下文追踪，对任何未在 unsafe 作用域内调用 unsafe 函数、进行裸指针 cast 或解引用的行为进行编译期硬性拦截；
+   - 代码生成与状态机适配（`codegen.rs`）：
+     - 修复状态机局部变量深度收集遗漏 `Stmt::UnsafeBlock` 分支的 Bug，使 unsafe 块内局部变量正确进入上下文并生成 `ctx.var`；
+     - 修复 `map_type` 遗漏 `ref_classes`（包括 `struct`）导致将值类型错误映射为 `*User` 的类型失配问题；
+     - 修复函数参数字段变异检查，放行对裸指针目标字段（pointee field）的修改。
+3. **测试验证全线飘绿**：
+   - 编写正向综合测试 [`cap/test/test_unsafe_pass.cp`](file:///data/dev/cp/cap/test/test_unsafe_pass.cp)，验证一级裸指针成员修改、二级裸指针解引用修改、标量指针解引用修改、三态错误联合共存以及 switch 模式匹配，输出完全符合预期；
+   - 编写反向安全测试：
+     - [`cap/test/test_unsafe_fail_call.cp`](file:///data/dev/cp/cap/test/test_unsafe_fail_call.cp)：拦截外部调用 unsafe 函数，报错 `Compile Error: Call to unsafe function requires unsafe block`；
+     - [`cap/test/test_unsafe_fail_cast.cp`](file:///data/dev/cp/cap/test/test_unsafe_fail_cast.cp)：拦截外部强转裸指针，报错 `Compile Error: Cast to raw pointer requires unsafe block`；
+     - [`cap/test/test_unsafe_fail_deref.cp`](file:///data/dev/cp/cap/test/test_unsafe_fail_deref.cp)：拦截外部解引用裸指针，报错 `Compile Error: Dereferencing raw pointer requires unsafe block`。
+   - 历史全量回归测试（`test_for_pass.cp`, `test_pipe_pass.cp`, `test_error_box_switch_pass.cp`, `test_lifetime_pass.cp` 等）100% 绿色通过，Rust 编译器测试与代码格式化检查全部通过。
+4. **规范与文档更新**：
+   - 规范参考手册 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md) 新增第十八章《Unsafe 与裸指针系统规范》；
+   - 严谨按规范追加记录到 [`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md) 与 [`SESSION.md`](file:///data/dev/cp/SESSION.md)。
+
+
 
 
 

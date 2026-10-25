@@ -125,6 +125,9 @@ pub fn find_referenced_vars_in_expr(expr: &Expr, vars: &mut HashSet<String>) {
             find_referenced_vars_in_expr(start, vars);
             find_referenced_vars_in_expr(end, vars);
         }
+        Expr::Cast { expr, .. } => find_referenced_vars_in_expr(expr, vars),
+        Expr::Deref(d) => find_referenced_vars_in_expr(d, vars),
+        Expr::Unsafe(b) => find_referenced_vars_in_block(b, vars),
         _ => {}
     }
 }
@@ -175,7 +178,7 @@ pub fn find_referenced_vars_in_stmt(stmt: &Stmt, vars: &mut HashSet<String>) {
         Stmt::Defer(d) => find_referenced_vars_in_stmt(d, vars),
         Stmt::ErrDefer(d) => find_referenced_vars_in_stmt(d, vars),
         Stmt::ComptimeBlock(b) => find_referenced_vars_in_block(b, vars),
-        Stmt::Block(b) => find_referenced_vars_in_block(b, vars),
+        Stmt::Block(b) | Stmt::UnsafeBlock(b) => find_referenced_vars_in_block(b, vars),
         Stmt::TryCatch {
             try_block,
             catch_body,
@@ -202,7 +205,7 @@ pub fn get_declared_vars_in_block(block: &BlockStmt) -> HashSet<String> {
             if let Pattern::Ident(i) = &v.pat {
                 vars.insert(i.sym.clone());
             }
-        } else if let Stmt::Block(b) = stmt {
+        } else if let Stmt::Block(b) | Stmt::UnsafeBlock(b) = stmt {
             let inner = get_declared_vars_in_block(b);
             vars.extend(inner);
         } else if let Stmt::TryCatch {

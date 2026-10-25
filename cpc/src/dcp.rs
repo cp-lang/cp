@@ -316,6 +316,9 @@ impl DcpEmitter {
             }
             Type::BoxDyn(id) => format!("Box<dyn {}>", id.sym),
             Type::BareDyn(id) => format!("dyn {}", id.sym),
+            Type::RawPtr { inner, depth } => {
+                format!("{}{}{}", "*".repeat(*depth), self.format_type(inner), "!")
+            }
         }
     }
 }

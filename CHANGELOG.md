@@ -333,7 +333,49 @@
 
 ## [Unreleased] - 2026-10-25
 
-### 迭代系统规范与实现 (Iteration System: Borrow, In-Place MutBorrow, Move & Range)
+### Unsafe 与裸指针系统规范与实现 (Unsafe & Raw Pointer System: *T!, **T!, unsafe fn, unsafe {}, Deref & Cast)
+
+### 修改文件 (Modified)
+- [`cpc/src/lexer.rs`](file:///data/dev/cp/cpc/src/lexer.rs):
+  - 注册 `Token::Unsafe` (`unsafe` 关键字)。
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs):
+  - 在 `Type` 中新增 `Type::RawPtr { inner: Box<Type>, depth: usize }` 变体，支持多级非托管裸指针；
+  - 在 `Expr` 中新增 `Expr::Cast { span, expr, target_ty }`、`Expr::Deref(Box<Expr>)` 与 `Expr::Unsafe(BlockStmt)` 变体；
+  - 在 `Stmt` 中新增 `Stmt::UnsafeBlock(BlockStmt)` 变体；
+  - 在 `Function` 与 `MethodSig` 中增加 `is_unsafe: bool` 标识。
+- [`cpc/src/ast_visitor.rs`](file:///data/dev/cp/cpc/src/ast_visitor.rs):
+  - 适配 `Expr::Cast`、`Expr::Deref`、`Expr::Unsafe` 与 `Stmt::UnsafeBlock` 的遍历与变量引用收集。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - 新增双 Token 前瞻缓冲区 `peeked2` 与 `peek_next`；
+  - 实现裸指针类型解析（`*T!`、`**T!`、`***T!`），利用双向 lookahead 彻底消除与返回类型错误联合分隔符 `!` 的语法混淆；
+  - 提取独立前缀一元/后缀解析器 `parse_postfix_expr` 与 `parse_postfix_from_left`，确保 `&user as *User!` 严谨按照 `(&user) as *User!` 进行优先级绑定，避免一元借用贪婪吞入类型转换；
+  - 实现 `unsafe fn` 函数声明与 `unsafe { ... }` 表达式/语句块解析；
+  - 实现显式类型强转语法 `expr as TargetType`；
+  - 实现标量与多级解引用语法 `p.*` 与 `pp.*.field`；
+  - 支持大写值类型结构体字面量实例化 `User{age: 20}` 并将 `struct` 正确声明为 `is_ref = true`。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 新增 `SemaError::UnsafeRequired(String, Span)` 编译期安全错误；
+  - 在 `SymbolKind::Func` 中记录 `is_unsafe: bool`；
+  - 引入 `unsafe_depth` 与 `current_fn_is_unsafe` 上下文追踪；
+  - 编译期严格检查并硬性拦截在 unsafe 外部调用 unsafe 函数、强转裸指针或解引用裸指针的操作；
+  - 增强 `infer_type` 对 `Expr::Cast`、`Expr::Deref`、`Expr::Unsafe` 的类型推导。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 在 `map_type` 中正确将 `self.ref_classes`（包括 `struct`）映射为值类型，多级裸指针 `Type::RawPtr` 映射为 Zig 裸指针（`*T`、`**T`）；
+  - 实现 `Expr::Cast` 映射为 Zig `@as(Target, @ptrCast(@alignCast(&(...))))`；
+  - 实现 `Expr::Deref` 映射为 Zig 原生解引用 `p.*`；
+  - 修复状态机局部变量收集（`extract_locals_simple` 与 `extract_local_vars_to_str`），支持深入 `Stmt::UnsafeBlock` 发现变量并正确注入 `cp_main_Context`；
+  - 修复函数参数字段赋值检查，允许对裸指针和可变借用参数的目标字段（pointee field）进行赋值修改。
+- [`cpc/src/dcp.rs`](file:///data/dev/cp/cpc/src/dcp.rs) 与 [`cpc/src/lsp.rs`](file:///data/dev/cp/cpc/src/lsp.rs):
+  - 适配 `Type::RawPtr` 穷尽模式匹配与补全。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 新增第十八章《Unsafe 与裸指针系统规范》，完整记录指针语法、解引用规则、与错误联合解耦、显式强转、安全拦截与生产级代码示例。
+
+### 新增文件 (Added)
+- [`cap/test/test_unsafe_pass.cp`](file:///data/dev/cp/cap/test/test_unsafe_pass.cp): 涵盖一级裸指针参数修改、二级裸指针解引用修改、标量裸指针修改、三态错误联合共存以及 switch 模式匹配的全量正向功能测试。
+- [`cap/test/test_unsafe_fail_call.cp`](file:///data/dev/cp/cap/test/test_unsafe_fail_call.cp): 验证在 unsafe 块外部调用 `unsafe fn` 被编译期硬性拦截并报错的反向测试。
+- [`cap/test/test_unsafe_fail_cast.cp`](file:///data/dev/cp/cap/test/test_unsafe_fail_cast.cp): 验证在 unsafe 块外部执行 `&x as *T!` 强转被编译期硬性拦截并报错的反向测试。
+- [`cap/test/test_unsafe_fail_deref.cp`](file:///data/dev/cp/cap/test/test_unsafe_fail_deref.cp): 验证在 unsafe 块外部执行裸指针解引用 `p.*` 被编译期硬性拦截并报错的反向测试。
+
 
 ### 修改文件 (Modified)
 - [`cpc/src/lexer.rs`](file:///data/dev/cp/cpc/src/lexer.rs):
