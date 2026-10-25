@@ -2462,23 +2462,55 @@ impl<'a> Parser<'a> {
                 let chars: Vec<char> = s.chars().collect();
                 let mut i = 0;
                 while i < chars.len() {
+                    if chars[i] == '\\' && i + 1 < chars.len() {
+                        let next_c = chars[i + 1];
+                        if next_c == '$' {
+                            current_quasi.push('$');
+                            i += 2;
+                            continue;
+                        } else if next_c == '`' {
+                            current_quasi.push('`');
+                            i += 2;
+                            continue;
+                        } else if next_c == '\\' {
+                            current_quasi.push('\\');
+                            i += 2;
+                            continue;
+                        }
+                    }
+
                     if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '{' {
                         quasis.push(current_quasi.clone());
                         current_quasi.clear();
                         i += 2;
                         let mut brace_depth = 1;
                         let mut expr_str = String::new();
+                        let mut in_single_quote = false;
+                        let mut in_double_quote = false;
+                        let mut escape = false;
+
                         while i < chars.len() {
-                            if chars[i] == '{' {
-                                brace_depth += 1;
-                            } else if chars[i] == '}' {
-                                brace_depth -= 1;
+                            let c = chars[i];
+                            if escape {
+                                escape = false;
+                            } else if c == '\\' {
+                                escape = true;
+                            } else if c == '"' && !in_single_quote {
+                                in_double_quote = !in_double_quote;
+                            } else if c == '\'' && !in_double_quote {
+                                in_single_quote = !in_single_quote;
+                            } else if !in_single_quote && !in_double_quote {
+                                if c == '{' {
+                                    brace_depth += 1;
+                                } else if c == '}' {
+                                    brace_depth -= 1;
+                                    if brace_depth == 0 {
+                                        break;
+                                    }
+                                }
                             }
 
-                            if brace_depth == 0 {
-                                break;
-                            }
-                            expr_str.push(chars[i]);
+                            expr_str.push(c);
                             i += 1;
                         }
                         if brace_depth != 0 {

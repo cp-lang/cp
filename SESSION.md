@@ -2831,6 +2831,40 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 2. 执行 Git 提交并生成提交记录：`docs: synchronize cp_ref.md with static objects, dynamic dict, map, set, and core runtime specifications` (`a94202f`)；
 3. 代码库工作区干净，所有已实现功能（静态匿名对象、动态字典、Map、Set、字符串扩展方法、模板字符串、RegExp、Math、Bun HTTP serve、Actor 协程、Worker 多线程、SharedTensor 及标准库总表）的技术规范已安全落库。
 
+---
+
+## 2026-10-25
+
+### 用户指令
+> 我们实现的 `${expr}` 模板字符串, 借鉴了 Typescript/es6语法, 这个$是否有必要?
+> rust zig c# Python go 等编程语言中是如何实现模板字符串的
+> 
+> 完整认可你的分析, 不用去掉$, 模板字符串在编程中作用非常大, 对照Typescript/es6 和 rust, 检查模板字符串已经实现的功能,是否完整, 是否需要优化和补充.
+> 
+> 开工
+
+### 执行结果汇报
+1. **多语言横向对比与深度审计**：
+   - 深入比对 TypeScript/ES6、Rust、Python、C#、Zig、Go 的模板字符串设计哲学与转义成本，论证确立保持 `${expr}` 是专为 AI Agent 与 JSON 格式化打造的最优解；
+   - 深度审查发现并定位了 3 大底层断层：
+     1. Codegen 完全缺失：`Expr::Template` 跌入 `_ => "0"` 生成 `ctx.t1 = 0;` 导致 Zig 编译失败；
+     2. Sema 盲区：缺失 `Type::String` 推导与表达式递归检查；
+     3. 词法/语法边界缺陷：缺少 `\$` 转义，且在 `${...}` 内部提取表达式时未忽略引号内部的大括号，导致提前截断报错。
+2. **底层编译管线全链路攻坚落地**：
+   - **Parser 加固**（`cpc/src/parser.rs`）：实装 `\$`、`` \` ``、`\\` 转义支持，引入带引号感知的词法状态机，确保引号内部的大括号不干扰 `${...}` 闭合判定；
+   - **Sema 补全**（`cpc/src/sema.rs`）：实装 `Expr::Template` 递归表达式检查、`Type::String` 类型推导与源码 Span 关联；
+   - **Codegen 端到端打通与常量折叠**（`cpc/src/codegen.rs`）：
+     - 注入 Zig 运行时万能适配器 `cp_fmt(v)`，抹平字符串、整数、浮点、布尔、动态 `Message`、可选类型与结构体；
+     - 实现编译期常量折叠（Comptime Constant Folding）：全常量模板直接内联为纯静态切片，0 运行时堆开销；
+     - 实现动态模板的精准转义（`escape_zig_fmt_string`）与 `std.fmt.allocPrint` 极速代码生成；
+     - 补齐 `infer_cp_type_with_mock` 与 `infer_zig_type` 的类型映射。
+3. **测试套件全面验证**：
+   - 扩充综合测试用例 [`cap/test/test_template.cp`](file:///data/dev/cp/cap/test/test_template.cp)，覆盖单插值、跨类型多插值、表达式计算、纯文本常量折叠、`\$` 与 `` \` `` 转义、原生 JSON 结构化负载、内嵌大括号表达式、链式方法调用（`.toUpperCase()`）及同步函数返回模板字符串 9 大场景，全部 100% 绿色通过！
+   - 全量回归测试（`test_unsafe_pass.cp`, `test_for_pass.cp`, `test_pipe_pass.cp`, `test_map_set_dict.cp`, `test_static_object.cp`）全线飘绿，Rust 编译器测试与 `cargo fmt` 检查全部通过。
+4. **语言设计规范同步**：
+   - 同步更新规范手册 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md) 第二十一章第 2 节。
+
+
 
 
 

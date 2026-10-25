@@ -985,6 +985,70 @@ let reply = raw
 4. 核对 [`cap/test/test_http_serve.cp`](file:///data/dev/cp/cap/test/test_http_serve.cp)、[`cap/test/test_actor.cp`](file:///data/dev/cp/cap/test/test_actor.cp)、[`cap/test/test_worker.cp`](file:///data/dev/cp/cap/test/test_worker.cp)、[`cap/test/test_zero_copy.cp`](file:///data/dev/cp/cap/test/test_zero_copy.cp) 与第二十二章规范，完全一致；
 5. 核对 `lib/cap/` 中实际存在的各模块，与第二十三章标准库索引表 100% 对齐。
 
+---
+
+## 2026-10-25: 模板字符串系统端到端链路修复、转义解析加固与零开销常量折叠实现
+
+### 1. 任务背景与核心问题定位
+在对 CP 模板字符串与 TypeScript/ES6 及 Rust 进行深度对比与审计时，发现了一个此前未暴露的严重底层编译断层：
+1. **Codegen 断层**：在 `cpc/src/codegen.rs` 的 `generate_expr` 中，缺少 `Expr::Template` 分支，导致其跌入 `_ => "0"`，生成的 Zig 状态机中直接输出 `ctx.t1 = 0;`，使得模板字符串实际根本无法通过 Zig 编译器；
+2. **Sema 盲区**：在 `cpc/src/sema.rs` 中，`Expr::Template` 缺失类型推导（未推导为 `Type::String`），且内部插值表达式未被递归分析；
+3. **词法/解析边界缺陷**：
+   - 旧解析器在 `${...}` 内部提取表达式时，仅通过简单的字符扫描与大括号计数，一旦字符串内部含有 `{` 或 `}`（如 `${"{" + "}"}` 或包含 JSON 对象的下标访问），计数器提前归零导致解析错误中断；
+   - 缺少对 `\$`（转义美元符号）、`` \` ``（转义反引号）与 `\\`（转义斜杠）的解析支持，无法在模板字符串中输出字面量 `$`（易与价格等符号冲突）。
+
+---
+
+### 2. 攻坚架构与实现细节
+
+#### （1）Parser 解析健壮性重构 (`cpc/src/parser.rs`)
+- **转义前瞻支持**：在扫描模板字符串文本时，如果遇到 `\`：
+  - `\$` -> 向 quasi 压入 `$` 并跳过 2 字符；
+  - `` \` `` -> 向 quasi 压入 `` ` `` 并跳过 2 字符；
+  - `\\` -> 向 quasi 压入 `\` 并跳过 2 字符；
+  彻底消除了字面量 `$` 与 `${` 插值标记的二义性冲突。
+- **智能词法状态机**：在解析 `${...}` 表达式时，引入 `in_single_quote`、`in_double_quote` 与 `escape` 标记。在单双引号内部出现的 `{` 与 `}` 绝不修改 `brace_depth`，确保只有表达式最外层的闭合 `}` 才会终止插值块提取。
+
+#### （2）Sema 类型推导与递归检查 (`cpc/src/sema.rs`)
+- 在 `analyze_expr` 中增加 `Expr::Template(t)` 分支，对其 `expressions` 逐一递归执行语法与借用安全检查；
+- 在 `infer_type` 中返回 `Ok(Type::String)`，并在 `inner_span` 中绑定其源码 Span。
+
+#### （3）Codegen 极致代码生成与 Zig 运行时适配 (`cpc/src/codegen.rs`)
+1. **注入万能格式化桥接函数 `cp_fmt(v)`**：
+   在 Zig 前导代码中注入 `cp_fmt`：
+   - 字符串切片 -> 直接返回底层切片，0 冗余内存拷贝；
+   - 布尔值 -> 返回 `"true"` 或 `"false"`；
+   - 整数 / 浮点数 -> 映射为 `std.fmt.allocPrint(std.heap.page_allocator, "{d}", .{v})`；
+   - 动态 `Message` 联合体 -> 模式匹配各变体并返回格式化切片；
+   - 可选类型 -> 解包递归格式化或返回 `"null"`；
+   - 其它类型 -> 兜底 `{any}`。
+2. **编译期常量折叠 (Comptime Optimization)**：
+   若模板字符串内部全部为字面量（`matches!(e, Expr::Lit(_))`），编译器前端直接在编译期拼接为常量纯字面量，产出纯 Zig 字符串常量 `"..."`，达到 100% 零运行时损耗与零堆分配。
+3. **动态格式化与 Zig 字符转义 (`escape_zig_fmt_string`)**：
+   对于含有动态表达式的模板字符串：
+   - 遍历各 quasi 文本，自动将 `{` 转换为 `{{`，`}` 转换为 `}}`，`\n` 转换为 `\n`；
+   - 将动态插值槽位固定为 `{s}`，参数包裹为 `cp_fmt(expr)`；
+   - 最终生成高效的 `std.fmt.allocPrint(std.heap.page_allocator, "pattern", .{ cp_fmt(e1), cp_fmt(e2) }) catch unreachable`。
+4. **类型推导打通**：
+   在 `infer_cp_type_with_mock` 与 `infer_zig_type` 中将 `Expr::Template` 绑定为 `Type::String` 与 `"[]const u8"`。
+
+---
+
+### 3. 测试验证与全量回归
+1. 扩充编写综合功能测试用例 [`cap/test/test_template.cp`](file:///data/dev/cp/cap/test/test_template.cp)，涵盖：
+   - `t1`: 基础变量插值 `Hello ${name}!`；
+   - `t2`: 多类型混合插值 `CP Language v${version} says ${name}`；
+   - `t3`: 表达式计算插值 `Result: ${a + b}`；
+   - `t4`: 纯文本编译期常量折叠 `Just a string`；
+   - `t5`: `\$` 与 `` \` `` 转义 `Price is $100 for `CP Lang``；
+   - `t6`: 结构化 JSON 负载与字面量花括号 `{"status": 200, "user_id": 88, "name": "World"}`；
+   - `t7`: 表达式内部包含带花括号的字符串 `${"{" + "foo" + "}"}`；
+   - `t8`: 模板字符串结果链式调用字符串方法 `` `agent ${name}`.toUpperCase() ``；
+   - `t9`: 同步函数中返回模板字符串 `format_user(999, "Admin")`。
+2. 运行 `./zig-out/cap test/test_template.cp`，9 大测试项全部绿色通过！
+3. 全量历史回归测试（`test_unsafe_pass.cp`, `test_for_pass.cp`, `test_pipe_pass.cp`, `test_map_set_dict.cp`, `test_static_object.cp`），全部 100% 编译通过并正常运行。
+
+
 
 
 

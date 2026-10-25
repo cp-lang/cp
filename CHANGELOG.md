@@ -422,6 +422,29 @@
   - **新增第二十二章《高并发服务、多线程与网络系统》**：收录对标 Bun.js 的原生 `serve({ port, fetch })` 高性能 HTTP 反应堆、`Request`、`Response`、`json(...)`；收录轻量 Actor 协程（`@spawn`, `@receive`, `@reply`, `@self`）；收录 OS 多线程 Worker（`@worker_spawn`）与无锁跨线程环形信箱；收录 AI 大张量跨进程零拷贝共享内存 `SharedTensor`。
   - **新增第二十三章《系统标准库生态索引》**：提供系统级 `cap:*` 模块索引总表（涵盖 `cap:io`, `cap:http`, `cap:actor`, `cap:worker`, `cap:fs`, `cap:net`, `cap:crypto`, `cap:sqlite`, `cap:json`, `cap:mem`, `cap:test`, `cap:beam`）。
 
+---
+
+## 2026-10-25 (模板字符串系统端到端打通、转义加固与编译期常量折叠)
+
+### 修改文件 (Modified)
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - 增强 `Token::TemplateStringRaw` 解析逻辑，支持 `\$`（字面量美元符号）、`` \` ``（字面量反引号）与 `\\`（字面量反斜杠）的转义，杜绝价格符号与格式化冲突；
+  - 引入引号状态机（`in_single_quote`, `in_double_quote`, `escape`），在 `${...}` 提取内部表达式时，智能忽略字符串字面量内部的花括号，彻底修复包含 `{` / `}` 的嵌套字符串提前闭合 Bug。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 在 `analyze_expr` 中深度递归分析 `Expr::Template` 内部的所有插值表达式；
+  - 在 `infer_type` 中将 `Expr::Template` 正确推导为 `Type::String`；
+  - 在 `inner_span` 中关联 `Expr::Template` 的源码位置。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 注入 Zig 运行时格式化万能适配器 `cp_fmt(v)`，无缝支持字符串切片、布尔值、整数、浮点数、动态 `Message`、可选类型及任意结构体；
+  - 实现 `Expr::Template` 编译期常量折叠（Constant Folding）：若所有插值均为常量字面量，编译期直接折叠为纯 Zig 静态切片，零运行时开销、零堆分配；
+  - 实现动态模板字符串的高速格式化代码生成，利用 `escape_zig_fmt_string` 对非动态文本槽位执行 Zig 级别 `{` -> `{{`、`}` -> `}}` 转义，配合 `std.fmt.allocPrint` 达成极致原生的字符串合成；
+  - 在 `infer_cp_type_with_mock` 与 `infer_zig_type` 中注册 `Expr::Template => Type::String` / `"[]const u8"`。
+- [`cap/test/test_template.cp`](file:///data/dev/cp/cap/test/test_template.cp):
+  - 扩充综合测试用例，覆盖基础插值、跨类型多插值、表达式计算、纯文本常量折叠、`\$` 与 `` \` `` 转义、原生 JSON 结构化负载、内嵌大括号表达式、链式方法调用（`.toUpperCase()`）及同步函数返回模板字符串全套场景。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 扩充第二十一章第 2 节，新增模板字符串转义规则、零转义 JSON 友好设计、常量折叠与链式调用规范说明。
+
+
 
 
 

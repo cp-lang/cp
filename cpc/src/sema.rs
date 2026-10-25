@@ -1477,6 +1477,11 @@ impl Analyzer {
                 self.unsafe_depth -= 1;
                 res?;
             }
+            Expr::Template(t) => {
+                for e in &t.expressions {
+                    self.analyze_expr(e)?;
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -1856,6 +1861,12 @@ impl Analyzer {
                 }
                 Ok(Type::Tuple(tys))
             }
+            Expr::Template(t) => {
+                for e in &t.expressions {
+                    let _ = self.infer_type(e)?;
+                }
+                Ok(Type::String)
+            }
             Expr::Await(inner) => {
                 if !self.current_fn_is_async {
                     return Err(SemaError::AwaitOutsideAsync(inner_span(inner)));
@@ -1945,6 +1956,7 @@ fn inner_span(expr: &Expr) -> Span {
         Expr::ReflectType { span, .. } | Expr::ReflectOf { span, .. } => *span,
         Expr::PipePlaceholder(span) => *span,
         Expr::Range { span, .. } => *span,
+        Expr::Template(t) => t.span,
         _ => Span { start: 0, end: 0 },
     }
 }

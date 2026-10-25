@@ -1058,6 +1058,7 @@ impl Codegen {
         self.writeln("fn cp_not(v: anytype) bool { const T = @TypeOf(v); if (comptime T == bool) { return !v; } else if (comptime @typeInfo(T) == .optional) { return v == null; } else if (comptime is_string_like(T)) { return to_string_slice(v).len == 0; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return v == 0; } else { return false; } }");
         self.writeln("fn CpNullCoalesceReturn(comptime TOpt: type, comptime TFb: type) type { if (@typeInfo(TOpt) == .optional) { const Child = @typeInfo(TOpt).optional.child; if (Child == Message) return Message; if (is_string_like(Child)) return []const u8; return Child; } return CpValType(TFb); }");
         self.writeln("fn cp_null_coalesce(opt_val: anytype, fallback: anytype) CpNullCoalesceReturn(@TypeOf(opt_val), @TypeOf(fallback)) { const TOpt = @TypeOf(opt_val); const RType = CpNullCoalesceReturn(TOpt, @TypeOf(fallback)); if (comptime @typeInfo(TOpt) == .optional) { if (opt_val) |v| { if (comptime RType == Message) { return v; } else if (comptime is_string_like(RType)) { return to_string_slice(v); } else { return v; } } else { if (comptime RType == Message) { return cp_message_from(fallback); } else if (comptime is_string_like(RType)) { return to_string_slice(fallback); } else { return fallback; } } } return cp_val(fallback); }");
+        self.writeln("fn cp_fmt(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == bool) { return if (v) \"true\" else \"false\"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{d}\", .{v}) catch unreachable; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{d}\", .{v}) catch unreachable; } else if (comptime T == Message) { return switch (v) { .string => |s| s, .int => |i| std.fmt.allocPrint(std.heap.page_allocator, \"{d}\", .{i}) catch unreachable, .float => |f| std.fmt.allocPrint(std.heap.page_allocator, \"{d}\", .{f}) catch unreachable, .boolean => |b| if (b) \"true\" else \"false\", else => std.fmt.allocPrint(std.heap.page_allocator, \"{any}\", .{v}) catch unreachable, }; } else if (comptime @typeInfo(T) == .optional) { if (v) |unwrapped| { return cp_fmt(unwrapped); } else { return \"null\"; } } else { return std.fmt.allocPrint(std.heap.page_allocator, \"{any}\", .{v}) catch unreachable; } }");
 
         self.writeln("fn cp_math_random() f32 {");
         self.writeln("    return 0.5; // Stub");
@@ -2300,6 +2301,7 @@ impl Codegen {
             Expr::Lit(Lit::Float(_)) => Some(Type::F32),
             Expr::Lit(Lit::Str(_)) => Some(Type::String),
             Expr::Lit(Lit::Bool(_)) => Some(Type::Bool),
+            Expr::Template(_) => Some(Type::String),
             Expr::Ident(id) => {
                 if let Some(t) = mock_types.get(&id.sym) {
                     return Some(t.clone());
@@ -3090,6 +3092,39 @@ impl Codegen {
             } else if chars[i] == '\"' {
                 out.push('\\');
                 out.push('\"');
+                i += 1;
+            } else {
+                out.push(chars[i]);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    pub fn escape_zig_fmt_string(s: &str) -> String {
+        let mut out = String::new();
+        let chars: Vec<char> = s.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '{' {
+                out.push_str("{{");
+                i += 1;
+            } else if chars[i] == '}' {
+                out.push_str("}}");
+                i += 1;
+            } else if chars[i] == '\\' && i + 1 < chars.len() && chars[i + 1] == '\"' {
+                out.push('\\');
+                out.push('\"');
+                i += 2;
+            } else if chars[i] == '\"' {
+                out.push('\\');
+                out.push('\"');
+                i += 1;
+            } else if chars[i] == '\n' {
+                out.push_str("\\n");
+                i += 1;
+            } else if chars[i] == '\r' {
+                out.push_str("\\r");
                 i += 1;
             } else {
                 out.push(chars[i]);
@@ -7375,6 +7410,57 @@ impl Codegen {
                 self.current_case_content = saved;
                 format!("(blk: {{\n{}\n}})", body_str)
             }
+            Expr::Template(t) => {
+                if t.expressions.is_empty() {
+                    if t.quasis.is_empty() {
+                        return "\"\"".to_string();
+                    } else {
+                        return format!("\"{}\"", Self::escape_zig_string(&t.quasis[0]));
+                    }
+                }
+
+                // Compile-time constant folding if all expressions are literals
+                let all_lits = t.expressions.iter().all(|e| matches!(e, Expr::Lit(_)));
+                if all_lits {
+                    let mut folded = String::new();
+                    for (idx, quasi) in t.quasis.iter().enumerate() {
+                        folded.push_str(quasi);
+                        if idx < t.expressions.len() {
+                            if let Expr::Lit(lit) = &t.expressions[idx] {
+                                match lit {
+                                    Lit::Int(n) => folded.push_str(&n.to_string()),
+                                    Lit::Float(f) => folded.push_str(&f.to_string()),
+                                    Lit::Str(s) => folded.push_str(s),
+                                    Lit::Bool(b) => {
+                                        folded.push_str(if *b { "true" } else { "false" })
+                                    }
+                                    Lit::Null => folded.push_str("null"),
+                                    Lit::Undefined => folded.push_str("undefined"),
+                                }
+                            }
+                        }
+                    }
+                    return format!("\"{}\"", Self::escape_zig_string(&folded));
+                }
+
+                let mut fmt_pattern = String::new();
+                let mut args_code = Vec::new();
+
+                for (idx, quasi) in t.quasis.iter().enumerate() {
+                    fmt_pattern.push_str(&Self::escape_zig_fmt_string(quasi));
+                    if idx < t.expressions.len() {
+                        fmt_pattern.push_str("{s}");
+                        let expr_code = self.generate_expr(&t.expressions[idx]);
+                        args_code.push(format!("cp_fmt({})", expr_code));
+                    }
+                }
+
+                format!(
+                    "(std.fmt.allocPrint(std.heap.page_allocator, \"{}\", .{{ {} }}) catch unreachable)",
+                    fmt_pattern,
+                    args_code.join(", ")
+                )
+            }
             _ => "0".to_string(),
         }
     }
@@ -7538,6 +7624,7 @@ impl Codegen {
                 Expr::Lit(crate::ast::Lit::Float(_)) => return "f32".to_string(),
                 Expr::Lit(crate::ast::Lit::Str(_)) => return "[]const u8".to_string(),
                 Expr::Lit(crate::ast::Lit::Bool(_)) => return "bool".to_string(),
+                Expr::Template(_) => return "[]const u8".to_string(),
                 Expr::New(call) => {
                     if let Expr::Ident(id) = &*call.callee {
                         if id.sym == "Error" {
