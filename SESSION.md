@@ -2785,6 +2785,41 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 2. 执行 Git 提交并生成提交记录：`feat: implement Unsafe and Raw Pointer System (*T!, **T!, unsafe fn, unsafe blocks, deref and cast)` (`caa4632`)；
 3. 代码库工作区干净，阶段性成果已安全落库。
 
+---
+
+## 2026-10-25
+
+### 用户指令
+> 10. 静态匿名对象与动态字典, Map Set Dict 这些我们已经实现了, 并提交到代码库, 但是, 你好像没有将这部分实现的功能, 写入 cp_ref.md 语言规范, 用户无法知道cp中存在这些实现.
+> 除了这个功能之外, 你要检查一遍我们实现的系列功能, 是否已全部写入我们的语言设计规范 cp_ref.md, 让用户知道我们cp语言已经实现的这些功能.
+
+### 执行结果汇报
+1. **代码库与测试用例全景排查**：
+   - 全盘审查了历史提交与 `cap/test/`、`lib/cap/` 中的所有用例与源码：
+     - `test_static_object.cp`：静态匿名对象 `{ ... }`、模式解构 `let { id, name } = user`、展开运算符 `...` 覆盖机制；
+     - `test_map_set_dict.cp` / `test_map_set.cp`：ES6 `Map`（全套方法、`map[k]` 下标语法）、ES6 `Set`（去重、全套方法）、动态字典 `#{ ... }` / `Dict`（动态属性赋值 `d[k] = v`、字典展开、空值合并 `??`）；
+     - `test_string.cp`：14+ 字符串方法套件（`indexOf`, `slice`, `replace`, `split`, `trim` 等）；
+     - `test_template.cp`：反引号模板字符串 `` `Hello ${name}` `` 插值；
+     - `test_regex.cp`：POSIX `RegExp` 引擎（`re.test()`, `s.match(re)`）；
+     - `test_math.cp`：全局 `Math` 浮点常量与函数体系；
+     - `test_http_serve.cp` / `test_http_routing.cp`：对标 Bun.js 的原生 `serve({ port, fetch })` 高性能 HTTP 反应堆、`Request`、`Response`、`json`；
+     - `test_actor.cp` / `test_worker.cp` / `test_cross_thread_channel.cp`：Actor 协程（`@spawn`, `@receive`, `@reply`, `@self`）、Worker 原生多线程（`@worker_spawn`）与无锁环形信箱；
+     - `test_zero_copy.cp`：AI 大张量跨 Agent 零拷贝共享内存 `SharedTensor`；
+     - `lib/cap/`：全部 12 个系统标准库模块（`cap:io`, `cap:http`, `cap:actor`, `cap:worker`, `cap:fs`, `cap:net`, `cap:crypto`, `cap:sqlite`, `cap:json`, `cap:mem`, `cap:test`, `cap:beam`）。
+2. **消解历史设计矛盾**：
+   - 发现早期文档第 3 节中残留的“不支持动态增删属性”历史表述，将其彻底重构修正为“静态匿名对象 `{ ... }`（编译期零成本）与动态字典 `#{ ... }`（运行时动态哈希）”双轨分立机制，彻底消除用户心智矛盾。
+3. **语言设计规范 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md) 体系化补全**：
+   - 更新第 3 节《基本类型与对象模型》关于静态结构体与动态字典的双轨规范；
+   - 新增第十九章《静态匿名对象与动态字典系统 (Static Anonymous Objects & Dynamic Dict `#{ ... }`)》；
+   - 新增第二十章《高级集合数据结构规范 (Map & Set Collections)》；
+   - 新增第二十一章《文本与数学核心内建对象 (Strings, Template Literals, RegExp & Math)》；
+   - 新增第二十二章《高并发服务、多线程与网络系统 (Bun HTTP, Actor, Worker & Zero-Copy Tensor)》；
+   - 新增第二十三章《系统标准库生态索引 (Standard Library Reference)》。
+4. **记录规范维护**：
+   - 同步按规范更新 [`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md) 与 [`SESSION.md`](file:///data/dev/cp/SESSION.md)；
+   - 目前所有代码和文档处于完备就绪状态，等待执行 Git 提交。
+
+
 
 
 

@@ -925,6 +925,67 @@ let reply = raw
    - `test_lifetime_pass.cp` (零摩擦生命周期) 100% 通过；
    - `cpc` 单元测试与代码规范 `cargo fmt` 检查全部通过。
 
+---
+
+## 2026-10-25: 语言设计规范 `cp_ref.md` 深度审计、矛盾调和与全量功能系统性补全
+
+### 1. 任务背景与问题审计
+根据大师指示，对已提交到代码库的全部已实现功能进行全盘审计，核对是否全部准确收录于语言设计规范文档 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md) 中。
+
+在对编译器源码、标准库（`lib/cap/`）及测试套件（`cap/test/`）进行全面地毯式扫描后，发现了以下关键盲区与历史遗留矛盾：
+1. **历史表述冲突（重大）**：在早期的 `cp_ref.md` 第 3 节中，曾记载“不支持动态增删属性，如需映射请使用 Map”；然而后续演进中，CP 语言不仅正式落地了 `Map` 和 `Set`，还引入了前置 `#` 的动态字典语法糖 `#{ ... }` / `Dict` 以及 `map[k]` 下标索引语法与 `??` 空值合并。旧文档的表述直接导致用户误判动态字典的能力。
+2. **集合体系缺失**：第 1~18 章规范手册中缺少对 ECMAScript 标准 `Map` 与 `Set` 的详细 API 与内存规范记载。
+3. **文本与数学内建库缺失**：已实现的 14+ 字符串方法（`indexOf`, `slice`, `replace`, `split` 等）、反引号模板字符串 `` `Hello ${name}` ``、POSIX `RegExp` 正则表达式引擎（`test`, `match`）以及全局 `Math` 高精度计算库均未在文档中成章列出。
+4. **高并发与网络生态未系统归纳**：对标 Bun.js 的原生 `serve({ port, fetch })` 高性能 HTTP 反应堆、`Request`、`Response`、`json(...)`、Actor 协程（`@spawn`, `@receive`, `@reply`, `@self`）、Worker 原生多线程（`@worker_spawn`）以及 AI 大张量零拷贝共享内存 `SharedTensor` 缺少专章规范。
+5. **标准库全景索引缺失**：缺少对 `cap:io`, `cap:http`, `cap:actor`, `cap:worker`, `cap:fs`, `cap:net`, `cap:crypto`, `cap:sqlite`, `cap:json`, `cap:mem`, `cap:test`, `cap:beam` 命名空间的总览索引表。
+
+---
+
+### 2. 规范调和与章节扩展方案
+
+为使用户清晰掌握 CP 语言所有已实现的能力，在 `cp_ref.md` 中进行了针对性的重构与补全：
+
+#### （1）修正第 3 节对象模型描述
+将原本单一的“对象类型”升级为明晰的**双轨制对象模型**：
+- **静态匿名对象 `{ ... }`**：零堆分配、编译期确定布局、不可动态增删，专用于数据契约与参数包；
+- **动态字典 `#{ ... }` / `Dict`**：显式前缀 `#`，基于高性能哈希表，支持运行时自由赋值 `d[k] = v` 与 `??` 兜底。
+
+#### （2）新增第十九章：静态匿名对象与动态字典系统
+- 详细对比静态匿名对象与动态字典的语义、底层映射、内存位置与展开行为；
+- 记录静态对象的初始化、字段直接访问、模式解构与 `...` 展开覆盖机制；
+- 记录动态字典 `#{ ... }` 的初始化、动态增删改查、字典展开与 `??` 空值合并运算符。
+
+#### （3）新增第二十章：高级集合数据结构规范 (Map & Set)
+- 详细列出 `Map` 的全套 API（`set`, `get`, `has`, `delete`, `clear`, `size`, `keys`, `values`, `entries`）；
+- 记录 `map[key]` 下标索引语法糖以及 `for [k, v] of map.entries()` 模式解构迭代；
+- 详细列出 `Set` 的全套 API（`add`, `has`, `delete`, `clear`, `size`, `values`）；
+- 记录底层的零 GC 保证：基于 Actor Arena 内存池管理，随调度生命周期瞬时回收，无需 Stop-the-world。
+
+#### （4）新增第二十一章：文本与数学核心内建对象
+- 制作字符串 14+ 扩展方法表格，覆盖查找定位、前缀后缀、截取分片、大小写转换、修剪空白、替换分割与编码；
+- 记录反引号模板字符串的变量插值、多类型混合插值与表达式计算；
+- 记录 `RegExp` POSIX 正则表达式构造与 `re.test()` / `s.match(re)` API；
+- 记录全局 `Math` 对象的物理常量、浮点极值、取整、对数、幂运算、三角函数与随机数。
+
+#### （5）新增第二十二章：高并发服务、多线程与网络系统
+- 详细记录 Bun-style `serve({ port, fetch })` 微服务启动、路由分发与 `Request` / `Response` / `json` 类规范；
+- 记录轻量 Actor 协程原语（`@spawn`, `@receive`, `@reply`, `@self`）；
+- 记录原生多线程 Worker（`@worker_spawn`）与无锁跨线程环形信箱通道；
+- 记录 AI 大张量零拷贝跨 Agent 共享内存 `SharedTensor` 的底层硬件级原子引用计数机制。
+
+#### （6）新增第二十三章：系统标准库生态索引
+- 梳理出完整的 12 大系统标准库命名空间（`cap:*`）索引总表，标明每个模块的职责定位与关键导出符号。
+
+---
+
+### 3. 验证与一致性核对
+1. 核对 [`cap/test/test_static_object.cp`](file:///data/dev/cp/cap/test/test_static_object.cp) 与第十九章规范，语法及展开行为 100% 吻合；
+2. 核对 [`cap/test/test_map_set_dict.cp`](file:///data/dev/cp/cap/test/test_map_set_dict.cp) 与第二十章规范，API 及 `??` 语义 100% 吻合；
+3. 核对 [`cap/test/test_string.cp`](file:///data/dev/cp/cap/test/test_string.cp)、[`cap/test/test_template.cp`](file:///data/dev/cp/cap/test/test_template.cp)、[`cap/test/test_regex.cp`](file:///data/dev/cp/cap/test/test_regex.cp)、[`cap/test/test_math.cp`](file:///data/dev/cp/cap/test/test_math.cp) 与第二十一章规范，全部完全一致；
+4. 核对 [`cap/test/test_http_serve.cp`](file:///data/dev/cp/cap/test/test_http_serve.cp)、[`cap/test/test_actor.cp`](file:///data/dev/cp/cap/test/test_actor.cp)、[`cap/test/test_worker.cp`](file:///data/dev/cp/cap/test/test_worker.cp)、[`cap/test/test_zero_copy.cp`](file:///data/dev/cp/cap/test/test_zero_copy.cp) 与第二十二章规范，完全一致；
+5. 核对 `lib/cap/` 中实际存在的各模块，与第二十三章标准库索引表 100% 对齐。
+
+
 
 
 

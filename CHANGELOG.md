@@ -409,6 +409,20 @@
 - [`cap/test/test_for_fail_mutate.cp`](file:///data/dev/cp/cap/test/test_for_fail_mutate.cp): 在 `for x of list` 只读借用循环体内试图调用 `list.push(...)` 触发 `MutateWhileBorrowedInFor` 语义拦截反向测试。
 - [`cap/test/test_for_fail_use_after_move.cp`](file:///data/dev/cp/cap/test/test_for_fail_use_after_move.cp): 在 `for move x of list` 所有权转移后试图再次读取 `list` 触发 `UseOfMovedVar` 语义拦截反向测试。
 
+---
+
+## 2026-10-25 (语言设计规范 `cp_ref.md` 全量同步与补全)
+
+### 修改文件 (Modified)
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - **修正第 3 节对象模型描述**：消除旧文档“不支持动态增删属性”的表述矛盾，重构为显式的“静态匿名对象 `{ ... }`（编译期零成本）与动态字典 `#{ ... }`（运行时动态哈希）”双轨分立机制。
+  - **新增第十九章《静态匿名对象与动态字典系统》**：完整定义静态匿名对象 `{ ... }` 的编译期强类型推导、模式解构、展开与覆盖语法；完整定义动态字典 `#{ ... }` / `Dict`、运行时下标索引读写 `d[k] = v`、字典展开与空值合并运算符 `??`。
+  - **新增第二十章《高级集合数据结构规范 (Map & Set)》**：详尽收录 ES6 标准 `Map`（`set`, `get`, `has`, `delete`, `clear`, `size`, `keys`, `values`, `entries`、`map[k]` 下标语法糖）与 `Set`（`add`, `has`, `delete`, `clear`, `size`, `values`），以及底层的零 GC Arena 内存管理与生命周期。
+  - **新增第二十一章《文本与数学核心内建对象》**：全面记录字符串方法套件（`indexOf`, `slice`, `replace`, `split`, `trim` 等 14+ API）、反引号模板字符串 `` `Hello ${name}` ``、POSIX `RegExp` 正则表达式引擎（`test`, `match`）、以及全局 `Math` 高性能数学运算对象（常量、浮点极值、三角函数、随机数）。
+  - **新增第二十二章《高并发服务、多线程与网络系统》**：收录对标 Bun.js 的原生 `serve({ port, fetch })` 高性能 HTTP 反应堆、`Request`、`Response`、`json(...)`；收录轻量 Actor 协程（`@spawn`, `@receive`, `@reply`, `@self`）；收录 OS 多线程 Worker（`@worker_spawn`）与无锁跨线程环形信箱；收录 AI 大张量跨进程零拷贝共享内存 `SharedTensor`。
+  - **新增第二十三章《系统标准库生态索引》**：提供系统级 `cap:*` 模块索引总表（涵盖 `cap:io`, `cap:http`, `cap:actor`, `cap:worker`, `cap:fs`, `cap:net`, `cap:crypto`, `cap:sqlite`, `cap:json`, `cap:mem`, `cap:test`, `cap:beam`）。
+
+
 
 
 
