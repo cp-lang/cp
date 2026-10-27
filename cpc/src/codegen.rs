@@ -30,7 +30,8 @@ pub struct Codegen {
     current_zig_fn_name: String,
     is_class_method: bool,
     is_main: bool,
-    moved_vars: HashSet<String>,
+    pub moved_vars: HashSet<String>,
+    pub lambda_moved_vars: HashMap<String, HashSet<String>>,
     uninitialized_vars: HashSet<String>,
     pub captured_vars: HashMap<String, Vec<(String, String)>>,
     pub ref_classes: HashSet<String>,
@@ -61,6 +62,8 @@ pub struct Codegen {
     pub current_next_callee: Option<String>,
     pub current_forward_params: Vec<String>,
     pub mut_borrow_loop_vars: HashSet<String>,
+    pub is_parallel_runtime: bool,
+    pub parallel_worker_count: usize,
 }
 
 impl Codegen {
@@ -85,6 +88,7 @@ impl Codegen {
             is_class_method: false,
             is_main: false,
             moved_vars: HashSet::new(),
+            lambda_moved_vars: HashMap::new(),
             uninitialized_vars: HashSet::new(),
             captured_vars: HashMap::new(),
             ref_classes: HashSet::new(),
@@ -115,6 +119,8 @@ impl Codegen {
             current_next_callee: None,
             current_forward_params: Vec::new(),
             mut_borrow_loop_vars: HashSet::new(),
+            is_parallel_runtime: false,
+            parallel_worker_count: 0,
         }
     }
 
@@ -423,10 +429,32 @@ impl Codegen {
         println!("[TRACE] In generate_module: setting up globals");
         let mut class_order = Vec::new();
         let mut impl_decls = Vec::new();
+        let mut has_single_thread_meta = false;
         for item in &module.body {
             if let ModuleItem::Decl(Decl::Func(f)) = item {
                 self.globals.insert(f.ident.sym.clone());
                 self.fn_sigs.insert(f.ident.sym.clone(), f.clone());
+                if f.ident.sym == "main" {
+                    for m in &f.meta {
+                        if m.name.sym == "parallel" {
+                            self.is_parallel_runtime = true;
+                            for arg in &m.args {
+                                let expr = match arg {
+                                    MetaArg::Positional(e) => e,
+                                    MetaArg::Named(_, e) => e,
+                                };
+                                if let Expr::Lit(Lit::Int(n)) = expr {
+                                    if *n > 0 {
+                                        self.parallel_worker_count = *n as usize;
+                                    }
+                                }
+                            }
+                        } else if m.name.sym == "single_thread" {
+                            has_single_thread_meta = true;
+                            self.is_parallel_runtime = false;
+                        }
+                    }
+                }
             }
             if let ModuleItem::Decl(Decl::Class(c)) = item {
                 self.globals.insert(c.ident.sym.clone());
@@ -637,6 +665,16 @@ impl Codegen {
             }
         }
 
+        if !self.is_parallel_runtime && !has_single_thread_meta {
+            if let Ok(cap_content) = std::fs::read_to_string("cap.json") {
+                if cap_content.contains("\"mode\": \"parallel\"")
+                    || cap_content.contains("\"mode\":\"parallel\"")
+                {
+                    self.is_parallel_runtime = true;
+                }
+            }
+        }
+
         self.globals.insert("Math".to_string());
         self.globals.insert("Map".to_string());
         self.globals.insert("Dict".to_string());
@@ -647,6 +685,11 @@ impl Codegen {
         self.globals.insert("Error".to_string());
         self.globals.insert("Box".to_string());
         self.globals.insert("print".to_string());
+        self.globals.insert("spawn".to_string());
+        self.globals.insert("join".to_string());
+        self.globals.insert("Task".to_string());
+        self.globals.insert("Event".to_string());
+        self.globals.insert("EventEmitter".to_string());
         self.globals.insert("console".to_string());
         self.globals.insert("reflect".to_string());
         self.globals.insert("TypeInfo".to_string());
@@ -1137,18 +1180,26 @@ impl Codegen {
         self.writeln(
             "const _Task = struct { run: *const fn(*anyopaque) anyerror!void, ctx: *anyopaque };",
         );
+        self.writeln("const Spinlock = struct { state: std.atomic.Value(u32) = std.atomic.Value(u32).init(0), pub fn acquire(self: *Spinlock) void { while (self.state.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) { std.atomic.spinLoopHint(); } } pub fn release(self: *Spinlock) void { self.state.store(0, .release); } };");
+        self.writeln("const GlobalTaskQueue = struct { lock: Spinlock = .{}, buffer: [2048]_Task = undefined, head: usize = 0, tail: usize = 0, count: usize = 0, pub fn push(self: *GlobalTaskQueue, item: _Task) void { self.lock.acquire(); defer self.lock.release(); if (self.count >= 2048) return; self.buffer[self.tail] = item; self.tail = (self.tail + 1) % 2048; self.count += 1; } pub fn pop(self: *GlobalTaskQueue) ?_Task { self.lock.acquire(); defer self.lock.release(); if (self.count == 0) return null; const item = self.buffer[self.head]; self.head = (self.head + 1) % 2048; self.count -= 1; return item; } pub fn len(self: *GlobalTaskQueue) usize { self.lock.acquire(); defer self.lock.release(); return self.count; } };");
+        self.writeln("var global_task_queue: GlobalTaskQueue = .{};");
+        self.writeln("var global_runtime_shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);");
+        self.writeln(
+            "var global_active_tasks: std.atomic.Value(usize) = std.atomic.Value(usize).init(0);",
+        );
+        self.writeln("var global_running_workers: std.atomic.Value(usize) = std.atomic.Value(usize).init(0);");
         self.writeln("threadlocal var task_queue: [1000]_Task = undefined; threadlocal var queue_len: usize = 0;");
         self.writeln(
             "threadlocal var current_node_id: u32 = 0; threadlocal var next_local_id: u32 = 1;",
         );
-        self.writeln("fn schedule(run: *const fn(*anyopaque) anyerror!void, ctx: *anyopaque) void { if (queue_len < 1000) { task_queue[queue_len] = .{ .run = run, .ctx = ctx }; queue_len += 1; } }");
+        self.writeln("fn schedule(run: *const fn(*anyopaque) anyerror!void, ctx: *anyopaque) void { if (current_node_id == 0) { global_task_queue.push(.{ .run = run, .ctx = ctx }); } else { if (queue_len < 1000) { task_queue[queue_len] = .{ .run = run, .ctx = ctx }; queue_len += 1; } } }");
+        self.writeln("const _WorkerPoolRunner = struct { pub fn run() void { while (!global_runtime_shutdown.load(.acquire)) { if (global_task_queue.pop()) |task| { _ = global_running_workers.fetchAdd(1, .acquire); task.run(task.ctx) catch {}; _ = global_running_workers.fetchSub(1, .release); } else { const ts = std.os.linux.timespec{ .sec = 0, .nsec = 100_000 }; _ = std.os.linux.nanosleep(&ts, null); } } } };");
         self.writeln("");
         self.writeln("// --- Cross-Thread Channels & Mailboxes ---");
         self.writeln(
             "const CrossThreadMessage = struct { target: PID, sender: PID, msg: Message };",
         );
         self.writeln("const MailboxItem = struct { sender: PID, msg: Message };");
-        self.writeln("const Spinlock = struct { state: std.atomic.Value(u32) = std.atomic.Value(u32).init(0), pub fn acquire(self: *Spinlock) void { while (self.state.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) { std.atomic.spinLoopHint(); } } pub fn release(self: *Spinlock) void { self.state.store(0, .release); } };");
         self.writeln("const MailboxRingBuffer = struct { lock: Spinlock = .{}, buffer: [256]CrossThreadMessage = undefined, head: usize = 0, tail: usize = 0, count: usize = 0, pub fn push(self: *MailboxRingBuffer, item: CrossThreadMessage) bool { self.lock.acquire(); defer self.lock.release(); if (self.count >= 256) return false; self.buffer[self.tail] = item; self.tail = (self.tail + 1) % 256; self.count += 1; return true; } pub fn pop(self: *MailboxRingBuffer) ?CrossThreadMessage { self.lock.acquire(); defer self.lock.release(); if (self.count == 0) return null; const item = self.buffer[self.head]; self.head = (self.head + 1) % 256; self.count -= 1; return item; } };");
         self.writeln("var global_worker_mailboxes: [128]MailboxRingBuffer = @splat(.{});");
         self.writeln(
@@ -1163,11 +1214,11 @@ impl Codegen {
         self.writeln("fn drain_cross_thread_mailbox() void { const slot = current_node_id % 128; while (global_worker_mailboxes[slot].pop()) |item| { deliver_local(item.target.local_id, item.sender, item.msg); } }");
         self.writeln("fn cp_send(sender_pid: PID, target: PID, msg: Message) bool { if (target.node_id == current_node_id) { deliver_local(target.local_id, sender_pid, msg); return true; } else { const slot = target.node_id % 128; return global_worker_mailboxes[slot].push(.{ .target = target, .sender = sender_pid, .msg = msg }); } }");
         self.writeln("");
-        self.writeln("pub fn print(v: anytype) void { const T = @TypeOf(v); if (comptime is_string_like(T)) { std.debug.print(\"{s}\\n\", .{ to_string_slice(v) }); } else if (comptime T == Message) { std.debug.print(\"{s}\\n\", .{ cp_fmt(v) }); } else { std.debug.print(\"{any}\\n\", .{ v }); } }");
-        self.writeln("pub const Task = struct { base: BaseContext = .{}, state: u8 = 0, waiter_ctx: ?*anyopaque = null, waiter_fn: ?*const fn(*anyopaque) anyerror!void = null, join_barrier: ?*JoinBarrier = null, join_idx: usize = 0, arena: ?*std.heap.ArenaAllocator = null, };");
-        self.writeln("pub const JoinBarrier = struct { remaining: usize, total: usize, results: []Message, waiter_ctx: ?*anyopaque = null, waiter_fn: ?*const fn(*anyopaque) anyerror!void = null, pub fn init(allocator: std.mem.Allocator, total: usize) !*JoinBarrier { const b = try allocator.create(JoinBarrier); b.* = .{ .remaining = total, .total = total, .results = try allocator.alloc(Message, total), .waiter_ctx = null, .waiter_fn = null }; return b; } pub fn on_task_done(self: *JoinBarrier, idx: usize, msg: Message) void { self.results[idx] = msg; self.remaining -= 1; if (self.remaining == 0) { if (self.waiter_ctx) |w_ctx| { const w_fn = self.waiter_fn.?; const base_waiter: *BaseContext = @ptrCast(@alignCast(w_ctx)); const arr_res = std.heap.page_allocator.alloc(Message, self.total) catch unreachable; @memcpy(arr_res, self.results); base_waiter.await_result = Message{ .array = arr_res }; self.waiter_ctx = null; self.waiter_fn = null; schedule(w_fn, w_ctx); } } } };");
-        self.writeln("pub fn __cp_task_bridge(p: *anyopaque) anyerror!void { const t: *Task = @ptrCast(@alignCast(p)); t.state = 2; if (t.join_barrier) |b| { b.on_task_done(t.join_idx, t.base.await_result.?); } if (t.waiter_ctx) |w_ctx| { const w_fn = t.waiter_fn.?; const base_waiter: *BaseContext = @ptrCast(@alignCast(w_ctx)); base_waiter.await_result = t.base.await_result; t.waiter_ctx = null; t.waiter_fn = null; schedule(w_fn, w_ctx); } }");
-        self.writeln("pub fn cp_msg_to_val(m: Message) []const u8 { return switch (m) { .string => |s| s, else => \"\", }; }");
+        self.writeln("pub fn print(v: anytype) void { const T = @TypeOf(v); if (comptime is_string_like(T)) { std.debug.print(\"{s}\\n\", .{ to_string_slice(v) }); } else if (comptime T == Message) { std.debug.print(\"{s}\\n\", .{ cp_fmt(v) }); } else if (comptime T == ?Message) { if (v) |m| { std.debug.print(\"{s}\\n\", .{ cp_fmt(m) }); } else { std.debug.print(\"null\\n\", .{}); } } else { std.debug.print(\"{any}\\n\", .{ v }); } }");
+        self.writeln("pub const Task = struct { base: BaseContext = .{}, lock: Spinlock = .{}, state: u8 = 0, waiter_ctx: ?*anyopaque = null, waiter_fn: ?*const fn(*anyopaque) anyerror!void = null, join_barrier: ?*JoinBarrier = null, join_idx: usize = 0, arena: ?*std.heap.ArenaAllocator = null, };");
+        self.writeln("pub const JoinBarrier = struct { lock: Spinlock = .{}, remaining: usize, total: usize, results: []Message, waiter_ctx: ?*anyopaque = null, waiter_fn: ?*const fn(*anyopaque) anyerror!void = null, pub fn init(allocator: std.mem.Allocator, total: usize) !*JoinBarrier { const b = try allocator.create(JoinBarrier); b.* = .{ .remaining = total + 1, .total = total, .results = try allocator.alloc(Message, total), .waiter_ctx = null, .waiter_fn = null }; return b; } pub fn on_task_done(self: *JoinBarrier, idx: usize, msg: Message) void { self.lock.acquire(); self.results[idx] = msg; self.remaining -= 1; const done = (self.remaining == 0); const w_ctx_opt = self.waiter_ctx; const w_fn_opt = self.waiter_fn; if (done and w_ctx_opt != null) { self.waiter_ctx = null; self.waiter_fn = null; } self.lock.release(); if (done) { if (w_ctx_opt) |w_ctx| { const w_fn = w_fn_opt.?; const base_waiter: *BaseContext = @ptrCast(@alignCast(w_ctx)); const arr_res = std.heap.page_allocator.alloc(Message, self.total) catch unreachable; @memcpy(arr_res, self.results); base_waiter.await_result = Message{ .array = arr_res }; schedule(w_fn, w_ctx); } } } pub fn finish_setup_and_should_suspend(self: *JoinBarrier) bool { self.lock.acquire(); self.remaining -= 1; const done = (self.remaining == 0); if (done) { const base_waiter: *BaseContext = @ptrCast(@alignCast(self.waiter_ctx.?)); const arr_res = std.heap.page_allocator.alloc(Message, self.total) catch unreachable; @memcpy(arr_res, self.results); base_waiter.await_result = Message{ .array = arr_res }; self.waiter_ctx = null; self.waiter_fn = null; } self.lock.release(); return !done; } };");
+        self.writeln("pub fn __cp_task_bridge(p: *anyopaque) anyerror!void { const t: *Task = @ptrCast(@alignCast(p)); t.lock.acquire(); t.state = 2; const jb = t.join_barrier; const j_idx = t.join_idx; const w_ctx_opt = t.waiter_ctx; const w_fn_opt = t.waiter_fn; t.waiter_ctx = null; t.waiter_fn = null; const res = t.base.await_result; t.lock.release(); if (jb) |b| { b.on_task_done(j_idx, res orelse Message{ .string = \"\" }); } if (w_ctx_opt) |w_ctx| { const w_fn = w_fn_opt.?; const base_waiter: *BaseContext = @ptrCast(@alignCast(w_ctx)); base_waiter.await_result = res; schedule(w_fn, w_ctx); } _ = global_active_tasks.fetchSub(1, .release); }");
+        self.writeln("pub fn cp_msg_to_val(m: Message) []const u8 { return cp_fmt(m); }");
         self.writeln("pub fn cp_unpack_elem(v: anytype, comptime idx: usize) []const u8 { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return \"\"; } else if (comptime T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return \"\"; } else { return @field(v, std.fmt.comptimePrint(\"{d}\", .{idx})); } }");
         self.writeln("");
 
@@ -1363,15 +1414,29 @@ impl Codegen {
             self.indent();
             self.writeln("global_io = init.io;");
             self.writeln("var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator); defer arena.deinit();");
+            if self.is_parallel_runtime {
+                let wc_expr = if self.parallel_worker_count > 0 {
+                    format!("{}", self.parallel_worker_count)
+                } else {
+                    "@min(@max(std.Thread.getCpuCount() catch 4, 2), 16)".to_string()
+                };
+                self.writeln(&format!("const __worker_count: usize = {};", wc_expr));
+                self.writeln(
+                    "var __workers = try arena.allocator().alloc(std.Thread, __worker_count);",
+                );
+                self.writeln("for (0..__worker_count) |wi| { __workers[wi] = try std.Thread.spawn(.{}, _WorkerPoolRunner.run, .{}); }");
+                self.writeln("defer { global_runtime_shutdown.store(true, .release); for (__workers) |wt| { wt.join(); } }");
+            }
             self.writeln("var ctx: cp_main_Context = undefined; ctx.pc = 0; ctx._self = PID{ .node_id = 0, .local_id = 1 }; next_local_id = 2; ctx.arena = &arena; ctx._parent = null; ctx._parent_fn = null; ctx.received_msg = null; ctx.received_sender = null;");
             self.writeln("try cp_main(&ctx);");
             self.writeln("while (true) {");
             self.indent();
             self.writeln("drain_cross_thread_mailbox();");
+            self.writeln("while (global_task_queue.pop()) |task| { _ = global_running_workers.fetchAdd(1, .acquire); try task.run(task.ctx); _ = global_running_workers.fetchSub(1, .release); }");
             self.writeln("while (queue_len > 0) { const task = task_queue[0]; for (task_queue[1..queue_len], 0..) |t, j| { task_queue[j] = t; } queue_len -= 1; try task.run(task.ctx); }");
             self.writeln("drain_cross_thread_mailbox();");
-            self.writeln("if (active_fds == 0 and queue_len == 0 and waiting_count == 0) break;");
-            self.writeln("if (queue_len == 0 and waiting_count > 0 and active_fds == 0) { const ts = std.os.linux.timespec{ .sec = 0, .nsec = 500_000 }; _ = std.os.linux.nanosleep(&ts, null); }");
+            self.writeln("if (active_fds == 0 and queue_len == 0 and global_task_queue.len() == 0 and waiting_count == 0 and global_active_tasks.load(.acquire) == 0 and global_running_workers.load(.acquire) == 0) break;");
+            self.writeln("if (queue_len == 0 and global_task_queue.len() == 0 and (waiting_count > 0 or global_active_tasks.load(.acquire) > 0 or global_running_workers.load(.acquire) > 0) and active_fds == 0) { const ts = std.os.linux.timespec{ .sec = 0, .nsec = 500_000 }; _ = std.os.linux.nanosleep(&ts, null); }");
             self.writeln("if (active_fds > 0) {");
             self.indent();
             self.writeln("const ready_count = try std.posix.poll(poll_fds[0..active_fds], 10);");
@@ -2380,7 +2445,10 @@ impl Codegen {
                         }
                         return Some(Type::Tuple(tup_tys));
                     }
-                    if fid.sym == "spawn" || fid.sym == "@task_spawn" {
+                    if fid.sym == "spawn"
+                        || fid.sym == "@task_spawn"
+                        || fid.sym == "@task_spawn_cpu"
+                    {
                         return Some(Type::Ref(Ident {
                             span: fid.span,
                             sym: "Task".to_string(),
@@ -2416,6 +2484,12 @@ impl Codegen {
                     }
                 } else if let Expr::Member(mem) = &*c.callee {
                     if let Expr::Ident(oid) = &*mem.obj {
+                        if oid.sym == "spawn" && mem.prop.sym == "cpu" {
+                            return Some(Type::Ref(Ident {
+                                span: mem.prop.span,
+                                sym: "Task".to_string(),
+                            }));
+                        }
                         if self.enum_defs.contains_key(&oid.sym) {
                             return Some(Type::Ref(oid.clone()));
                         }
@@ -4669,6 +4743,14 @@ impl Codegen {
                             }
                         }
                     } else if let Expr::Ident(lhs_id) = &*bin.left {
+                        if self.current_fn_params.contains(&lhs_id.sym)
+                            && !self.mutable_fn_params.contains(&lhs_id.sym)
+                        {
+                            panic!(
+                                "CP Compile Error: Cannot mutate read-only variable or captured outer variable '{}'",
+                                lhs_id.sym
+                            );
+                        }
                         if self.is_class_field(&lhs_id.sym) {
                             if self.current_receiver_mode == ReceiverMode::ReadOnly {
                                 panic!(
@@ -6126,24 +6208,46 @@ impl Codegen {
                     }
                 }
 
-                let callee = match &*call.callee {
-                    Expr::Ident(ident) => ident.sym.clone(),
-                    _ => self.generate_expr(&call.callee),
+                let is_spawn_cpu = if let Expr::Member(mem) = &*call.callee {
+                    if let Expr::Ident(obj_id) = &*mem.obj {
+                        obj_id.sym == "spawn" && mem.prop.sym == "cpu"
+                    } else {
+                        false
+                    }
+                } else {
+                    false
                 };
-                if (callee == "spawn" || callee == "@task_spawn") && call.args.len() == 1 {
+                let callee = if is_spawn_cpu {
+                    "@task_spawn_cpu".to_string()
+                } else {
+                    match &*call.callee {
+                        Expr::Ident(ident) => ident.sym.clone(),
+                        _ => self.generate_expr(&call.callee),
+                    }
+                };
+                if (callee == "spawn" || callee == "@task_spawn" || callee == "@task_spawn_cpu")
+                    && call.args.len() == 1
+                {
                     let task_fn = match &call.args[0] {
                         Expr::Ident(id) => id.sym.clone(),
                         Expr::Arrow(_) => self.generate_expr(&call.args[0]),
                         _ => "Unknown".to_string(),
                     };
                     let mut captures = String::new();
-                    if let Some(cv) = self.captured_vars.get(&task_fn) {
-                        for (r, _) in cv {
+                    let moved_in_closure = self.lambda_moved_vars.get(&task_fn).cloned().unwrap_or_default();
+                    if let Some(cv) = self.captured_vars.get(&task_fn).cloned() {
+                        for (r, _) in &cv {
                             if self.var_is_ref_struct.contains(r) {
                                 panic!("CP Compile Error: Stack-bound ref struct '{}' cannot be captured across parallel task spawn boundary", r);
                             }
                             if self.var_borrow_sources.contains_key(r) {
                                 panic!("CP Compile Error: Temporary borrow '{}' cannot be captured across parallel task spawn boundary (use move or Shared<T>)", r);
+                            }
+                            if !moved_in_closure.contains(r) {
+                                if self.moved_vars.contains(r) {
+                                    panic!("CP Compile Error: Use of moved variable '{}'", r);
+                                }
+                                self.check_borrow_conflict(r, false);
                             }
                             let src = if self.is_state_machine {
                                 format!("ctx.{}", r)
@@ -6153,7 +6257,10 @@ impl Codegen {
                             captures.push_str(&format!("sub_ctx.{} = {}; ", r, src));
                         }
                     }
-                    return format!("(blk: {{ const arena_ptr = std.heap.page_allocator.create(std.heap.ArenaAllocator) catch unreachable; arena_ptr.* = std.heap.ArenaAllocator.init(std.heap.page_allocator); const task_ptr = arena_ptr.allocator().create(Task) catch unreachable; task_ptr.* = .{{ .arena = arena_ptr }}; const sub_ctx = arena_ptr.allocator().create({0}_Context) catch unreachable; sub_ctx.* = undefined; sub_ctx.pc = 0; sub_ctx.arena = arena_ptr; sub_ctx._parent = @ptrCast(task_ptr); sub_ctx._parent_fn = @ptrCast(&__cp_task_bridge); {1} const p = PID{{ .node_id = current_node_id, .local_id = next_local_id }}; next_local_id += 1; sub_ctx._self = p; schedule(@ptrCast(&{0}), @ptrCast(sub_ctx)); break :blk task_ptr; }})", task_fn, captures);
+                    if callee == "@task_spawn_cpu" {
+                        return format!("(blk: {{ _ = global_active_tasks.fetchAdd(1, .acquire); const arena_ptr = std.heap.page_allocator.create(std.heap.ArenaAllocator) catch unreachable; arena_ptr.* = std.heap.ArenaAllocator.init(std.heap.page_allocator); const task_ptr = arena_ptr.allocator().create(Task) catch unreachable; task_ptr.* = .{{ .arena = arena_ptr }}; const sub_ctx = arena_ptr.allocator().create({0}_Context) catch unreachable; sub_ctx.* = undefined; sub_ctx.pc = 0; sub_ctx.arena = arena_ptr; sub_ctx._parent = @ptrCast(task_ptr); sub_ctx._parent_fn = @ptrCast(&__cp_task_bridge); {1} const p = PID{{ .node_id = current_node_id, .local_id = next_local_id }}; next_local_id += 1; sub_ctx._self = p; const _CpuRunner = struct {{ pub fn run(c: *anyopaque) void {{ {0}(c) catch {{}}; }} }}; const _th = std.Thread.spawn(.{{}}, _CpuRunner.run, .{{@as(*anyopaque, @ptrCast(sub_ctx))}}) catch unreachable; _th.detach(); break :blk task_ptr; }})", task_fn, captures);
+                    }
+                    return format!("(blk: {{ _ = global_active_tasks.fetchAdd(1, .acquire); const arena_ptr = std.heap.page_allocator.create(std.heap.ArenaAllocator) catch unreachable; arena_ptr.* = std.heap.ArenaAllocator.init(std.heap.page_allocator); const task_ptr = arena_ptr.allocator().create(Task) catch unreachable; task_ptr.* = .{{ .arena = arena_ptr }}; const sub_ctx = arena_ptr.allocator().create({0}_Context) catch unreachable; sub_ctx.* = undefined; sub_ctx.pc = 0; sub_ctx.arena = arena_ptr; sub_ctx._parent = @ptrCast(task_ptr); sub_ctx._parent_fn = @ptrCast(&__cp_task_bridge); {1} const p = PID{{ .node_id = current_node_id, .local_id = next_local_id }}; next_local_id += 1; sub_ctx._self = p; schedule(@ptrCast(&{0}), @ptrCast(sub_ctx)); break :blk task_ptr; }})", task_fn, captures);
                 }
                 if callee == "Error" {
                     let code = if !call.args.is_empty() {
@@ -6814,11 +6921,15 @@ impl Codegen {
                                     let arg_code = self.generate_expr(arg);
                                     reg_tasks.push_str(&format!(
                                         "const __t{idx}: *Task = @ptrCast(@alignCast({arg_code})); \
+                                        __t{idx}.lock.acquire(); \
                                         if (__t{idx}.state == 2) {{ \
-                                            barrier.on_task_done({idx}, __t{idx}.base.await_result.?); \
+                                            const __res{idx} = __t{idx}.base.await_result orelse Message{{ .string = \"\" }}; \
+                                            __t{idx}.lock.release(); \
+                                            barrier.on_task_done({idx}, __res{idx}); \
                                         }} else {{ \
                                             __t{idx}.join_barrier = barrier; \
                                             __t{idx}.join_idx = {idx}; \
+                                            __t{idx}.lock.release(); \
                                         }} "
                                     ));
                                 }
@@ -6828,7 +6939,8 @@ impl Codegen {
                                     barrier.waiter_fn = @ptrCast(&{1}); \
                                     {2} \
                                     ctx.pc = {3}; \
-                                    if (barrier.remaining > 0) return;",
+                                    if (barrier.finish_setup_and_should_suspend()) return; \
+                                    continue;",
                                     call.args.len(), current_fn, reg_tasks, next_pc
                                 );
                                 self.write_to_case(&logic);
@@ -6901,12 +7013,17 @@ impl Codegen {
                     let current_fn = self.current_zig_fn_name.clone();
                     let logic = format!(
                         "const __single_task: *Task = @ptrCast(@alignCast({0})); \
+                        __single_task.lock.acquire(); \
                         if (__single_task.state == 2) {{ \
                             ctx.await_result = __single_task.base.await_result; \
+                            __single_task.lock.release(); \
+                            ctx.pc = {2}; \
+                            continue; \
                         }} else {{ \
                             __single_task.waiter_ctx = @ptrCast(ctx); \
                             __single_task.waiter_fn = @ptrCast(&{1}); \
                             ctx.pc = {2}; \
+                            __single_task.lock.release(); \
                             return; \
                         }}",
                         task_code, current_fn, next_pc
@@ -7214,7 +7331,7 @@ impl Codegen {
                 "@complete_task" => {
                     let task = self.generate_expr(&call.args[0]);
                     let val = self.generate_expr(&call.args[1]);
-                    format!("(blk: {{ const __cp_target_task: *Task = @ptrCast(@alignCast({0})); __cp_target_task.state = 2; __cp_target_task.base.await_result = cp_message_from({1}); if (__cp_target_task.join_barrier) |b| {{ b.on_task_done(__cp_target_task.join_idx, __cp_target_task.base.await_result.?); }} if (__cp_target_task.waiter_ctx) |w_ctx| {{ const w_fn = __cp_target_task.waiter_fn.?; const base_waiter: *BaseContext = @ptrCast(@alignCast(w_ctx)); base_waiter.await_result = __cp_target_task.base.await_result; __cp_target_task.waiter_ctx = null; __cp_target_task.waiter_fn = null; schedule(w_fn, w_ctx); }} break :blk {{}}; }})", task, val)
+                    format!("(blk: {{ const __cp_target_task: *Task = @ptrCast(@alignCast({0})); __cp_target_task.lock.acquire(); __cp_target_task.state = 2; __cp_target_task.base.await_result = cp_message_from({1}); const __jb = __cp_target_task.join_barrier; const __j_idx = __cp_target_task.join_idx; const __w_ctx_opt = __cp_target_task.waiter_ctx; const __w_fn_opt = __cp_target_task.waiter_fn; __cp_target_task.waiter_ctx = null; __cp_target_task.waiter_fn = null; const __res = __cp_target_task.base.await_result; __cp_target_task.lock.release(); if (__jb) |b| {{ b.on_task_done(__j_idx, __res orelse Message{{ .string = \"\" }}); }} if (__w_ctx_opt) |w_ctx| {{ const w_fn = __w_fn_opt.?; const base_waiter: *BaseContext = @ptrCast(@alignCast(w_ctx)); base_waiter.await_result = __res; schedule(w_fn, w_ctx); }} break :blk {{}}; }})", task, val)
                 }
                 "@send" | "@reply" => {
                     let target = self.generate_expr(&call.args[0]);
@@ -7299,6 +7416,10 @@ impl Codegen {
                 let mut lambda_output = String::new();
                 let mut lambda_gen = Codegen::new();
                 lambda_gen.globals = self.globals.clone();
+                lambda_gen.class_defs = self.class_defs.clone();
+                lambda_gen.fn_sigs = self.fn_sigs.clone();
+                lambda_gen.trait_defs = self.trait_defs.clone();
+                lambda_gen.var_cp_types = self.var_cp_types.clone();
                 lambda_gen.is_state_machine = true;
                 lambda_gen.current_fn_is_async = true;
                 lambda_gen.current_zig_fn_name = lambda_name.clone();
@@ -7330,6 +7451,9 @@ impl Codegen {
                             captured.push(("self".to_string(), format!("*{}", c)));
                         }
                     } else if let Some(ty) = self.locals.get(&r) {
+                        if self.moved_vars.contains(&r) {
+                            panic!("CP Compile Error: Use of moved variable '{}'", r);
+                        }
                         captured.push((r.clone(), ty.clone()));
                     }
                 }
@@ -7338,6 +7462,14 @@ impl Codegen {
 
                 for (r, ty) in &captured {
                     lambda_gen.locals.insert(r.clone(), ty.clone());
+                    if r != "self" || self.current_receiver_mode != ReceiverMode::Mut {
+                        lambda_gen.current_fn_params.insert(r.clone());
+                    }
+                    if !self.var_borrow_sources.contains_key(r)
+                        && (!self.current_fn_params.contains(r) || self.move_fn_params.contains(r))
+                    {
+                        lambda_gen.move_fn_params.insert(r.clone());
+                    }
                     writeln!(lambda_output, "    {}: {},", r, ty).unwrap();
                 }
 
@@ -7368,7 +7500,10 @@ impl Codegen {
                 match &*arrow.body {
                     ArrowBody::Expr(e) => {
                         let ec = lambda_gen.generate_expr(e);
-                        lambda_gen.write_to_case(&format!("_ = {}; return;", ec));
+                        lambda_gen.write_to_case(&format!(
+                            "const __ret_val = {}; if (ctx._parent) |p| {{ const base: *BaseContext = @ptrCast(@alignCast(p)); base.await_result = cp_message_from(__ret_val); schedule(ctx._parent_fn.?, p); }} return;",
+                            ec
+                        ));
                     }
                     ArrowBody::Block(b) => {
                         for s in &b.body {
@@ -7383,8 +7518,11 @@ impl Codegen {
                 writeln!(lambda_output, "        else => unreachable,\n    }} }} }}\n").unwrap();
                 self.lambda_funcs.push(lambda_output);
 
+                self.lambda_moved_vars
+                    .insert(lambda_name.clone(), lambda_gen.moved_vars.clone());
                 for moved in &lambda_gen.moved_vars {
                     if self.locals.contains_key(moved) {
+                        self.check_active_borrows_before_move(moved);
                         self.moved_vars.insert(moved.clone());
                     }
                 }

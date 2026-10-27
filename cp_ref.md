@@ -2949,48 +2949,72 @@ CP 通过 `SharedTensor` 机制实现跨 Agent 零拷贝交互：
 
 ---
 
-## 5. 异步任务编排与并行任务池 (`cap:parallel`)
+## 5. 异步任务编排与多核并行运行时 (`cap:parallel`)
 
-专为单机多核计算及无栈协程调度设计的异步任务管理体系：
+借鉴 Rust Tokio 的双轨并发架构，CP 提供**按需开启的多核 Worker 线程池 (`@parallel`)** 与 **专用计算线程派发 (`spawn.cpu`)**：
 
-### 5.1 核心原语与语法糖
-- **`spawn(async () => { ... })`**：派生原生异步任务，返回轻量级任务句柄 `Task`。
-- **`join(task1, task2, ...)`**：并行等待多个任务，基于无锁并发屏障（`JoinBarrier`）汇总结果，返回元组。
-- **`await`**：无栈协程挂起，在任务完成或屏障计数归零时恢复执行，出让控制权且零阻塞。
+### 5.1 运行时模式控制 (`@parallel` / `@single_thread` / `cap.json`)
+- **默认单线程 Reactor 模式**：未加标记时，程序默认以零线程切换开销的单线程 Reactor 模式运行，适合轻量 CLI 与纯异步 I/O 脚本。
+- **`@parallel` / `@parallel(N)` 多核并行模式**：在 `async fn main()` 上标注 `@parallel`（或指定线程数 `@parallel(4)`），或在项目 `cap.json` 中配置 `"mode": "parallel"`，程序启动时自动根据 CPU 核心数拉起多核共享任务队列（`GlobalTaskQueue`）与 Worker 线程池，使所有 `spawn` 的异步协程自动在多核 CPU 上真正并行执行。
+- **`@single_thread` 强制单线程覆盖**：即使 `cap.json` 开启了 `"mode": "parallel"`，也可在特定入口函数上用 `@single_thread` 强制锁定单线程模式。
+
+### 5.2 核心原语与重度计算卸载 (`spawn` vs `spawn.cpu`)
+- **`spawn(async () => { ... })`**：派生轻量级无栈异步协程任务，投入多核 Worker 队列，适合高并发 I/O 与常规并发任务，返回 `Task` 句柄。
+- **`spawn.cpu(() => { ... })`**：将重度 CPU 密集型计算（如加密、压缩、矩阵运算）或同步阻塞调用卸载至独立的 OS 专用计算线程执行，绝不阻塞或饿死异步 Worker 线程池，同样返回可 `await` / `join` 的 `Task` 句柄。
+- **`join(task1, task2, ...)`**：基于原子自旋锁保护的并发屏障（`JoinBarrier`）并行等待多个任务（支持混合等待 `spawn` 与 `spawn.cpu` 任务），待全部完成后按顺序返回结果元组。
 
 ```cp
 import { print } from "cap:io";
 import { spawn, join } from "cap:parallel";
 
+@parallel(4)
 async fn main() {
-  // 并发执行两个计算任务
+  let shared_prefix = "Prefix:";
+  let secret_token = "OwnedSecret-42";
+
+  // 1. 多核 Worker 线程池并发执行异步任务（支持只读借用捕获）
   let task1 = spawn(async () => {
+    print(`${shared_prefix} Running Task 1`);
     return "Hello from Task 1";
   });
 
+  // 2. 使用 move 将变量所有权安全转移至并发任务
   let task2 = spawn(async () => {
+    let owned = move secret_token;
+    print(`Task 2 received ${owned}`);
     return "Hello from Task 2";
   });
 
-  // 等待并行结果汇总并解构
-  let [msg1, msg2] = await join(task1, task2);
+  // 3. 使用 spawn.cpu 将重度 CPU 计算卸载至独立计算线程
+  let cpu_task = spawn.cpu(() => {
+    let mut sum = 0;
+    let mut i = 0;
+    while (i < 1000) { sum = sum + i; i = i + 1; }
+    return "CPU Compute Done";
+  });
+
+  // 等待并行结果汇总并按序解构
+  let [msg1, msg2, msg3] = await join(task1, task2, cpu_task);
 
   print(msg1);
   print(msg2);
+  print(msg3);
   print("Hello, Concurrent Plus!");
 }
 ```
 
-### 5.2 跨并行边界的内存安全法则 (Borrow & Stack Isolation)
-为了根除多线程与并发场景下的数据竞争与悬垂引用，CP 编译器在语法分析与代码生成期对 `spawn` 捕获的闭包施加了严格的所有权与借用安全检查：
-1. **禁止临时借用逃逸**：局部临时借用（`&x` 或 `mut &x`）禁止跨越 `spawn` 边界传递。若企图在并行闭包中捕获临时借用，编译器触发致命错误：
+### 5.3 跨并行边界的内存安全法则 (Read-Only Borrow, Mutability & Ownership Check)
+为了根除多线程并行下的数据竞争（Data Race）与悬垂指针（Dangling Pointer），CP 编译器对 `spawn` 与 `spawn.cpu` 捕获的外部变量执行严格的编译期安全检查：
+1. **禁止捕获局部临时借用 (`&` / `&mut`)**：
    `CP Compile Error: Temporary borrow 'x' cannot be captured across parallel task spawn boundary (use move or Shared<T>)`
-2. **禁止栈绑定 `ref struct` 逃逸**：栈分配的引用结构体不得跨任务捕获：
+2. **禁止捕获栈绑定 `ref struct`**：
    `CP Compile Error: Stack-bound ref struct 'x' cannot be captured across parallel task spawn boundary`
-3. **安全数据流转通道**：
-   - **所有权转移 (`move`)**：将独占资源所有权转移至并行任务；
-   - **原子引用共享 (`Shared<T>` / `SharedTensor`)**：通过全局共享堆原子引用计数实现安全共享；
-   - **值拷贝**：基础纯标量数据进行值语义隔离拷贝。
+3. **默认只读借用捕获与禁止跨任务直接修改**：
+   未被 `move` 的外部变量以只读方式捕获（同时校验外层是否存在活跃的可变借用冲突），在子任务闭包内严禁直接修改该外部变量：
+   `CP Compile Error: Cannot mutate read-only variable or captured outer variable 'x'`
+4. **所有权转移 (`move`) 与 Use-After-Move 拦截**：
+   在任务闭包内通过 `move x` 转移所有权时，编译器首先校验 `x` 无活跃借用，随后将所有权移交子任务并在外层标记失效；外层后续若再次访问 `x`，立即报错拦截：
+   `CP Compile Error: Use of moved value 'x'`
 
 ---
 

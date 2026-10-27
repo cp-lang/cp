@@ -335,6 +335,14 @@ impl Analyzer {
                     sym: "Task".to_string(),
                 })),
             ),
+            (
+                "@task_spawn_cpu",
+                false,
+                Some(Type::Ref(Ident {
+                    span: mock_span.clone(),
+                    sym: "Task".to_string(),
+                })),
+            ),
             ("join", true, Some(Type::Any)),
             ("@task_join", true, Some(Type::Any)),
             (
@@ -1799,7 +1807,10 @@ impl Analyzer {
                         let elem_tys = vec![Type::Any; call.args.len()];
                         return Ok(Type::Tuple(elem_tys));
                     }
-                    if fid.sym == "spawn" || fid.sym == "@task_spawn" {
+                    if fid.sym == "spawn"
+                        || fid.sym == "@task_spawn"
+                        || fid.sym == "@task_spawn_cpu"
+                    {
                         return Ok(Type::Ref(Ident {
                             span: fid.span,
                             sym: "Task".to_string(),
@@ -1807,6 +1818,16 @@ impl Analyzer {
                     }
                     if let Some(SymbolKind::Func { ret: Some(ret), .. }) = self.resolve(&fid.sym) {
                         return Ok(ret.clone());
+                    }
+                }
+                if let Expr::Member(mem) = &*call.callee {
+                    if let Expr::Ident(oid) = &*mem.obj {
+                        if oid.sym == "spawn" && mem.prop.sym == "cpu" {
+                            return Ok(Type::Ref(Ident {
+                                span: mem.prop.span,
+                                sym: "Task".to_string(),
+                            }));
+                        }
                     }
                 }
                 let callee_ty = self.infer_type(&call.callee)?;

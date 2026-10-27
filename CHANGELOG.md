@@ -497,6 +497,32 @@
 - [`cap/test/test_parallel_fail_borrow.cp`](file:///data/dev/cp/cap/test/test_parallel_fail_borrow.cp): 验证跨 `spawn` 边界非法捕获局部临时借用触发编译期严密拦截。
 - [`cap/test/test_events_pass.cp`](file:///data/dev/cp/cap/test/test_events_pass.cp): `EventEmitter` 事件监听分发与 `Event` 协程同步信号标志测试，原生全绿通过。
 
+---
+
+## 2026-10-28 (`@parallel` 多核 Worker 线程池、`spawn.cpu` 专用计算线程与跨任务只读/可变借用及所有权检查)
+
+### 修改文件 (Modified)
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 注册 `@task_spawn_cpu` 内建函数并返回 `Type::Ref("Task")`；
+  - 在 `infer_type` 的 `Expr::Call` 分支识别 `spawn.cpu(...)` 属性调用语法，推导返回 `Task` 类型。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 在 `generate_module` 中解析 `main` 函数上的 `@parallel` / `@parallel(N)` / `@parallel(threads: N)` 与 `@single_thread` 元注解，并支持读取 `cap.json` 中的 `"mode": "parallel"` 配置；
+  - 注入线程安全的 `GlobalTaskQueue`（带 `Spinlock` 保护的 2048 槽位环形队列）、`_WorkerPoolRunner` 工作线程池循环、`global_active_tasks` 与 `global_running_workers` 原子计数器；
+  - 升级 `Task` 与 `JoinBarrier` 为自旋锁（`Spinlock`）并发安全结构，引入 `remaining = total + 1` 与 `finish_setup_and_should_suspend()` 机制消除主线程注册屏障与 Worker 线程并发完成任务之间的竞态条件；
+  - 实现 `spawn.cpu(...)`（及 `@task_spawn_cpu`）代码生成，自动拉起独立 OS 计算线程执行重度 CPU 密集型闭包并通过 `__cp_task_bridge` 唤醒 `await` / `join`；
+  - 强化跨任务闭包捕获的内存安全检查：只读捕获外部变量时调用 `check_borrow_conflict(r, false)` 并禁止在闭包内直接修改外部变量（报错 `Cannot mutate read-only variable or captured outer variable`）；支持在闭包内使用 `move` 转移外部变量所有权并在外层实施 Use-After-Move 拦截。
+- [`lib/cap/parallel.cp`](file:///data/dev/cp/lib/cap/parallel.cp):
+  - 更新 `spawn` 与 `@parallel`、`spawn.cpu` 注释说明。
+- [`cap/test/test_parallel_join.cp`](file:///data/dev/cp/cap/test/test_parallel_join.cp):
+  - 升级为 `@parallel(4)` 多核并行测试，覆盖 `spawn` 只读捕获、`spawn` + `move` 所有权转移、`spawn.cpu` 重度计算线程派发及 `await join(task1, task2, cpu_task)` 并发汇聚。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 更新第 22.5 节，完整收录 `@parallel` / `@single_thread` / `cap.json` 多核运行时配置、`spawn.cpu` 专用计算线程原语及跨任务只读借用、禁止可变修改与 `move` 所有权检查规范。
+
+### 新增文件 (Added)
+- [`cap/test/test_parallel_fail_mutate_capture.cp`](file:///data/dev/cp/cap/test/test_parallel_fail_mutate_capture.cp): 验证在 `spawn` 并发任务中直接修改捕获的外部变量时触发编译期拦截。
+- [`cap/test/test_parallel_fail_use_after_move.cp`](file:///data/dev/cp/cap/test/test_parallel_fail_use_after_move.cp): 验证在 `spawn` 并发任务中 `move` 转移外部变量所有权后，外层再次访问触发 `Use of moved value` 编译期拦截。
+
+
 
 
 

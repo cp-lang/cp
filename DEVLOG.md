@@ -1194,6 +1194,32 @@ let reply = raw
      ```
 4. 执行 `cargo test --manifest-path cpc/Cargo.toml` 与 `cargo fmt`，全语言核心单元测试 100% 保持通过，代码风格规范整洁。
 
+---
+
+## 2026-10-28: 对标 Rust Tokio 的 `@parallel` 多核 Worker 线程池、`spawn.cpu` 专用计算线程与跨任务借用/所有权安全实现
+
+### 1. 架构背景与设计决策
+针对用户提出的“如何让 `spawn` 的异步任务真正实现多核并行运行，同时区分轻量异步 I/O 协程与重度 CPU 密集型计算任务，并确保跨线程内存安全”：
+1. **双轨运行时启动机制 (`@parallel` vs 默认单线程)**：
+   - 借鉴 Rust `#[tokio::main]` 的设计哲学：未标注时默认保持零线程切换开销的单线程 Reactor 模式；
+   - 当入口函数标注 `@parallel`（或 `@parallel(4)` / `@parallel(threads: 4)`），或项目 `cap.json` 配置 `"mode": "parallel"` 时，程序在 `main` 入口自动初始化多核 Worker 线程池（默认按 CPU 核心数自适应 `[2, 16]` 个 Worker 线程），并在退出时优雅通知并 `join` 回收全部工作线程；支持 `@single_thread` 显式覆盖。
+2. **I/O 异步任务与重度 CPU 计算解耦 (`spawn` vs `spawn.cpu`)**：
+   - 经过对比 `heavy`、`worker`、`compute`、`thread` 与 `spawn.cpu`，确立采用最具语义直觉的命名空间式语法 **`spawn.cpu(() => { ... })`** 替代冗长的 `spawn_blocking`；
+   - `spawn(...)` 将轻量无栈协程推入多核共享的 `GlobalTaskQueue`，由 Worker 线程池高并发调度；
+   - `spawn.cpu(...)` 直接通过 `std.Thread.spawn` 拉起独立的操作系统计算线程执行重度计算闭环，完成后通过 `__cp_task_bridge` 触发 `JoinBarrier` 或唤醒等待协程，绝不抢占或饿死异步 Worker 线程。
+3. **多线程并发屏障的无竞态同步 (`Task.lock` & `JoinBarrier.lock`)**：
+   - 在真正的多核并行下，`spawn` 出的任务可能在主线程尚未完成 `await join(t1, t2, t3)` 的所有任务挂载前就已在另一个 CPU 核心上执行完毕；
+   - 为彻底消灭这一并发竞态，`Task` 与 `JoinBarrier` 均内嵌原子自旋锁 `Spinlock`，并将 `JoinBarrier.remaining` 初始化为 `total + 1`。主线程在完成全部子任务的锁内检查与挂载后，调用 `barrier.finish_setup_and_should_suspend()` 扣减最后的 `1`：若此时所有子任务均已完成，主线程无需挂起直接继续执行；否则安全挂起等待最后一个完成的 Worker 线程调用 `schedule` 唤醒。
+4. **跨任务只读借用、可变借用与所有权 (`move`) 编译期防线**：
+   - **禁止临时借用与栈结构体逃逸**：捕获 `&x`、`&mut x` 或 `ref struct` 直接报错拦截；
+   - **只读借用捕获与禁止跨线程直接写**：未被 `move` 的捕获变量触发外层 `check_borrow_conflict(r, false)` 检查（若存在未结束的可变借用则报错），并在闭包内注册为只读绑定，任何直接赋值修改（如 `count = 20`）立即触发 `CP Compile Error: Cannot mutate read-only variable or captured outer variable`；
+   - **所有权显式转移 (`move`)**：在闭包内对捕获变量执行 `move x` 时，先校验外层无活跃借用，随后将 `x` 记录至外层 `moved_vars` 黑名单，外层后续一旦访问立即触发 `CP Compile Error: Use of moved value`。
+
+### 2. 验证结果
+1. [`cap/test/test_parallel_join.cp`](file:///data/dev/cp/cap/test/test_parallel_join.cp)：在 `@parallel(4)` 下同时运行两个 `spawn` 异步任务（含只读捕获与 `move` 所有权转移）及一个 `spawn.cpu` 重度计算任务，通过 `await join(task1, task2, cpu_task)` 正确并行汇聚输出；
+2. 负向安全测试 [`cap/test/test_parallel_fail_borrow.cp`](file:///data/dev/cp/cap/test/test_parallel_fail_borrow.cp)、[`cap/test/test_parallel_fail_mutate_capture.cp`](file:///data/dev/cp/cap/test/test_parallel_fail_mutate_capture.cp)、[`cap/test/test_parallel_fail_use_after_move.cp`](file:///data/dev/cp/cap/test/test_parallel_fail_use_after_move.cp) 全部在编译期被精准拦截。
+
+
 
 
 

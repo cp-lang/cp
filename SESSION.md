@@ -2989,6 +2989,43 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 2. 执行 Git commit，完成当前里程碑成果的代码库持久化保存；
 3. 工作区保持干净，所有编译与测试用例 100% 保持绿色通过状态。
 
+---
+
+## 2026-10-28
+
+### 用户指令
+> 使用 spawn.cpu 吧
+> 按你上面的方案, @parallel 或 cap.json 配置, 实现类似 rust中经典的 tokio 多worker 工作线程处理spaw 和 spawn_blocking 启动多协程并发运算
+> 让刚才实现的 cp 异步任务实现真正的并发运行
+> 实现该功能时, 需注意 只读借用 可变借用 与变量所有权 检查, 确保内存安全
+
+### 执行结果汇报
+1. **实现 `@parallel` / `@single_thread` 与 `cap.json` 多核 Worker 线程池运行时**：
+   - 支持在 `async fn main()` 上标注 `@parallel`（自适应 CPU 核心数拉起 Worker 线程池）或 `@parallel(4)` / `@parallel(threads: 4)`（指定 Worker 线程数），以及在 `cap.json` 中配置 `"mode": "parallel"`；支持 `@single_thread` 强制单线程运行；
+   - 构建线程安全的 `GlobalTaskQueue`、`_WorkerPoolRunner` 及原子自旋锁保护的 `Task` 与 `JoinBarrier`，实现无竞态的多核并行调度与 `await join(...)` 汇聚。
+2. **实现 `spawn.cpu(() => { ... })` 专用计算线程卸载**：
+   - 支持通过 `spawn.cpu(...)` 将重度 CPU 密集型计算卸载至独立 OS 线程并行执行，不阻塞异步 Worker 线程池，返回标准 `Task` 句柄，可与普通 `spawn` 任务一起通过 `await` 或 `await join(...)` 等待结果。
+3. **完备的跨任务只读借用、可变借用与所有权 (`move`) 安全检查**：
+   - 严禁捕获局部临时借用（`&` / `&mut`）与栈绑定 `ref struct`；
+   - 未 `move` 的外部变量默认按只读借用捕获（自动检查外层是否存在活跃的可变借用冲突），在子任务内禁止直接赋值修改（触发 `CP Compile Error: Cannot mutate read-only variable or captured outer variable`）；
+   - 支持在子任务内通过 `move` 转移外部变量所有权，并在外层严格拦截 Use-After-Move（触发 `CP Compile Error: Use of moved value`）。
+4. **测试验证与文档同步**：
+   - 正向测试 [`cap/test/test_parallel_join.cp`](file:///data/dev/cp/cap/test/test_parallel_join.cp) 与负向测试 [`cap/test/test_parallel_fail_borrow.cp`](file:///data/dev/cp/cap/test/test_parallel_fail_borrow.cp)、[`cap/test/test_parallel_fail_mutate_capture.cp`](file:///data/dev/cp/cap/test/test_parallel_fail_mutate_capture.cp)、[`cap/test/test_parallel_fail_use_after_move.cp`](file:///data/dev/cp/cap/test/test_parallel_fail_use_after_move.cp) 全部验证通过；
+   - 同步更新 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md) 与 [`SESSION.md`](file:///data/dev/cp/SESSION.md)。
+
+---
+
+## 2026-10-28
+
+### 用户指令
+> git 提交
+
+### 执行结果汇报
+1. 将 `@parallel` 多核 Worker 线程池与 `spawn.cpu` 专用计算线程实现（`cpc/src/sema.rs`, `cpc/src/codegen.rs`, `lib/cap/parallel.cp`）、正向与负向测试用例（`cap/test/test_parallel_join.cp`, `cap/test/test_parallel_fail_mutate_capture.cp`, `cap/test/test_parallel_fail_use_after_move.cp`）、语言设计规范手册（`cp_ref.md`）、工程指令文件（`GEMINI.md`）以及记录日志（`CHANGELOG.md`, `DEVLOG.md`, `SESSION.md`）全部加入 Git 暂存区；
+2. 执行 `git commit` 完成提交；
+3. 工作区恢复干净状态。
+
+
 
 
 

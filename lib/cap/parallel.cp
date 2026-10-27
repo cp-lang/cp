@@ -12,8 +12,9 @@ export class Task {
 }
 
 /**
- * 派发并发异步任务至调度线程池。
+ * 派发并发异步任务至调度线程池（配合 `@parallel` 多核 Worker 线程池并行执行）。
  * 立即返回轻量级 Task 任务句柄。
+ * 对于重度 CPU 密集型或同步阻塞计算，可使用 `spawn.cpu(() => { ... })` 派发至专用计算线程。
  */
 export fn spawn(task_fn: any): any {
     return @task_spawn(task_fn);
