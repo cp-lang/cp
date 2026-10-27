@@ -300,6 +300,64 @@ impl Analyzer {
             self.scopes[0].insert(reflect_name.to_string(), SymbolKind::Class(cls));
         }
 
+        for name in &["Task", "Event", "EventEmitter"] {
+            let cls = crate::ast::Class {
+                span: mock_span.clone(),
+                ident: crate::ast::Ident {
+                    span: mock_span.clone(),
+                    sym: name.to_string(),
+                },
+                fields: vec![],
+                methods: vec![],
+                implements: vec![],
+                extends: None,
+                is_ref: false,
+                meta: vec![],
+            };
+            self.classes.insert(name.to_string(), cls.clone());
+            self.scopes[0].insert(name.to_string(), SymbolKind::Class(cls));
+        }
+
+        for (fn_name, is_async, ret_ty) in &[
+            (
+                "spawn",
+                false,
+                Some(Type::Ref(Ident {
+                    span: mock_span.clone(),
+                    sym: "Task".to_string(),
+                })),
+            ),
+            (
+                "@task_spawn",
+                false,
+                Some(Type::Ref(Ident {
+                    span: mock_span.clone(),
+                    sym: "Task".to_string(),
+                })),
+            ),
+            ("join", true, Some(Type::Any)),
+            ("@task_join", true, Some(Type::Any)),
+            (
+                "@create_pending_task",
+                false,
+                Some(Type::Ref(Ident {
+                    span: mock_span.clone(),
+                    sym: "Task".to_string(),
+                })),
+            ),
+            ("@complete_task", false, Some(Type::Void)),
+        ] {
+            self.scopes[0].insert(
+                fn_name.to_string(),
+                SymbolKind::Func {
+                    params: vec![],
+                    ret: ret_ty.clone(),
+                    is_async: *is_async,
+                    is_unsafe: false,
+                },
+            );
+        }
+
         for item in &module.body {
             match item {
                 ModuleItem::Decl(Decl::Meta(m)) => {
@@ -1592,6 +1650,7 @@ impl Analyzer {
             Pattern::Tuple(elements) => {
                 let element_types = match ty {
                     Type::Tuple(tys) => tys,
+                    Type::Any => vec![Type::Any; elements.len()],
                     _ => {
                         return Err(SemaError::TypeMismatch(
                             Type::Tuple(vec![]),
@@ -1736,6 +1795,16 @@ impl Analyzer {
             }
             Expr::Call(call) => {
                 if let Expr::Ident(fid) = &*call.callee {
+                    if fid.sym == "join" || fid.sym == "@task_join" {
+                        let elem_tys = vec![Type::Any; call.args.len()];
+                        return Ok(Type::Tuple(elem_tys));
+                    }
+                    if fid.sym == "spawn" || fid.sym == "@task_spawn" {
+                        return Ok(Type::Ref(Ident {
+                            span: fid.span,
+                            sym: "Task".to_string(),
+                        }));
+                    }
                     if let Some(SymbolKind::Func { ret: Some(ret), .. }) = self.resolve(&fid.sym) {
                         return Ok(ret.clone());
                     }

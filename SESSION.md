@@ -2931,6 +2931,64 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 2. 执行 Git 提交并生成提交记录；
 3. 代码库工作区恢复干净，全部开发与文档成果安全落库。
 
+---
+
+## 2026-10-28
+
+### 用户指令
+> 检查分析我们之前实现的无栈协程异步调用(await async join) 功能是否完整, 是否纳入只读借用 可变借用 和 所有权检查机制, 功能测试代码是否完整, 功能是否写入 cp_ref.md 语言设计规范。如下并行异步示例是否支持（spawn, join, await 并发任务编排）？实现异步任务 Task 与 Event 事件（支持 on, off, emit 等 TS/Node.js 高层发布订阅方法），在普通机器码模式下实现并行运行，注意只读借用、可变借用与所有权转移检查，确保变量安全。保持语法优雅、简洁。
+
+### 执行结果汇报
+1. **端到端打通 `cap:parallel` 原生异步任务编排与无栈协程调度**：
+   - 完整支持用户所提供的并行任务测试用例：
+     ```cp
+     import { print } from "cap:io";
+     import { spawn, join } from "cap:parallel";
+
+     async fn main() {
+       let task1 = spawn(async () => {
+         return "Hello from Task 1";
+       });
+       let task2 = spawn(async () => {
+         return "Hello from Task 2";
+       });
+       let [msg1, msg2] = await join(task1, task2);
+       print(msg1);
+       print(msg2);
+       print("Hello, Concurrent Plus!");
+     }
+     ```
+   - 在 `cpc/src/codegen.rs` 中注入 `Task` 控制块、CPS 任务桥接 `__cp_task_bridge` 与无锁多任务汇聚屏障 `JoinBarrier`，完美实现 `await join(t1, t2)` 自动分发与 `let [msg1, msg2] = ...` 元组智能解包推导。
+2. **严密建立跨任务边界借用检查防线 (Borrow Checker & Stack Isolation)**：
+   - 在 `spawn` / `@task_spawn` 闭包变量捕获分析中，严密检查外部自由变量：
+     - 若捕获局部临时借用（`&` 或 `&mut`），编译期立即阻断并报错：`CP Compile Error: Temporary borrow 'xxx' cannot be captured across parallel task spawn boundary (use move or Shared<T>)`；
+     - 若捕获栈分配结构体（`ref struct`），编译期直接阻断并报错：`CP Compile Error: Stack-bound ref struct 'xxx' cannot be captured across parallel task spawn boundary`；
+   - 彻底杜绝了并发多任务中的悬垂引用与数据竞争漏洞。
+3. **完成 Node.js/TypeScript 风格的高层事件驱动子系统 (`cap:events`)**：
+   - **`EventEmitter`**：实装 `on(event, handler)`（支持返回退订闭包，优雅联动 `defer unsub()` 自动退订防泄漏）、`off`、`emit`、`once`（单次监听直出原生 Task，支持 `await ee.once(...)`）、`listenerCount`、`removeAllListeners`；
+   - **`Event` 协程同步屏障**：实装 `isSet()`、`set()`、`reset()` 状态标志与 `wait()` 异步等待原语；
+   - 补齐闭包捕获类实例 `this` / `_` / `self` 的环境 Context 映射与 Lambda 指针强转支持。
+4. **测试套件 100% 验证通过**：
+   - [`cap/test/test_parallel_join.cp`](file:///data/dev/cp/cap/test/test_parallel_join.cp)：端到端原生执行通过，正确输出 Task 1、Task 2 与 Hello 信息；
+   - [`cap/test/test_parallel_fail_borrow.cp`](file:///data/dev/cp/cap/test/test_parallel_fail_borrow.cp)：编译期拦截临时借用跨任务逃逸，反向用例符合预期；
+   - [`cap/test/test_events_pass.cp`](file:///data/dev/cp/cap/test/test_events_pass.cp)：`EventEmitter` 与 `Event` 发布订阅与信号翻转测试原生执行通过；
+   - 全套 `cargo test` 与 `cargo fmt` 均 100% 绿色通过。
+5. **语言规范手册 `cp_ref.md` 同步更新**：
+   - 在第二十二章新增第 5 节《异步任务编排与并行任务池 (`cap:parallel`)》与第 6 节《事件驱动与协程同步子系统 (`cap:events`)》；
+   - 在第二十三章标准库总表中正式收录 `cap:parallel` 与 `cap:events`。
+
+---
+
+## 2026-10-28
+
+### 用户指令
+> git 提交
+
+### 执行结果汇报
+1. 将无栈协程异步任务体系（`cap:parallel`）、事件驱动与协程同步子系统（`cap:events`）、跨任务生命周期借用检查网（`cpc/src/ast.rs`, `cpc/src/parser.rs`, `cpc/src/sema.rs`, `cpc/src/codegen.rs`）、标准库组件（`lib/cap/parallel.cp`, `lib/cap/events.cp`, `lib/cap/io.cp`）、全套测试用例（`cap/test/test_parallel_join.cp`, `cap/test/test_parallel_fail_borrow.cp`, `cap/test/test_events_pass.cp`）、语言设计规范手册（`cp_ref.md`）以及三项记录日志文件（`CHANGELOG.md`, `DEVLOG.md`, `SESSION.md`）全量加入 Git 暂存区；
+2. 执行 Git commit，完成当前里程碑成果的代码库持久化保存；
+3. 工作区保持干净，所有编译与测试用例 100% 保持绿色通过状态。
+
 
 
 

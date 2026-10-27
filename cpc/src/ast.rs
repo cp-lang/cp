@@ -395,6 +395,7 @@ pub struct EnumInitField {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArrowExpr {
     pub span: Span,
+    pub is_async: bool,
     pub params: Vec<Pattern>,
     pub body: Box<ArrowBody>,
 }

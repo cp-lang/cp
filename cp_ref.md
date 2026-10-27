@@ -2949,6 +2949,88 @@ CP 通过 `SharedTensor` 机制实现跨 Agent 零拷贝交互：
 
 ---
 
+## 5. 异步任务编排与并行任务池 (`cap:parallel`)
+
+专为单机多核计算及无栈协程调度设计的异步任务管理体系：
+
+### 5.1 核心原语与语法糖
+- **`spawn(async () => { ... })`**：派生原生异步任务，返回轻量级任务句柄 `Task`。
+- **`join(task1, task2, ...)`**：并行等待多个任务，基于无锁并发屏障（`JoinBarrier`）汇总结果，返回元组。
+- **`await`**：无栈协程挂起，在任务完成或屏障计数归零时恢复执行，出让控制权且零阻塞。
+
+```cp
+import { print } from "cap:io";
+import { spawn, join } from "cap:parallel";
+
+async fn main() {
+  // 并发执行两个计算任务
+  let task1 = spawn(async () => {
+    return "Hello from Task 1";
+  });
+
+  let task2 = spawn(async () => {
+    return "Hello from Task 2";
+  });
+
+  // 等待并行结果汇总并解构
+  let [msg1, msg2] = await join(task1, task2);
+
+  print(msg1);
+  print(msg2);
+  print("Hello, Concurrent Plus!");
+}
+```
+
+### 5.2 跨并行边界的内存安全法则 (Borrow & Stack Isolation)
+为了根除多线程与并发场景下的数据竞争与悬垂引用，CP 编译器在语法分析与代码生成期对 `spawn` 捕获的闭包施加了严格的所有权与借用安全检查：
+1. **禁止临时借用逃逸**：局部临时借用（`&x` 或 `mut &x`）禁止跨越 `spawn` 边界传递。若企图在并行闭包中捕获临时借用，编译器触发致命错误：
+   `CP Compile Error: Temporary borrow 'x' cannot be captured across parallel task spawn boundary (use move or Shared<T>)`
+2. **禁止栈绑定 `ref struct` 逃逸**：栈分配的引用结构体不得跨任务捕获：
+   `CP Compile Error: Stack-bound ref struct 'x' cannot be captured across parallel task spawn boundary`
+3. **安全数据流转通道**：
+   - **所有权转移 (`move`)**：将独占资源所有权转移至并行任务；
+   - **原子引用共享 (`Shared<T>` / `SharedTensor`)**：通过全局共享堆原子引用计数实现安全共享；
+   - **值拷贝**：基础纯标量数据进行值语义隔离拷贝。
+
+---
+
+## 6. 事件驱动与协程同步子系统 (`cap:events`)
+
+为高层业务与 Agent 协作提供对标 Node.js / TypeScript 优雅习惯的发布订阅模型与协程同步原语：
+
+### 6.1 `EventEmitter` 事件发布订阅
+- **`on(event, handler)`**：注册监听器，并返回 Unsubscribe 退订函数（可直接配合 `defer unsub()` 杜绝监听泄漏）；
+- **`off(event, handler)`**：注销特定监听器；
+- **`emit(event, ...args)`**：同步分发事件；
+- **`once(event)`**：单次监听，返回可 `await` 的 `Task` 句柄；
+- **`listenerCount(event)`** 与 **`removeAllListeners(event)`**：监听器统计与批量清理。
+
+### 6.2 `Event` 协程同步屏障 (Signal)
+- **`isSet()`**：读取事件是否处于触发状态；
+- **`set()`**：触发事件，一键唤醒所有挂起等待的任务；
+- **`reset()`**：重置事件为未就绪态；
+- **`wait()`**：返回异步 `Task`，当事件就绪时立即唤醒等待协程。
+
+```cp
+import { EventEmitter, Event } from "cap:events";
+import { print } from "cap:io";
+
+async fn main() {
+    let mut ee = new EventEmitter();
+    let unsub = ee.on("data", (msg) => {
+        print(msg);
+    });
+    ee.emit("data");
+
+    let mut evt = new Event();
+    print(evt.isSet()); // false
+    evt.set();
+    print(evt.isSet()); // true
+}
+```
+
+---
+
 # 第二十三章：系统标准库生态索引 (Standard Library Reference)
 
 CP 语言通过 `import { ... } from "cap:xxx"` 协议提供全面的极速标准库：
@@ -2956,6 +3038,8 @@ CP 语言通过 `import { ... } from "cap:xxx"` 协议提供全面的极速标�
 | 标准库命名空间   | 关键导出符号                                     | 职责与能力                                          |
 | :--------------- | :----------------------------------------------- | :-------------------------------------------------- |
 | **`cap:io`**     | `print`, `@print`                                | 高性能格式化终端与标准 I/O 输出                     |
+| **`cap:parallel`** | `Task`, `spawn`, `join`                        | 并发任务编排、无锁屏障与无栈协程调度               |
+| **`cap:events`** | `EventEmitter`, `Event`                          | Node.js 风格发布订阅与协程同步事件原语              |
 | **`cap:http`**   | `serve`, `Request`, `Response`, `Server`, `json` | 对标 Bun 的超轻量极速 HTTP 微服务开发组件           |
 | **`cap:actor`**  | `spawn`, `receive`, `reply`, `self`              | 轻量级协程 Actor 调度与消息投递                     |
 | **`cap:worker`** | `Worker`, `@worker_spawn`                        | 操作系统原生多线程与多调度器并发支持                |

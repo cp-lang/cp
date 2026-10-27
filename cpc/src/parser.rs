@@ -1706,7 +1706,17 @@ impl<'a> Parser<'a> {
                         };
                         continue;
                     }
-                    if self.peek() == Some(&Token::LBrace) {
+                    let is_enum_init = if let Expr::Ident(ref obj_id) = left {
+                        obj_id
+                            .sym
+                            .chars()
+                            .next()
+                            .map_or(false, |c| c.is_uppercase())
+                            && prop.sym.chars().next().map_or(false, |c| c.is_uppercase())
+                    } else {
+                        false
+                    };
+                    if is_enum_init && self.peek() == Some(&Token::LBrace) {
                         self.bump()?;
                         let mut fields = Vec::new();
                         while self.peek() != Some(&Token::RBrace) {
@@ -1897,6 +1907,7 @@ impl<'a> Parser<'a> {
                             start: left_span(&left).start,
                             end: self.peek_span().end,
                         },
+                        is_async: false,
                         params,
                         body: Box::new(body),
                     }));
@@ -2085,7 +2096,17 @@ impl<'a> Parser<'a> {
                         };
                         continue;
                     }
-                    if self.peek() == Some(&Token::LBrace) {
+                    let is_enum_init = if let Expr::Ident(ref obj_id) = left {
+                        obj_id
+                            .sym
+                            .chars()
+                            .next()
+                            .map_or(false, |c| c.is_uppercase())
+                            && prop.sym.chars().next().map_or(false, |c| c.is_uppercase())
+                    } else {
+                        false
+                    };
+                    if is_enum_init && self.peek() == Some(&Token::LBrace) {
                         self.bump()?;
                         let mut fields = Vec::new();
                         while self.peek() != Some(&Token::RBrace) {
@@ -2201,7 +2222,9 @@ impl<'a> Parser<'a> {
                 if self.in_pipeline_rhs > 0 {
                     if let Some(Token::Ident(_)) = self.peek() {
                         let prop = self.parse_ident()?;
-                        if self.peek() == Some(&Token::LBrace) {
+                        if prop.sym.chars().next().map_or(false, |c| c.is_uppercase())
+                            && self.peek() == Some(&Token::LBrace)
+                        {
                             self.bump()?;
                             let mut fields = Vec::new();
                             while self.peek() != Some(&Token::RBrace) {
@@ -2395,6 +2418,7 @@ impl<'a> Parser<'a> {
                         start: span.start,
                         end: self.peek_span().end,
                     },
+                    is_async: false,
                     params: pat_params,
                     body: Box::new(body),
                 })))
@@ -2418,6 +2442,7 @@ impl<'a> Parser<'a> {
                                 start: span.start,
                                 end: self.peek_span().end,
                             },
+                            is_async: false,
                             params,
                             body: Box::new(body),
                         })));
@@ -2431,6 +2456,66 @@ impl<'a> Parser<'a> {
                 let expr = self.parse_expr()?;
                 self.expect(Token::RParen)?;
                 Ok(expr)
+            }
+            Token::Async => {
+                if self.peek() == Some(&Token::Fn) {
+                    self.bump()?;
+                    let params = self.parse_params()?;
+                    let mut _return_type = None;
+                    if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Arrow) {
+                        self.bump()?;
+                        _return_type = Some(self.parse_type()?);
+                    }
+                    let body = ArrowBody::Block(self.parse_block_stmt()?);
+                    let pat_params = params
+                        .into_iter()
+                        .map(|p| Pattern::Ident(p.ident))
+                        .collect();
+                    Ok(Expr::Arrow(Box::new(ArrowExpr {
+                        span: Span {
+                            start: span.start,
+                            end: self.peek_span().end,
+                        },
+                        is_async: true,
+                        params: pat_params,
+                        body: Box::new(body),
+                    })))
+                } else if self.peek() == Some(&Token::LParen) {
+                    self.bump()?;
+                    let params = self.parse_arrow_params()?;
+                    self.expect(Token::FatArrow)?;
+                    let body = if self.peek() == Some(&Token::LBrace) {
+                        ArrowBody::Block(self.parse_block_stmt()?)
+                    } else {
+                        ArrowBody::Expr(self.parse_expr()?)
+                    };
+                    Ok(Expr::Arrow(Box::new(ArrowExpr {
+                        span: Span {
+                            start: span.start,
+                            end: self.peek_span().end,
+                        },
+                        is_async: true,
+                        params,
+                        body: Box::new(body),
+                    })))
+                } else {
+                    let ident = self.parse_ident()?;
+                    self.expect(Token::FatArrow)?;
+                    let body = if self.peek() == Some(&Token::LBrace) {
+                        ArrowBody::Block(self.parse_block_stmt()?)
+                    } else {
+                        ArrowBody::Expr(self.parse_expr()?)
+                    };
+                    Ok(Expr::Arrow(Box::new(ArrowExpr {
+                        span: Span {
+                            start: span.start,
+                            end: self.peek_span().end,
+                        },
+                        is_async: true,
+                        params: vec![Pattern::Ident(ident)],
+                        body: Box::new(body),
+                    })))
+                }
             }
             Token::HashLBrace => {
                 let fields = self.parse_object_fields()?;

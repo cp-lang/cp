@@ -460,6 +460,43 @@
 - [`cap/test/test_this_underscore_interchange.cp`](file:///data/dev/cp/cap/test/test_this_underscore_interchange.cp):
   - 涵盖缺省只读借用省略、`_` 与 `this` 属性互访、`&_` / `mut _` / `&this` / `mut this` 可变借用变异、`move _` / `move this` 所有权消费、单继承派生调用及异步状态机 `async fn` 上下文穿透综合测试用例，100% 编译运行通过。
 
+---
+
+## 2026-10-28 (异步任务编排 cap:parallel、事件驱动 cap:events 与跨任务借用安全检查)
+
+### 修改文件 (Modified)
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs):
+  - 为 `ArrowExpr` 新增 `is_async: bool` 字段，精确区分普通同步闭包与 `async () => { ... }` 异步任务闭包。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - 在 `parse_primary` 中支持 `async () => { ... }`、`async fn(...) { ... }` 与 `async ident => ...` 箭头表达式语法；
+  - 修复 `parse_bin_expr` 与 `parse_postfix_expr` 中将常规对象属性访问误判为 `EnumInit` 的歧义（限定仅当对象标识符与属性名均为全大写枚举命名规范时方进入枚举初始化解析）。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 注册 `Task`、`Event`、`EventEmitter` 内建类型与 `spawn`、`join`、`@task_spawn`、`@task_join`、`@create_pending_task`、`@complete_task` 内建函数；
+  - 优化 `Pattern::Tuple` 解构语义，允许从 `Type::Any` 解构出动态元组；
+  - 为 `join` / `@task_join` 与 `spawn` / `@task_spawn` 注入精准的语义返回类型推导。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 注入原生并发运行时前置基座：`Task`、`JoinBarrier`、`__cp_task_bridge`、`cp_msg_to_val`、`cp_unpack_elem` 以及泛型 `print(v: anytype)`；
+  - 实现 `spawn` / `@task_spawn` 代码生成：分配独立 Arena，实例化 CPS 状态机上下文，通过 `__cp_task_bridge` 接入协程调度器；
+  - 实现严密的跨任务内存借用检查网：严格禁止临时借用（`&`、`&mut`）与栈绑定 `ref struct` 跨越 `spawn` 边界，强制使用 `move` 或 `Shared<T>` 消除数据竞争；
+  - 实现 `await` 多任务等待与单任务解析，支持 `let [msg1, msg2] = await join(task1, task2)` 元组智能解包与字符串自动推导；
+  - 支持闭包/Lambda 对 `this` / `_` / `self` 的环境捕获与上下文自动传递；
+  - 适配同步函数返回 Lambda 函数指针时的 `@ptrCast(@constCast(&lambda_X))` 自动转换；
+  - 过滤标准库 `lib/cap/parallel.cp` 中 `class Task` 与 `print`、`spawn`、`join` 的重复顶层符号声明，避免 Zig 命名碰撞。
+- [`lib/cap/io.cp`](file:///data/dev/cp/lib/cap/io.cp):
+  - 导出 `export fn print(msg: any): void`，供非 `@print` 宏规范调用。
+- [`lib/cap/parallel.cp`](file:///data/dev/cp/lib/cap/parallel.cp):
+  - 实现并导出 `Task`、`spawn`、`join` 并发核心任务管理组件。
+- [`lib/cap/events.cp`](file:///data/dev/cp/lib/cap/events.cp):
+  - 实现并导出 `EventEmitter`（`on`, `off`, `emit`, `once`, `listenerCount`, `removeAllListeners`）与 `Event`（`isSet`, `set`, `reset`, `wait`），支持 `defer unsub()` 自动退订。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 扩充第二十二章，新增第 5 节《异步任务编排与并行任务池 (`cap:parallel`)》与第 6 节《事件驱动与协程同步子系统 (`cap:events`)》；
+  - 更新第二十三章系统标准库总表，收录 `cap:parallel` 与 `cap:events`。
+
+### 新增文件 (Added)
+- [`cap/test/test_parallel_join.cp`](file:///data/dev/cp/cap/test/test_parallel_join.cp): 跨任务并发 `spawn`、`join` 屏障汇聚与 `let [msg1, msg2] = await join(...)` 元组解包测试，原生全绿通过。
+- [`cap/test/test_parallel_fail_borrow.cp`](file:///data/dev/cp/cap/test/test_parallel_fail_borrow.cp): 验证跨 `spawn` 边界非法捕获局部临时借用触发编译期严密拦截。
+- [`cap/test/test_events_pass.cp`](file:///data/dev/cp/cap/test/test_events_pass.cp): `EventEmitter` 事件监听分发与 `Event` 协程同步信号标志测试，原生全绿通过。
+
 
 
 

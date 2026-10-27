@@ -1119,6 +1119,81 @@ let reply = raw
 - 全面更新 `cp_ref.md` 第 2 节 Trait 契约定义与第 10.5 节《`trait`、单继承 `class` 与自身实例 `_` / `this` 的所有权、借用与生命周期》；
 - 明确以表格和详细条款规范“只读借用省略首参”、“可变借用 `&_`（兼容 `mut _`）”、“所有权消费 `move _`”，建立完整且规范的对外文档。
 
+---
+
+## 2026-10-28: 无栈协程异步任务编排 (`cap:parallel`)、事件驱动子系统 (`cap:events`) 与跨任务内存安全防线构建
+
+### 1. 任务背景与核心需求
+在 CP-BEAM 整体规划中，并行计算（Concurrent Plus）是 CP 语言的核心基石。用户提出全面检查分析并攻坚已实现的无栈协程异步调用（`await`, `async`, `join`）机制：
+1. **端到端支持原生并行任务编排**：
+   ```cp
+   import { print } from "cap:io";
+   import { spawn, join } from "cap:parallel";
+
+   async fn main() {
+     let task1 = spawn(async () => { return "Hello from Task 1"; });
+     let task2 = spawn(async () => { return "Hello from Task 2"; });
+     let [msg1, msg2] = await join(task1, task2);
+     print(msg1);
+     print(msg2);
+     print("Hello, Concurrent Plus!");
+   }
+   ```
+2. **跨并行边界严格执行只读借用、可变借用与所有权检查**：杜绝局部临时借用（`&`、`&mut`）及栈绑定 `ref struct` 逃逸到并行任务中，确保变量绝对安全；
+3. **实现 Node.js/TypeScript 风格的高层事件子系统 (`cap:events`)**：涵盖 `EventEmitter`（`on`, `off`, `emit`, `once`, `listenerCount`, `removeAllListeners`）与同步事件屏障 `Event`（`isSet`, `set`, `reset`, `wait`）；
+4. **当前以普通操作系统机器码模式原生执行**，与后续 `-beam` 虚拟机模式保持清晰分层；
+5. **完整编写测试套件并同步更新 `cp_ref.md` 语言设计规范**。
+
+### 2. 核心架构原理与编译器实现
+
+#### 2.1 `cap:parallel` 任务调度与 `JoinBarrier` 屏障
+- **`Task` 核心控制块**：内嵌专属 `ArenaAllocator`、当前状态 `state` (0: pending, 1: running, 2: completed)、任务完成返回值 `Message`、父级唤醒回调 `waiter_fn` 与 `waiter_ctx`、以及可选的 `JoinBarrier` 引用。
+- **CPS 任务桥接 (`__cp_task_bridge`)**：通过闭包生成的状态机切片在执行到末尾时，调用 `__cp_task_bridge` 自动将结果写入关联的 `Task`，并在有挂起等待者时触发 `schedule(waiter_fn, waiter_ctx)` 唤醒父协程。
+- **`JoinBarrier` 并发屏障**：`await join(t1, t2, ...)` 动态分配原子/单线程安全的 `JoinBarrier` 控制块，预设剩余计数 `remaining = total`。每个并行子任务完成后自动调用 `barrier.on_task_done(idx, result)` 收集结果切片；当全部子任务达成时，自动唤醒挂起的主协程，并通过 `let [msg1, msg2] = ...` 展开元组解构。
+
+#### 2.2 跨 `spawn` 边界的生命周期与借用安全检查 (Borrow Checker)
+- **编译期严防悬垂引用**：在 `cpc/src/codegen.rs` 的 `spawn` / `@task_spawn` 代码生成中，遍历闭包捕获的所有外部自由变量：
+  - 检查变量是否为栈分配的 `ref struct`：若命中直接触发 `panic!("CP Compile Error: Stack-bound ref struct '{}' cannot be captured across parallel task spawn boundary", r)`；
+  - 检查变量是否为局部临时借用（`var_borrow_sources.contains_key(r)`）：若命中直接触发 `panic!("CP Compile Error: Temporary borrow '{}' cannot be captured across parallel task spawn boundary (use move or Shared<T>)", r)`；
+- **所有权安全传递**：强制开发者在跨任务通信时使用确定性的值拷贝、所有权移动 `move`、或基于全局共享堆的原子引用计数张量 `Shared<T>` / `SharedTensor`。
+
+#### 2.3 `cap:events` 事件驱动与同步信号设计
+- **`EventEmitter` 发布订阅**：
+  - `on(event, handler)`：注册监听器并返回退订闭包，优雅支持 `let unsub = ee.on(...); defer unsub();` 实现 RAII 式自动销毁，彻底根除监听器泄露；
+  - `off(event, handler)`：注销特定监听器；
+  - `emit(event, ...args)`：同步派发事件；
+  - `once(event)`：单次触发，返回内部生成的挂起 `Task`，使业务可直接通过 `await ee.once("ready")` 实现协程级事件驱动。
+- **`Event` 协程同步屏障**：
+  - `isSet()`、`set()`、`reset()` 状态翻转；
+  - `wait()`：返回未决 `Task`，配合 `set()` 一键唤醒所有等待者。
+
+#### 2.4 闭包环境上下文支持 (`this` / `self`) 与函数指针转换
+- 在 `cpc/src/codegen.rs` 中增强 `Expr::Arrow` 变量捕获：当闭包内部引用 `this` 或 `_` 时，自动从外层类定义或局部变量提取接收者类型，将 `self: *ClassName` 注入闭包的 Context 结构体并在生成期映射为 `ctx.self`；
+- 在 `Stmt::Return` 中支持将 Lambda 函数指针返回至 `*anyopaque`（`any` 类型），自动补齐 Zig 所需的 `@ptrCast(@constCast(&lambda_X))` 强转。
+
+### 3. 测试验证与结果
+1. [`cap/test/test_parallel_join.cp`](file:///data/dev/cp/cap/test/test_parallel_join.cp)：
+   - 验证用户原语示例，并发启动两个任务，通过 `let [msg1, msg2] = await join(...)` 等待汇聚并打印，输出完全吻合：
+     ```text
+     Hello from Task 1
+     Hello from Task 2
+     Hello, Concurrent Plus!
+     ```
+2. [`cap/test/test_parallel_fail_borrow.cp`](file:///data/dev/cp/cap/test/test_parallel_fail_borrow.cp)：
+   - 验证临时借用捕获时的编译期防御，准确拦截并报告：
+     ```text
+     CP Compile Error: Temporary borrow 'b' cannot be captured across parallel task spawn boundary (use move or Shared<T>)
+     ```
+3. [`cap/test/test_events_pass.cp`](file:///data/dev/cp/cap/test/test_events_pass.cp)：
+   - 验证 `EventEmitter` 与 `Event`，测试其 `on` / `emit` 与 `isSet` / `set` / `reset` 状态流转，全流程绿灯通过：
+     ```text
+     false
+     true
+     false
+     EventEmitter and Event verified!
+     ```
+4. 执行 `cargo test --manifest-path cpc/Cargo.toml` 与 `cargo fmt`，全语言核心单元测试 100% 保持通过，代码风格规范整洁。
+
 
 
 

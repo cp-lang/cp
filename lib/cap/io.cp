@@ -50,3 +50,10 @@ export class Stdio {
 }
 
 export const stdio = new Stdio();
+
+/**
+ * 高性能标准输出打印
+ */
+export fn print(msg: any): void {
+    @print("{any}", msg);
+}

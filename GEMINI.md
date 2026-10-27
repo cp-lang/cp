@@ -3,24 +3,27 @@
 ## 1. Code Editing Rules (CRITICAL)
 
 - **Always use internal file editing tools** (`replace_file_content` / `write_file`) for modifying code.
-- **Strictly FORBIDDEN in Bash**: DO NOT use `sed`, `cat`, `awk`, `perl`, `cat << 'EOF'`, or file redirection (`>`, `>>`) to edit existing source files.
+- **Strictly FORBIDDEN in Bash**:
+  - DO NOT use `sed`, `awk`, `perl`, `python`, `python3 -c`, or inline scripts to edit files.
+  - DO NOT use `cat << 'EOF'` or file redirections (`>`, `>>`) to overwrite or append to existing files.
 - Bash is reserved **strictly** for:
-  - Compiling & Building (`zig build`, `cargo build`)
-  - Running test suites (`zig test`, `cargo test`)
+  - Compiling & Building (`cargo build`, `zig build`, `./cap/bin/cap build`)
+  - Running test suites (`cargo test`, `zig test`, `./cap/bin/cap cap/test/*`)
   - Git operations (read-only inspection, commits only when requested)
-  - Read-only inspections (`ls`, `file`, `nm`)
+  - Read-only environment inspections (`ls`, `file`, `nm`, `objdump`)
 
-## 2. File Inspection Rules
+## 2. File Inspection & Reading Rules (CRITICAL)
 
-- Prefer using the native `read_file` tool rather than running `cat` or `sed -n` inside Bash when inspecting code lines.
+- **Strictly FORBIDDEN**: DO NOT use `python3 -c "open(...)"`, `cat`, `head`, `tail`, or `sed -n` in Bash to inspect, read, or slice source files.
+- **Always use native file tools**:
+  - Use `read_file` to read the entire file.
+  - Use `view_file` (with line ranges) to inspect specific blocks of code.
+- Native tool calls are pre-authorized and bypass all permission prompts.
 
-## 3. Code Inspection Rules
+## 3. Formatting & Quality
 
-- **Prefer using `view_file`** with line ranges to inspect code rather than chaining `cat | sed -n` in Bash.
-
-## 4. Formatting
-
-- Run `zig fmt` or `cargo fmt` after code modifications to maintain formatting consistency.
+- Run `cargo fmt` or `zig fmt` after code modifications to maintain consistent style.
+- Ensure new test cases adhere to the standard `.cp` naming convention under `cap/test/test_*.cp`.
 
 # RFC-002: CP-BEAM 终极架构白皮书 & CLI 驱动开发指南
 
