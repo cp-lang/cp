@@ -2414,7 +2414,39 @@ impl Codegen {
                 lifetimes: vec![],
             }))),
             Expr::EnumInit(ei) => Some(Type::Ref(ei.enum_name.clone())),
-            Expr::Cast { target_ty, .. } => Some(target_ty.clone()),
+            Expr::Cast {
+                expr, target_ty, ..
+            } => {
+                if let Type::RawPtr { inner, depth } = target_ty {
+                    if **inner == Type::Any {
+                        if let Expr::Borrow(b, _) = &**expr {
+                            if let Some(mut base_ty) = self.infer_cp_type_with_mock(b, mock_types) {
+                                for _ in 1..*depth {
+                                    if let Type::RawPtr {
+                                        inner: sub,
+                                        depth: d,
+                                    } = base_ty
+                                    {
+                                        if d > 1 {
+                                            base_ty = Type::RawPtr {
+                                                inner: sub,
+                                                depth: d - 1,
+                                            };
+                                        } else {
+                                            base_ty = *sub;
+                                        }
+                                    }
+                                }
+                                return Some(Type::RawPtr {
+                                    inner: Box::new(base_ty),
+                                    depth: *depth,
+                                });
+                            }
+                        }
+                    }
+                }
+                Some(target_ty.clone())
+            }
             Expr::Deref(inner) => {
                 let inner_ty = self.infer_cp_type_with_mock(inner, mock_types)?;
                 match inner_ty {
@@ -7637,9 +7669,23 @@ impl Codegen {
             Expr::Cast {
                 expr,
                 target_ty,
-                ..
+                span,
             } => {
-                let target_zig_ty = self.map_type(target_ty);
+                let resolved_ty = if let Type::RawPtr { inner, .. } = target_ty {
+                    if **inner == Type::Any {
+                        self.infer_cp_type(&Expr::Cast {
+                            span: *span,
+                            expr: expr.clone(),
+                            target_ty: target_ty.clone(),
+                        })
+                        .unwrap_or_else(|| target_ty.clone())
+                    } else {
+                        target_ty.clone()
+                    }
+                } else {
+                    target_ty.clone()
+                };
+                let target_zig_ty = self.map_type(&resolved_ty);
                 match &**expr {
                     Expr::Borrow(inner, _) => {
                         let inner_code = self.generate_expr(inner);
@@ -7652,7 +7698,7 @@ impl Codegen {
                         } else {
                             false
                         };
-                        if is_class_ref && matches!(target_ty, Type::RawPtr { depth: 1, .. }) {
+                        if is_class_ref && matches!(resolved_ty, Type::RawPtr { depth: 1, .. }) {
                             format!(
                                 "@as({}, @ptrCast(@alignCast({})))",
                                 target_zig_ty, inner_code

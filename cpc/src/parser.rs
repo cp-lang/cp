@@ -517,11 +517,14 @@ impl<'a> Parser<'a> {
             } else if self.peek() == Some(&Token::Move) {
                 self.bump()?;
                 is_move = true;
-            } else if self.peek() == Some(&Token::Ampersand) {
+            } else if self.peek() == Some(&Token::Star) {
                 self.bump()?;
                 is_mut = true;
+            } else if self.peek() == Some(&Token::Ampersand) {
+                self.bump()?;
                 if self.peek() == Some(&Token::Mut) {
                     self.bump()?;
+                    is_mut = true;
                 }
             }
 
@@ -539,6 +542,9 @@ impl<'a> Parser<'a> {
             } else {
                 Type::Any
             };
+            if matches!(ty, Type::BorrowType { is_mut: true, .. }) {
+                is_mut = true;
+            }
             let default = if self.peek() == Some(&Token::Assign) {
                 self.bump()?;
                 Some(self.parse_primary_expr()?)
@@ -641,6 +647,43 @@ impl<'a> Parser<'a> {
                 self.bump()?;
                 depth += 1;
             }
+            let mut lifetimes = Vec::new();
+            if depth == 1 {
+                if self.peek() == Some(&Token::LParen) {
+                    self.bump()?;
+                    while self.peek() != Some(&Token::RParen) && self.peek().is_some() {
+                        let id = self.parse_ident()?;
+                        lifetimes.push(id.sym);
+                        if self.peek() == Some(&Token::Pipe) {
+                            self.bump()?;
+                        }
+                    }
+                    self.expect(Token::RParen)?;
+                } else if let Some(Token::Ident(_)) = self.peek() {
+                    let checkpoint = self.lexer.clone();
+                    let peeked_checkpoint = self.peeked.clone();
+                    let peeked2_checkpoint = self.peeked2.clone();
+                    let first_ident = self.parse_ident()?;
+                    if matches!(
+                        self.peek(),
+                        Some(Token::Ident(_))
+                            | Some(Token::String)
+                            | Some(Token::I32)
+                            | Some(Token::U32)
+                            | Some(Token::U64)
+                            | Some(Token::F32)
+                            | Some(Token::F64)
+                            | Some(Token::USize)
+                            | Some(Token::Bool)
+                    ) {
+                        lifetimes.push(first_ident.sym);
+                    } else {
+                        self.lexer = checkpoint;
+                        self.peeked = peeked_checkpoint;
+                        self.peeked2 = peeked2_checkpoint;
+                    }
+                }
+            }
             let inner = self.parse_base_type()?;
             if self.peek() == Some(&Token::Bang) {
                 let is_raw_ptr_bang = match self.peek_next() {
@@ -667,11 +710,11 @@ impl<'a> Parser<'a> {
                 }
             }
             let mut ty = inner;
-            for _ in 0..depth {
+            for idx in 0..depth {
                 ty = Type::BorrowType {
                     inner: Box::new(ty),
                     is_mut: true,
-                    lifetimes: vec![],
+                    lifetimes: if idx == 0 { lifetimes.clone() } else { vec![] },
                 };
             }
             return Ok(ty);
@@ -1271,9 +1314,17 @@ impl<'a> Parser<'a> {
         if self.peek() == Some(&Token::Let) || self.peek() == Some(&Token::Const) {
             self.bump()?;
         }
-        let mode = if self.peek() == Some(&Token::Ampersand) {
+        let mode = if self.peek() == Some(&Token::Star) {
             self.bump()?;
             IterMode::MutBorrow
+        } else if self.peek() == Some(&Token::Ampersand) {
+            self.bump()?;
+            if self.peek() == Some(&Token::Mut) {
+                self.bump()?;
+                IterMode::MutBorrow
+            } else {
+                IterMode::Borrow
+            }
         } else if self.peek() == Some(&Token::Move) {
             self.bump()?;
             IterMode::Move
@@ -2295,7 +2346,26 @@ impl<'a> Parser<'a> {
                 Ok(Expr::Unsafe(block))
             }
             Token::Star => {
+                let mut depth = 1;
+                while self.peek() == Some(&Token::Star) {
+                    self.bump()?;
+                    depth += 1;
+                }
                 let inner = self.parse_postfix_expr()?;
+                if self.peek() == Some(&Token::Bang) {
+                    let end = self.bump()?.1.end;
+                    return Ok(Expr::Cast {
+                        span: Span {
+                            start: span.start,
+                            end,
+                        },
+                        expr: Box::new(Expr::Borrow(Box::new(inner), true)),
+                        target_ty: Type::RawPtr {
+                            inner: Box::new(Type::Any),
+                            depth,
+                        },
+                    });
+                }
                 Ok(Expr::Borrow(Box::new(inner), true))
             }
             Token::Bang => {

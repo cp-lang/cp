@@ -53,9 +53,9 @@ async fn main(): void {
     }
     expect_eq(sum_nums, 60);
 
-    // Verify nums is still intact and can be iterated again
+    // Verify nums is still intact and can be iterated again (explicit &x read-only borrow)
     let count = 0;
-    for (let x of nums) {
+    for (&x of nums) {
         count = count + 1;
     }
     expect_eq(count, 3);
@@ -63,21 +63,21 @@ async fn main(): void {
     @print("✔ Read-only borrow iteration tests passed!");
 
     // -------------------------------------------------------------
-    // 3. Mutable Borrow: for &x of list (in-place modification)
+    // 3. Mutable Borrow: for *x of list (in-place modification)
     // -------------------------------------------------------------
     let mut_list: i32[] = [1, 2, 3];
     __zig__ {
         ctx.mut_list = try ctx.arena.?.allocator().dupe(i32, ctx.mut_list);
     }
-    for &x of mut_list {
+    for *x of mut_list {
         x = x * 10;
     }
     expect_eq(mut_list[0], 10);
     expect_eq(mut_list[1], 20);
     expect_eq(mut_list[2], 30);
 
-    // Mutable with parentheses syntax: for (&x of mut_list)
-    for (&x of mut_list) {
+    // Mutable with parentheses syntax: for (*x of mut_list)
+    for (*x of mut_list) {
         x = x + 5;
     }
     expect_eq(mut_list[0], 15);

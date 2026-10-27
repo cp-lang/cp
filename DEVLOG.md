@@ -1219,6 +1219,23 @@ let reply = raw
 1. [`cap/test/test_parallel_join.cp`](file:///data/dev/cp/cap/test/test_parallel_join.cp)：在 `@parallel(4)` 下同时运行两个 `spawn` 异步任务（含只读捕获与 `move` 所有权转移）及一个 `spawn.cpu` 重度计算任务，通过 `await join(task1, task2, cpu_task)` 正确并行汇聚输出；
 2. 负向安全测试 [`cap/test/test_parallel_fail_borrow.cp`](file:///data/dev/cp/cap/test/test_parallel_fail_borrow.cp)、[`cap/test/test_parallel_fail_mutate_capture.cp`](file:///data/dev/cp/cap/test/test_parallel_fail_mutate_capture.cp)、[`cap/test/test_parallel_fail_use_after_move.cp`](file:///data/dev/cp/cap/test/test_parallel_fail_use_after_move.cp) 全部在编译期被精准拦截。
 
+---
+
+## 2026-10-28: 全局借用、所有权与裸指针符号体系正交统一 (`&` / `*` / `*... !` / `move`)
+
+### 1. 问题诊断与统一原则
+在审视全语言符号体系时，发现此前在表达式/类型中使用 `&` 表示只读借用、`*` 表示可变借用，但在函数首参 `&_` 与 `for &x of list` 中却将 `&` 用作了可变借用，导致同一符号在不同语法位置含义相反。
+为此，确立 **“1 个符号 = 1 种恒定语义（零例外）”** 的全局正交准则：
+1. **`&`（只读借用）**：`let a = &b`、`: &T`、`fn f(x: T)` / `fn f(&x: T)`、`fn get()` / `fn get(&_)`、`for x of list` / `for &x of list`；
+2. **`*`（安全可变借用，无尾置 `!`）**：`let a = *b`、`: *T`、`fn f(*x: T)` / `fn f(x: *T)`、`fn set(*_)`、`for *x of list`；
+3. **`*... !`（Unsafe 裸指针，前置 `*` 层级 + 尾置 `!`）**：类型 `: *T!` / `: **T!`，以及 `unsafe` 块内直接获取裸指针 `let a = *b!` / `let pp = **b!`（兼容 `as *T!` 强转）；
+4. **`move`（所有权转移，及直接赋值 `let a = b`）**：`let a = b` / `let a = move b`、`fn f(move x: T)`、`fn close(move _)`、`for move x of list`。
+
+### 2. 编译器改造与验证
+- 在 `cpc/src/parser.rs`、`cpc/src/sema.rs`、`cpc/src/codegen.rs` 中全面打通 `*x: T`、`*_`、`for *x of list`、`*x T` 生命周期绑定以及 `*b!` / `**b!` 裸指针表达式推导；
+- 升级并运行 `test_this_underscore_interchange.cp`、`test_for_pass.cp`、`test_unsafe_pass.cp`、`test_lifetime_pass.cp`、`test_trait_class_pass.cp`、`test_parallel_join.cp`，全部 100% 编译运行通过。
+
+
 
 
 

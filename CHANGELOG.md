@@ -522,6 +522,32 @@
 - [`cap/test/test_parallel_fail_mutate_capture.cp`](file:///data/dev/cp/cap/test/test_parallel_fail_mutate_capture.cp): 验证在 `spawn` 并发任务中直接修改捕获的外部变量时触发编译期拦截。
 - [`cap/test/test_parallel_fail_use_after_move.cp`](file:///data/dev/cp/cap/test/test_parallel_fail_use_after_move.cp): 验证在 `spawn` 并发任务中 `move` 转移外部变量所有权后，外层再次访问触发 `Use of moved value` 编译期拦截。
 
+---
+
+## 2026-10-28 (全局统一只读借用 `&`、可变借用 `*`、Unsafe 裸指针 `*... !` 与所有权转移 `move` 符号标准)
+
+### 修改文件 (Modified)
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - `parse_params`：将前置 `*`（如 `*x: T`、`*_`、`*this`）及 `: *T` 类型参数统一解析为可变借用（`is_mut = true`）；将前置 `&`（如 `&x: T`、`&_`、`&this`）统一解析为显式只读借用（`is_mut = false`）；
+  - `parse_for_stmt`：将 `for *x of list` 统一解析为原地可变借用（`IterMode::MutBorrow`），将 `for x of list` 与 `for &x of list` 统一解析为只读借用（`IterMode::Borrow`）；
+  - `parse_base_type`：为可变借用类型 `*T` 增加第 3 级参数名生命周期绑定支持（如 `: *x Tensor`、`: *(x | y) Tensor`、`: *_ Tensor`）；
+  - `parse_primary_expr`：支持 `*b!` 与 `**b!` 直接裸指针获取表达式（前置 `*` 层级 + 尾置 `!`），自动映射为对应层级的 `Type::RawPtr` 转换。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 在 `infer_type` 的 `Expr::Cast` 分支中支持对 `*b!` / `**b!` 表达式进行自动目标裸指针类型推导并强制校验 `unsafe` 上下文。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 在 `infer_cp_type_with_mock` 与 `Expr::Cast` 代码生成中支持 `*b!` / `**b!` 的内部类型自动解析与 Zig 指针强转生成。
+- [`cap/test/test_this_underscore_interchange.cp`](file:///data/dev/cp/cap/test/test_this_underscore_interchange.cp):
+  - 更新并验证 `&_` 显式只读借用接收者与 `*_` / `*this` 可变借用接收者。
+- [`cap/test/test_for_pass.cp`](file:///data/dev/cp/cap/test/test_for_pass.cp):
+  - 更新并验证 `for &x of nums` 显式只读迭代与 `for *x of mut_list` 原地可变借用迭代。
+- [`cap/test/test_unsafe_pass.cp`](file:///data/dev/cp/cap/test/test_unsafe_pass.cp):
+  - 验证 `*user!`、`**p_copy!`、`*num!` 裸指针获取语法。
+- [`cap/test/test_lifetime_pass.cp`](file:///data/dev/cp/cap/test/test_lifetime_pass.cp):
+  - 验证 `ref struct` 中 `: *Tensor` 字段与 `*t1` 可变借用传参。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 在第十章新增《0. 全局借用、所有权与指针符号统一标准 (Global Symbol Matrix)》，并全面同步更新第 2.5 节、第十章、第十七章与第十八章示例与规范表。
+
+
 
 
 

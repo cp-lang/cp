@@ -14,10 +14,10 @@ class Tensor {
 
 // 借鉴 C# 的 ref struct：零开销借用局部数据，无需 <'a> 标注！
 ref struct TensorView {
-    target: &mut Tensor;
+    target: *Tensor;
     offset: i32;
 
-    fn init(t: &mut Tensor, off: i32) {
+    fn init(t: *Tensor, off: i32) {
         this.target = t;
         this.offset = off;
     }
@@ -48,8 +48,8 @@ fn testLifetimesAndRefStruct() {
     let r1 = &t1;
     @print("NLL borrow read: {d}", r1.size); // r1 最后一次使用！
 
-    // 2. 测试 ref struct (栈绑定视图) 零开销原地修改局部数据
-    let view = new TensorView(&mut t1, 5);
+    // 2. 测试 ref struct (栈绑定视图) 零开销原地修改局部数据 (*t1 可变借用)
+    let view = new TensorView(*t1, 5);
     view.addOffset();
     @print("After ref struct mutation: {d}", t1.size); // view 最后一次使用！
 

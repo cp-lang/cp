@@ -2007,7 +2007,38 @@ impl Analyzer {
                 sym: "TypeInfo".to_string(),
             })),
             Expr::Range { .. } => Ok(Type::I32),
-            Expr::Cast { target_ty, .. } => Ok(target_ty.clone()),
+            Expr::Cast {
+                expr, target_ty, ..
+            } => {
+                if let Type::RawPtr { inner, depth } = target_ty {
+                    if **inner == Type::Any {
+                        if let Expr::Borrow(b, _) = &**expr {
+                            let mut base_ty = self.infer_type(b)?;
+                            for _ in 1..*depth {
+                                if let Type::RawPtr {
+                                    inner: sub,
+                                    depth: d,
+                                } = base_ty
+                                {
+                                    if d > 1 {
+                                        base_ty = Type::RawPtr {
+                                            inner: sub,
+                                            depth: d - 1,
+                                        };
+                                    } else {
+                                        base_ty = *sub;
+                                    }
+                                }
+                            }
+                            return Ok(Type::RawPtr {
+                                inner: Box::new(base_ty),
+                                depth: *depth,
+                            });
+                        }
+                    }
+                }
+                Ok(target_ty.clone())
+            }
             Expr::Deref(inner) => {
                 let inner_ty = self.infer_type(inner)?;
                 match inner_ty {

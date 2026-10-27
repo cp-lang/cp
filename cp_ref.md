@@ -153,12 +153,12 @@ fn loadWeights() !Tensor {
 
 ```cp
 trait TensorOps {
-  fn norm(): i32;                         // 缺省只读借用（省略 _ / this）
-  fn scale(&_, factor: i32);              // 显式可变借用 &_ (亦支持 mut _)
-  fn consume(move _): i32;                // 显式所有权消费 move _ (亦支持 move this)
+  fn norm(): i32;                         // 缺省只读借用（省略 _ / this，兼容 &_）
+  fn scale(*_, factor: i32);              // 显式可变借用 *_ (亦兼容 mut _)
+  fn consume(move _): i32;                // 显式所有权消费 move _ (亦兼容 move this)
 
   // Trait 默认方法实现：内部可省略 _. 直接互调同 Trait 方法
-  fn normalize(&_) {
+  fn normalize(*_) {
     let n = norm();
     if (n > 0) {
       scale(1);
@@ -172,7 +172,7 @@ class Matrix extends BaseTensor implements TensorOps { ... }
 // 方式 B：Rust 风格后向扩展（给已有的类型实现 trait）
 impl TensorOps for Tensor {
   fn norm(): i32 { return _.data; }
-  fn scale(&_, factor: i32) { _.data = _.data * factor; }
+  fn scale(*_, factor: i32) { _.data = _.data * factor; }
   fn consume(move _): i32 { return _.data; }
 }
 ```
@@ -1554,26 +1554,42 @@ match req {
 
 # 十、内存安全模型 (Zero-Friction Memory Safety)
 
-CP 语言通过编译器底层的“所有权、隐式借用、读写互斥与零摩擦生命周期”四大支柱，实现了对标 Rust 的 100% 编译期内存安全，同时彻底摒弃了 Rust 繁琐的 `<'a>` 生命周期泛型传染，完美保留了 TypeScript 般丝滑的开发心智。
+CP 语言通过编译器底层的“所有权、隐式借用、读写互斥与零摩擦生命周期”四大支柱，实现了对标 Rust 的 100% 编译期内存安全，同时彻底摒弃了 Rust 繁琐的 `<'a>` 生命周期泛型传染与冗长的 `&mut` 噪音，完美保留了 TypeScript 般丝滑的开发心智。
+
+## 0. 全局借用、所有权与指针符号统一标准 (Global Symbol Matrix)
+
+在 CP 语言中，**1 个符号永远代表 1 种固定语义（全局零例外）**：
+- **`&`（Ampersand）**：永远代表 **只读借用（Read-Only Borrow）**（在默认只读的位置可省略 `&`）。
+- **`*`（Star，无尾置 `!`）**：永远代表 **安全可变借用（Mutable Borrow）**（因指针解引用采用后缀 `p.*`，前置 `*` 全局专职代表受编译器生命周期与读写互斥保护的可变借用）。
+- **`*... !`（前置 `*` + 尾置 `!`）**：永远代表 **Unsafe 裸指针（Raw Pointer）**（前置 `*` 个数代表指针层级，尾置 `!` 代表非托管裸指针，仅限 `unsafe` 块内使用）。
+- **`move`（及直接赋值 `let a = b`）**：永远代表 **所有权转移（Ownership Transfer）**。
+
+| 语法场景 | 只读借用 (Read-Only) | 可变借用 (Mutable) | 所有权转移 (Move) | Unsafe 裸指针 (Raw Ptr) |
+| :--- | :--- | :--- | :--- | :--- |
+| **1. 函数参数** | `fn f(x: T)` *(默认省略)*<br>*(兼容显式 `fn f(&x: T)`)* | **`fn f(*x: T)`**<br>*(或 `fn f(x: *T)`)* | **`fn f(move x: T)`** | `unsafe fn f(p: *T!)` |
+| **2. 变量赋值** | **`let a = &b`** | **`let a = *b`** | **`let a = b`**<br>*(或 `let a = move b`)* | `let a = *b!`<br>`let pp = **a!` |
+| **3. 类型声明 / 返回值** | **`: &T`** | **`: *T`** | **`: T`** | **`: *T!`** / **`: **T!`** |
+| **4. 对象/结构 `this`/`_`** | `fn get()` *(默认省略 `_`)*<br>*(兼容 `fn get(_)` / `fn get(&_)`) * | **`fn set(*_, v: i32)`**<br>*(兼容 `*this` / `mut _`)* | **`fn close(move _)`**<br>*(兼容 `move this`)* | — |
+| **5. `for` 循环迭代** | `for x of list` *(默认省略)*<br>*(兼容 `for &x of list`)* | **`for *x of list`** | **`for move x of list`** | — |
 
 ## 1. 所有权与自动释放 (Ownership & Auto-Drop)
 
 - **局部变量去冗余**：废除局部变量的 `let mut`，统一使用 `let`（可变绑定）与 `const`（深度不可变）。
 - **创建即拥有**：`let tensor = new Tensor();` 创建对象时，`tensor` 拥有该堆内存的唯一所有权。
 - **作用域释放 (RAII)**：当所有者变量离开作用域且未被转移所有权时，编译器自动注入 `defer tensor.release()`（无需 GC，零停顿）。
-- **赋值即 Move**：`let a = b;`（或显式 `move b`）会将 `b` 的所有权转移给 `a`。此后继续访问 `b` 将触发编译期错误：`CP Compile Error: Use of moved value`。
+- **赋值即 Move**：`let a = b;`（或显式 `let a = move b;`）会将 `b` 的所有权转移给 `a`；而 `let a = &b;` 创建只读借用，`let a = *b;` 创建可变借用。所有权转移后继续访问 `b` 将触发编译期错误：`CP Compile Error: Use of moved value`。
 
 ## 2. 隐式借用与读写推导 (Implicit Borrow Deduction)
 
 函数传参默认**不转移所有权**，而是由编译器自动生成**隐式借用**。借用权限由函数签名中的**参数修饰符**决定：
 
-- **只读借用 (默认)**：`fn view(data: Tensor)` -> 调用 `view(a)` 时，自动传入只读引用 `&T`，函数内禁止修改。
-- **可变借用 (`mut`)**：`fn modify(mut data: Tensor)` -> 调用 `modify(a)` 时，自动传入可变引用 `&mut T`，允许原地修改。
+- **只读借用 (默认或 `&`)**：`fn view(data: Tensor)`（或 `fn view(&data: Tensor)`）-> 调用 `view(a)` 时，自动传入只读引用 `&T`，函数内禁止修改。
+- **可变借用 (`*`)**：`fn modify(*data: Tensor)`（或 `fn modify(data: *Tensor)`，兼容 `mut data: Tensor`）-> 调用 `modify(a)` 时，自动传入可变引用 `*T`，允许原地修改。
 - **转移所有权 (`move`)**：`fn consume(move data: Tensor)` -> 调用 `consume(a)` 时，转移所有权，调用后外层 `a` 立即失效。
 
 ## 3. 借用检查器规则 (Borrow Checker)
 
-- **读写互斥**：在同一有效生命周期内，允许存在多个只读借用（`&T`），或仅允许存在**唯一一个**可变借用（`&mut T`）。可变借用与任何其他借用严格互斥。
+- **读写互斥**：在同一有效生命周期内，允许存在多个只读借用（`&T`），或仅允许存在**唯一一个**可变借用（`*T`）。可变借用与任何其他借用严格互斥。
 - **借用期间锁定所有者**：当变量 `a` 存在尚未结束的活跃借用 `r`（即 `r` 在后续代码中还会被读取）时，严禁将 `a` 的所有权 Move 转移或对其进行破坏性修改。
 - **防御迭代器失效**：容器遍历持有只读借用，循环体内调用 `push/remove` 等可变方法将被编译器直接拦截。
 
@@ -1584,22 +1600,22 @@ CP 彻底废除了 Rust 晦涩且具有传染性的 `<'a, 'b>` 生命周期泛�
 ### （1）局部作用域：非词法生命周期 (NLL) 与防悬垂推导（100% 零标注）
 
 - **作用域深度防悬垂 (Scope Depth Check)**：外层变量深度小（活得长），内层块 `{}` 变量深度大（死得早）。**严禁将内层短命变量的借用赋值给外层长命变量**，否则编译报错：`Borrowed value does not live long enough`。
-- **非词法生命周期 (Non-Lexical Lifetimes - NLL)**：借用变量 `let r = &a;` 的生命周期**并非持续到花括号结束，而是精准终止于 `r` 的最后一次使用（Last Use）处**。在 `r` 最后一次使用之后，原变量 `a` 立即解除锁定，可安全进行 `move` 或可变操作。
+- **非词法生命周期 (Non-Lexical Lifetimes - NLL)**：借用变量 `let r = &a;`（只读）或 `let m = *a;`（可变）的生命周期**并非持续到花括号结束，而是精准终止于该借用变量的最后一次使用（Last Use）处**。在最后一次使用之后，原变量 `a` 立即解除锁定，可安全进行 `move` 或可变操作。
 
 ### （2）函数返回借用：三级推导梯队（99% 零标注，1% 参数名直观绑定）
 
-首先，**严禁函数返回内部创建的局部变量的借用**（悬垂返回直接编译报错）。当函数返回一个借用（如 `: &Tensor`）时，按以下三级梯队解析来源：
+首先，**严禁函数返回内部创建的局部变量的借用**（悬垂返回直接编译报错）。当函数返回一个借用（只读 `: &Tensor` 或可变 `: *Tensor`）时，按以下三级梯队解析来源：
 
-1. **第 1 级（自动省略 Elision）**：若只有一个引用类参数，或为类方法（含 `this`），返回值的生命周期自动绑定到该唯一参数或 `this`。
+1. **第 1 级（自动省略 Elision）**：若只有一个引用类参数，或为类方法（含 `this` / `_`），返回值的生命周期自动绑定到该唯一参数或 `this` / `_`。
 2. **第 2 级（默认交集 Default Union —— 无需标注）**：若有多个对象参数且未写标注（如 `fn pick(a: Tensor, b: Tensor): &Tensor`），编译器**自动将返回值生命周期绑定为所有对象参数生命周期的交集 `min(a, b)`**。只要调用处使用返回值时 `a` 和 `b` 均存活，即完全合法！
-3. **第 3 级（极简参数名绑定 `&param` —— 告别 `<'a>`）**：仅当存在多个对象参数，但返回值只借用自特定参数（且希望其他参数提前释放）时，直接在 `&` 后指认参数名：
+3. **第 3 级（极简参数名绑定 `&param` / `*param` —— 告别 `<'a>`）**：仅当存在多个对象参数，但返回值只借用自特定参数（且希望其他参数提前释放）时，直接在 `&` 或 `*` 后指认参数名：
    ```cp
-   // 明确声明：返回的 Tensor 仅借用自参数 x，与 y 的死活无关！
+   // 明确声明：返回的只读借用 Tensor 仅借用自参数 x，与 y 的死活无关！
    fn selectFirst(x: Tensor, y: Tensor): &x Tensor {
        return &x;
    }
    ```
-   若可能借用自多个指定参数，支持 TS 风格的联合指认：`: &(x | y) Tensor`。
+   若可能借用自多个指定参数，支持 TS 风格的联合指认：`: &(x | y) Tensor` 或 `: *(x | y) Tensor`。
 
 ### （3）结构体与并发逃逸法则：Shared<T> 与 栈绑定视图 (Stack-Bound View / ref struct)
 
@@ -1609,45 +1625,45 @@ CP 彻底废除了 Rust 晦涩且具有传染性的 `<'a, 'b>` 生命周期泛�
    - 字段只允许存储**拥有所有权的数据（Move 传入）**或**共享所有权句柄 `Shared<T>`**。
    - **`Shared<T>`（对标 Rust `Arc<T>` / Nest `Refc Binary`）**：基于原子引用计数与全局共享堆，支持零拷贝跨函数逃逸、跨 Actor 传递。为杜绝数据竞争与循环引用，**`Shared<T>` 默认只读不可变**。
 2. **栈绑定借用视图（借鉴 C# `ref struct`，零开销局部借用，干掉最后 1% 缺陷）**：
-   - 支持显式声明 `ref class` / `ref struct`，或者当一个类/结构体的字段中包含裸借用（如 `data: &Tensor` 或 `data: &mut Tensor`）时，编译器自动将其推导为 **栈绑定视图（Stack-Bound View）**。
-   - **零开销优势**：无需原子引用计数，直接持有裸指针/切片，支持原地可变借用视图（`&mut T`），性能与手写 C/Rust 100% 一致，且**依然无需编写 `<'a>` 泛型**！
+   - 支持显式声明 `ref class` / `ref struct`，或者当一个类/结构体的字段中包含裸借用（如只读借用 `data: &Tensor` 或可变借用 `data: *Tensor`）时，编译器自动将其推导为 **栈绑定视图（Stack-Bound View）**。
+   - **零开销优势**：无需原子引用计数，直接持有裸指针/切片，支持原地可变借用视图（`*T`），性能与手写 C/Rust 100% 一致，且**依然无需编写 `<'a>` 泛型**！
    - **逃逸清零铁律**：编译器对栈绑定视图执行严格的逃逸拦截：
      - ❌ 严禁将其 `return` 出所借用变量的存活作用域（或返回出当前函数，除非绑定到输入参数生命周期）；
      - ❌ 严禁将其赋值给外层更长生命周期的变量；
-     - ❌ 严禁将其装入堆容器或通过 `@spawn` / 消息发送给其他 Actor 协程。
+     - ❌ 严禁将其装入堆容器或通过 `spawn` / 消息发送给其他 Actor 协程。
 
 ## 5. `trait`、单继承 `class` 与自身实例（`_` / `this`）的所有权、借用与生命周期
 
-CP 语言将普通函数的“默认只读借用、`mut` 可变借用、`move` 所有权转移”法则通过首参 `_`（等同于 `this`）完美统一到了面向对象与 Trait 契约体系中：
+CP 语言将普通函数的“默认/`&` 只读借用、`*` 可变借用、`move` 所有权转移”法则通过首参 `_`（等同于 `this`）完美统一到了面向对象与 Trait 契约体系中：
 
 ### （1）`_` 等同于 `this` 与成员互调省略
 
 - **`_` 作为 `this` 的一等极简别名**：在 `class`、`struct`、`trait` 与 `impl` 成员函数中，`_` 与 `this` 完全等价（推荐写 `_`，代码更精简）。
 - **成员互调与字段访问省略前缀**：在同一类或 Trait 内部，成员函数互相调用可直接省略 `_.` / `this.`（如直接写 `helper(x)`），不与局部变量冲突时也可直接访问字段。
-- **模式匹配通配符消歧**：为避免与代表自身实例的 `_` 冲突，`match` 模式匹配与解构中的通配符统一使用 `*`（如 `* => handleDefault()`）。
+- **模式匹配通配符消歧**：为避免与代表自身实例的 `_` 冲突，`match` / `switch` 模式匹配与解构中的通配符统一使用 `*`（如 `* => handleDefault()`）。
 
 ### （2）首参 `_` 的三维借用与所有权标记
 
-| 实例权限模式                 | 方法声明语法（推荐 `_`，兼容 `this`）                              | 编译期安全检查规则                                                                                                                                  |
-| :--------------------------- | :----------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **1. 只读借用 (默认)**       | `fn getVal(): i32`<br>_(缺省省略 `_`，等价于 `fn getVal(_): i32`)_ | • 内部禁止修改 `_.field`<br>• 内部禁止调用 `&_` 或 `move _` 方法<br>• 调用 `obj.getVal()` 产生只读借用 `&obj`                                       |
-| **2. 可变借用 (`&_`)**       | `fn setVal(&_, v: i32)`<br>_(兼容 `fn setVal(mut _, v: i32)`)_     | • 允许修改自身字段及调用其他 `&_` 方法<br>• 调用 `obj.setVal(1)` 时，若 `obj` 存在未结束的只读/可变借用，立即报错拦截                               |
-| **3. 所有权消费 (`move _`)** | `fn close(move _)`<br>`fn intoVal(move _): i32`                    | • 调用 `obj.close()` 后，外层 `obj` **所有权立即失效**（后续访问报 `Use of moved value`）<br>• 自动取消外层 `defer obj.release()`，杜绝 Double Free |
-| **4. 静态方法 (`static`)**   | `static fn create(): Tensor`                                       | • 无实例接收者 `_`，通过 `ClassName.create()` 调用                                                                                                  |
+| 实例权限模式                 | 方法声明语法（推荐 `_`，兼容 `this`）                                            | 编译期安全检查规则                                                                                                                                  |
+| :--------------------------- | :------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **1. 只读借用 (默认或 `&_`)** | `fn getVal(): i32`<br>_(缺省省略 `_`，等价于 `fn getVal(_): i32` 或 `fn getVal(&_): i32`)_ | • 内部禁止修改 `_.field`<br>• 内部禁止调用 `*_` 或 `move _` 方法<br>• 调用 `obj.getVal()` 产生只读借用 `&obj`                                       |
+| **2. 可变借用 (`*_`)**       | **`fn setVal(*_, v: i32)`**<br>_(兼容 `*this` / `mut _`)_                        | • 允许修改自身字段及调用其他 `*_` 方法<br>• 调用 `obj.setVal(1)` 时，若 `obj` 存在未结束的只读/可变借用，立即报错拦截                               |
+| **3. 所有权消费 (`move _`)** | `fn close(move _)`<br>`fn intoVal(move _): i32`                                  | • 调用 `obj.close()` 后，外层 `obj` **所有权立即失效**（后续访问报 `Use of moved value`）<br>• 自动取消外层 `defer obj.release()`，杜绝 Double Free |
+| **4. 静态方法 (`static`)**   | `static fn create(): Tensor`                                                     | • 无实例接收者 `_`，通过 `ClassName.create()` 调用                                                                                                  |
 
 ### （3）实例方法的生命周期联动推导
 
-- **第 1 级自动绑定 `_`**：类/Trait 方法返回借用（如 `fn getSlice(): &Tensor`）时，无需任何标注，返回值的生命周期自动绑定到当前实例 `_` (`this`)。在外层借用变量存活期间（NLL），原实例对象自动锁定，禁止调用 `&_` 或 `move _` 方法。
-- **第 3 级显式参数绑定 `&_`**：当方法含多个引用参数且需明确绑定来源时，支持 `: &_ Tensor`（或 `: &this Tensor`、`: &otherParam Tensor`）。
+- **第 1 级自动绑定 `_`**：类/Trait 方法返回借用（如 `fn getSlice(): &Tensor` 或 `fn getMutSlice(*_): *Tensor`）时，无需任何标注，返回值的生命周期自动绑定到当前实例 `_` (`this`)。在外层借用变量存活期间（NLL），原实例对象自动锁定，禁止调用冲突的 `*_` 或 `move _` 方法。
+- **第 3 级显式参数绑定 `&_` / `*_`**：当方法含多个引用参数且需明确绑定来源时，支持 `: &_ Tensor` 或 `: *_ Tensor`（以及 `: &otherParam Tensor`）。
 
 ### （4）单继承 `class`（`extends`）与 Rust 级 `trait`
 
-- **单继承 `class`**：支持 `class Child extends Parent`，子类自动继承父类的字段与方法，支持方法重写与 `super.method()` 调用；重写方法时，首参 `_` / `&_` / `move _` 的权限修饰必须与父类契约严格一致。
+- **单继承 `class`**：支持 `class Child extends Parent`，子类自动继承父类的字段与方法，支持方法重写与 `super.method()` 调用；重写方法时，首参 `_` / `*_` / `move _` 的权限修饰必须与父类契约严格一致。
 - **强悍 `trait` 系统**：
   - 同时支持 `struct` 与单继承 `class`；
-  - 支持携带 `_` / `&_` / `move _` 权限契约的方法签名及**默认方法实现（Default Methods）**（默认方法内可直接省略 `_.` 互调同 Trait 的抽象方法）；
+  - 支持携带 `_` / `*_` / `move _` 权限契约的方法签名及**默认方法实现（Default Methods）**（默认方法内可直接省略 `_.` 互调同 Trait 的抽象方法）；
   - 支持 TS 风格内联 `class A implements MyTrait` 与 Rust 风格后向扩展 `impl MyTrait for A`；
-  - 当函数参数类型为 `Trait`（如 `fn run(item: MyTrait)` vs `fn runMut(mut item: MyTrait)`）时，编译器静态校验实参类型是否实现了该 Trait，并严格拦截在只读 Trait 引用上调用 `&_` / `move _` 方法的行为。
+  - 当函数参数类型为 `Trait`（如 `fn run(item: MyTrait)` vs `fn runMut(*item: MyTrait)`）时，编译器静态校验实参类型是否实现了该 Trait，并严格拦截在只读 Trait 引用上调用 `*_` / `move _` 方法的行为。
 
 ---
 
@@ -2189,8 +2205,8 @@ CP 语言深度融合了 **ES6 / TypeScript 的极简优雅语法** 与 **Rust �
 
 | 语法模式             | 借用与权限语义                        | 底层机制与安全保证                                                                                                                                                                                                                      | 常见应用场景                                     |
 | :------------------- | :------------------------------------ | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------------------------------------- |
-| `for x of list`      | **只读借用 (Default Borrow)**         | 集合在循环体内被自动施加只读借用锁（`loop_borrowed_vars`）。循环体内严禁对集合进行任何结构性修改（如 `push`、`clear`、`delete`、重赋值）。杜绝迭代器失效与悬挂指针。循环结束后集合完全完好。                                            | 数据读取、汇总、只读遍历、多轮遍历               |
-| `for &x of list`     | **原地可变借用 (In-Place MutBorrow)** | `x` 获得对集合各元素的就地可变引用（映射为 Zig `for (&list) \|*x\|`）。循环内对 `x = new_val` 或 `x.field = val` 的写操作直接更新底层物理内存。同时禁止改变集合长度，保证绝对内存安全。                                                 | 原地数据加工、状态批量翻转、向量矩阵归一化       |
+| `for x of list`<br>_(兼容 `for &x of list`)_ | **只读借用 (Default Borrow)**         | 集合在循环体内被自动施加只读借用锁（`loop_borrowed_vars`）。循环体内严禁对集合进行任何结构性修改（如 `push`、`clear`、`delete`、重赋值）。杜绝迭代器失效与悬挂指针。循环结束后集合完全完好。                                            | 数据读取、汇总、只读遍历、多轮遍历               |
+| **`for *x of list`** | **原地可变借用 (In-Place MutBorrow)** | `x` 获得对集合各元素的就地可变引用（映射为 Zig `for (&list) \|*x\|`）。循环内对 `x = new_val` 或 `x.field = val` 的写操作直接更新底层物理内存。同时禁止改变集合长度，保证绝对内存安全。                                                 | 原地数据加工、状态批量翻转、向量矩阵归一化       |
 | `for move x of list` | **所有权转移 (Ownership Transfer)**   | 消费并转移集合内部元素的所有权（类似 Rust `into_iter` / Drain）。在遇到 `for move` 时，原集合立即被标记为已移交（`moved_vars`），后续任何读取均报 `Use of moved value` 编译错误。循环体每次迭代完全拥有 `x`，并在每轮结束自动析构释放。 | 资源管道转移、消息队列抽空处理、批量生命周期接管 |
 
 ---
@@ -2201,13 +2217,13 @@ CP 语言深度融合了 **ES6 / TypeScript 的极简优雅语法** 与 **Rust �
 
 ```cp
 // 1. 最简极客风格 (无括号，无需 let)
-for x of list { ... }
-for &x of list { ... }
-for move x of list { ... }
+for x of list { ... }       // 默认只读借用（亦可写 for &x of list）
+for *x of list { ... }      // 原地可变借用
+for move x of list { ... }  // 所有权转移
 
 // 2. TypeScript / ES6 兼容风格 (可选带小括号)
 for (x of list) { ... }
-for (&x of list) { ... }
+for (*x of list) { ... }
 for (move x of list) { ... }
 
 // 3. 变量声明兼容器 (可选带 let / const)
@@ -2343,24 +2359,24 @@ unsafe fn getFalliblePtr(fail: bool): *User! ! AllocError {
 
 ---
 
-## 3. 显式类型转换 (`expr as TargetType`)
+## 3. 裸指针获取 (`*b!` / `**b!`) 与显式类型转换 (`expr as TargetType`)
 
-从安全引用/借用转换为裸指针必须使用 `as` 显式转换，且必须处于 `unsafe` 作用域内：
+在 `unsafe` 作用域内，既可以使用极简的 **`*b!` / `**b!` 后缀感叹号表达式**直接获取裸指针，也可以使用 `as *T!` 进行显式类型转换：
 
 ```cp
 let mut user = User{age: 20};
 
 unsafe {
-    // 1. 将安全借用显式强转为一级裸指针
-    let p: *User! = &user as *User!;
+    // 1. 直接使用 *b! 获取一级裸指针（或写 &user as *User!）
+    let p: *User! = *user!;
 
-    // 2. 将裸指针变量的借用强转为二级裸指针
+    // 2. 直接使用 **b! 获取二级裸指针（或写 &p_copy as **User!）
     let mut p_copy: *User! = p;
-    let pp: **User! = &p_copy as **User!;
+    let pp: **User! = **p_copy!;
 
-    // 3. 标量类型强转
+    // 3. 标量裸指针获取
     let mut num: i32 = 100;
-    let pnum: *i32! = &num as *i32!;
+    let pnum: *i32! = *num!;
 }
 ```
 

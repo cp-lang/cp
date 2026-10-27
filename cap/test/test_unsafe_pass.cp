@@ -42,20 +42,20 @@ fn main() {
     let mut user = User{age: 20};
 
     unsafe {
-        // 1. Explicit cast to 1-level raw pointer
-        let p: *User! = &user as *User!;
+        // 1. Direct raw pointer expression (*user!) and explicit cast
+        let p: *User! = *user!;
         setAge(p, 30);
         @print("User age after setAge: {d}", user.age);
 
-        // 2. Double raw pointer (**User!)
+        // 2. Double raw pointer (**p_copy!)
         let mut p_copy: *User! = p;
-        let pp: **User! = &p_copy as **User!;
+        let pp: **User! = **p_copy!;
         modifyViaDoublePtr(pp, 45);
         @print("User age after modifyViaDoublePtr: {d}", user.age);
 
-        // 3. Scalar raw pointer (*i32!)
+        // 3. Scalar raw pointer (*num!)
         let mut num: i32 = 100;
-        let pnum: *i32! = &num as *i32!;
+        let pnum: *i32! = *num!;
         setScalar(pnum, 200);
         @print("Scalar num after setScalar: {d}", num);
 

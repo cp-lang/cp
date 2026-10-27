@@ -13,6 +13,11 @@ class InterchangeTest {
         return _.count;
     }
 
+    // 2b. Explicit read-only receiver using `&_`
+    fn getViaAmpersandUnderscore(&_): i32 {
+        return _.count;
+    }
+
     // 3. Default read-only receiver using `this`
     fn getViaThis(): i32 {
         return this.count;
@@ -36,8 +41,8 @@ class InterchangeTest {
         this.count = val;
     }
 
-    // 6b. Mutable borrow receiver using `&_`, mutating via `_.`
-    fn setViaAmpersandUnderscore(&_, val: i32) {
+    // 6b. Mutable borrow receiver using `*_`, mutating via `_.`
+    fn setViaStarUnderscore(*_, val: i32) {
         _.count = val;
     }
 
@@ -46,13 +51,13 @@ class InterchangeTest {
         _.count = val;
     }
 
-    // 7b. Mutable borrow receiver using `&this`, mutating via `this.`
-    fn setViaAmpersandThis(&this, val: i32) {
+    // 7b. Mutable borrow receiver using `*this`, mutating via `this.`
+    fn setViaStarThis(*this, val: i32) {
         this.count = val;
     }
 
     // 8. Mutable borrow receiver with omitted prefix
-    fn addOmitted(mut _, delta: i32) {
+    fn addOmitted(*_, delta: i32) {
         count = count + delta;
     }
 
@@ -95,14 +100,14 @@ async fn main(): void {
     item.setViaMutUnderscore(20);
     @print("5. after setViaMutUnderscore: {d}", item.getViaThis()); // 20
 
-    item.setViaAmpersandUnderscore(28);
-    @print("5b. after setViaAmpersandUnderscore (&_): {d}", item.getViaThis()); // 28
+    item.setViaStarUnderscore(28);
+    @print("5b. after setViaStarUnderscore (*_): {d}", item.getViaAmpersandUnderscore()); // 28
 
     item.setViaMutThis(35);
     @print("6. after setViaMutThis: {d}", item.getViaUnderscore()); // 35
 
-    item.setViaAmpersandThis(39);
-    @print("6b. after setViaAmpersandThis (&this): {d}", item.getViaUnderscore()); // 39
+    item.setViaStarThis(39);
+    @print("6b. after setViaStarThis (*this): {d}", item.getViaUnderscore()); // 39
 
     item.addOmitted(5);
     @print("7. after addOmitted: {d}", item.getOmitted());          // 40

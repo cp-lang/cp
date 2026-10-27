@@ -3025,6 +3025,45 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 2. 执行 `git commit` 完成提交；
 3. 工作区恢复干净状态。
 
+---
+
+## 2026-10-28
+
+### 用户指令
+> 回顾并检查我们标记 只读借用 可变借用 与所有权转移的 符号标记
+> 1. 函数参数,默认只读借用, 可变借用,使用 & 还是 * ?, 转移所有权是 move
+> 2. 变量赋值如: let a = b, 为所有权转移, let a = *b, let a = &b,哪个是可变借用,哪个是只读借用
+> 3. unsafe裸指针, let a = *b!, let a = **b!, 使用了后缀! 表示裸指针
+> 4. 对象/结构中的this标注: 默认不带_, 为只读借用, 可变借用, 使用 *_ 还是 &_
+> 可变借用 只读借用 需全局统一,不呢混乱,同时符合程序员编程直觉
+> 给出你的统一方案
+>
+> 确认, 按此标准统一, 并更新 cp_ref.md 设计规范.
+
+### 执行结果汇报
+1. **全局统一借用、所有权与裸指针符号标准**：
+   - **`&`（只读借用）**：变量赋值 `let a = &b`、类型 `: &T`、函数参数默认省略 `fn f(x: T)`（兼容 `fn f(&x: T)`）、对象首参默认省略 `fn get()`（兼容 `fn get(_)` / `fn get(&_)`）、循环默认省略 `for x of list`（兼容 `for &x of list`）；
+   - **`*`（安全可变借用）**：变量赋值 `let a = *b`、类型 `: *T`、函数参数 `fn f(*x: T)`（或 `fn f(x: *T)`）、对象首参 `fn set(*_, v: i32)`、循环原地修改 `for *x of list`；
+   - **`*... !`（Unsafe 裸指针）**：类型 `: *T!` / `: **T!`，以及 `unsafe` 块中 `let a = *b!` / `let pp = **b!` 直接获取裸指针（同时兼容 `as *T!` 强转）；
+   - **`move`（所有权转移）**：变量直接赋值 `let a = b`（或 `let a = move b`）、函数参数 `fn f(move x: T)`、对象首参 `fn close(move _)`、循环消费 `for move x of list`。
+2. **编译器与测试套件全面同步验证**：
+   - 更新 [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs)、[`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs)、[`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs)；
+   - 更新并验证 [`cap/test/test_this_underscore_interchange.cp`](file:///data/dev/cp/cap/test/test_this_underscore_interchange.cp)、[`cap/test/test_for_pass.cp`](file:///data/dev/cp/cap/test/test_for_pass.cp)、[`cap/test/test_unsafe_pass.cp`](file:///data/dev/cp/cap/test/test_unsafe_pass.cp)、[`cap/test/test_lifetime_pass.cp`](file:///data/dev/cp/cap/test/test_lifetime_pass.cp)，全套测试 100% 通过；
+   - 更新 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md) 与 [`SESSION.md`](file:///data/dev/cp/SESSION.md)。
+
+---
+
+## 2026-10-28
+
+### 用户指令
+> git 提交
+
+### 执行结果汇报
+1. 将全局借用、所有权与裸指针符号统一实现（`cpc/src/parser.rs`, `cpc/src/sema.rs`, `cpc/src/codegen.rs`）、更新后的测试用例（`cap/test/test_this_underscore_interchange.cp`, `cap/test/test_for_pass.cp`, `cap/test/test_unsafe_pass.cp`, `cap/test/test_lifetime_pass.cp`）、语言设计规范手册（`cp_ref.md`）以及记录日志（`CHANGELOG.md`, `DEVLOG.md`, `SESSION.md`）全部加入 Git 暂存区；
+2. 执行 `git commit` 完成提交；
+3. 工作区恢复干净状态。
+
+
 
 
 
