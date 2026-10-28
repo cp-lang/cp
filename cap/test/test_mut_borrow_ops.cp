@@ -24,35 +24,41 @@ fn mutate_dict(*d: Dict<string, i32>): void {
 
 fn main(): void {
     print("=== 1. Primitive Mutable Borrow (*v & p.* = 20) ===");
-    let v = 10;
-    let p = *v;
-    p.* = 20;
-    print(`v after p.* = 20: ${v}`);
-    mutate_int(*v, 35);
-    print(`v after mutate_int(*v, 35): ${v}`);
+    {
+        let v = 10;
+        let p = *v;
+        p.* = 20;
+        print(`v after p.* = 20: ${v}`);
+        mutate_int(*v, 35);
+        print(`v after mutate_int(*v, 35): ${v}`);
+    }
 
     print("=== 2. Object Literal Mutable Borrow (*v & p.a = 10) ===");
-    let v = {a: 10, b: 20};
-    let p = *v;
-    p.a = 100;
-    p.b = 200;
-    print(`p.a=${p.a}, v.a=${v.a}, v.b=${v.b}`);
+    {
+        let v = {a: 10, b: 20};
+        let p = *v;
+        p.a = 100;
+        p.b = 200;
+        print(`p.a=${p.a}, v.a=${v.a}, v.b=${v.b}`);
+    }
 
     print("=== 3. Array / Vec Mutable Borrow (*v & p.push(30)) ===");
-    let v = [10, 20];
-    let p = *v;
-    p.push(30);
-    p[1] = 25;
-    let popped = p.pop();
-    print(`popped=${popped}, v.length=${v.length}, v[0]=${v[0]}, v[1]=${v[1]}`);
-    mutate_arr(*v, 40);
-    print(`v after mutate_arr: len=${v.length}, v[0]=${v[0]}, v[2]=${v[2]}`);
+    {
+        let v = [10, 20];
+        let p = *v;
+        p.push(30);
+        p[1] = 25;
+        let popped = p.pop();
+        print(`popped=${popped}, v.length=${v.length}, v[0]=${v[0]}, v[1]=${v[1]}`);
+        mutate_arr(*v, 40);
+        print(`v after mutate_arr: len=${v.length}, v[0]=${v[0]}, v[2]=${v[2]}`);
 
-    print("=== 4. Mutable For Iteration (*item of v) ===");
-    for *item of v {
-        item = item + 1;
+        print("=== 4. Mutable For Iteration (*item of v) ===");
+        for *item of v {
+            item = item + 1;
+        }
+        print(`v after for *item: v[0]=${v[0]}, v[1]=${v[1]}, v[2]=${v[2]}`);
     }
-    print(`v after for *item: v[0]=${v[0]}, v[1]=${v[1]}, v[2]=${v[2]}`);
 
     print("=== 5. Map / Set / Dict Mutable Borrow Operations ===");
     let m = new Map<string, i32>();

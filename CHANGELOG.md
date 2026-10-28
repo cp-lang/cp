@@ -585,3 +585,23 @@
 - [`cap/test/test_mut_borrow_ops.cp`](file:///data/dev/cp/cap/test/test_mut_borrow_ops.cp): 覆盖基础类型 `*v` (`p.* = 20`)、对象字面量 `*v` (`p.a = 100`)、数组 `*v` (`p.push(30)`、`p.pop()`、`p[1] = 25`、`for *item of v`) 以及 `Map`/`Set`/`Dict` 全套可变借用操作的正向综合测试。
 - [`cap/test/test_mut_borrow_fail_readonly.cp`](file:///data/dev/cp/cap/test/test_mut_borrow_fail_readonly.cp): 验证通过只读借用 `let r = &v` 调用 `r.push(30)` 被编译器静态拦截的反向测试。
 - [`cap/test/test_mut_borrow_fail_conflict.cp`](file:///data/dev/cp/cap/test/test_mut_borrow_fail_conflict.cp): 验证当 `Map` 存在活跃只读借用 `let r = &m` 时调用 `m.set("k", 1)` 被编译器静态拦截的反向测试。
+
+## [Unreleased] - 2026-10-28 (Part 4)
+
+### 严禁同作用域重复声明变量 (Disallow Same-Scope Variable Redeclaration)
+
+### 修改文件 (Modified)
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 新增 `SemaError::DuplicateVarDecl(String, Span)`（`Compile Error: Cannot redeclare block-scoped variable '{0}' at {1:?}`）；
+  - 在 `analyze_pattern` 中严格检查当前块作用域（`self.scopes.last()`）是否已存在同名变量绑定（`SymbolKind::Var`，排除通配符 `_`），若在同一 `{}` 作用域重复声明则立即报错拦截；
+  - 将类方法中的类字段作用域与方法参数/方法体局部块作用域分离为双层作用域，允许方法内局部变量合法遮蔽同名类字段，同时禁止在方法顶层块内重声明方法参数或同名局部变量。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 新增 `check_and_record_scope_pat`，在 `rename_shadowed_vars_in_stmt` / `rename_shadowed_vars_in_block` 中按词法块维护独立的 `scope_vars: HashSet<String>`：对同一词法块内的重复变量声明执行编译期拦截，同时对合法的不同/平行子块（如 `{ let v = 10; } { let v = [10, 20]; }`）保留 CPS 状态机上下文字段的 Alpha-Renaming 消歧。
+- [`cap/test/test_mut_borrow_ops.cp`](file:///data/dev/cp/cap/test/test_mut_borrow_ops.cp):
+  - 将三段独立可变借用演示代码包裹在各自独立的 `{ ... }` 块作用域中。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 在第十章第 1 节新增“严禁同作用域重复声明变量（No Same-Scope Redeclaration）”规范，并同步更新第 3 节示例。
+
+### 新增文件 (Added)
+- [`cap/test/test_var_fail_redeclare.cp`](file:///data/dev/cp/cap/test/test_var_fail_redeclare.cp): 验证在同一 `{}` 块作用域内重复声明 `let v = 10; let v = [10, 20];` 时触发编译期报错拦截。
+

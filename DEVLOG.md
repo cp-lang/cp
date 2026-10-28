@@ -1271,3 +1271,22 @@ let reply = raw
 4. **容器改变操作与可变借用检查的全面闭环 (`check_mutation_allowed` & `check_read_allowed`)**：
    - 将 `push`、`pop`、`set`、`put_all`、`add`、`delete`、`clear`、下标赋值 `obj[k] = v`、字段赋值 `obj.f = v`、解引用赋值 `p.* = v` 以及 `for *x of container` 全部接入 `check_mutation_allowed`；
    - 修复 `compute_last_uses_stmt` 对控制流块（`If`/`While`/`For`/`Match`/`TryCatch`）的子语句计数步进，使其与 `generate_stmt` 的 `current_stmt_idx` 严格 1:1 对齐，确保 NLL 在借用最后一次使用后精准释放锁。
+
+---
+
+## 2026-10-28 (Part 4): 严禁同作用域重复声明变量 (Disallow Same-Scope Variable Redeclaration)
+
+### 1. 设计取舍与架构对齐
+在对比了 Rust 的同作用域变量遮蔽（Same-Scope Variable Shadowing）与 TypeScript / Zig / C++ / Go 的作用域规则后：
+- Rust 允许同作用域连续 `let v = ...` 是为了弥补其缺乏管道操作符、默认不可变绑定以及频繁手动解包 `Result`/`Option` 的人体工程学缺陷；
+- 而 CP 语言原生具备 `|>` 管道操作符与 `.` 主题占位符、`let` 默认可变绑定以及 `?` 错误传播自动解包，因此完全不需要同作用域同名重声明；
+- 相反，禁止同一 `{}` 作用域内的重复 `let`/`const` 声明，能够与 TypeScript 和 Zig 的直觉保持 100% 一致，并在编译期第一时间拦截命名冲突与复制粘贴导致的遮蔽 Bug。
+
+### 2. 实现方案
+1. **前端语义拦截 (`cpc/src/sema.rs`)**：
+   - 新增 `SemaError::DuplicateVarDecl`，在 `analyze_pattern` 处理 `Pattern::Ident`（非 `_`）时检查当前最内层作用域 `self.scopes.last()` 是否已存在 `SymbolKind::Var`，若已存在则立即报错：`Compile Error: Cannot redeclare block-scoped variable 'v'`；
+   - 在 `Decl::Class` 方法分析中，将类字段注入外层类作用域，方法参数与方法体放入内层方法块作用域，确保局部变量可合法遮蔽同名类字段，但不可重声明方法参数或同块变量。
+2. **后端状态机消歧与双重防线 (`cpc/src/codegen.rs`)**：
+   - 在 `rename_shadowed_vars_in_stmt` / `rename_shadowed_vars_in_block` 中按词法块边界（`Block`、`If`、`While`、`For`、`Match`、`TryCatch`、`Arrow`）维护独立的 `scope_vars: HashSet<String>`；
+   - 同一块内重复声明直接触发编译期拦截，而不同/平行子块（如 `{ let v = 10; } { let v = [10, 20]; }`）中的同名不同类型变量继续通过 Alpha-Renaming（`v__shadow_1`）提升至 CPS 状态机 `Context` 结构体，兼顾编译期严格检查与状态机扁平存储。
+

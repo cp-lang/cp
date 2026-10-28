@@ -3124,3 +3124,84 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 
 ### 执行结果汇报
 将可变借用变量操作（`*v`, `p.* = 20`, `p.a = 10`, `p.push(30)`）、容器（`Array`/`Vec`, `Map`, `Set`, `Dict`）可变借用检查、测试套件以及更新后的 `cp_ref.md`、`CHANGELOG.md`、`DEVLOG.md`、`SESSION.md` 提交至 Git 仓库。
+
+
+---
+
+## 2026-10-28 (Session Update - 耗时原因分析)
+
+### 用户指令
+> 本次任务为何执行时间这么久
+
+### 执行结果汇报
+向用户如实汇报本次任务耗时较长的三大原因：
+1. **底层类型与运行时机制联动改造面广**：您给出的三段简洁代码（`let v = 10; let p = *v; p.* = 20;`、`let v = {a: 10, b: 20}; let p = *v; p.a = 10;`、`let v = [10, 20]; let p = *v; p.push(30);`）涉及四个深层机制：
+   - 同一作用域下同名变量 `v` / `p` 连续三次以不同类型重声明（Shadowing），需在 CPS 状态机生成前增加 AST Alpha-Renaming；
+   - 匿名对象 `{a: 10, b: 20}` 取指针 `*v` 在 Zig 中遇到匿名结构体名义类型不兼容，需提升为顶层具名结构体 `__CpObj_...`；
+   - 数组字面量 `[10, 20]` 原本是只读静态切片 `&.{10, 20}`，要支持 `p.push(30)` 原地扩容并同步反映到 `v`，需重写为动态切片 `cp_array_lit` 与二级指针穿透 `cp_array_push(&p, 30)`；
+   - 全容器（`Array`/`Vec`, `Map`, `Set`, `Dict`）的改变操作与 NLL 生命周期计数器（`compute_last_uses_stmt`）精确对齐。
+2. **多次触发 `cargo build --release` 全量优化编译**：[`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs) 已超过 9300 行，每次 `cargo build --release` 需要约 23~25 秒，过程中编译了 4 次，仅 Rust Release 编译等待就消耗了近 2 分钟。
+3. **上下文窗口截断与恢复**：在第一轮完成前半部分修改时触发了会话上下文截断摘要（Context Compaction），恢复后重新读取确认了 [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs) 的行号区间再完成剩余编辑。
+同时给出后续提速改进措施（合并编辑减少 `cargo build --release` 次数、先用 `cargo check` 快速验证再去跑最终 release 构建）。
+
+
+---
+
+## 2026-10-28 (Session Update - 同作用域重复声明变量处理策略探讨)
+
+### 用户指令
+> 同名不同类型变量遮蔽（Shadowing）：您的代码在同一个块里连续三次声明 let v = ...; let p = *v;，类型分别是 i32、{a: i32, b: i32}、i32[]。
+> 我的意思是三段独立示意代码, 只是一次性写给你了,并不是连续三次声明, 如果在真实代码中出现这种连续声明,编译应该报错对吧,
+> 你当前是如何处理的
+
+### 执行结果汇报
+向用户如实汇报当前处理逻辑与设计取舍：
+1. **当前的处理方式（Rust 风格同作用域 Shadowing）**：
+   - 在刚才的实现中，我误以为您希望像 Rust 一样支持同作用域变量遮蔽（Rust 允许在同一个函数块内连续写 `let v = 10; let v = "hello";`），因此在 [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs) 中加入了 `rename_shadowed_vars_in_block`，将后续重声明的同名变量在底层自动重命名为 `v__shadow_1`、`v__shadow_2`，从而让同作用域连续 `let v` 通过编译。
+2. **为什么真实代码中应当报错（符合 TS / Zig 直觉与工程安全）**：
+   - CP 语言的主体心智对标 TypeScript + Zig：在 TS 和 Zig 中，**同一个作用域（Same Scope）内重复 `let v = ...` 属于手误/命名冲突 Bug，编译器必须明确报错拦截**（例如：`Identifier 'v' has already been declared in this scope`）。
+   - 而在**不同子作用域**（例如两个独立的 `if` 分支块、两个独立的 `for` 循环或内层 `{ ... }` 块）中声明同名局部变量，则属于合法的作用域隔离。
+3. 请示用户是否立即修正：在 [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs) 中严格拦截**同一作用域**下的重复 `let`/`const` 变量声明并报错，仅对合法的不同块作用域（如两个平行的 `{ ... }` 块或两个循环块）保留底层的状态机字段消歧。
+
+
+---
+
+## 2026-10-28 (Session Update - 深度解析 Rust 同作用域 Variable Shadowing 的设计初衷与 CP 取舍)
+
+### 用户指令
+> Rust 允许在同一个 {} 内连续写 let v = 10; let v = [10, 20];
+> Rust 为何要这样设计?
+> 在其他所有语言中,好像都没有这种设计
+
+### 执行结果汇报
+向用户从编程语言血统与编译器原理深度剖析 Rust 设计同作用域 Shadowing 的四大原因，以及为何其他主流语言（TS/Zig/C++/Go）全部禁止、为何 CP 语言不需要这一设计（因 CP 已具备 `|>` 管道操作符、默认可变 `let` 与 `?` 自动解包）。
+
+
+---
+
+## 2026-10-28 (Session Update - 实装同作用域重复声明变量编译期拦截)
+
+### 用户指令
+> 好
+
+### 执行结果汇报
+1. **实装同作用域重复声明变量编译期拦截**：
+   - 在 [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs) 中新增 `SemaError::DuplicateVarDecl`，在 `analyze_pattern` 中检测当前词法块作用域内是否已存在同名变量（排除通配符 `_`），若在同一 `{}` 作用域重复声明 `let`/`const` 或重声明函数参数，立即报错：`Compile Error: Cannot redeclare block-scoped variable '<name>'`；
+   - 在 [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs) 中按每个词法块维护独立的 `scope_vars` 集合，拦截同块重复声明，同时对不同/平行子块（如 `{ let v = 10; } { let v = [10, 20]; }`）保留 CPS 状态机上下文字段的 Alpha-Renaming 消歧。
+2. **测试验证与文档更新**：
+   - 更新 [`cap/test/test_mut_borrow_ops.cp`](file:///data/dev/cp/cap/test/test_mut_borrow_ops.cp)（将三段独立示意代码置于各自 `{ ... }` 块作用域中）并通过编译运行；
+   - 新增反向测试 [`cap/test/test_var_fail_redeclare.cp`](file:///data/dev/cp/cap/test/test_var_fail_redeclare.cp)，验证同一 `{}` 内 `let v = 10; let v = [10, 20];` 被精准拦截；
+   - 同步更新 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md) 与 [`SESSION.md`](file:///data/dev/cp/SESSION.md)。
+
+
+---
+
+## 2026-10-28 (Session Update - Git Commit)
+
+### 用户指令
+> git 提交
+
+### 执行结果汇报
+将同作用域重复声明变量编译期拦截（[`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs)、[`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs)）、测试用例（[`cap/test/test_mut_borrow_ops.cp`](file:///data/dev/cp/cap/test/test_mut_borrow_ops.cp)、[`cap/test/test_var_fail_redeclare.cp`](file:///data/dev/cp/cap/test/test_var_fail_redeclare.cp)）以及更新后的 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)、[`SESSION.md`](file:///data/dev/cp/SESSION.md) 与 [`GEMINI.md`](file:///data/dev/cp/GEMINI.md) 提交至 Git 仓库。
+
+

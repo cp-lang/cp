@@ -57,6 +57,8 @@ pub enum SemaError {
     MutateWhileBorrowedInFor(String, Span),
     #[error("Compile Error: {0} at {1:?}")]
     UnsafeRequired(String, Span),
+    #[error("Compile Error: Cannot redeclare block-scoped variable '{0}' at {1:?}")]
+    DuplicateVarDecl(String, Span),
 }
 
 pub type SemaResult<T> = Result<T, SemaError>;
@@ -1072,16 +1074,30 @@ impl Analyzer {
                         }
                     }
                     for p in &m.params {
-                        let p_kind = SymbolKind::Var {
-                            ty: p.ty.clone(),
-                            kind: VarDeclKind::Let,
-                        };
-                        self.define(p.ident.sym.clone(), p_kind.clone(), p.ident.span)?;
-                        self.symbol_map.insert(p.ident.span, p_kind);
+                        if p.ident.sym == "this" || p.ident.sym == "_" {
+                            let p_kind = SymbolKind::Var {
+                                ty: p.ty.clone(),
+                                kind: VarDeclKind::Let,
+                            };
+                            self.define(p.ident.sym.clone(), p_kind.clone(), p.ident.span)?;
+                            self.symbol_map.insert(p.ident.span, p_kind);
+                        }
+                    }
+                    self.enter_scope();
+                    for p in &m.params {
+                        if p.ident.sym != "this" && p.ident.sym != "_" {
+                            let p_kind = SymbolKind::Var {
+                                ty: p.ty.clone(),
+                                kind: VarDeclKind::Let,
+                            };
+                            self.define(p.ident.sym.clone(), p_kind.clone(), p.ident.span)?;
+                            self.symbol_map.insert(p.ident.span, p_kind);
+                        }
                     }
                     for stmt in &m.body.body {
                         self.analyze_stmt(stmt)?;
                     }
+                    self.exit_scope();
                     self.exit_scope();
                     self.current_fn_is_async = old_async;
                     self.current_fn_is_unsafe = old_unsafe;
@@ -1669,14 +1685,23 @@ impl Analyzer {
 
     fn analyze_pattern(&mut self, pat: &Pattern, ty: Type, kind: &VarDeclKind) -> SemaResult<()> {
         match pat {
-            Pattern::Ident(ident) => self.define(
-                ident.sym.clone(),
-                SymbolKind::Var {
-                    ty,
-                    kind: kind.clone(),
-                },
-                ident.span,
-            ),
+            Pattern::Ident(ident) => {
+                if ident.sym != "_" {
+                    if let Some(SymbolKind::Var { .. }) =
+                        self.scopes.last().unwrap().get(&ident.sym)
+                    {
+                        return Err(SemaError::DuplicateVarDecl(ident.sym.clone(), ident.span));
+                    }
+                }
+                self.define(
+                    ident.sym.clone(),
+                    SymbolKind::Var {
+                        ty,
+                        kind: kind.clone(),
+                    },
+                    ident.span,
+                )
+            }
             Pattern::Tuple(elements) => {
                 let element_types = match ty {
                     Type::Tuple(tys) => tys,
