@@ -3295,3 +3295,71 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 
 ### 执行结果汇报
 将解构与模式匹配支持 `*` 单元素通配符与 `...` 多元素剩余/忽略模式的实现（[`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs)、[`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs)、[`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs)）、测试用例（[`cap/test/test_mut_borrow_ops.cp`](file:///data/dev/cp/cap/test/test_mut_borrow_ops.cp)）以及更新后的 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)、[`SESSION.md`](file:///data/dev/cp/SESSION.md) 提交至 Git 仓库。
+
+---
+
+## 2026-10-28 (Session Update - 编译代码全面审查、规范冲突比对与 cp_ref.md 架构重构)
+
+### 用户指令
+> 检查 评审我们最新的编译代码:
+> - cpc/src/ast.rs
+> - cpc/src/codegen.rs
+> - cpc/src/parser.rs
+> - cpc/src/sema.rs 
+> 
+> 对照cp_ref.md 语言设计规范,完成以下任务:
+> 1. 最新的编译代码, 是否存在遗漏/bug/错误/不妥当 之处.
+> 2. 针对最新的编译代码, 检查 cp_ref.md 语言设计规范是否与实现代码有冲突/遗漏之处.
+> 3. 需统一cp_ref.md设计规范与实现代码, 如有冲突, 你作为编程语言设计大师, 拿出你的修改建议与方案,让我决定.
+> 4. cp_ref.md 语言设计规范是程序员了解 学习cp语言的重要文档, 编排/内容如有不妥, 需要你进行优化/修改/补充/完善, 务必能体现我们已经实现的功能, 同时包括未实现和计划实现的部分.
+> 
+> 认可你的方案, 如下内容,需补充完善后,重新提交 cp_ref.md 目录/提纲:
+> 1. unsafe 部分是否缺失
+> 2. 宏编程macro部分是否缺失
+> 3. 管道操作中, 使用"."(是否可以统一为*号) 作为占位符, 不是 _, _ 下划线 用于 this 别名
+> 4. 匿名对象部分是否缺失, 静态匿名对象与动态#{} 匿名对象
+> 5. 异步编程: async/await
+> 6. 并发任务与并行计算
+> 7. Bun-Beam 统一更名为Nest 智能体容器
+> 8.  `Box<dyn Trait>` 胖指针与运行时 `downcast<T>()`
+> 9. ... 不仅作为“忽略对象剩余未解构字段”的通配符使用, 同时作为动态字典提取（...rest 绑定）。后续会完善编译器实现该功能.
+> 10. 内存安全, 只读借用/可变借用与变量所有权,包括异步编程/并发任务/多线程与生命周期, 结构体生命周期与并发逃逸的特殊设计,需详细表述.
+> 11. 泛型与Trait约束
+> 12. 模块系统（import/export ES6 风格）
+> 13. 管理器cap, cap.json
+> 14. 错误处理, 包括Err 返回和Err模式匹配, ? 错误冒泡, catch与try catch 代码块, 业务层统一Error类,和胖指针动态错误, 错误转换 
+> 15. 函数系统: 前缀(pub static async 等)/参数(缺省只读借用, *可变借用, move, *_), 返回类型void省略, ?T!Err  
+> 16. 类与结构,类单继承,  init 构造与 release 解构.
+> 17. trait 体系.
+> 18. 异步任务, 事件
+> 
+> 很好, 还存在一点问题:
+> 并行计算, 咱们实现的,好像是 spawn.cpu 与 spawn, 提供cap.json 或  @parallel 实现 worker线程池和 协程池
+> 
+> 确认
+
+### 执行结果汇报
+1. **全面审查最新编译核心源码**：
+   - [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs)：识别出 `Stmt::Match` 变体处于冗余死代码分支；
+   - [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs)：识别出对象解构 `{ a, ...rest }` 目前作为忽略剩余属性；支持了管道占位符 `*` 与 `.`；
+   - [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs)：增强 `infer_type` 对 `Expr::Match`（`switch` 表达式）分支类型的静态类型推导，避免退化为 `Type::Any`；
+   - [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs)：确认了容器在只读借用存活期内对元素执行原位修改（`v[0] = 6`）已被 NLL 借用检查硬核拦截；
+2. **重构编写《CP-Nest 语言设计规范与技术白皮书》([`cp_ref.md`](file:///data/dev/cp/cp_ref.md))**：
+   - 彻底清除前 1,500 行早期讨论中的废弃草稿（`Result/Option`、`let mut`、`loop` 及混淆通配符）；
+   - 正式将底层运行时定名为 **Nest 智能体容器（Nest Agent Container / Nest Runtime）**；
+   - 全盘规范化阐述 11 篇核心章节与 18 项用户核心要求：
+     - 双轨派生模型：`spawn(fn)` 纳秒级协程池 vs `spawn.cpu(fn)` Worker 物理线程池；
+     - 并发配置：`cap.json` 的 `"mode": "parallel"` 与 `@parallel(N)` / `@single_thread` 入口注解；
+     - 跨并发边界静态逃逸防御（禁止捕获 `ref struct` 与局部借用 `&T`，强制 `move` 或 `Shared<T>`）；
+     - 容器写保护铁律（只读借用期内禁扩容、禁 `v[0]=6` 原地修改）；
+     - 双轨对象模型（静态匿名结构体 vs 动态字典 `#{}`）；
+     - 管道占位符统一为 `*`（彻底与方法接收者 `_` 解耦）及 `.method()` 简写；
+     - 解构通配符 `*` 与区间忽略/剩余切片收集 `...`（及动态字典绑定规划）；
+     - 原生 3-State 错误处理体系（`! E`、`?T`、`?`、`? default`、`??`、`try { ... } catch` 隐式冒泡、统一 `Error` 类、`Box<dyn Error>`、`cp_convert_err`）；
+     - 函数前缀矩阵、参数借用语义、`_` 接收者（`_`、`*_`、`move _`）、`void` 省略；
+     - 纯内存布局容器、类单继承 `extends`、`init` / `release` 钩子、`trait` 体系与 `Box<dyn Trait>` 胖指针及 `downcast<T>()`；
+     - `unsafe` 裸指针直操与 `macro` 编译期宏系统；
+     - 标准库全协议索引与生态演进路线图。
+3. **验证与交付**：
+   - 编写 [`cap/test/test_pipe_star.cp`](file:///data/dev/cp/cap/test/test_pipe_star.cp) 并验证通过；
+   - 全套测试套件运行正常。

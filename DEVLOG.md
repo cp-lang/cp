@@ -1324,3 +1324,28 @@ let reply = raw
 3. **代码生成 (`cpc/src/codegen.rs`)**：
    - 在 Zig 运行时预置 `cp_unpack_tail(v, offset_from_end)` 与 `cp_unpack_slice(v, start, suffix_len)`，对切片直接生成零拷贝子切片 `v[start .. v.len - suffix_len]`；
    - 在 `Stmt::Var`、`generate_pattern_match`、`Stmt::For` 以及状态机局部变量提取器中打通前缀、剩余切片与后缀元素的类型推导与代码生成。
+
+---
+
+## 2026-10-28 (Part 7): 全面重构《CP 语言官方设计规范与架构白皮书》（cp_ref.md）并升级编译器管道通配占位符与 Match 推导
+
+### 1. 深度对齐审查与规范体系重构原理
+在代码与原有 3,135 行的 `cp_ref.md` 进行地毯式对齐比对中，发现原有前 1,500 行充斥着早期讨论的试验性草稿（如已废弃的 `Result/Option`、`let mut`、`loop`、`_` 通配符等），与第十章以后的最新正式定稿发生严重冲突。
+根据大师指导与确认，执行了系统性重构升级：
+1. **全面净化清洗历史冲突**：彻底清除早期历史记录，统一升级为 11 篇体系完备的工业级金牌参考规范；
+2. **定名升级为 Nest 智能体容器**：将底层剥离版 OTP 虚拟机运行时统一更名为“Nest 智能体容器（Nest Agent Container / Nest Runtime）”，确立 CP 语言作为 Nest 智能体容器原生执行体的核心架构地位；
+3. **双轨派生模型（Dual-Track Spawn）系统化**：
+   - `spawn(fn)`：轻量级抢占式协程池（Coroutine Pool），纳秒级出让，基于 Reductions 计数抢占调度；
+   - `spawn.cpu(fn)`：Worker 物理线程池（CPU Thread Pool），直接调用底层 OS 物理线程，脱离协程主调度器，专用于密集矩阵运算与科学计算；
+   - 并发运行时配置体系（`cap.json` 的 `"mode": "parallel"` 与源码级 `@parallel(N)` / `@single_thread` 注解）；
+   - 跨并发边界静态安全检查（严禁捕获栈绑定 `ref struct` 与局部借用 `&T`，强制 `move` 或原子引用共享 `Shared<T>`）。
+4. **容器写保护铁律（Container Mutation Guard）**：
+   - 明确阐明容器在处于任何只读借用存活期内，严禁扩容缩容，严禁元素原地修改（如 `v[0] = 6`）；
+5. **管道操作符占位符正交解耦**：
+   - 管道占位符统一支持 `*`，彻底将 `_` 解放专用于方法接收者 `this` 别名；
+   - 同步支持点号方法简写（`data |> .trim()`）。
+
+### 2. 编译器针对性增强与测试
+1. **语法解析 (`cpc/src/parser.rs`)**：在 `in_pipeline_rhs > 0` 状态下识别孤立的 `*`（`Token::Star`）并直接解析为 `Expr::PipePlaceholder`，使得 `data |> add(5, *)` 能够自然编译为对应参数位置替换；
+2. **语义推导 (`cpc/src/sema.rs`)**：在 `infer_type` 中增加对 `Expr::Match`（`switch` 表达式）的类型推导，使 `let x = switch (...) { ... };` 能够直接推导出分支公共静态类型，避免退化为 `Type::Any`；
+3. **验证测试 (`cap/test/test_pipe_star.cp`)**：新增管道占位符 `*` 与 `.` 的编译和运行测试，全套正反向用例通过。

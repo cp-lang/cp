@@ -2474,6 +2474,21 @@ impl<'a> Parser<'a> {
                 Ok(Expr::Unsafe(block))
             }
             Token::Star => {
+                if self.in_pipeline_rhs > 0
+                    && matches!(
+                        self.peek(),
+                        Some(
+                            Token::Comma
+                                | Token::RParen
+                                | Token::RBracket
+                                | Token::RBrace
+                                | Token::Semicolon
+                                | Token::Pipe
+                        ) | None
+                    )
+                {
+                    return Ok(Expr::PipePlaceholder(span));
+                }
                 let mut depth = 1;
                 while self.peek() == Some(&Token::Star) {
                     self.bump()?;

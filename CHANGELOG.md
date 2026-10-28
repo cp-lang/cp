@@ -642,5 +642,21 @@
 - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
   - 补充单元素通配符 `*`、多元素剩余/忽略模式 `...`（裸 `...` 与具名 `...rest`）以及与范围符号 `..` / `..=` 正交分离的语法规范与示例。
 
+## [Unreleased] - 2026-10-28 (Part 7)
+
+### 全面重构《CP 语言官方设计规范与架构白皮书》（cp_ref.md）并升级编译器管道通配占位符与 Match 推导
+
+### 修改文件 (Modified)
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 彻底清洗重构历史遗留对话草稿（清除旧的 `Result/Option`、`let mut`、`loop` 及冲突通配符），升级为 11 篇体系完备的工业级金牌参考规范；
+  - 全面收录 18 项核心要求：Nest 智能体容器（更名与定义）、双轨派生模型（`spawn` 协程池 vs `spawn.cpu` Worker 物理线程池）、`cap.json` 与 `@parallel` / `@single_thread` 并发配置、3-State 原生错误体系、容器写保护铁律（只读借用期间禁扩容与禁元素原地修改）、双轨对象模型（静态匿名结构体 vs 动态 `#{}` 字典）、`Box<dyn Trait>` 胖指针与 `downcast<T>()`、解构 `*` 与 `...`、管道占位符 `*` 与接收者 `_` 彻底解耦、`unsafe` 与裸指针、`macro` 宏系统、类继承 `init`/`release` 钩子等。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - 在 `in_pipeline_rhs > 0` 管道表达式右侧解析中，支持 `*`（`Token::Star`）作为通用通配占位符（如 `data |> process(5, *)`），与方法接收者 `_` 彻底解耦。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 在 `infer_type` 中增加对 `Expr::Match`（`switch` 表达式）分支返回值的静态类型推导，避免类型退化为 `Type::Any`。
+
+### 新增文件 (Added)
+- [`cap/test/test_pipe_star.cp`](file:///data/dev/cp/cap/test/test_pipe_star.cp): 验证管道操作符配合 `*` 通配占位符与 `.` 占位符的正向编译与执行测试。
+
 
 

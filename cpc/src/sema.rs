@@ -2292,6 +2292,38 @@ impl Analyzer {
                 }
                 Ok(Type::Void)
             }
+            Expr::Match(m) => {
+                for arm in &m.arms {
+                    let arm_ty = match &*arm.body {
+                        Stmt::Expr(e) => self.infer_type(e).unwrap_or(Type::Any),
+                        Stmt::Block(b) => {
+                            if let Some(Stmt::Expr(e)) = b.body.last() {
+                                self.infer_type(e).unwrap_or(Type::Any)
+                            } else if let Some(Stmt::Return(r)) = b.body.last() {
+                                if let Some(arg) = &r.arg {
+                                    self.infer_type(arg).unwrap_or(Type::Any)
+                                } else {
+                                    Type::Void
+                                }
+                            } else {
+                                Type::Void
+                            }
+                        }
+                        Stmt::Return(r) => {
+                            if let Some(arg) = &r.arg {
+                                self.infer_type(arg).unwrap_or(Type::Any)
+                            } else {
+                                Type::Void
+                            }
+                        }
+                        _ => Type::Void,
+                    };
+                    if arm_ty != Type::Any && arm_ty != Type::Unknown && arm_ty != Type::Void {
+                        return Ok(arm_ty);
+                    }
+                }
+                Ok(Type::Any)
+            }
             _ => Ok(Type::Any),
         }
     }
