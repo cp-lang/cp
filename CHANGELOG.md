@@ -684,5 +684,69 @@
 - [`cap/test/test_obj_destructure_rest.cp`](file:///data/dev/cp/cap/test/test_obj_destructure_rest.cp): 验证对象解构具名 `...rest`、裸 `...`、`...*`、`switch` 分支与 `for` 循环解构的全链路正向测试。
 - [`cap/test/test_obj_rest_fail_multiple.cp`](file:///data/dev/cp/cap/test/test_obj_rest_fail_multiple.cp): 验证对象解构中包含多个 `...` 时的编译期错误拦截反向测试。
 
+## [Unreleased] - 2026-10-29 (Part 9)
+
+### 扩充《CP 语言官方设计规范与架构白皮书》（cp_ref.md）：新增附录《CP 在 AI 与 AI 智能体领域的独到优势与设计哲学》
+
+### 修改文件 (Modified)
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 目录（TOC）更新：新增《附录：CP 在 AI 与 AI 智能体领域的独到优势与设计哲学》三级索引（A.1、A.2、A.3）；
+  - 全文末尾系统性增补附录 A，涵盖：
+    - **A.1 主流语言物理死穴全景对比**：深度剖析 Python（GIL 锁死/asyncio 卡顿/内存暴涨）、TypeScript（单线程阻塞/无原生多核/V8 堆上限）、Go（百万 Agent 记忆引发 STW 垃圾回收停顿）、Rust（async 状态管理地狱/Arc-Mutex 泛滥/无抢占调度）、Zig（纯手工内存管理/缺乏并发信箱原语）在海量智能体场景下的致命瓶颈；
+    - **A.2 CP 语言六大核心独到优势**：
+      1. 独创“双轨派生模型”（`spawn` 纳秒协程池 vs `spawn.cpu` Worker 物理线程池）；
+      2. 彻底无 GC（No GC）+ CPS 状态机切分（百微秒级冷启动、单机支撑百万活跃 Agent 驻留）；
+      3. `SharedTensor` 全局共享堆与零拷贝原子引用穿透通信；
+      4. 抢占式调度（Reductions 计数时间片，杜绝复杂 Prompt/CoT 思维链饿死集群）；
+      5. 双轨对象模型（静态匿名结构体 vs 动态字典 `#{}`）与 3-State 原生错误体系（LLM Tool Calling 零阻抗与极简容错）；
+      6. Crash-Proof 故障隔离与“任其崩溃”哲学（Supervisor Tree 热拉起与 NIF Resource Objects 资源兜底）；
+    - **A.3 典型真实业务场景落地实测对比**：万人同域 NPC 仿真 (Virtual Town)、高频金融量化群智决策、边缘嵌入式 Agent 设备矩阵对比。
+- [`.gitignore`](file:///data/dev/cp/.gitignore):
+  - 添加 `*-bak*.md` 规则，防止规范文件历史备份草稿污染 git 工作区。
+
+## [Unreleased] - 2026-10-29 (Part 10)
+
+### 配合用户对 `cp_ref.md` 的内容更新，重新整理并同步文档目录索引 (TOC)
+
+### 修改文件 (Modified)
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 仅重新整理文档开头的 `## 目录索引 (Table of Contents)`，未改动任何正文内容；
+  - 第一篇目录全量同步用户新增的各大章节：
+    - `1.2 CP/Rust/Zig/Go/TypeScript 精简对比表`（包含 1.2.1 差异化标签与 1.2.2 优势）；
+    - `1.3 为AI而生：CP在 AI/AI智能体 领域的独到优势与设计哲学`（包含 1.3.1 物理死穴对比、1.3.2 六大独到优势与核心架构解析、1.3.3 典型场景实测直观对比）；
+    - `1.4 高性能服务后端（替代部分 Go/C++/C/Rust/Zig）`；
+    - `1.5 CLI工具、开发工具链（替代 Go / Zig）`；
+    - `1.6 嵌入式、裸机、RTOS（Zig原生主场，CP是加分版）`；
+    - `1.7 游戏引擎底层、高性能引擎脚本/绑定层（替代 C++、部分Rust）`；
+    - `1.8 跨平台系统软件、Daemon、系统组件（替代C / C++）`；
+    - `1.9 高性能WebAssembly（Wasm）`；
+    - `2.0 教育、入门系统级编程（这个是很特别的差异化赛道）`；
+    - `2.1 现有Zig项目的上层迁移层（Zig生态内部的升级选择）`；
+    - `2.2 边界：哪些场景CP不适合主推（心里要有数）`；
+    - 以及构建与包管理器相关章节索引；
+  - 移除已合入第一篇的原末尾附录目录索引条目。
+
+## [Unreleased] - 2026-10-29 (Part 11)
+
+### 重构《CP 语言官方设计规范与架构白皮书》（cp_ref.md）：独立升格第二篇《`cap` 统一工具链与模块生态体系》并全面对标 Bun.js
+
+### 修改文件 (Modified)
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 全局章节升格：将规范手册由原 11 篇系统性扩充重组为 **12 篇完整宏伟架构**，原第二篇至第十一篇依次顺延为第三篇至第十二篇，对应子章节编号（`3.1`~`12.2`）全链路对齐；
+  - 第一篇定名为《第一篇：CP 语言哲学、核心愿景与全景场景矩阵》，纯粹聚焦于核心定位、竞品对比、AI/智能体独到优势与 9 大落地场景；
+  - 正式独立升格设立《第二篇：`cap` 统一工具链与模块生态体系 (The `cap` All-in-One Toolchain & Ecosystem)》：
+    - **2.1 架构愿景与品牌标识**：引入 CAP ($C^P$) 官方 ASCII 标志徽章，深度确立对标 Bun.js 的“全生态归一”哲学（CAP 之于 CP 犹如 Bun 之于 TS/JS）；
+    - **2.2 CLI 全指令全景矩阵**：系统梳理 21 项指令，包含已实装指令（`run`, `build`, `-r`, `-f`, `-s`, `--exe`, `--obj`, `--lib`, `-b`, `add`, `-g`, `test`）、正在演进指令（`init`, `remove`, `update`, `bench`）与规划中指令（`fmt`, `lint`, `publish`, `cache clean`）；
+    - **2.3 全局缓存与软链接零拷贝注入**：绘制 Mermaid 架构流向图，阐释 `~/.cap/cache/` 全局单实例存储与 `cap_modules/` 毫秒级符号软链接注入机制，终结 `node_modules` 磁盘黑洞；
+    - **2.4 `cap.json` 权威清单规范**：详述工程清单、并发模式、依赖 Semver、Monorepo `workspaces`、编译控制与 Nest 容器专有参数；
+    - **2.5 ES6 风格模块系统与别名权威裁决**：
+      - 深度论证并裁决模块更名为何坚守 `as`（`import { a as b }`）而非 `:`，确立 `:` 作为类型注解的神圣正交性、保持 `* as math` 的纯粹自洽，并对齐主流工程直觉；
+      - 详解三层向上攀升依赖查找机制（Upward Resolution）与目录缺省入口推断优先级；
+    - **2.6 CAP 特性演进与对标路线图**：以对照表清晰展示 CAP 对标 Bun / Cargo 的全景落地现状与未来路线；
+  - 同步全量更新全文顶部的 `## 目录索引 (Table of Contents)`。
+
+
+
+
 
 

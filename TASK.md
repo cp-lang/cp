@@ -1,3 +1,41 @@
+# 角色
+
+你是资深编程大师，精通zig、rust、js、es6、Typescript、c、c++、c#等各种编程语言和各种编程库，现在，你与我一起创建一个新的编程语言，语法类似Typescript，上手容易；安全类似Rust，避免内存泄露、空指针和程序崩溃；模块、包生态类似Npm；包管理、编译、测试、运行类似Bun，使用简单。
+
+同时通过-nest参数编译为支持抢占式调度智能体，在Nest虚拟机中动态加载、运行，基于云端智能体平台，开放给用户编写智能体，上传cp代码，云端编译后，动态加载到Nest中运行。
+
+Nest是单机百万级（线程）智能体运行容器，在计算机并行内核之上实现的多线程平台，非操作系统线程，普通服务器支持百万-千万线程，每线程200KB内存，远低于Docker容器和Node.js，专用于智能体运行容器，每个智能体运行在单独的Nest线程中。
+
+# cp(Concurrent Plus) 智能体编程语言
+
+cp(Concurrent Plus) 是一门创新编程语言，它集成了 TypeScript/es6 的简洁 + Rust 的安全 + Zig 的跨平台与速度**
+
+写起来像 TS，
+安全媲美 Rust，
+运行速度 Zig，
+专门为 AI 大模型并行计算而生。
+
+cp 代码通过rust编写的cpc编译器，编译为zig代码，再通过zig编译为全平台机器码，直接运行在操作系统上，不像Typescript/es6运行在Node或Bun的JS Core/V8虚拟机上。
+
+cp对于zig，类似es6对于es5。
+
+## 运行在以下两个场景
+
+### 直接运行于各种操作系统
+
+1. 使用zig编译为机器码，直接运行于各种操作系统。
+2. 与zig相比，由于借鉴了Rust的安全特性，比zig安全。
+3. 与Rust相比，有类似的安全性，但是语法类似Typescript，上手更容易。
+4. 借鉴bun针对js语言的包、包管理、编译、测试、运行等，由cap针对cp语言提供类似的包、包管理、编译、测试、运行等。
+5. 类似es6相比es5，提供了强大的语言特性、语法糖、模块管理、异步等，让js语言脱胎换骨；类似，cp在zig基础上，借鉴了es6语法，让zig脱胎换骨。
+
+### 运行于Nest虚拟机
+
+1. 带 `-nest` 编译选项，编译产物作为Actor，运行于Nest智能体容器中。
+2. Nest通过zig编译，与bun一起成为Bun-Nest双核心的百万智能体运行平台。
+3. cp语言通过cpc编译器插装让权代码，支持Nest的抢占式协程调度，用于多租户百万智能体研发，避免一个智能体死循环影响其他智能体运行。
+4. 与Nest及Nest庞大、稳定的调度生态无缝集成，继承Nest强大的资源库，避免重新造轮子。
+
 ## trait 与 类成员函数实例的所有权、借用与生命周期
 
 很好，我们已经完成类似rust中的变量所有权、借用（只读、可变）、与生命周期。
@@ -1374,3 +1412,37 @@ let user = User{age: 20};
 1. 请调取并复用你当前上下文中对上述文件最后一次修改的设计与具体实现代码与硬盘文件进行对比。
 2. 如发现硬盘文件有内容丢失，使用 native tool（write_file 或 replace_file_content），将上述文件重新写入并恢复到你修改后的最新状态。
 3. 恢复完成后，直接在当前目录重新运行相关的测试用例（如 ./cap/bin/cap cap/test/test_parallel_join.cp 或其它相关测试），验证编译与逻辑是否已完全恢复。
+
+### 一、最新编译代码审查（遗漏 / Bug / 潜在问题 / 不妥之处）
+
+在经过逐行分析后，目前的编译器实现整体架构非常健壮，AST、Sema、Codegen 之间的链路顺畅。但在边缘语义处理与代码严谨性上，仍存在以下 4 处值得关注和完善的地方：
+
+#### 1. cpc/src/ast.rs：Stmt::Match 变体处于冗余状态（Dead AST Variant）
+
+• 现象：在 ast.rs:181 中定义了 Stmt::Match(MatchExpr)，但在 parser.rs:2598 中，所有 match 和 switch 无论是作为表达式还是独立语句，均通过 parse_primary_expr 被解析为
+Expr::Match，在语句层表现为 Stmt::Expr(Expr::Match(...))。
+• 影响：虽然在 codegen.rs:5312 和 codegen.rs:5811 中对 Stmt::Match 和 Stmt::Expr(Expr::Match) 均有生成处理，但 AST 中的 Stmt::Match 实际上永远不会被 parser
+生产，属于冗余死分支。
+• 建议：保留当前架构即可，或在未来 AST 精简时统一将语句级匹配归入 Stmt::Expr。
+
+#### 2. cpc/src/parser.rs：对象解构中的 ...rest 仅做吞入跳过，未绑定变量
+
+• 现象：在 parser.rs:1195-1204 中，当解析对象解构 { a, ...rest } 时：
+if self.peek() == Some(&Token::DotDotDot) {
+self.bump()?;
+if !matches!(self.peek(), Some(Token::Comma | Token::RBrace) | None) {
+let _ = self.parse_ident()?; // 仅跳过标识符，未存入 AST
+}
+continue;
+}
+• 影响：如果是为了忽略剩余字段（如 let { a, ... } = obj;），当前行为完全正常；但如果开发者写 let { a, ...rest } = obj; 试图捕获剩余字段字典，rest 并不会被声明，后续使用
+rest 会在语义期报未定义变量。
+• 建议：在规范中明确——对象解构中的 ... 目前代表“忽略剩余属性”（通配）；如需支持提取剩余属性为字典，后续需在 ObjectPatProp 中加入 Rest 变体支持。
+
+#### 3. cpc/src/sema.rs：infer_type 对 Expr::Match（switch 表达式）类型推断退化为 Type::Any
+
+• 现象：在 sema.rs:1949-2296 的类型推断中，Expr::Match 缺少单独的推断逻辑，直接落入了末尾的 _ => Ok(Type::Any)。
+• 影响：若写 let s = switch (val) { 1 => "hello", * => "world" };，Sema 阶段会将 s 标记为 Type::Any，而丢失其精准的 Type::String，影响后续静态方法调用和类型安全性。
+• 建议：在 infer_type 中增加 Expr::Match 分支，推断所有分支 body 的联合类型（或取首个非空分支类型）。
+
+#### 4. cpc/src/codegen.rs：只读借用容器时的防篡改保护已精确生效
