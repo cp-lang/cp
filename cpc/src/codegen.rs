@@ -4302,408 +4302,6 @@ impl Codegen {
         }
     }
 
-    fn check_and_record_scope_pat(pat: &Pattern, scope_vars: &mut HashSet<String>) {
-        match pat {
-            Pattern::Ident(id) => {
-                if id.sym != "_" {
-                    if scope_vars.contains(&id.sym) {
-                        panic!(
-                            "CP Compile Error: Cannot redeclare block-scoped variable '{}' in the same scope.",
-                            id.sym
-                        );
-                    }
-                    scope_vars.insert(id.sym.clone());
-                }
-            }
-            Pattern::Array(pats) | Pattern::Tuple(pats) => {
-                for p in pats {
-                    Self::check_and_record_scope_pat(p, scope_vars);
-                }
-            }
-            Pattern::Object(props) => {
-                for prop in props {
-                    if let Some(sub_pat) = &prop.val {
-                        Self::check_and_record_scope_pat(sub_pat, scope_vars);
-                    } else if prop.key.sym != "_" {
-                        if scope_vars.contains(&prop.key.sym) {
-                            panic!(
-                                "CP Compile Error: Cannot redeclare block-scoped variable '{}' in the same scope.",
-                                prop.key.sym
-                            );
-                        }
-                        scope_vars.insert(prop.key.sym.clone());
-                    }
-                }
-            }
-            Pattern::Rest(p) | Pattern::Err(p) => {
-                Self::check_and_record_scope_pat(p, scope_vars);
-            }
-            _ => {}
-        }
-    }
-
-    fn rename_shadowed_vars_in_pat(
-        pat: &mut Pattern,
-        counts: &mut HashMap<String, usize>,
-        active: &mut HashMap<String, String>,
-    ) {
-        match pat {
-            Pattern::Ident(id) => {
-                let count = counts.entry(id.sym.clone()).or_insert(0);
-                *count += 1;
-                if *count > 1 {
-                    let new_name = format!("{}__shadow_{}", id.sym, *count - 1);
-                    active.insert(id.sym.clone(), new_name.clone());
-                    id.sym = new_name;
-                } else {
-                    active.insert(id.sym.clone(), id.sym.clone());
-                }
-            }
-            Pattern::Array(pats) | Pattern::Tuple(pats) | Pattern::Or(pats) => {
-                for p in pats {
-                    Self::rename_shadowed_vars_in_pat(p, counts, active);
-                }
-            }
-            Pattern::Object(props) => {
-                for prop in props {
-                    if let Some(sub_pat) = &mut prop.val {
-                        Self::rename_shadowed_vars_in_pat(sub_pat, counts, active);
-                    } else {
-                        let orig = prop.key.sym.clone();
-                        let count = counts.entry(orig.clone()).or_insert(0);
-                        *count += 1;
-                        if *count > 1 {
-                            let new_name = format!("{}__shadow_{}", orig, *count - 1);
-                            active.insert(orig.clone(), new_name.clone());
-                            prop.val = Some(Pattern::Ident(Ident {
-                                span: prop.key.span,
-                                sym: new_name,
-                            }));
-                        } else {
-                            active.insert(orig.clone(), orig);
-                        }
-                    }
-                }
-            }
-            Pattern::Rest(p) | Pattern::Err(p) => {
-                Self::rename_shadowed_vars_in_pat(p, counts, active);
-            }
-            Pattern::Enum(ep) => {
-                if let Some(fields) = &mut ep.fields {
-                    for prop in fields {
-                        if let Some(sub_pat) = &mut prop.val {
-                            Self::rename_shadowed_vars_in_pat(sub_pat, counts, active);
-                        }
-                    }
-                }
-                if let Some(tpats) = &mut ep.tuple_pats {
-                    for p in tpats {
-                        Self::rename_shadowed_vars_in_pat(p, counts, active);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn rename_shadowed_vars_in_expr(
-        expr: &mut Expr,
-        counts: &mut HashMap<String, usize>,
-        active: &mut HashMap<String, String>,
-    ) {
-        match expr {
-            Expr::Ident(id) => {
-                if let Some(mapped) = active.get(&id.sym) {
-                    id.sym = mapped.clone();
-                }
-            }
-            Expr::Bin(bin) => {
-                Self::rename_shadowed_vars_in_expr(&mut bin.left, counts, active);
-                Self::rename_shadowed_vars_in_expr(&mut bin.right, counts, active);
-            }
-            Expr::Call(call) | Expr::New(call) | Expr::OptCall(call) => {
-                Self::rename_shadowed_vars_in_expr(&mut call.callee, counts, active);
-                for arg in &mut call.args {
-                    Self::rename_shadowed_vars_in_expr(arg, counts, active);
-                }
-            }
-            Expr::Member(mem) | Expr::OptMember(mem) => {
-                Self::rename_shadowed_vars_in_expr(&mut mem.obj, counts, active);
-            }
-            Expr::Slice(sl) => {
-                Self::rename_shadowed_vars_in_expr(&mut sl.obj, counts, active);
-                if let Some(s) = &mut sl.start {
-                    Self::rename_shadowed_vars_in_expr(s, counts, active);
-                }
-                if let Some(e) = &mut sl.end {
-                    Self::rename_shadowed_vars_in_expr(e, counts, active);
-                }
-            }
-            Expr::Match(m) => {
-                Self::rename_shadowed_vars_in_expr(&mut m.disc, counts, active);
-                for arm in &mut m.arms {
-                    let saved = active.clone();
-                    let mut arm_scope = HashSet::new();
-                    Self::rename_shadowed_vars_in_pat(&mut arm.pat, counts, active);
-                    if let Some(g) = &mut arm.guard {
-                        Self::rename_shadowed_vars_in_expr(g, counts, active);
-                    }
-                    Self::rename_shadowed_vars_in_stmt(
-                        &mut arm.body,
-                        counts,
-                        active,
-                        &mut arm_scope,
-                    );
-                    *active = saved;
-                }
-            }
-            Expr::Spawn(sp) => {
-                Self::rename_shadowed_vars_in_expr(&mut sp.callee, counts, active);
-                for arg in &mut sp.args {
-                    Self::rename_shadowed_vars_in_expr(arg, counts, active);
-                }
-            }
-            Expr::Question(e)
-            | Expr::ErrWrap(e)
-            | Expr::BoxNew(e)
-            | Expr::Await(e)
-            | Expr::Move(e)
-            | Expr::Borrow(e, _)
-            | Expr::Deref(e) => {
-                Self::rename_shadowed_vars_in_expr(e, counts, active);
-            }
-            Expr::QuestionFallback {
-                expr: e, fallback, ..
-            } => {
-                Self::rename_shadowed_vars_in_expr(e, counts, active);
-                Self::rename_shadowed_vars_in_expr(fallback, counts, active);
-            }
-            Expr::NullCoalesce { left, right } => {
-                Self::rename_shadowed_vars_in_expr(left, counts, active);
-                Self::rename_shadowed_vars_in_expr(right, counts, active);
-            }
-            Expr::Catch {
-                expr: e,
-                err_ident,
-                body,
-                ..
-            } => {
-                Self::rename_shadowed_vars_in_expr(e, counts, active);
-                let saved = active.clone();
-                let mut catch_scope = HashSet::new();
-                if let Some(id) = err_ident {
-                    catch_scope.insert(id.sym.clone());
-                    let c = counts.entry(id.sym.clone()).or_insert(0);
-                    *c += 1;
-                    if *c > 1 {
-                        let new_name = format!("{}__shadow_{}", id.sym, *c - 1);
-                        active.insert(id.sym.clone(), new_name.clone());
-                        id.sym = new_name;
-                    } else {
-                        active.insert(id.sym.clone(), id.sym.clone());
-                    }
-                }
-                Self::rename_shadowed_vars_in_stmt(body, counts, active, &mut catch_scope);
-                *active = saved;
-            }
-            Expr::Downcast { obj, .. } => {
-                Self::rename_shadowed_vars_in_expr(obj, counts, active);
-            }
-            Expr::Array(items) => {
-                for item in items {
-                    Self::rename_shadowed_vars_in_expr(item, counts, active);
-                }
-            }
-            Expr::Object(fields) | Expr::Dict(fields) => {
-                for f in fields {
-                    Self::rename_shadowed_vars_in_expr(&mut f.val, counts, active);
-                }
-            }
-            Expr::Index { obj, index } => {
-                Self::rename_shadowed_vars_in_expr(obj, counts, active);
-                Self::rename_shadowed_vars_in_expr(index, counts, active);
-            }
-            Expr::Arrow(arrow) => {
-                let saved = active.clone();
-                let mut arrow_scope = HashSet::new();
-                for p in &mut arrow.params {
-                    Self::check_and_record_scope_pat(p, &mut arrow_scope);
-                    Self::rename_shadowed_vars_in_pat(p, counts, active);
-                }
-                match &mut *arrow.body {
-                    ArrowBody::Expr(e) => Self::rename_shadowed_vars_in_expr(e, counts, active),
-                    ArrowBody::Block(b) => {
-                        Self::rename_shadowed_vars_in_block(b, counts, active, &mut arrow_scope)
-                    }
-                }
-                *active = saved;
-            }
-            Expr::EnumInit(ei) => {
-                if let Some(fields) = &mut ei.fields {
-                    for f in fields {
-                        Self::rename_shadowed_vars_in_expr(&mut f.val, counts, active);
-                    }
-                }
-            }
-            Expr::Template(tl) => {
-                for e in &mut tl.expressions {
-                    Self::rename_shadowed_vars_in_expr(e, counts, active);
-                }
-            }
-            Expr::Builtin(b) => {
-                for a in &mut b.args {
-                    Self::rename_shadowed_vars_in_expr(a, counts, active);
-                }
-            }
-            Expr::ReflectOf { expr: e, .. } | Expr::Cast { expr: e, .. } => {
-                Self::rename_shadowed_vars_in_expr(e, counts, active);
-            }
-            Expr::Range { start, end, .. } => {
-                Self::rename_shadowed_vars_in_expr(start, counts, active);
-                Self::rename_shadowed_vars_in_expr(end, counts, active);
-            }
-            Expr::Unsafe(b) => {
-                let saved = active.clone();
-                let mut child_scope = HashSet::new();
-                Self::rename_shadowed_vars_in_block(b, counts, active, &mut child_scope);
-                *active = saved;
-            }
-            _ => {}
-        }
-    }
-
-    fn rename_shadowed_vars_in_stmt(
-        stmt: &mut Stmt,
-        counts: &mut HashMap<String, usize>,
-        active: &mut HashMap<String, String>,
-        scope_vars: &mut HashSet<String>,
-    ) {
-        match stmt {
-            Stmt::Var(v) => {
-                if let Some(init) = &mut v.init {
-                    Self::rename_shadowed_vars_in_expr(init, counts, active);
-                }
-                Self::check_and_record_scope_pat(&v.pat, scope_vars);
-                Self::rename_shadowed_vars_in_pat(&mut v.pat, counts, active);
-            }
-            Stmt::Expr(e) => {
-                Self::rename_shadowed_vars_in_expr(e, counts, active);
-            }
-            Stmt::Return(r) => {
-                if let Some(arg) = &mut r.arg {
-                    Self::rename_shadowed_vars_in_expr(arg, counts, active);
-                }
-            }
-            Stmt::If(i) => {
-                Self::rename_shadowed_vars_in_expr(&mut i.test, counts, active);
-                let saved = active.clone();
-                let mut cons_scope = HashSet::new();
-                Self::rename_shadowed_vars_in_stmt(&mut i.cons, counts, active, &mut cons_scope);
-                *active = saved.clone();
-                if let Some(alt) = &mut i.alt {
-                    let mut alt_scope = HashSet::new();
-                    Self::rename_shadowed_vars_in_stmt(alt, counts, active, &mut alt_scope);
-                    *active = saved;
-                }
-            }
-            Stmt::While(w) => {
-                Self::rename_shadowed_vars_in_expr(&mut w.test, counts, active);
-                let saved = active.clone();
-                let mut body_scope = HashSet::new();
-                Self::rename_shadowed_vars_in_stmt(&mut w.body, counts, active, &mut body_scope);
-                *active = saved;
-            }
-            Stmt::For(f) => {
-                Self::rename_shadowed_vars_in_expr(&mut f.expr, counts, active);
-                let saved = active.clone();
-                let mut for_scope = HashSet::new();
-                Self::check_and_record_scope_pat(&f.pat, &mut for_scope);
-                Self::rename_shadowed_vars_in_pat(&mut f.pat, counts, active);
-                match &mut *f.body {
-                    Stmt::Block(b) => {
-                        Self::rename_shadowed_vars_in_block(b, counts, active, &mut for_scope);
-                    }
-                    other => {
-                        Self::rename_shadowed_vars_in_stmt(other, counts, active, &mut for_scope);
-                    }
-                }
-                *active = saved;
-            }
-            Stmt::Match(m) => {
-                Self::rename_shadowed_vars_in_expr(&mut m.disc, counts, active);
-                for arm in &mut m.arms {
-                    let saved = active.clone();
-                    let mut arm_scope = HashSet::new();
-                    Self::rename_shadowed_vars_in_pat(&mut arm.pat, counts, active);
-                    if let Some(g) = &mut arm.guard {
-                        Self::rename_shadowed_vars_in_expr(g, counts, active);
-                    }
-                    Self::rename_shadowed_vars_in_stmt(
-                        &mut arm.body,
-                        counts,
-                        active,
-                        &mut arm_scope,
-                    );
-                    *active = saved;
-                }
-            }
-            Stmt::Spawn(sp) => {
-                Self::rename_shadowed_vars_in_expr(&mut sp.callee, counts, active);
-                for arg in &mut sp.args {
-                    Self::rename_shadowed_vars_in_expr(arg, counts, active);
-                }
-            }
-            Stmt::Defer(s) | Stmt::ErrDefer(s) => {
-                Self::rename_shadowed_vars_in_stmt(s, counts, active, scope_vars);
-            }
-            Stmt::ComptimeBlock(b) | Stmt::Block(b) | Stmt::UnsafeBlock(b) => {
-                let saved = active.clone();
-                let mut child_scope = HashSet::new();
-                Self::rename_shadowed_vars_in_block(b, counts, active, &mut child_scope);
-                *active = saved;
-            }
-            Stmt::TryCatch {
-                try_block,
-                err_ident,
-                catch_body,
-                ..
-            } => {
-                let saved = active.clone();
-                let mut try_scope = HashSet::new();
-                Self::rename_shadowed_vars_in_block(try_block, counts, active, &mut try_scope);
-                *active = saved.clone();
-                if let Some(cb) = catch_body {
-                    let mut catch_scope = HashSet::new();
-                    if let Some(id) = err_ident {
-                        catch_scope.insert(id.sym.clone());
-                        let c = counts.entry(id.sym.clone()).or_insert(0);
-                        *c += 1;
-                        if *c > 1 {
-                            let new_name = format!("{}__shadow_{}", id.sym, *c - 1);
-                            active.insert(id.sym.clone(), new_name.clone());
-                            id.sym = new_name;
-                        } else {
-                            active.insert(id.sym.clone(), id.sym.clone());
-                        }
-                    }
-                    Self::rename_shadowed_vars_in_stmt(cb, counts, active, &mut catch_scope);
-                    *active = saved;
-                }
-            }
-        }
-    }
-
-    fn rename_shadowed_vars_in_block(
-        block: &mut BlockStmt,
-        counts: &mut HashMap<String, usize>,
-        active: &mut HashMap<String, String>,
-        scope_vars: &mut HashSet<String>,
-    ) {
-        for s in &mut block.body {
-            Self::rename_shadowed_vars_in_stmt(s, counts, active, scope_vars);
-        }
-    }
-
     fn generate_function(&mut self, func: &Function) {
         self.generate_function_decorated(func, None);
     }
@@ -4716,26 +4314,7 @@ impl Codegen {
         {
             return;
         }
-        let mut owned_func = raw_func.clone();
-        {
-            let mut counts: HashMap<String, usize> = HashMap::new();
-            let mut active: HashMap<String, String> = HashMap::new();
-            let mut scope_vars: HashSet<String> = HashSet::new();
-            for p in &owned_func.params {
-                counts.insert(p.ident.sym.clone(), 1);
-                active.insert(p.ident.sym.clone(), p.ident.sym.clone());
-                if p.ident.sym != "this" && p.ident.sym != "_" {
-                    scope_vars.insert(p.ident.sym.clone());
-                }
-            }
-            Self::rename_shadowed_vars_in_block(
-                &mut owned_func.body,
-                &mut counts,
-                &mut active,
-                &mut scope_vars,
-            );
-        }
-        let func = &owned_func;
+        let func = raw_func;
         let zig_name = if func.ident.sym == "main" {
             "cp_main".to_string()
         } else if func.ident.sym == "test" {
@@ -5410,6 +4989,9 @@ impl Codegen {
                             ));
                             let init_ty = self.infer_cp_type(init);
                             for prop in props {
+                                if matches!(prop.val, Some(Pattern::Wildcard)) {
+                                    continue;
+                                }
                                 let bound_name = if let Some(sub_pat) = &prop.val {
                                     if let Pattern::Ident(id) = sub_pat {
                                         id.sym.clone()
@@ -5445,6 +5027,16 @@ impl Codegen {
                                     self.write_to_case(&format!("_ = &{};", bound_name));
                                 }
                             }
+                        }
+                        Pattern::Wildcard => {
+                            self.write_to_case(&format!(
+                                "_ = {};",
+                                if is_try {
+                                    format!("try {}", final_expr)
+                                } else {
+                                    final_expr.clone()
+                                }
+                            ));
                         }
                         _ => {}
                     }
@@ -9073,6 +8665,9 @@ impl Codegen {
                             };
                             if let Some(tys) = obj_fields {
                                 for p in fields {
+                                    if matches!(p.val, Some(Pattern::Wildcard)) {
+                                        continue;
+                                    }
                                     let ident = if let Some(Pattern::Ident(i)) = &p.val {
                                         i
                                     } else {
@@ -9089,6 +8684,9 @@ impl Codegen {
                                 }
                             } else {
                                 for p in fields {
+                                    if matches!(p.val, Some(Pattern::Wildcard)) {
+                                        continue;
+                                    }
                                     let ident = if let Some(Pattern::Ident(i)) = &p.val {
                                         i
                                     } else {
@@ -9255,6 +8853,9 @@ impl Codegen {
                             };
                             if let Some(tys) = obj_fields {
                                 for p in fields {
+                                    if matches!(p.val, Some(Pattern::Wildcard)) {
+                                        continue;
+                                    }
                                     let ident = if let Some(Pattern::Ident(i)) = &p.val {
                                         i
                                     } else {
@@ -9270,6 +8871,9 @@ impl Codegen {
                                 }
                             } else {
                                 for p in fields {
+                                    if matches!(p.val, Some(Pattern::Wildcard)) {
+                                        continue;
+                                    }
                                     let ident = if let Some(Pattern::Ident(i)) = &p.val {
                                         i
                                     } else {

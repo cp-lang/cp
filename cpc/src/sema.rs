@@ -1114,98 +1114,140 @@ impl Analyzer {
         Ok(())
     }
 
-    fn bind_match_pattern(&mut self, pat: &Pattern) {
+    fn bind_match_pattern(&mut self, pat: &Pattern) -> SemaResult<()> {
         match pat {
             Pattern::Ident(id) => {
-                let _ = self.define(
+                if let Some(SymbolKind::Var { .. }) = self.scopes.last().unwrap().get(&id.sym) {
+                    return Err(SemaError::DuplicateVarDecl(id.sym.clone(), id.span));
+                }
+                self.define(
                     id.sym.clone(),
                     SymbolKind::Var {
                         ty: Type::Any,
                         kind: VarDeclKind::Let,
                     },
                     id.span,
-                );
+                )?;
             }
-            Pattern::Err(inner) => self.bind_match_pattern(inner),
+            Pattern::Err(inner) => self.bind_match_pattern(inner)?,
             Pattern::Enum(ep) => {
                 if let Some(tpats) = &ep.tuple_pats {
                     for tp in tpats {
-                        self.bind_match_pattern(tp);
+                        self.bind_match_pattern(tp)?;
                     }
                 }
                 if let Some(props) = &ep.fields {
                     for p in props {
                         if let Some(vp) = &p.val {
-                            self.bind_match_pattern(vp);
+                            self.bind_match_pattern(vp)?;
                         } else {
-                            let _ = self.define(
+                            if let Some(SymbolKind::Var { .. }) =
+                                self.scopes.last().unwrap().get(&p.key.sym)
+                            {
+                                return Err(SemaError::DuplicateVarDecl(
+                                    p.key.sym.clone(),
+                                    p.key.span,
+                                ));
+                            }
+                            self.define(
                                 p.key.sym.clone(),
                                 SymbolKind::Var {
                                     ty: Type::Any,
                                     kind: VarDeclKind::Let,
                                 },
                                 p.key.span,
-                            );
+                            )?;
                         }
                     }
                 }
             }
-            Pattern::Tuple(els) | Pattern::Or(els) => {
+            Pattern::Tuple(els) | Pattern::Array(els) => {
                 for el in els {
-                    self.bind_match_pattern(el);
+                    self.bind_match_pattern(el)?;
                 }
+            }
+            Pattern::Or(els) => {
+                let base_scope = self.scopes.last().unwrap().clone();
+                let mut merged = base_scope.clone();
+                for el in els {
+                    *self.scopes.last_mut().unwrap() = base_scope.clone();
+                    self.bind_match_pattern(el)?;
+                    for (k, v) in self.scopes.last().unwrap() {
+                        merged.insert(k.clone(), v.clone());
+                    }
+                }
+                *self.scopes.last_mut().unwrap() = merged;
             }
             Pattern::Object(props) => {
                 for p in props {
                     if let Some(vp) = &p.val {
-                        self.bind_match_pattern(vp);
+                        self.bind_match_pattern(vp)?;
                     } else {
-                        let _ = self.define(
+                        if let Some(SymbolKind::Var { .. }) =
+                            self.scopes.last().unwrap().get(&p.key.sym)
+                        {
+                            return Err(SemaError::DuplicateVarDecl(p.key.sym.clone(), p.key.span));
+                        }
+                        self.define(
                             p.key.sym.clone(),
                             SymbolKind::Var {
                                 ty: Type::Any,
                                 kind: VarDeclKind::Let,
                             },
                             p.key.span,
-                        );
+                        )?;
                     }
                 }
             }
             _ => {}
         }
+        Ok(())
     }
 
-    fn bind_for_pattern(&mut self, pat: &Pattern, elem_ty: &Type) {
+    fn bind_for_pattern(&mut self, pat: &Pattern, elem_ty: &Type) -> SemaResult<()> {
         match pat {
             Pattern::Ident(id) => {
-                let _ = self.define(
+                if let Some(SymbolKind::Var { .. }) = self.scopes.last().unwrap().get(&id.sym) {
+                    return Err(SemaError::DuplicateVarDecl(id.sym.clone(), id.span));
+                }
+                self.define(
                     id.sym.clone(),
                     SymbolKind::Var {
                         ty: elem_ty.clone(),
                         kind: VarDeclKind::Let,
                     },
                     id.span,
-                );
+                )?;
             }
             Pattern::Tuple(pats) | Pattern::Array(pats) => {
                 for p in pats {
-                    self.bind_for_pattern(p, &Type::Any);
+                    self.bind_for_pattern(p, &Type::Any)?;
                 }
             }
             Pattern::Object(props) => {
                 for p in props {
-                    let _ = self.define(
-                        p.key.sym.clone(),
-                        SymbolKind::Var {
-                            ty: Type::Any,
-                            kind: VarDeclKind::Let,
-                        },
-                        p.key.span,
-                    );
+                    if let Some(vp) = &p.val {
+                        self.bind_for_pattern(vp, &Type::Any)?;
+                    } else {
+                        if let Some(SymbolKind::Var { .. }) =
+                            self.scopes.last().unwrap().get(&p.key.sym)
+                        {
+                            return Err(SemaError::DuplicateVarDecl(p.key.sym.clone(), p.key.span));
+                        }
+                        self.define(
+                            p.key.sym.clone(),
+                            SymbolKind::Var {
+                                ty: Type::Any,
+                                kind: VarDeclKind::Let,
+                            },
+                            p.key.span,
+                        )?;
+                    }
                 }
             }
-            _ => self.bind_match_pattern(pat),
+            _ => self.bind_match_pattern(pat)?,
         }
+        Ok(())
     }
 
     fn analyze_stmt(&mut self, stmt: &Stmt) -> SemaResult<()> {
@@ -1271,8 +1313,23 @@ impl Analyzer {
                 }
 
                 self.enter_scope();
-                self.bind_for_pattern(&f.pat, &elem_ty);
-                let res = self.analyze_stmt(&f.body);
+                let bind_res = self.bind_for_pattern(&f.pat, &elem_ty);
+                let res = match bind_res {
+                    Ok(()) => match &*f.body {
+                        Stmt::Block(b) => {
+                            let mut r = Ok(());
+                            for s in &b.body {
+                                if let Err(e) = self.analyze_stmt(s) {
+                                    r = Err(e);
+                                    break;
+                                }
+                            }
+                            r
+                        }
+                        other => self.analyze_stmt(other),
+                    },
+                    Err(e) => Err(e),
+                };
                 self.exit_scope();
 
                 if let Some(ref coll_name) = coll_var_opt {
@@ -1293,12 +1350,19 @@ impl Analyzer {
                 self.analyze_expr(&m.disc)?;
                 for arm in &m.arms {
                     self.enter_scope();
-                    self.bind_match_pattern(&arm.pat);
+                    self.bind_match_pattern(&arm.pat)?;
                     if let Some(g) = &arm.guard {
                         self.infer_type(g)?;
                         self.analyze_expr(g)?;
                     }
-                    self.analyze_stmt(&arm.body)?;
+                    match &*arm.body {
+                        Stmt::Block(b) => {
+                            for s in &b.body {
+                                self.analyze_stmt(s)?;
+                            }
+                        }
+                        other => self.analyze_stmt(other)?,
+                    }
                     self.exit_scope();
                 }
             }
@@ -1426,11 +1490,18 @@ impl Analyzer {
                 self.analyze_expr(&m.disc)?;
                 for arm in &m.arms {
                     self.enter_scope();
-                    self.bind_match_pattern(&arm.pat);
+                    self.bind_match_pattern(&arm.pat)?;
                     if let Some(g) = &arm.guard {
                         self.analyze_expr(g)?;
                     }
-                    self.analyze_stmt(&arm.body)?;
+                    match &*arm.body {
+                        Stmt::Block(b) => {
+                            for s in &b.body {
+                                self.analyze_stmt(s)?;
+                            }
+                        }
+                        other => self.analyze_stmt(other)?,
+                    }
                     self.exit_scope();
                 }
             }
@@ -1686,12 +1757,8 @@ impl Analyzer {
     fn analyze_pattern(&mut self, pat: &Pattern, ty: Type, kind: &VarDeclKind) -> SemaResult<()> {
         match pat {
             Pattern::Ident(ident) => {
-                if ident.sym != "_" {
-                    if let Some(SymbolKind::Var { .. }) =
-                        self.scopes.last().unwrap().get(&ident.sym)
-                    {
-                        return Err(SemaError::DuplicateVarDecl(ident.sym.clone(), ident.span));
-                    }
+                if let Some(SymbolKind::Var { .. }) = self.scopes.last().unwrap().get(&ident.sym) {
+                    return Err(SemaError::DuplicateVarDecl(ident.sym.clone(), ident.span));
                 }
                 self.define(
                     ident.sym.clone(),
@@ -1705,6 +1772,7 @@ impl Analyzer {
             Pattern::Tuple(elements) => {
                 let element_types = match ty {
                     Type::Tuple(tys) => tys,
+                    Type::Array(inner) => vec![(*inner).clone(); elements.len()],
                     Type::Any => vec![Type::Any; elements.len()],
                     _ => {
                         return Err(SemaError::TypeMismatch(

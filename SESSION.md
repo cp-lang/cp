@@ -3205,3 +3205,34 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 将同作用域重复声明变量编译期拦截（[`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs)、[`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs)）、测试用例（[`cap/test/test_mut_borrow_ops.cp`](file:///data/dev/cp/cap/test/test_mut_borrow_ops.cp)、[`cap/test/test_var_fail_redeclare.cp`](file:///data/dev/cp/cap/test/test_var_fail_redeclare.cp)）以及更新后的 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)、[`SESSION.md`](file:///data/dev/cp/SESSION.md) 与 [`GEMINI.md`](file:///data/dev/cp/GEMINI.md) 提交至 Git 仓库。
 
 
+---
+
+## 2026-10-28 (Session Update - 彻底删除 `rename_shadowed_vars_*` 冗余代码并对齐 `*` 通配符同名报错)
+
+### 用户指令
+> 1. 你之前错误理解同一名称可以重复let 定义, 你实现的代码, 是否已删除
+> 2. 模式匹配, 通配符, 我们从 _ 改为 *号, 同名编译报错, 需注意
+
+### 执行结果汇报
+1. **彻底删除此前误判重复 `let` 定义所写的代码**：
+   - 已将 [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs) 中此前为支持同名重复 `let` 定义而编写的 `check_and_record_scope_pat`、`rename_shadowed_vars_in_pat`、`rename_shadowed_vars_in_expr`、`rename_shadowed_vars_in_stmt`、`rename_shadowed_vars_in_block`（共 420 余行代码）**100% 彻底删除**；
+   - 将 [`cap/test/test_mut_borrow_ops.cp`](file:///data/dev/cp/cap/test/test_mut_borrow_ops.cp) 中的三段独立示意代码分别放入 `demo_primitive()`、`demo_object()`、`demo_array()` 三个独立函数中。
+2. **模式匹配与解构通配符 `*`（而非 `_`）及同名编译报错**：
+   - 在 [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs) 的 `analyze_pattern` 中移除了此前对 `_` 的豁免，并在 `bind_match_pattern` 与 `bind_for_pattern` 中全面增加同名变量绑定检查；
+   - 现在 `_` 作为普通标识符/接收者别名对待（不再作为通配符豁免），写 `let [_, _] = [10, 20];`、`let _ = 1; let _ = 2;` 或 `match x { [a, a] => ... }` 均会触发 `Compile Error: Cannot redeclare block-scoped variable`；而使用 `*` 通配符（如 `let [*, second, *] = v;`、`let * = expr;`、`match x { [*, *] => ... }`）则正常编译通过；
+   - 新增反向测试 [`cap/test/test_pat_fail_duplicate.cp`](file:///data/dev/cp/cap/test/test_pat_fail_duplicate.cp) 并验证通过，同步更新 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md) 与 [`SESSION.md`](file:///data/dev/cp/SESSION.md)。
+
+
+---
+
+## 2026-10-28 (Session Update - Git Commit)
+
+### 用户指令
+> 提交
+
+### 执行结果汇报
+将移除 `rename_shadowed_vars_*` 冗余代码、统一 `*` 通配符与同名模式编译期拦截（[`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs)、[`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs)）、测试用例（[`cap/test/test_mut_borrow_ops.cp`](file:///data/dev/cp/cap/test/test_mut_borrow_ops.cp)、[`cap/test/test_pat_fail_duplicate.cp`](file:///data/dev/cp/cap/test/test_pat_fail_duplicate.cp)）以及更新后的 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)、[`SESSION.md`](file:///data/dev/cp/SESSION.md) 提交至 Git 仓库。
+
+
+
+

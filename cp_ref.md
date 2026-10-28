@@ -1575,7 +1575,7 @@ CP 语言通过编译器底层的“所有权、隐式借用、读写互斥与�
 ## 1. 所有权与自动释放 (Ownership & Auto-Drop)
 
 - **局部变量去冗余**：废除局部变量的 `let mut`，统一使用 `let`（可变绑定）与 `const`（深度不可变）。
-- **严禁同作用域重复声明变量（No Same-Scope Redeclaration）**：对标 TypeScript 与 Zig 的工程安全直觉，在同一个 `{}` 块作用域内严禁重复声明同名变量（如连续写 `let v = 10; let v = [10, 20];` 或在函数顶层块重声明同名参数），编译器将直接报错拦截：`Compile Error: Cannot redeclare block-scoped variable 'v'`（通配丢弃符 `_` 除外，且允许在不同/嵌套的子块 `{ ... }` 中声明同名局部变量）。
+- **严禁同作用域重复声明变量（No Same-Scope Redeclaration & `*` Wildcard）**：对标 TypeScript 与 Zig 的工程安全直觉，在同一个 `{}` 块作用域或同一个解构/模式匹配中严禁重复绑定同名变量（如连续写 `let v = 10; let v = [10, 20];`、`let [a, a] = [1, 2];` 或 `let [_, _] = [1, 2];`），编译器将直接报错拦截：`Compile Error: Cannot redeclare block-scoped variable 'v'`。**注意：CP 的模式匹配与解构通配符是 `*`（而非 `_`），`_` 是类/结构体方法接收者 `this` 的别名或普通变量标识符，重复使用 `_` 同样触发同名编译报错，丢弃元素请使用 `[*, second, *]` 或 `let * = expr;`。**
 - **创建即拥有**：`let tensor = new Tensor();` 创建对象时，`tensor` 拥有该堆内存的唯一所有权。
 - **作用域释放 (RAII)**：当所有者变量离开作用域且未被转移所有权时，编译器自动注入 `defer tensor.release()`（无需 GC，零停顿）。
 - **赋值即 Move**：`let a = b;`（或显式 `let a = move b;`）会将 `b` 的所有权转移给 `a`；而 `let a = &b;` 创建只读借用，`let a = *b;` 创建可变借用。所有权转移后继续访问 `b` 将触发编译期错误：`CP Compile Error: Use of moved value`。

@@ -1290,3 +1290,16 @@ let reply = raw
    - 在 `rename_shadowed_vars_in_stmt` / `rename_shadowed_vars_in_block` 中按词法块边界（`Block`、`If`、`While`、`For`、`Match`、`TryCatch`、`Arrow`）维护独立的 `scope_vars: HashSet<String>`；
    - 同一块内重复声明直接触发编译期拦截，而不同/平行子块（如 `{ let v = 10; } { let v = [10, 20]; }`）中的同名不同类型变量继续通过 Alpha-Renaming（`v__shadow_1`）提升至 CPS 状态机 `Context` 结构体，兼顾编译期严格检查与状态机扁平存储。
 
+---
+
+## 2026-10-28 (Part 5): 彻底清理 `rename_shadowed_vars_*` 冗余代码并对齐 `*` 通配符同名编译报错
+
+### 1. 问题审视与清理
+1. **彻底删除 `codegen.rs` 中的 `rename_shadowed_vars_*`**：
+   - 此前因误将三段独立示意代码当作同一函数内连续三次声明 `let v`，在 `cpc/src/codegen.rs` 中编写了 420 余行 `rename_shadowed_vars_*` AST 重命名代码；
+   - 既然明确禁止重复 `let` 定义，且独立示意代码归属各自独立函数作用域，已在 `cpc/src/codegen.rs` 中将该 420+ 行代码 100% 彻底删除，保持代码生成器干净纯粹。
+2. **模式匹配与解构通配符 `*` vs 标识符 `_`**：
+   - CP 语言已将模式匹配与解构的通配符从 `_` 统一为 `*`（`Pattern::Wildcard`），而 `_` 则是接收者 `this` 的别名及普通标识符；
+   - 因此，在 `cpc/src/sema.rs` 的 `analyze_pattern`、`bind_match_pattern`、`bind_for_pattern` 中全面移除了对 `_` 的特殊豁免：无论在 `let` 解构、`for` 解构还是 `match` 分支模式中，只要出现同名标识符（包括 `[_, _]` 或 `[a, a]`），一律触发 `Compile Error: Cannot redeclare block-scoped variable`，而使用 `[*, *]` 通配符则合法通过。
+
+

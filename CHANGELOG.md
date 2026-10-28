@@ -605,3 +605,23 @@
 ### 新增文件 (Added)
 - [`cap/test/test_var_fail_redeclare.cp`](file:///data/dev/cp/cap/test/test_var_fail_redeclare.cp): 验证在同一 `{}` 块作用域内重复声明 `let v = 10; let v = [10, 20];` 时触发编译期报错拦截。
 
+## [Unreleased] - 2026-10-28 (Part 5)
+
+### 彻底移除 `codegen.rs` 同名遮蔽重命名代码 (`rename_shadowed_vars_*`) 并统一 `*` 模式匹配通配符同名检查
+
+### 修改文件 (Modified)
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 彻底删除此前误判同名重复 `let` 定义时引入的 `check_and_record_scope_pat`、`rename_shadowed_vars_in_pat`、`rename_shadowed_vars_in_expr`、`rename_shadowed_vars_in_stmt`、`rename_shadowed_vars_in_block`（共 420+ 行冗余代码）；
+  - 在 `Stmt::Var`、`extract_locals_simple` 与 `extract_local_vars_to_str` 中完善 `Pattern::Wildcard`（`*`）支持（涵盖 `let * = expr;`、`let [*, x] = arr;`、`let {a: *, b} = obj;`）。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 在 `analyze_pattern` 中移除对 `_` 的豁免（在 CP 中通配符为 `*` 即 `Pattern::Wildcard`，而 `_` 是合法的变量/接收者标识符，重复绑定 `_` 同样报错 `DuplicateVarDecl`）；
+  - 升级 `bind_match_pattern` 与 `bind_for_pattern` 返回 `SemaResult<()>`，对 `match` 模式与 `for` 循环解构中的同名变量（如 `[a, a]`、`[_, _]`）及循环体/分支块内的同名重声明统一执行 `DuplicateVarDecl` 报错拦截。
+- [`cap/test/test_mut_borrow_ops.cp`](file:///data/dev/cp/cap/test/test_mut_borrow_ops.cp):
+  - 将三段独立演示拆分为 `demo_primitive()`、`demo_object()`、`demo_array()` 三个独立函数，并增加 `let [*, second, *] = v;` 通配符 `*` 解构验证。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 明确说明模式匹配与解构通配符为 `*`（而非 `_`），重复绑定 `_` 或任意同名变量均触发编译期错误。
+
+### 新增文件 (Added)
+- [`cap/test/test_pat_fail_duplicate.cp`](file:///data/dev/cp/cap/test/test_pat_fail_duplicate.cp): 验证在模式解构中重复使用 `_`（`let [_, _] = [10, 20];`）时触发 `DuplicateVarDecl` 编译期报错拦截。
+
+
