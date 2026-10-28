@@ -1243,8 +1243,12 @@ impl Codegen {
         self.writeln("pub const JoinBarrier = struct { lock: Spinlock = .{}, remaining: usize, total: usize, results: []Message, waiter_ctx: ?*anyopaque = null, waiter_fn: ?*const fn(*anyopaque) anyerror!void = null, pub fn init(allocator: std.mem.Allocator, total: usize) !*JoinBarrier { const b = try allocator.create(JoinBarrier); b.* = .{ .remaining = total + 1, .total = total, .results = try allocator.alloc(Message, total), .waiter_ctx = null, .waiter_fn = null }; return b; } pub fn on_task_done(self: *JoinBarrier, idx: usize, msg: Message) void { self.lock.acquire(); self.results[idx] = msg; self.remaining -= 1; const done = (self.remaining == 0); const w_ctx_opt = self.waiter_ctx; const w_fn_opt = self.waiter_fn; if (done and w_ctx_opt != null) { self.waiter_ctx = null; self.waiter_fn = null; } self.lock.release(); if (done) { if (w_ctx_opt) |w_ctx| { const w_fn = w_fn_opt.?; const base_waiter: *BaseContext = @ptrCast(@alignCast(w_ctx)); const arr_res = std.heap.page_allocator.alloc(Message, self.total) catch unreachable; @memcpy(arr_res, self.results); base_waiter.await_result = Message{ .array = arr_res }; schedule(w_fn, w_ctx); } } } pub fn finish_setup_and_should_suspend(self: *JoinBarrier) bool { self.lock.acquire(); self.remaining -= 1; const done = (self.remaining == 0); if (done) { const base_waiter: *BaseContext = @ptrCast(@alignCast(self.waiter_ctx.?)); const arr_res = std.heap.page_allocator.alloc(Message, self.total) catch unreachable; @memcpy(arr_res, self.results); base_waiter.await_result = Message{ .array = arr_res }; self.waiter_ctx = null; self.waiter_fn = null; } self.lock.release(); return !done; } };");
         self.writeln("pub fn __cp_task_bridge(p: *anyopaque) anyerror!void { const t: *Task = @ptrCast(@alignCast(p)); t.lock.acquire(); t.state = 2; const jb = t.join_barrier; const j_idx = t.join_idx; const w_ctx_opt = t.waiter_ctx; const w_fn_opt = t.waiter_fn; t.waiter_ctx = null; t.waiter_fn = null; const res = t.base.await_result; t.lock.release(); if (jb) |b| { b.on_task_done(j_idx, res orelse Message{ .string = \"\" }); } if (w_ctx_opt) |w_ctx| { const w_fn = w_fn_opt.?; const base_waiter: *BaseContext = @ptrCast(@alignCast(w_ctx)); base_waiter.await_result = res; schedule(w_fn, w_ctx); } _ = global_active_tasks.fetchSub(1, .release); }");
         self.writeln("pub fn cp_msg_to_val(m: Message) []const u8 { return cp_fmt(m); }");
-        self.writeln("pub fn CpUnpackElemType(comptime T: type, comptime idx: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; return @FieldType(T, std.fmt.comptimePrint(\"{d}\", .{idx})); }");
-        self.writeln("pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return \"\"; } else if (comptime T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return \"\"; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[idx]; } else { return @field(v, std.fmt.comptimePrint(\"{d}\", .{idx})); } }");
+        self.writeln("pub fn CpUnpackElemType(comptime T: type, comptime idx: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; return @FieldType(T, std.fmt.comptimePrint(\"{d}\", .{idx})); }");
+        self.writeln("pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return \"\"; } else if (comptime T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return \"\"; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(T) == .array)) { return v[idx]; } else { return @field(v, std.fmt.comptimePrint(\"{d}\", .{idx})); } }");
+        self.writeln("pub fn CpUnpackTailType(comptime T: type, comptime offset_from_end: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; const n = @typeInfo(T).@\"struct\".fields.len; return @FieldType(T, std.fmt.comptimePrint(\"{d}\", .{n - offset_from_end})); }");
+        self.writeln("pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return \"\"; } else if (comptime T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return \"\"; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .array)) { return v[v.len - offset_from_end]; } else { const n = @typeInfo(T).@\"struct\".fields.len; return @field(v, std.fmt.comptimePrint(\"{d}\", .{n - offset_from_end})); } }");
+        self.writeln("pub fn CpUnpackSliceType(comptime T: type, comptime start: usize) type { if (T == ?Message or T == Message) return []const Message; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return T; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return []const @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return []const @typeInfo(T).array.child; const fields = @typeInfo(T).@\"struct\".fields; if (fields.len == 0) return []const i32; const Elem = if (start < fields.len) fields[start].type else fields[0].type; return []const CpValType(Elem); }");
+        self.writeln("pub fn cp_unpack_slice(v: anytype, comptime start: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start + suffix_len) { return m.array[start .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime T == Message) { if (v == .array and v.array.len >= start + suffix_len) { return v.array[start .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[start .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[start .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[start .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .array)) { return v[start .. v.len - suffix_len]; } else { const fields = @typeInfo(T).@\"struct\".fields; const end = fields.len - suffix_len; const count = if (end > start) end - start else 0; const Elem = if (start < fields.len) CpValType(fields[start].type) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, std.fmt.comptimePrint(\"{d}\", .{f_idx}))); } return buf; } }");
         self.writeln("");
 
         println!("[TRACE] Generating Traits");
@@ -3640,12 +3644,55 @@ impl Codegen {
             Pattern::Tuple(pats) => {
                 let mut conds = Vec::new();
                 let mut binds = String::new();
+                let rest_pos = pats.iter().position(|p| matches!(p, Pattern::Rest(_)));
                 for (idx, sub_pat) in pats.iter().enumerate() {
-                    let elem_expr = format!("{}.@\"{}\"", val_expr, idx);
-                    let sub_ty = if let Some(Type::Tuple(tys)) = val_cp_ty {
-                        tys.get(idx)
+                    if let Pattern::Rest(inner) = sub_pat {
+                        if let Pattern::Ident(id) = &**inner {
+                            let suffix_len = pats.len() - 1 - idx;
+                            let slice_expr =
+                                format!("cp_unpack_slice({}, {}, {})", val_expr, idx, suffix_len);
+                            if let Some(Type::Array(elem_ty)) = val_cp_ty {
+                                bound_types.push((id.sym.clone(), Type::Array(elem_ty.clone())));
+                            } else if let Some(Type::Tuple(tys)) = val_cp_ty {
+                                let elem_ty = tys
+                                    .get(idx)
+                                    .cloned()
+                                    .or_else(|| tys.first().cloned())
+                                    .unwrap_or(Type::I32);
+                                bound_types.push((id.sym.clone(), Type::Array(Box::new(elem_ty))));
+                            }
+                            binds.push_str(&format!(
+                                "const {0} = {1}; _ = &{0}; ",
+                                id.sym, slice_expr
+                            ));
+                        }
+                        continue;
+                    }
+                    let elem_expr = if let Some(r_idx) = rest_pos {
+                        if idx > r_idx {
+                            let offset_from_end = pats.len() - idx;
+                            format!("cp_unpack_tail({}, {})", val_expr, offset_from_end)
+                        } else {
+                            format!("cp_unpack_elem({}, {})", val_expr, idx)
+                        }
                     } else {
-                        None
+                        format!("cp_unpack_elem({}, {})", val_expr, idx)
+                    };
+                    let sub_ty = match val_cp_ty {
+                        Some(Type::Tuple(tys)) => {
+                            if let Some(r_idx) = rest_pos {
+                                if idx > r_idx {
+                                    let offset = pats.len() - idx;
+                                    tys.len().checked_sub(offset).and_then(|ti| tys.get(ti))
+                                } else {
+                                    tys.get(idx)
+                                }
+                            } else {
+                                tys.get(idx)
+                            }
+                        }
+                        Some(Type::Array(elem_ty)) => Some(&**elem_ty),
+                        _ => None,
                     };
                     let (c, b) = self.generate_pattern_match(
                         &elem_expr,
@@ -4961,17 +5008,108 @@ impl Codegen {
                                     final_expr.clone()
                                 }
                             ));
+                            let mut init_ty = self.infer_cp_type(init);
+                            while let Some(Type::BorrowType { inner, .. }) = init_ty {
+                                init_ty = Some(*inner);
+                            }
+                            let rest_pos =
+                                elements.iter().position(|p| matches!(p, Pattern::Rest(_)));
+                            let keyword = match var.kind {
+                                crate::ast::VarDeclKind::Const => "const",
+                                _ => "var",
+                            };
                             for (idx, el) in elements.iter().enumerate() {
-                                if let Pattern::Ident(ident) = el {
-                                    let lhs = if self.is_state_machine {
-                                        format!("ctx.{}", ident.sym)
-                                    } else {
-                                        format!("var {}", ident.sym)
-                                    };
-                                    self.write_to_case(&format!(
-                                        "{} = cp_unpack_elem(_tmp_v{}, {});",
-                                        lhs, tmp_id, idx
-                                    ));
+                                match el {
+                                    Pattern::Ident(ident) => {
+                                        self.var_scope_depth
+                                            .insert(ident.sym.clone(), self.current_scope_depth);
+                                        if let Some(Type::Array(elem_ty)) = &init_ty {
+                                            self.var_cp_types
+                                                .insert(ident.sym.clone(), (**elem_ty).clone());
+                                        } else if let Some(Type::Tuple(tys)) = &init_ty {
+                                            let ty_idx = if let Some(r_idx) = rest_pos {
+                                                if idx < r_idx {
+                                                    Some(idx)
+                                                } else {
+                                                    let offset = elements.len() - idx;
+                                                    tys.len().checked_sub(offset)
+                                                }
+                                            } else {
+                                                Some(idx)
+                                            };
+                                            if let Some(ti) = ty_idx {
+                                                if let Some(t) = tys.get(ti) {
+                                                    self.var_cp_types
+                                                        .insert(ident.sym.clone(), t.clone());
+                                                }
+                                            }
+                                        }
+                                        let lhs = if self.is_state_machine {
+                                            format!("ctx.{}", ident.sym)
+                                        } else {
+                                            format!("{} {}", keyword, ident.sym)
+                                        };
+                                        if let Some(r_idx) = rest_pos {
+                                            if idx > r_idx {
+                                                let offset_from_end = elements.len() - idx;
+                                                self.write_to_case(&format!(
+                                                    "{} = cp_unpack_tail(_tmp_v{}, {});",
+                                                    lhs, tmp_id, offset_from_end
+                                                ));
+                                            } else {
+                                                self.write_to_case(&format!(
+                                                    "{} = cp_unpack_elem(_tmp_v{}, {});",
+                                                    lhs, tmp_id, idx
+                                                ));
+                                            }
+                                        } else {
+                                            self.write_to_case(&format!(
+                                                "{} = cp_unpack_elem(_tmp_v{}, {});",
+                                                lhs, tmp_id, idx
+                                            ));
+                                        }
+                                        if !self.is_state_machine {
+                                            self.write_to_case(&format!("_ = &{};", ident.sym));
+                                        }
+                                    }
+                                    Pattern::Rest(inner) => {
+                                        if let Pattern::Ident(ident) = &**inner {
+                                            self.var_scope_depth.insert(
+                                                ident.sym.clone(),
+                                                self.current_scope_depth,
+                                            );
+                                            if let Some(Type::Array(elem_ty)) = &init_ty {
+                                                self.var_cp_types.insert(
+                                                    ident.sym.clone(),
+                                                    Type::Array(elem_ty.clone()),
+                                                );
+                                            } else if let Some(Type::Tuple(tys)) = &init_ty {
+                                                let elem_ty = tys
+                                                    .get(idx)
+                                                    .cloned()
+                                                    .or_else(|| tys.first().cloned())
+                                                    .unwrap_or(Type::I32);
+                                                self.var_cp_types.insert(
+                                                    ident.sym.clone(),
+                                                    Type::Array(Box::new(elem_ty)),
+                                                );
+                                            }
+                                            let suffix_len = elements.len() - 1 - idx;
+                                            let lhs = if self.is_state_machine {
+                                                format!("ctx.{}", ident.sym)
+                                            } else {
+                                                format!("{} {}", keyword, ident.sym)
+                                            };
+                                            self.write_to_case(&format!(
+                                                "{} = cp_unpack_slice(_tmp_v{}, {}, {});",
+                                                lhs, tmp_id, idx, suffix_len
+                                            ));
+                                            if !self.is_state_machine {
+                                                self.write_to_case(&format!("_ = &{};", ident.sym));
+                                            }
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
@@ -4987,7 +5125,10 @@ impl Codegen {
                                     final_expr.clone()
                                 }
                             ));
-                            let init_ty = self.infer_cp_type(init);
+                            let mut init_ty = self.infer_cp_type(init);
+                            while let Some(Type::BorrowType { inner, .. }) = init_ty {
+                                init_ty = Some(*inner);
+                            }
                             for prop in props {
                                 if matches!(prop.val, Some(Pattern::Wildcard)) {
                                     continue;
@@ -5410,18 +5551,49 @@ impl Codegen {
 
                     match &f.pat {
                         Pattern::Tuple(elems) => {
+                            let rest_pos = elems.iter().position(|p| matches!(p, Pattern::Rest(_)));
                             for (idx, p) in elems.iter().enumerate() {
-                                if let Pattern::Ident(id) = p {
-                                    self.var_scope_depth
-                                        .insert(id.sym.clone(), self.current_scope_depth);
-                                    if f.mode == IterMode::MutBorrow {
-                                        self.mut_borrow_loop_vars.insert(id.sym.clone());
+                                match p {
+                                    Pattern::Ident(id) => {
+                                        self.var_scope_depth
+                                            .insert(id.sym.clone(), self.current_scope_depth);
+                                        if f.mode == IterMode::MutBorrow {
+                                            self.mut_borrow_loop_vars.insert(id.sym.clone());
+                                        }
+                                        let val_expr = if let Some(r_idx) = rest_pos {
+                                            if idx > r_idx {
+                                                let offset_from_end = elems.len() - idx;
+                                                format!(
+                                                    "cp_unpack_tail({}, {})",
+                                                    item_var, offset_from_end
+                                                )
+                                            } else {
+                                                format!("(if (comptime (@typeInfo(@TypeOf({0})) == .pointer and @hasField(@typeInfo(@TypeOf({0})).pointer.child, \"key\")) or (!(@typeInfo(@TypeOf({0})) == .pointer) and @hasField(@TypeOf({0}), \"key\"))) (if ({1} == 0) {0}.key else {0}.value) else cp_unpack_elem({0}, {1}))", item_var, idx)
+                                            }
+                                        } else {
+                                            format!("(if (comptime (@typeInfo(@TypeOf({0})) == .pointer and @hasField(@typeInfo(@TypeOf({0})).pointer.child, \"key\")) or (!(@typeInfo(@TypeOf({0})) == .pointer) and @hasField(@TypeOf({0}), \"key\"))) (if ({1} == 0) {0}.key else {0}.value) else cp_unpack_elem({0}, {1}))", item_var, idx)
+                                        };
+                                        self.write_to_case(&format!(
+                                            "const {} = {}; _ = &{};",
+                                            id.sym, val_expr, id.sym
+                                        ));
                                     }
-                                    let val_expr = format!("(if (comptime (@typeInfo(@TypeOf({0})) == .pointer and @hasField(@typeInfo(@TypeOf({0})).pointer.child, \"key\")) or (!(@typeInfo(@TypeOf({0})) == .pointer) and @hasField(@TypeOf({0}), \"key\"))) (if ({1} == 0) {0}.key else {0}.value) else {0}.@\"{1}\")", item_var, idx);
-                                    self.write_to_case(&format!(
-                                        "const {} = {}; _ = &{};",
-                                        id.sym, val_expr, id.sym
-                                    ));
+                                    Pattern::Rest(inner) => {
+                                        if let Pattern::Ident(id) = &**inner {
+                                            self.var_scope_depth
+                                                .insert(id.sym.clone(), self.current_scope_depth);
+                                            let suffix_len = elems.len() - 1 - idx;
+                                            let val_expr = format!(
+                                                "cp_unpack_slice({}, {}, {})",
+                                                item_var, idx, suffix_len
+                                            );
+                                            self.write_to_case(&format!(
+                                                "const {} = {}; _ = &{};",
+                                                id.sym, val_expr, id.sym
+                                            ));
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
@@ -8619,39 +8791,98 @@ impl Codegen {
                         }
                         Pattern::Tuple(el) => {
                             let init_cp_ty = v.init.as_ref().and_then(|e| self.infer_cp_type(e));
-                            let resolved_ty = v.ty.as_ref().or(init_cp_ty.as_ref());
-                            match resolved_ty {
+                            let mut resolved_ty = v.ty.as_ref().or(init_cp_ty.as_ref()).cloned();
+                            while let Some(Type::BorrowType { inner, .. }) = resolved_ty {
+                                resolved_ty = Some(*inner);
+                            }
+                            let rest_pos = el.iter().position(|p| matches!(p, Pattern::Rest(_)));
+                            match &resolved_ty {
                                 Some(Type::Tuple(tys)) => {
                                     for (idx, p) in el.iter().enumerate() {
-                                        if let Pattern::Ident(i) = p {
-                                            let t_str = if idx < tys.len() {
-                                                self.map_type(&tys[idx])
-                                            } else {
-                                                "[]const u8".to_string()
-                                            };
-                                            self.locals.insert(i.sym.clone(), t_str);
-                                            if idx < tys.len() {
-                                                self.var_cp_types
-                                                    .insert(i.sym.clone(), tys[idx].clone());
+                                        match p {
+                                            Pattern::Ident(i) => {
+                                                let ty_idx = if let Some(r_idx) = rest_pos {
+                                                    if idx < r_idx {
+                                                        Some(idx)
+                                                    } else {
+                                                        let offset = el.len() - idx;
+                                                        tys.len().checked_sub(offset)
+                                                    }
+                                                } else {
+                                                    Some(idx)
+                                                };
+                                                let t_str = ty_idx
+                                                    .and_then(|ti| tys.get(ti))
+                                                    .map(|t| self.map_type(t))
+                                                    .unwrap_or_else(|| "[]const u8".to_string());
+                                                self.locals.insert(i.sym.clone(), t_str);
+                                                if let Some(ti) = ty_idx {
+                                                    if let Some(t) = tys.get(ti) {
+                                                        self.var_cp_types
+                                                            .insert(i.sym.clone(), t.clone());
+                                                    }
+                                                }
                                             }
+                                            Pattern::Rest(inner) => {
+                                                if let Pattern::Ident(i) = &**inner {
+                                                    let elem_ty = tys
+                                                        .get(idx)
+                                                        .cloned()
+                                                        .or_else(|| tys.first().cloned())
+                                                        .unwrap_or(Type::I32);
+                                                    let arr_ty = Type::Array(Box::new(elem_ty));
+                                                    self.locals.insert(
+                                                        i.sym.clone(),
+                                                        self.map_type(&arr_ty),
+                                                    );
+                                                    self.var_cp_types.insert(i.sym.clone(), arr_ty);
+                                                }
+                                            }
+                                            _ => {}
                                         }
                                     }
                                 }
                                 Some(Type::Array(elem_ty)) => {
                                     let t_str = self.map_type(elem_ty);
+                                    let arr_ty = Type::Array(elem_ty.clone());
+                                    let arr_t_str = self.map_type(&arr_ty);
                                     for p in el {
-                                        if let Pattern::Ident(i) = p {
-                                            self.locals.insert(i.sym.clone(), t_str.clone());
-                                            self.var_cp_types
-                                                .insert(i.sym.clone(), (**elem_ty).clone());
+                                        match p {
+                                            Pattern::Ident(i) => {
+                                                self.locals.insert(i.sym.clone(), t_str.clone());
+                                                self.var_cp_types
+                                                    .insert(i.sym.clone(), (**elem_ty).clone());
+                                            }
+                                            Pattern::Rest(inner) => {
+                                                if let Pattern::Ident(i) = &**inner {
+                                                    self.locals
+                                                        .insert(i.sym.clone(), arr_t_str.clone());
+                                                    self.var_cp_types
+                                                        .insert(i.sym.clone(), arr_ty.clone());
+                                                }
+                                            }
+                                            _ => {}
                                         }
                                     }
                                 }
                                 _ => {
                                     for p in el {
-                                        if let Pattern::Ident(i) = p {
-                                            self.locals
-                                                .insert(i.sym.clone(), "[]const u8".to_string());
+                                        match p {
+                                            Pattern::Ident(i) => {
+                                                self.locals.insert(
+                                                    i.sym.clone(),
+                                                    "[]const u8".to_string(),
+                                                );
+                                            }
+                                            Pattern::Rest(inner) => {
+                                                if let Pattern::Ident(i) = &**inner {
+                                                    self.locals.insert(
+                                                        i.sym.clone(),
+                                                        "[]const Message".to_string(),
+                                                    );
+                                                }
+                                            }
+                                            _ => {}
                                         }
                                     }
                                 }
@@ -8659,7 +8890,11 @@ impl Codegen {
                         }
                         Pattern::Object(fields) => {
                             let init_cp_ty = v.init.as_ref().and_then(|e| self.infer_cp_type(e));
-                            let obj_fields = match v.ty.as_ref().or(init_cp_ty.as_ref()) {
+                            let mut resolved_ty = v.ty.as_ref().or(init_cp_ty.as_ref()).cloned();
+                            while let Some(Type::BorrowType { inner, .. }) = resolved_ty {
+                                resolved_ty = Some(*inner);
+                            }
+                            let obj_fields = match &resolved_ty {
                                 Some(Type::Object(fs)) => Some(fs),
                                 _ => None,
                             };
@@ -8805,41 +9040,113 @@ impl Codegen {
                         }
                         Pattern::Tuple(el) => {
                             let init_cp_ty = var.init.as_ref().and_then(|e| self.infer_cp_type(e));
-                            let resolved_ty = var.ty.as_ref().or(init_cp_ty.as_ref());
-                            match resolved_ty {
+                            let mut resolved_ty = var.ty.as_ref().or(init_cp_ty.as_ref()).cloned();
+                            while let Some(Type::BorrowType { inner, .. }) = resolved_ty {
+                                resolved_ty = Some(*inner);
+                            }
+                            let rest_pos = el.iter().position(|p| matches!(p, Pattern::Rest(_)));
+                            match &resolved_ty {
                                 Some(Type::Tuple(tys)) => {
                                     for (idx, p) in el.iter().enumerate() {
-                                        if let Pattern::Ident(ident) = p {
-                                            let t_str = if idx < tys.len() {
-                                                self.map_type(&tys[idx])
-                                            } else {
-                                                "[]const u8".to_string()
-                                            };
-                                            self.locals.insert(ident.sym.clone(), t_str.clone());
-                                            writeln!(output, "    {}: {},", ident.sym, t_str)
-                                                .unwrap();
+                                        match p {
+                                            Pattern::Ident(ident) => {
+                                                let ty_idx = if let Some(r_idx) = rest_pos {
+                                                    if idx < r_idx {
+                                                        Some(idx)
+                                                    } else {
+                                                        let offset = el.len() - idx;
+                                                        tys.len().checked_sub(offset)
+                                                    }
+                                                } else {
+                                                    Some(idx)
+                                                };
+                                                let t_str = ty_idx
+                                                    .and_then(|ti| tys.get(ti))
+                                                    .map(|t| self.map_type(t))
+                                                    .unwrap_or_else(|| "[]const u8".to_string());
+                                                self.locals
+                                                    .insert(ident.sym.clone(), t_str.clone());
+                                                writeln!(output, "    {}: {},", ident.sym, t_str)
+                                                    .unwrap();
+                                            }
+                                            Pattern::Rest(inner) => {
+                                                if let Pattern::Ident(ident) = &**inner {
+                                                    let elem_ty = tys
+                                                        .get(idx)
+                                                        .cloned()
+                                                        .or_else(|| tys.first().cloned())
+                                                        .unwrap_or(Type::I32);
+                                                    let t_str = self
+                                                        .map_type(&Type::Array(Box::new(elem_ty)));
+                                                    self.locals
+                                                        .insert(ident.sym.clone(), t_str.clone());
+                                                    writeln!(
+                                                        output,
+                                                        "    {}: {},",
+                                                        ident.sym, t_str
+                                                    )
+                                                    .unwrap();
+                                                }
+                                            }
+                                            _ => {}
                                         }
                                     }
                                 }
                                 Some(Type::Array(elem_ty)) => {
                                     let t_str = self.map_type(elem_ty);
+                                    let arr_t_str = self.map_type(&Type::Array(elem_ty.clone()));
                                     for p in el {
-                                        if let Pattern::Ident(ident) = p {
-                                            self.locals.insert(ident.sym.clone(), t_str.clone());
-                                            writeln!(output, "    {}: {},", ident.sym, t_str)
-                                                .unwrap();
+                                        match p {
+                                            Pattern::Ident(ident) => {
+                                                self.locals
+                                                    .insert(ident.sym.clone(), t_str.clone());
+                                                writeln!(output, "    {}: {},", ident.sym, t_str)
+                                                    .unwrap();
+                                            }
+                                            Pattern::Rest(inner) => {
+                                                if let Pattern::Ident(ident) = &**inner {
+                                                    self.locals.insert(
+                                                        ident.sym.clone(),
+                                                        arr_t_str.clone(),
+                                                    );
+                                                    writeln!(
+                                                        output,
+                                                        "    {}: {},",
+                                                        ident.sym, arr_t_str
+                                                    )
+                                                    .unwrap();
+                                                }
+                                            }
+                                            _ => {}
                                         }
                                     }
                                 }
                                 _ => {
                                     for p in el {
-                                        if let Pattern::Ident(ident) = p {
-                                            self.locals.insert(
-                                                ident.sym.clone(),
-                                                "[]const u8".to_string(),
-                                            );
-                                            writeln!(output, "    {}: []const u8,", ident.sym)
-                                                .unwrap();
+                                        match p {
+                                            Pattern::Ident(ident) => {
+                                                self.locals.insert(
+                                                    ident.sym.clone(),
+                                                    "[]const u8".to_string(),
+                                                );
+                                                writeln!(output, "    {}: []const u8,", ident.sym)
+                                                    .unwrap();
+                                            }
+                                            Pattern::Rest(inner) => {
+                                                if let Pattern::Ident(ident) = &**inner {
+                                                    self.locals.insert(
+                                                        ident.sym.clone(),
+                                                        "[]const Message".to_string(),
+                                                    );
+                                                    writeln!(
+                                                        output,
+                                                        "    {}: []const Message,",
+                                                        ident.sym
+                                                    )
+                                                    .unwrap();
+                                                }
+                                            }
+                                            _ => {}
                                         }
                                     }
                                 }
@@ -8847,7 +9154,11 @@ impl Codegen {
                         }
                         Pattern::Object(fields) => {
                             let init_cp_ty = var.init.as_ref().and_then(|e| self.infer_cp_type(e));
-                            let obj_fields = match var.ty.as_ref().or(init_cp_ty.as_ref()) {
+                            let mut resolved_ty = var.ty.as_ref().or(init_cp_ty.as_ref()).cloned();
+                            while let Some(Type::BorrowType { inner, .. }) = resolved_ty {
+                                resolved_ty = Some(*inner);
+                            }
+                            let obj_fields = match &resolved_ty {
                                 Some(Type::Object(fs)) => Some(fs),
                                 _ => None,
                             };

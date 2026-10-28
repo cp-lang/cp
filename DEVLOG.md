@@ -1303,3 +1303,24 @@ let reply = raw
    - 因此，在 `cpc/src/sema.rs` 的 `analyze_pattern`、`bind_match_pattern`、`bind_for_pattern` 中全面移除了对 `_` 的特殊豁免：无论在 `let` 解构、`for` 解构还是 `match` 分支模式中，只要出现同名标识符（包括 `[_, _]` 或 `[a, a]`），一律触发 `Compile Error: Cannot redeclare block-scoped variable`，而使用 `[*, *]` 通配符则合法通过。
 
 
+
+---
+
+## 2026-10-28 (Part 6): 解构与模式匹配支持 `*` 单元素通配符与 `...` 多元素剩余/忽略算子
+
+### 1. 语法正交化设计 (`*` vs `...` vs `..`)
+结合 TypeScript 的直观心智与 Rust 的切片解构威力，同时保持词法与语法 100% 唯一、零歧义：
+1. **`*`（单元素通配符，`Pattern::Wildcard`）**：忽略单个位置的元素或属性值（如 `let [*, second, *] = v;`、`let {a: *, b} = obj;`）；
+2. **`...`（多元素剩余/忽略算子，`Pattern::Rest`）**：
+   - **裸 `...`**：忽略开头、中间或末尾的任意个（0..N）元素（如 `let [first, ..., last] = [10, 20, 30, 40];`）；
+   - **具名 `...rest`**：将开头、中间或末尾的剩余元素提取为零拷贝只读切片 `v[start .. v.len - suffix_len]`（如 `let [head, ...middle, tail] = [10, 20, 30, 40];`）；
+3. **`..` 与 `..=`（纯范围符号，`Expr::Range`）**：严格专用于范围表达式（如 `0..10`、`1..=5`），不在解构中兼容 `..`，保证语法唯一性与编译期极速解析。
+
+### 2. 实现方案
+1. **语法解析 (`cpc/src/parser.rs`)**：在 `parse_single_pattern` 中识别 `Token::DotDotDot` (`...`)，根据后续 token 是否为标识符构造 `Pattern::Rest(Box::new(Pattern::Ident(id)))` 或 `Pattern::Rest(Box::new(Pattern::Wildcard))`。
+2. **语义分析 (`cpc/src/sema.rs`)**：
+   - 检查每个元组/数组模式中 `Pattern::Rest` 的数量，若超过 1 个则报错 `SemaError::MultipleRestInPattern`；
+   - 根据 `rest_idx` 切分前缀（`0..rest_idx`）与后缀（`rest_idx+1..len`），后缀元素按尾部偏移 `offset_from_end = elements.len() - i` 对齐静态元组末端类型，具名 `...rest` 绑定为 `Type::Array(elem_ty)`。
+3. **代码生成 (`cpc/src/codegen.rs`)**：
+   - 在 Zig 运行时预置 `cp_unpack_tail(v, offset_from_end)` 与 `cp_unpack_slice(v, start, suffix_len)`，对切片直接生成零拷贝子切片 `v[start .. v.len - suffix_len]`；
+   - 在 `Stmt::Var`、`generate_pattern_match`、`Stmt::For` 以及状态机局部变量提取器中打通前缀、剩余切片与后缀元素的类型推导与代码生成。

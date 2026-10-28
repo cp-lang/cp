@@ -1157,6 +1157,25 @@ impl<'a> Parser<'a> {
                 self.bump()?;
                 Ok(Pattern::Null)
             }
+            Some(Token::DotDotDot) => {
+                self.bump()?;
+                if !matches!(
+                    self.peek(),
+                    Some(
+                        Token::Comma
+                            | Token::RBracket
+                            | Token::RBrace
+                            | Token::RParen
+                            | Token::Pipe
+                            | Token::FatArrow
+                    ) | None
+                ) {
+                    let id = self.parse_ident()?;
+                    Ok(Pattern::Rest(Box::new(Pattern::Ident(id))))
+                } else {
+                    Ok(Pattern::Rest(Box::new(Pattern::Wildcard)))
+                }
+            }
             Some(Token::LBracket) => {
                 let mut elements = Vec::new();
                 self.bump()?;
@@ -1173,6 +1192,16 @@ impl<'a> Parser<'a> {
                 let _start = self.bump()?.1.start;
                 let mut props = Vec::new();
                 while self.peek() != Some(&Token::RBrace) {
+                    if self.peek() == Some(&Token::DotDotDot) {
+                        self.bump()?;
+                        if !matches!(self.peek(), Some(Token::Comma | Token::RBrace) | None) {
+                            let _ = self.parse_ident()?;
+                        }
+                        if self.peek() == Some(&Token::Comma) {
+                            self.bump()?;
+                        }
+                        continue;
+                    }
                     let key = self.parse_ident()?;
                     let mut val = None;
                     if self.peek() == Some(&Token::Colon) {

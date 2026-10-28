@@ -59,6 +59,10 @@ pub enum SemaError {
     UnsafeRequired(String, Span),
     #[error("Compile Error: Cannot redeclare block-scoped variable '{0}' at {1:?}")]
     DuplicateVarDecl(String, Span),
+    #[error(
+        "Compile Error: Destructuring pattern cannot contain multiple '...' rest elements at {0:?}"
+    )]
+    MultipleRestInPattern(Span),
 }
 
 pub type SemaResult<T> = Result<T, SemaError>;
@@ -1162,10 +1166,14 @@ impl Analyzer {
                 }
             }
             Pattern::Tuple(els) | Pattern::Array(els) => {
+                if els.iter().filter(|p| matches!(p, Pattern::Rest(_))).count() > 1 {
+                    return Err(SemaError::MultipleRestInPattern(Span { start: 0, end: 0 }));
+                }
                 for el in els {
                     self.bind_match_pattern(el)?;
                 }
             }
+            Pattern::Rest(inner) => self.bind_match_pattern(inner)?,
             Pattern::Or(els) => {
                 let base_scope = self.scopes.last().unwrap().clone();
                 let mut merged = base_scope.clone();
@@ -1220,9 +1228,20 @@ impl Analyzer {
                 )?;
             }
             Pattern::Tuple(pats) | Pattern::Array(pats) => {
+                if pats
+                    .iter()
+                    .filter(|p| matches!(p, Pattern::Rest(_)))
+                    .count()
+                    > 1
+                {
+                    return Err(SemaError::MultipleRestInPattern(Span { start: 0, end: 0 }));
+                }
                 for p in pats {
                     self.bind_for_pattern(p, &Type::Any)?;
                 }
+            }
+            Pattern::Rest(inner) => {
+                self.bind_for_pattern(inner, &Type::Array(Box::new(Type::Any)))?;
             }
             Pattern::Object(props) => {
                 for p in props {
@@ -1769,38 +1788,128 @@ impl Analyzer {
                     ident.span,
                 )
             }
+            Pattern::Rest(inner) => self.analyze_pattern(inner, ty, kind),
             Pattern::Tuple(elements) => {
-                let element_types = match ty {
-                    Type::Tuple(tys) => tys,
-                    Type::Array(inner) => vec![(*inner).clone(); elements.len()],
-                    Type::Any => vec![Type::Any; elements.len()],
-                    _ => {
+                let mut base_ty = ty;
+                while let Type::BorrowType { inner, .. } = base_ty {
+                    base_ty = *inner;
+                }
+                let rest_positions: Vec<usize> = elements
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, p)| {
+                        if matches!(p, Pattern::Rest(_)) {
+                            Some(i)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if rest_positions.len() > 1 {
+                    return Err(SemaError::MultipleRestInPattern(Span { start: 0, end: 0 }));
+                }
+                if let Some(&rest_idx) = rest_positions.first() {
+                    let prefix_len = rest_idx;
+                    let suffix_len = elements.len() - 1 - rest_idx;
+                    match base_ty {
+                        Type::Tuple(element_types) => {
+                            if element_types.len() < prefix_len + suffix_len {
+                                return Err(SemaError::TypeMismatch(
+                                    Type::Tuple(vec![]),
+                                    Type::Tuple(element_types),
+                                    Span { start: 0, end: 0 },
+                                ));
+                            }
+                            for i in 0..prefix_len {
+                                self.analyze_pattern(&elements[i], element_types[i].clone(), kind)?;
+                            }
+                            if let Pattern::Rest(inner) = &elements[rest_idx] {
+                                let slice_elem_ty = element_types
+                                    .get(rest_idx)
+                                    .cloned()
+                                    .or_else(|| element_types.first().cloned())
+                                    .unwrap_or(Type::Any);
+                                self.analyze_pattern(
+                                    inner,
+                                    Type::Array(Box::new(slice_elem_ty)),
+                                    kind,
+                                )?;
+                            }
+                            for i in (rest_idx + 1)..elements.len() {
+                                let offset_from_end = elements.len() - i;
+                                let elem_ty =
+                                    element_types[element_types.len() - offset_from_end].clone();
+                                self.analyze_pattern(&elements[i], elem_ty, kind)?;
+                            }
+                        }
+                        Type::Array(inner) => {
+                            for (i, el) in elements.iter().enumerate() {
+                                if i == rest_idx {
+                                    self.analyze_pattern(el, Type::Array(inner.clone()), kind)?;
+                                } else {
+                                    self.analyze_pattern(el, (*inner).clone(), kind)?;
+                                }
+                            }
+                        }
+                        Type::Any | Type::Unknown => {
+                            for (i, el) in elements.iter().enumerate() {
+                                if i == rest_idx {
+                                    self.analyze_pattern(
+                                        el,
+                                        Type::Array(Box::new(Type::Any)),
+                                        kind,
+                                    )?;
+                                } else {
+                                    self.analyze_pattern(el, Type::Any, kind)?;
+                                }
+                            }
+                        }
+                        _ => {
+                            return Err(SemaError::TypeMismatch(
+                                Type::Tuple(vec![]),
+                                base_ty,
+                                Span { start: 0, end: 0 },
+                            ))
+                        }
+                    }
+                    Ok(())
+                } else {
+                    let element_types = match base_ty {
+                        Type::Tuple(tys) => tys,
+                        Type::Array(inner) => vec![(*inner).clone(); elements.len()],
+                        Type::Any | Type::Unknown => vec![Type::Any; elements.len()],
+                        _ => {
+                            return Err(SemaError::TypeMismatch(
+                                Type::Tuple(vec![]),
+                                base_ty,
+                                Span { start: 0, end: 0 },
+                            ))
+                        }
+                    };
+                    if elements.len() != element_types.len() {
                         return Err(SemaError::TypeMismatch(
                             Type::Tuple(vec![]),
-                            ty,
+                            Type::Tuple(element_types),
                             Span { start: 0, end: 0 },
-                        ))
+                        ));
                     }
-                };
-                if elements.len() != element_types.len() {
-                    return Err(SemaError::TypeMismatch(
-                        Type::Tuple(vec![]),
-                        Type::Tuple(element_types),
-                        Span { start: 0, end: 0 },
-                    ));
+                    for (i, el) in elements.iter().enumerate() {
+                        self.analyze_pattern(el, element_types[i].clone(), kind)?;
+                    }
+                    Ok(())
                 }
-                for (i, el) in elements.iter().enumerate() {
-                    self.analyze_pattern(el, element_types[i].clone(), kind)?;
-                }
-                Ok(())
             }
             Pattern::Object(props) => {
-                let fields = match ty {
+                let mut base_ty = ty;
+                while let Type::BorrowType { inner, .. } = base_ty {
+                    base_ty = *inner;
+                }
+                let fields = match base_ty {
                     Type::Object(fs) => fs,
                     _ => {
                         return Err(SemaError::TypeMismatch(
                             Type::Object(vec![]),
-                            ty,
+                            base_ty,
                             Span { start: 0, end: 0 },
                         ))
                     }

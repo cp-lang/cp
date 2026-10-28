@@ -52,13 +52,18 @@ fn demo_array(): void {
     mutate_arr(*v, 40);
     print(`v after mutate_arr: len=${v.length}, v[0]=${v[0]}, v[2]=${v[2]}`);
 
-    print("=== 4. Mutable For Iteration (*item of v) & Wildcard (*) ===");
+    print("=== 4. Mutable For Iteration (*item of v) & Wildcard (*) / Rest (...) ===");
     for *item of v {
         item = item + 1;
     }
-    let [*, second] = v;
-    second = second + 0;
+    let [*, second, ...] = v;
     print(`v after for *item: v[0]=${v[0]}, v[1]=${second}, v[2]=${v[2]}`);
+
+    let nums = [10, 20, 30, 40];
+    let [*, second_num, *, fourth_num] = nums;
+    let [first, ..., last] = nums;
+    let [head, ...middle, tail] = nums;
+    print(`Rest destructure: second_num=${second_num}, fourth_num=${fourth_num}, first=${first}, last=${last}, head=${head}, middle_len=${middle.length}, middle[0]=${middle[0]}, middle[1]=${middle[1]}, tail=${tail}`);
 }
 
 fn main(): void {

@@ -624,4 +624,23 @@
 ### 新增文件 (Added)
 - [`cap/test/test_pat_fail_duplicate.cp`](file:///data/dev/cp/cap/test/test_pat_fail_duplicate.cp): 验证在模式解构中重复使用 `_`（`let [_, _] = [10, 20];`）时触发 `DuplicateVarDecl` 编译期报错拦截。
 
+## [Unreleased] - 2026-10-28 (Part 6)
+
+### 解构与模式匹配全面支持 `*`（单元素通配符）与 `...`（首/中/尾多元素忽略与零拷贝切片收集）
+
+### 修改文件 (Modified)
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - 在 `parse_single_pattern` 中新增 `Token::DotDotDot` (`...`) 解析：当后接标识符时解析为具名剩余切片模式 `Pattern::Rest(Box::new(Pattern::Ident(id)))`（如 `...rest`、`...middle`），当为裸 `...` 时解析为多元素忽略模式 `Pattern::Rest(Box::new(Pattern::Wildcard))`（如 `let [first, ..., last] = arr;`），并在对象模式 `{ a, ... }` 中支持尾部 `...` 忽略。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 新增 `SemaError::MultipleRestInPattern(Span)`，严格限制同一数组/元组解构模式中最多只能包含一个 `...`；
+  - 在 `analyze_pattern`、`bind_match_pattern`、`bind_for_pattern` 中全面支持 `Pattern::Rest` 位于开头（`[..., last]`）、中间（`[first, ..., last]` / `[head, ...middle, tail]`）或末尾（`[first, ...rest]`），自动计算前缀与后缀索引（反向偏移 `len - offset_from_end`），并将具名 `...rest` 推导为切片类型 `Type::Array(elem_ty)`。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 新增 Zig 运行时编译期辅助函数 `CpUnpackTailType` / `cp_unpack_tail`（按尾部偏移提取元素）与 `CpUnpackSliceType` / `cp_unpack_slice`（按前/后缀边界生成零拷贝子切片 `v[start .. v.len - suffix_len]`），并支持解包借用切片 `*[]const T`；
+  - 在 `Stmt::Var`、`generate_pattern_match`、`Stmt::For`、`extract_locals_simple` 与 `extract_local_vars_to_str` 中全面支持 `Pattern::Wildcard` (`*`) 与 `Pattern::Rest` (`...` / `...rest`)。
+- [`cap/test/test_mut_borrow_ops.cp`](file:///data/dev/cp/cap/test/test_mut_borrow_ops.cp):
+  - 新增 `let [*, second, *] = v;`、`let [first, ..., last] = nums;` 与 `let [head, ...middle, tail] = nums;` 解构测试。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 补充单元素通配符 `*`、多元素剩余/忽略模式 `...`（裸 `...` 与具名 `...rest`）以及与范围符号 `..` / `..=` 正交分离的语法规范与示例。
+
+
 

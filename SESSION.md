@@ -3234,5 +3234,64 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 将移除 `rename_shadowed_vars_*` 冗余代码、统一 `*` 通配符与同名模式编译期拦截（[`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs)、[`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs)）、测试用例（[`cap/test/test_mut_borrow_ops.cp`](file:///data/dev/cp/cap/test/test_mut_borrow_ops.cp)、[`cap/test/test_pat_fail_duplicate.cp`](file:///data/dev/cp/cap/test/test_pat_fail_duplicate.cp)）以及更新后的 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)、[`SESSION.md`](file:///data/dev/cp/SESSION.md) 提交至 Git 仓库。
 
 
+---
+
+## 2026-10-28 (Session Update - 解构赋值中 `*` 通配符与 `...` 剩余模式设计探讨)
+
+### 用户指令
+> 通配符 * 正常放行：使用 * 作为通配符（如 let [*, second] = v;、let {a: *, b} = obj;、let * = expr;、match x { [*, *] => ... }）
+> 除了模式匹配 switch 中我们使用了 * 作为通配符, 解构赋值,我们也实现了 * 通配符吗?
+> Typescript中 结构赋值, 使用了 ..., 没有 通配符*
+> rust中的结构赋值是什么样的, rust 支持_ 通配符吗?
+>  我们cp 是否要实现 Typescript的... 和 * 通配符呢
+
+### 执行结果汇报
+向用户对比解析了 TypeScript（支持 `...rest` 与空位 `[ , second]`，无通配符）与 Rust（支持 `_` 单元素通配符与 `..` 多元素省略/切片模式）的解构设计，并说明 CP 语言结合两者优势（`*` 忽略单个元素/属性，`...` 忽略或零拷贝切片收集多个元素）的设计方案。
 
 
+---
+
+## 2026-10-28 (Session Update - `let [first, .., last]` 在 CP 中的实现方式探讨)
+
+### 用户指令
+> let [first, .., last] = [10, 20, 30, 40]; // 忽略中间任意个元素，只取首尾！
+> 这个在cp中如何实现
+
+### 执行结果汇报
+向用户说明在 CP 中统一使用三点 `...` 实现首、中、尾任意位置的多元素忽略与零拷贝切片收集：
+1. 裸 `...` 忽略中间任意个元素：`let [first, ..., last] = [10, 20, 30, 40];`
+2. 具名 `...middle` 零拷贝收集切片：`let [first, ...middle, last] = [10, 20, 30, 40];`
+
+
+---
+
+## 2026-10-28 (Session Update - 实装解构与模式匹配 `*` 通配符与 `...` 剩余/忽略模式)
+
+### 用户指令
+> 很好, 解构支持通配符 * 和 ..., 不需要兼容 .., 兼容 .. 会导致代码不统一, 同时还降低编译速度.
+> .. 符号, 在cp 中, 是作为范围符号对吧
+> 按上述方案实现
+
+### 执行结果汇报
+1. **确认 `..`（及 `..=`）在 CP 中的定位**：
+   - 是的，在 CP 语言中，`..`（左闭右开范围，如 `0..10`）和 `..=`（闭区间范围，如 `1..=5`）**严格专用于范围（Range）运算符**（对应词法 `Token::DotDot` / `Token::DotDotEq` 与语法 `Expr::Range`），绝不混入解构模式中，保证语法唯一性与编译期极速解析。
+2. **全链路实装解构与模式匹配中的 `*` 与 `...`**：
+   - **前端解析 ([`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs))**：在 `parse_single_pattern` 中支持 `...`（`Token::DotDotDot`）：后接标识符时解析为具名切片收集 `Pattern::Rest(Box::new(Pattern::Ident(id)))`（如 `...rest`、`...middle`），裸 `...` 时解析为多元素忽略 `Pattern::Rest(Box::new(Pattern::Wildcard))`（如 `let [first, ..., last] = arr;`）。
+   - **语义分析 ([`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs))**：新增 `SemaError::MultipleRestInPattern` 拦截单个模式中出现多个 `...` 的非法写法；支持 `...` 出现在开头、中间、末尾任意位置，自动校验前缀/后缀元素类型并将具名 `...rest` 推导为切片类型 `Type::Array(elem_ty)`。
+   - **后端代码生成 ([`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs))**：新增 `cp_unpack_tail`（按尾部偏移提取元素）与 `cp_unpack_slice`（零拷贝切片 `v[start .. v.len - suffix_len]`），在 `let` 解构、`for` 循环解构与 `switch`/`match` 模式匹配中全面打通 `*` 与 `...`。
+   - **测试验证 ([`cap/test/test_mut_borrow_ops.cp`](file:///data/dev/cp/cap/test/test_mut_borrow_ops.cp))**：验证 `let [*, second, *] = v;`、`let [first, ..., last] = nums;`、`let [head, ...middle, tail] = nums;` 100% 编译运行通过。
+
+
+
+
+
+
+---
+
+## 2026-10-28 (Session Update - Git Commit)
+
+### 用户指令
+> git 提交
+
+### 执行结果汇报
+将解构与模式匹配支持 `*` 单元素通配符与 `...` 多元素剩余/忽略模式的实现（[`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs)、[`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs)、[`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs)）、测试用例（[`cap/test/test_mut_borrow_ops.cp`](file:///data/dev/cp/cap/test/test_mut_borrow_ops.cp)）以及更新后的 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)、[`SESSION.md`](file:///data/dev/cp/SESSION.md) 提交至 Git 仓库。
