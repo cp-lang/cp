@@ -3081,3 +3081,46 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 
 
 
+
+
+---
+
+## 2026-10-28 (Session Update - 可变借用变量操作与容器可变借用检查汇报)
+
+### 用户指令
+1. > `*` 作为可变借用, 可变借用变量的操作,是否按如下方式:
+   > ```cp
+   > let v = 10;
+   > let p = *v;
+   > p.* = 20;
+   > let v = {a: 10, b: 20};
+   > let p = *v;
+   > p.a = 10; 
+   > let v =  [10, 20];
+   > let p = *v;
+   > p.push(30);
+   > ```
+   > 其中, 数组 map set dict vec等容器改变操作, 是否已经纳入可变借用检查
+2. > 汇报进度
+
+### 执行结果汇报
+1. **三类可变借用变量操作已 100% 原生支持并通过实机编译运行验证**：
+   - **基础类型（`i32` 等）**：`let v = 10; let p = *v; p.* = 20;` 通过后缀 `.*` 解引用原地修改 `v`；
+   - **对象/结构体（`{a: 10, b: 20}` / `struct` / `class`）**：`let v = {a: 10, b: 20}; let p = *v; p.a = 10;` 自动解引用原地修改字段；
+   - **数组与容器（`[10, 20]` / `Array<T>` / `Vec<T>` / `Map` / `Set` / `Dict`）**：`let v = [10, 20]; let p = *v; p.push(30);` 自动解引用原地扩容修改原数组 `v`，且支持同一作用域内同名变量连续重声明（Shadowing）。
+2. **`Array`/`Vec`、`Map`、`Set`、`Dict` 容器改变操作已全面纳入编译期可变借用检查**：
+   - 受检操作涵盖：`push`、`pop`、`set`、`put_all`、`add`、`delete`、`clear`、下标赋值 `container[k] = val` 以及 `for *x of container` 原地可变迭代；
+   - 实装四重静态拦截：禁止通过只读借用（`&v`）或只读参数修改容器、NLL 活跃借用读写互斥冲突拦截、`for` 循环遍历期间防迭代器失效锁定、以及 Use-After-Move 拦截。
+3. **测试与文档同步**：
+   - 新增并通过 [`cap/test/test_mut_borrow_ops.cp`](file:///data/dev/cp/cap/test/test_mut_borrow_ops.cp)、[`cap/test/test_mut_borrow_fail_readonly.cp`](file:///data/dev/cp/cap/test/test_mut_borrow_fail_readonly.cp)、[`cap/test/test_mut_borrow_fail_conflict.cp`](file:///data/dev/cp/cap/test/test_mut_borrow_fail_conflict.cp)，全量回归测试 100% 通过，并已同步更新 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)。
+
+
+---
+
+## 2026-10-28 (Session Update - Git Commit)
+
+### 用户指令
+> 提交
+
+### 执行结果汇报
+将可变借用变量操作（`*v`, `p.* = 20`, `p.a = 10`, `p.push(30)`）、容器（`Array`/`Vec`, `Map`, `Set`, `Dict`）可变借用检查、测试套件以及更新后的 `cp_ref.md`、`CHANGELOG.md`、`DEVLOG.md`、`SESSION.md` 提交至 Git 仓库。

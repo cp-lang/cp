@@ -1587,11 +1587,42 @@ CP 语言通过编译器底层的“所有权、隐式借用、读写互斥与�
 - **可变借用 (`*`)**：`fn modify(*data: Tensor)`（或 `fn modify(data: *Tensor)`，兼容 `mut data: Tensor`）-> 调用 `modify(a)` 时，自动传入可变引用 `*T`，允许原地修改。
 - **转移所有权 (`move`)**：`fn consume(move data: Tensor)` -> 调用 `consume(a)` 时，转移所有权，调用后外层 `a` 立即失效。
 
-## 3. 借用检查器规则 (Borrow Checker)
+## 3. 借用检查器规则与可变借用操作规范 (Borrow Checker & Mutable Borrow Operations)
 
 - **读写互斥**：在同一有效生命周期内，允许存在多个只读借用（`&T`），或仅允许存在**唯一一个**可变借用（`*T`）。可变借用与任何其他借用严格互斥。
 - **借用期间锁定所有者**：当变量 `a` 存在尚未结束的活跃借用 `r`（即 `r` 在后续代码中还会被读取）时，严禁将 `a` 的所有权 Move 转移或对其进行破坏性修改。
-- **防御迭代器失效**：容器遍历持有只读借用，循环体内调用 `push/remove` 等可变方法将被编译器直接拦截。
+- **可变借用变量的三类核心操作（自动解引用与显式 `.*`）**：
+  1. **基础值类型（`i32`, `f32`, `bool` 等）**：通过后缀解引用 `p.* = val` 原地修改所借用变量的值；
+  2. **结构体 / 对象字面量（`{a: 10, b: 20}` / `struct` / `class`）**：支持自动解引用，直接通过 `p.a = val` 原地修改字段；
+  3. **容器类型（`Array` / `Vec` / `T[]`, `Map`, `Set`, `Dict`）**：支持自动解引用，直接通过 `p.push(...)`、`p.pop()`、`p.set(...)`、`p.add(...)`、`p.delete(...)`、`p.clear()`、`p[idx] = val` 原地修改容器内容。
+  ```cp
+  // 1. 基础类型可变借用：后缀 .* 解引用赋值
+  let v = 10;
+  let p = *v;
+  p.* = 20; // v 同步变为 20
+
+  // 2. 对象/结构体可变借用：自动解引用修改字段
+  let v = {a: 10, b: 20};
+  let p = *v;
+  p.a = 100; // v.a 同步变为 100
+
+  // 3. 数组/容器可变借用：自动解引用调用可变方法与索引赋值
+  let v = [10, 20];
+  let p = *v;
+  p.push(30); // v 同步扩容为 [10, 20, 30]
+  p[1] = 25;
+  ```
+- **容器改变操作全面纳入可变借用检查 (`Array` / `Vec`, `Map`, `Set`, `Dict`)**：
+  - **受检容器改变操作清单**：
+    - `Array<T>` / `Vec<T>` / `T[]`：`push(v)`、`pop()`、`clear()`、索引写入 `arr[i] = v`、`for *x of arr` 原地可变遍历；
+    - `Map<K, V>`：`set(k, v)`、`delete(k)`、`clear()`、索引写入 `map[k] = v`；
+    - `Set<T>`：`add(v)`、`delete(v)`、`clear()`；
+    - `Dict<K, V>` (`#{}`)：`set(k, v)`、`put_all(other)`、`delete(k)`、`clear()`、索引写入 `dict[k] = v`。
+  - **四重编译期拦截保障**：
+    1. **禁止通过只读借用 (`&v`) 或只读参数改变容器**：如 `let r = &v; r.push(30);` 直接报错 `Cannot perform mutable operation (container method 'push') through read-only borrow 'r'`；
+    2. **读写互斥与活跃借用冲突拦截**：当容器存在活跃的只读借用 `let r = &m;` 或另一个可变借用时，对原容器或冲突借用执行 `set`/`push`/`delete`/`clear`/`[] =` 立即报错 `Borrow conflict on 'm': cannot borrow as mutable while 'r' is still active`；
+    3. **防御迭代器失效（Loop-Borrow Lock）**：在 `for x of container` 或 `for *x of container` 遍历期间，严禁在循环体内对该容器（或其借用别名）调用 `push`、`pop`、`set`、`add`、`delete`、`clear` 或重赋值；
+    4. **Use-After-Move 拦截**：容器所有权 `move` 转移后，任何读写或方法调用立即报错拦截。
 
 ## 4. 零摩擦生命周期 (Zero-Friction Lifetimes)
 

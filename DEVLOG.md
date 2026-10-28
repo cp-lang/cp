@@ -1246,3 +1246,28 @@ let reply = raw
 
 
 
+
+
+---
+
+## 2026-10-28 (Part 3): 可变借用变量操作 (`*v`) 与容器 (`Array`/`Vec`, `Map`, `Set`, `Dict`) 可变借用检查全链路实现
+
+### 1. 任务背景与设计目标
+在完成全局借用符号统一（`&` 只读借用、`*` 可变借用、`.*` 解引用、`*!` 裸指针、`move` 所有权转移）后，需要确保 `*` 作为可变借用变量在以下三类核心场景中具备直观、统一且零摩擦的操作体验，并将所有容器的改变操作纳入编译期可变借用检查：
+1. **基础类型可变借用**：`let v = 10; let p = *v; p.* = 20;`（通过后缀 `.*` 解引用赋值原地修改 `v`）；
+2. **对象/结构体可变借用**：`let v = {a: 10, b: 20}; let p = *v; p.a = 10;`（自动解引用原地修改字段）；
+3. **数组与容器可变借用**：`let v = [10, 20]; let p = *v; p.push(30);`（自动解引用原地扩容与修改容器，涵盖 `Array`/`Vec`、`Map`、`Set`、`Dict`）。
+
+### 2. 核心技术难点与解决方案
+1. **值类型与堆引用类型的借用指针统一 (`Type::BorrowType` & `Expr::Borrow`)**：
+   - 基础类型（`i32`）、匿名对象（`{a: i32, b: i32}`）、数组切片（`[]const T`）在 Zig 中为值/切片类型，对其取借用 `*v` / `&v` 时，在 `map_type` 中将 `Type::BorrowType` 映射为 `*InnerZigType`，并在 `Expr::Borrow` 中生成 `(&v)`；
+   - 而 `Class`、`Map`、`Set`、`Dict` 在 Zig 中本身即为堆指针（`*Map`, `*Set` 等），取借用时直接保持单层指针，并在编译器 `var_borrow_sources` 中严格记录借用来源与可变性标志 `is_mut`。
+2. **动态可增长数组字面量 (`cp_array_lit` / `cp_array_push` / `cp_array_pop`)**：
+   - 原本 `[10, 20]` 生成静态只读切片 `&.{ 10, 20 }`，无法支持原地 `v.push(30)` 或通过可变借用 `p.push(30)` 修改原数组变量 `v`。
+   - 新增运行时辅助函数 `cp_array_lit(Elem, &.{ ... })` 分配堆切片，`cp_array_push(&target, val)` 与 `cp_array_pop(&target)` 同時支持直接传入 `*[]const T`（原变量地址 `&v`）或 `**[]const T`（借用变量地址 `&p`），原地更新切片指针与长度，使 `p.push(30)` 立即反映在 `v` 上。
+3. **匿名对象字面量的名义化 (`__CpObj_...`) 与同名变量遮蔽 Alpha-Renaming**：
+   - Zig 中两个相同字段的匿名 `struct { a: i32, b: i32 }` 属于不同名义类型，导致指针赋值报错；通过将 `Type::Object` 规范化注册为顶层 `const __CpObj_a_i32_b_i32 = struct { a: i32, b: i32 };`，彻底打通匿名对象的指针传递与状态机上下文字段存储。
+   - 针对同一函数内连续重声明同名不同类型变量（如三次声明 `let v = ...; let p = *v;`），在 `generate_function_logic` 入口执行 AST 级 Alpha-Renaming（`v__shadow_1`, `v__shadow_2`），消除 Zig 状态机 `Context` 结构体字段重名冲突。
+4. **容器改变操作与可变借用检查的全面闭环 (`check_mutation_allowed` & `check_read_allowed`)**：
+   - 将 `push`、`pop`、`set`、`put_all`、`add`、`delete`、`clear`、下标赋值 `obj[k] = v`、字段赋值 `obj.f = v`、解引用赋值 `p.* = v` 以及 `for *x of container` 全部接入 `check_mutation_allowed`；
+   - 修复 `compute_last_uses_stmt` 对控制流块（`If`/`While`/`For`/`Match`/`TryCatch`）的子语句计数步进，使其与 `generate_stmt` 的 `current_stmt_idx` 严格 1:1 对齐，确保 NLL 在借用最后一次使用后精准释放锁。

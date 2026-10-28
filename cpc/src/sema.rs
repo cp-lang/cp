@@ -223,6 +223,22 @@ impl Analyzer {
         self.classes.insert("Map".to_string(), map_class.clone());
         self.scopes[0].insert("Map".to_string(), SymbolKind::Class(map_class));
 
+        let dict_class = crate::ast::Class {
+            span: mock_span.clone(),
+            ident: crate::ast::Ident {
+                span: mock_span.clone(),
+                sym: "Dict".to_string(),
+            },
+            fields: vec![],
+            methods: vec![],
+            implements: vec![],
+            extends: None,
+            is_ref: false,
+            meta: Vec::new(),
+        };
+        self.classes.insert("Dict".to_string(), dict_class.clone());
+        self.scopes[0].insert("Dict".to_string(), SymbolKind::Class(dict_class));
+
         let error_class = crate::ast::Class {
             span: mock_span.clone(),
             ident: crate::ast::Ident {
@@ -1355,6 +1371,9 @@ impl Analyzer {
                                 || prop == "clear"
                                 || prop == "delete"
                                 || prop == "pop"
+                                || prop == "set"
+                                || prop == "put_all"
+                                || prop == "add"
                             {
                                 return Err(SemaError::MutateWhileBorrowedInFor(
                                     id.sym.clone(),
@@ -1606,6 +1625,9 @@ impl Analyzer {
                 self.types_eq(o1, other)
             }
             (Type::Array(t1), Type::Array(t2)) => self.types_eq(t1, t2),
+            (Type::Array(elem), Type::Tuple(tys)) | (Type::Tuple(tys), Type::Array(elem)) => {
+                tys.iter().all(|t| self.types_eq(elem, t))
+            }
             (Type::Tuple(t1), Type::Tuple(t2)) => {
                 if t1.len() != t2.len() {
                     return false;
@@ -1937,9 +1959,13 @@ impl Analyzer {
             }
             Expr::Dict(_) => Ok(Type::Dict(Box::new(Type::String), Box::new(Type::Any))),
             Expr::Index { obj, .. } => {
-                let o_ty = self.infer_type(obj)?;
+                let mut o_ty = self.infer_type(obj)?;
+                while let Type::BorrowType { inner, .. } = o_ty {
+                    o_ty = *inner;
+                }
                 match o_ty {
                     Type::Array(elem) => Ok(*elem),
+                    Type::Tuple(tys) => Ok(tys.into_iter().next().unwrap_or(Type::Any)),
                     Type::Map(_, v) | Type::Dict(_, v) => Ok(Type::Optional(v)),
                     _ => Ok(Type::Any),
                 }

@@ -555,3 +555,33 @@
 
 
 
+
+
+## [Unreleased] - 2026-10-28 (Part 3)
+
+### 可变借用变量操作 (`*v`, `p.* = 20`, `p.a = 10`, `p.push(30)`) 与容器改变操作全面纳入可变借用检查 (`Array`/`Vec`, `Map`, `Set`, `Dict`)
+
+### 修改文件 (Modified)
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - `parse_params` 将非接收者参数的前置 `*x: T` 与 `&x: T` 统一包装为 `Type::BorrowType { inner, is_mut, lifetimes }`，与 `x: *T` / `x: &T` 保持完全等价的 AST 表示；
+  - `parse_base_type` 支持 `Array<T>` 与 `Vec<T>` 泛型容器类型语法并映射为 `Type::Array(Box::new(elem))`；
+  - `Token::New` 支持 `new Map<K, V>()` / `new Set<T>()` / `new Dict<K, V>()` 可选泛型实参解析。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - `analyze_module` 注册内置 `Dict` 类符号；
+  - `analyze_expr` (`Expr::Call`) 将 `"set"`、`"put_all"`、`"add"` 与 `"push"`、`"pop"`、`"delete"`、`"clear"` 共同纳入 `loop_borrowed_vars` 循环借用期间的可变拦截；
+  - `types_eq` 允许 `Type::Array` 与同构 `Type::Tuple` 兼容；
+  - `infer_type` (`Expr::Index`) 支持自动解包 `Type::BorrowType` 后进行下标类型推导。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 新增 `loop_borrowed_containers` 与 `anon_obj_structs` 状态跟踪；
+  - 在 Zig 运行时前导中新增 `cp_array_lit`、`CpArrayElemType`、`cp_array_push`、`cp_array_pop`、`cp_container_clear`、`cp_index_of`、`cp_last_index_of`、`cp_includes`，并升级 `CpIndexReturnType`、`cp_index_get`、`cp_index_assign`、`cp_iter_slice`、`cp_mut_slice` 支持借用数组指针 `*[]const T` 与原地自动解引用修改；
+  - 实现函数内同名重声明变量 Alpha-Renaming（`rename_shadowed_vars_in_block`），完美支持同一作用域连续多次声明 `let v = ...; let p = *v;` 且具有不同底层类型；
+  - 将匿名对象字面量类型 `Type::Object` 规范化映射为顶层具名结构体 `const __CpObj_... = struct { ... };`，解决跨状态机/函数的 Zig 匿名结构体名义类型兼容问题；
+  - 统一实现 `check_mutation_allowed` 与 `check_read_allowed`：全面覆盖 `p.* = val`、`p.a = val`、`p[i] = val`、`for *x of v` 以及容器方法 `push`、`pop`、`set`、`put_all`、`add`、`delete`、`clear` 的可变借用权限、NLL 活跃借用读写互斥与 `for` 循环借用锁定检查；
+  - 修复 `compute_last_uses_stmt` 对控制流块（`If`/`While`/`For`/`Match`/`TryCatch`）的语句计数对齐，确保 NLL 最后一次使用（Last Use）语句序号与 `generate_stmt` 100% 精确同步。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 在第十章第 3 节补充可变借用变量的三类核心操作（`p.* = 20`、`p.a = 10`、`p.push(30)`）及 `Array`/`Vec`、`Map`、`Set`、`Dict` 容器改变操作的四重编译期可变借用检查规范与代码示例。
+
+### 新增文件 (Added)
+- [`cap/test/test_mut_borrow_ops.cp`](file:///data/dev/cp/cap/test/test_mut_borrow_ops.cp): 覆盖基础类型 `*v` (`p.* = 20`)、对象字面量 `*v` (`p.a = 100`)、数组 `*v` (`p.push(30)`、`p.pop()`、`p[1] = 25`、`for *item of v`) 以及 `Map`/`Set`/`Dict` 全套可变借用操作的正向综合测试。
+- [`cap/test/test_mut_borrow_fail_readonly.cp`](file:///data/dev/cp/cap/test/test_mut_borrow_fail_readonly.cp): 验证通过只读借用 `let r = &v` 调用 `r.push(30)` 被编译器静态拦截的反向测试。
+- [`cap/test/test_mut_borrow_fail_conflict.cp`](file:///data/dev/cp/cap/test/test_mut_borrow_fail_conflict.cp): 验证当 `Map` 存在活跃只读借用 `let r = &m` 时调用 `m.set("k", 1)` 被编译器静态拦截的反向测试。

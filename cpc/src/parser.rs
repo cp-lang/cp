@@ -520,12 +520,106 @@ impl<'a> Parser<'a> {
             } else if self.peek() == Some(&Token::Star) {
                 self.bump()?;
                 is_mut = true;
+                let p_ident = self.parse_ident()?;
+                let mut ty = if (p_ident.sym == "this"
+                    || p_ident.sym == "_"
+                    || p_ident.sym == "next"
+                    || p_ident.sym == "target")
+                    && self.peek() != Some(&Token::Colon)
+                {
+                    Type::Any
+                } else if self.peek() == Some(&Token::Colon) {
+                    self.bump()?;
+                    self.parse_type()?
+                } else {
+                    Type::Any
+                };
+                if p_ident.sym != "this"
+                    && p_ident.sym != "_"
+                    && !matches!(
+                        ty,
+                        Type::BorrowType { .. } | Type::RawPtr { .. } | Type::Any
+                    )
+                {
+                    ty = Type::BorrowType {
+                        inner: Box::new(ty),
+                        is_mut: true,
+                        lifetimes: vec![],
+                    };
+                }
+                let default = if self.peek() == Some(&Token::Assign) {
+                    self.bump()?;
+                    Some(self.parse_primary_expr()?)
+                } else {
+                    None
+                };
+                params.push(Param {
+                    span: p_ident.span,
+                    ident: p_ident,
+                    ty,
+                    is_comptime: false,
+                    is_mut,
+                    is_move,
+                    default,
+                    meta,
+                });
+                if self.peek() == Some(&Token::Comma) {
+                    self.bump()?;
+                }
+                continue;
             } else if self.peek() == Some(&Token::Ampersand) {
                 self.bump()?;
                 if self.peek() == Some(&Token::Mut) {
                     self.bump()?;
                     is_mut = true;
                 }
+                let p_ident = self.parse_ident()?;
+                let mut ty = if (p_ident.sym == "this"
+                    || p_ident.sym == "_"
+                    || p_ident.sym == "next"
+                    || p_ident.sym == "target")
+                    && self.peek() != Some(&Token::Colon)
+                {
+                    Type::Any
+                } else if self.peek() == Some(&Token::Colon) {
+                    self.bump()?;
+                    self.parse_type()?
+                } else {
+                    Type::Any
+                };
+                if p_ident.sym != "this"
+                    && p_ident.sym != "_"
+                    && !matches!(
+                        ty,
+                        Type::BorrowType { .. } | Type::RawPtr { .. } | Type::Any
+                    )
+                {
+                    ty = Type::BorrowType {
+                        inner: Box::new(ty),
+                        is_mut,
+                        lifetimes: vec![],
+                    };
+                }
+                let default = if self.peek() == Some(&Token::Assign) {
+                    self.bump()?;
+                    Some(self.parse_primary_expr()?)
+                } else {
+                    None
+                };
+                params.push(Param {
+                    span: p_ident.span,
+                    ident: p_ident,
+                    ty,
+                    is_comptime: false,
+                    is_mut,
+                    is_move,
+                    default,
+                    meta,
+                });
+                if self.peek() == Some(&Token::Comma) {
+                    self.bump()?;
+                }
+                continue;
             }
 
             let p_ident = self.parse_ident()?;
@@ -862,6 +956,11 @@ impl<'a> Parser<'a> {
                     let elem = self.parse_type()?;
                     self.expect(Token::Greater)?;
                     Type::Set(Box::new(elem))
+                } else if (sym == "Array" || sym == "Vec") && self.peek() == Some(&Token::Less) {
+                    self.bump()?;
+                    let elem = self.parse_type()?;
+                    self.expect(Token::Greater)?;
+                    Type::Array(Box::new(elem))
                 } else {
                     Type::Ref(Ident { span, sym })
                 }
@@ -2706,6 +2805,16 @@ impl<'a> Parser<'a> {
             Token::New => {
                 let callee_expr = self.parse_primary_expr()?;
                 if let Expr::Ident(ident) = callee_expr {
+                    if self.peek() == Some(&Token::Less) {
+                        self.bump()?;
+                        while self.peek() != Some(&Token::Greater) && self.peek().is_some() {
+                            self.parse_type()?;
+                            if self.peek() == Some(&Token::Comma) {
+                                self.bump()?;
+                            }
+                        }
+                        self.expect(Token::Greater)?;
+                    }
                     self.expect(Token::LParen)?;
                     let mut args = Vec::new();
                     while self.peek() != Some(&Token::RParen) {
