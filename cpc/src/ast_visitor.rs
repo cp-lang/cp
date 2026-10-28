@@ -251,7 +251,13 @@ pub fn extract_idents_from_pat(pat: &Pattern, vars: &mut HashSet<String>) {
         }
         Pattern::Object(props) => {
             for p in props {
-                vars.insert(p.key.sym.clone());
+                if p.key.sym != "*" {
+                    if let Some(val_pat) = &p.val {
+                        extract_idents_from_pat(val_pat, vars);
+                    } else {
+                        vars.insert(p.key.sym.clone());
+                    }
+                }
             }
         }
         Pattern::Rest(inner) => {

@@ -1349,3 +1349,22 @@ let reply = raw
 1. **语法解析 (`cpc/src/parser.rs`)**：在 `in_pipeline_rhs > 0` 状态下识别孤立的 `*`（`Token::Star`）并直接解析为 `Expr::PipePlaceholder`，使得 `data |> add(5, *)` 能够自然编译为对应参数位置替换；
 2. **语义推导 (`cpc/src/sema.rs`)**：在 `infer_type` 中增加对 `Expr::Match`（`switch` 表达式）的类型推导，使 `let x = switch (...) { ... };` 能够直接推导出分支公共静态类型，避免退化为 `Type::Any`；
 3. **验证测试 (`cap/test/test_pipe_star.cp`)**：新增管道占位符 `*` 与 `.` 的编译和运行测试，全套正反向用例通过。
+
+---
+
+## 2026-10-29 (Part 8): 对象解构全面支持 `...rest` 剩余属性提取与零成本强类型匿名对象绑定
+
+### 1. 核心需求与架构考量
+在前期审查中发现，`cpc/src/parser.rs` 在解析对象模式 `{ a, ...rest }` 时，仅对 `...` 及后续标识符进行了词法跳过，并未在 AST 中记录剩余属性，导致 `rest` 变量无法被声明使用。
+本次对对象解构进行了端到端的系统级升级：
+- **语法层**：支持 `let { a, ...rest } = obj;`（提取并绑定剩余字段）、`let { a, ... } = obj;` 与 `let { a, ...* } = obj;`（通配忽略其余字段）；
+- **语义层**：严格检查单个对象解构中不得出现超过 1 个 `...`（违者抛出 `MultipleRestInPattern`）；自动收集非 rest 键名集合 `non_rest_keys`，动态计算未被提取的字段集 `remaining_fields`，将 `rest` 推导为精确的强类型匿名对象 `Type::Object(remaining_fields)`；
+- **代码生成层**：
+  - 在 `Stmt::Var` 中为 `rest` 构建 Zig 原生匿名结构体 `.{ .f1 = _tmp_obj.f1, .f2 = _tmp_obj.f2 }`，完全零堆开销与强类型对齐；
+  - 在 `generate_pattern_match`、`Stmt::For` 循环迭代解构中打通 `...rest` 生成；
+  - 在 CPS 状态机 `extract_locals_simple` 与 `extract_local_vars_to_str` 中自动将 `rest` 注册为 `Context` 的 `__CpObj` 属性，保证在协程与挂起状态下的类型安全与持久化。
+
+### 2. 编译与测试
+- 编写全面正向测试 `cap/test/test_obj_destructure_rest.cp`（涵盖变量声明解构、`switch` 匹配解构、`for` 迭代解构）；
+- 编写反向测试 `cap/test/test_obj_rest_fail_multiple.cp`（验证多个 `...` 的编译期拦截）；
+- 所有测试套件均 100% 编译通过并执行无误。

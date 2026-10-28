@@ -3716,7 +3716,44 @@ impl Codegen {
             Pattern::Object(props) => {
                 let mut conds = Vec::new();
                 let mut binds = String::new();
+                let non_rest_keys: HashSet<String> = props
+                    .iter()
+                    .filter(|p| !p.is_rest)
+                    .map(|p| p.key.sym.clone())
+                    .collect();
+
                 for prop in props {
+                    if prop.is_rest {
+                        if prop.key.sym == "*" || matches!(prop.val, Some(Pattern::Wildcard)) {
+                            continue;
+                        }
+                        let remaining_fields = if let Some(Type::Object(fields)) = &val_cp_ty {
+                            fields
+                                .iter()
+                                .filter(|f| !non_rest_keys.contains(&f.ident.sym))
+                                .cloned()
+                                .collect::<Vec<_>>()
+                        } else {
+                            vec![]
+                        };
+                        let rest_rhs = if remaining_fields.is_empty() {
+                            ".{}".to_string()
+                        } else {
+                            let inits: Vec<String> = remaining_fields
+                                .iter()
+                                .map(|f| format!(".{} = {}.{}", f.ident.sym, val_expr, f.ident.sym))
+                                .collect();
+                            format!(".{{ {} }}", inits.join(", "))
+                        };
+                        let rest_ty = Type::Object(remaining_fields);
+                        bound_types.push((prop.key.sym.clone(), rest_ty));
+                        binds.push_str(&format!(
+                            "const {0} = {1}; _ = &{0}; ",
+                            prop.key.sym, rest_rhs
+                        ));
+                        continue;
+                    }
+
                     let field_expr = format!("{}.{}", val_expr, prop.key.sym);
                     if let Some(sub_pat) = &prop.val {
                         let (c, b) = self.generate_pattern_match(
@@ -5129,7 +5166,77 @@ impl Codegen {
                             while let Some(Type::BorrowType { inner, .. }) = init_ty {
                                 init_ty = Some(*inner);
                             }
+                            let non_rest_keys: HashSet<String> = props
+                                .iter()
+                                .filter(|p| !p.is_rest)
+                                .map(|p| p.key.sym.clone())
+                                .collect();
+
                             for prop in props {
+                                if prop.is_rest {
+                                    if prop.key.sym == "*"
+                                        || matches!(prop.val, Some(Pattern::Wildcard))
+                                    {
+                                        continue;
+                                    }
+                                    let bound_name = prop.key.sym.clone();
+                                    self.var_scope_depth
+                                        .insert(bound_name.clone(), self.current_scope_depth);
+                                    let remaining_fields = if let Some(Type::Object(fields)) =
+                                        &init_ty
+                                    {
+                                        fields
+                                            .iter()
+                                            .filter(|f| !non_rest_keys.contains(&f.ident.sym))
+                                            .cloned()
+                                            .collect::<Vec<_>>()
+                                    } else if let Some(Type::Ref(cname)) = &init_ty {
+                                        if let Some(cls) = self.class_defs.get(&cname.sym) {
+                                            cls.fields
+                                                .iter()
+                                                .filter(|f| !non_rest_keys.contains(&f.ident.sym))
+                                                .cloned()
+                                                .collect::<Vec<_>>()
+                                        } else {
+                                            vec![]
+                                        }
+                                    } else {
+                                        vec![]
+                                    };
+                                    let rest_obj_ty = Type::Object(remaining_fields.clone());
+                                    self.var_cp_types.insert(bound_name.clone(), rest_obj_ty);
+
+                                    let rhs = if remaining_fields.is_empty() {
+                                        ".{}".to_string()
+                                    } else {
+                                        let inits: Vec<String> = remaining_fields
+                                            .iter()
+                                            .map(|f| {
+                                                format!(
+                                                    ".{} = _tmp_obj{}.{}",
+                                                    f.ident.sym, tmp_id, f.ident.sym
+                                                )
+                                            })
+                                            .collect();
+                                        format!(".{{ {} }}", inits.join(", "))
+                                    };
+
+                                    let lhs = if self.is_state_machine {
+                                        format!("ctx.{}", bound_name)
+                                    } else {
+                                        let keyword = match var.kind {
+                                            crate::ast::VarDeclKind::Const => "const",
+                                            _ => "var",
+                                        };
+                                        format!("{} {}", keyword, bound_name)
+                                    };
+                                    self.write_to_case(&format!("{} = {};", lhs, rhs));
+                                    if !self.is_state_machine {
+                                        self.write_to_case(&format!("_ = &{};", bound_name));
+                                    }
+                                    continue;
+                                }
+
                                 if matches!(prop.val, Some(Pattern::Wildcard)) {
                                     continue;
                                 }
@@ -5598,7 +5705,58 @@ impl Codegen {
                             }
                         }
                         Pattern::Object(props) => {
+                            let non_rest_keys: HashSet<String> = props
+                                .iter()
+                                .filter(|p| !p.is_rest)
+                                .map(|p| p.key.sym.clone())
+                                .collect();
+
                             for prop in props {
+                                if prop.is_rest {
+                                    if prop.key.sym == "*"
+                                        || matches!(prop.val, Some(Pattern::Wildcard))
+                                    {
+                                        continue;
+                                    }
+                                    let bound_name = prop.key.sym.clone();
+                                    self.var_scope_depth
+                                        .insert(bound_name.clone(), self.current_scope_depth);
+                                    let coll_ty = self.infer_cp_type(&f.expr);
+                                    let remaining_fields = match coll_ty {
+                                        Some(Type::Array(inner)) => match *inner {
+                                            Type::Object(fields) => fields
+                                                .iter()
+                                                .filter(|f| !non_rest_keys.contains(&f.ident.sym))
+                                                .cloned()
+                                                .collect::<Vec<_>>(),
+                                            _ => vec![],
+                                        },
+                                        _ => vec![],
+                                    };
+                                    let rhs = if remaining_fields.is_empty() {
+                                        ".{}".to_string()
+                                    } else {
+                                        let inits: Vec<String> = remaining_fields
+                                            .iter()
+                                            .map(|f| {
+                                                format!(
+                                                    ".{} = {}.{}",
+                                                    f.ident.sym, item_var, f.ident.sym
+                                                )
+                                            })
+                                            .collect();
+                                        format!(".{{ {} }}", inits.join(", "))
+                                    };
+                                    self.write_to_case(&format!(
+                                        "const {} = {}; _ = &{};",
+                                        bound_name, rhs, bound_name
+                                    ));
+                                    continue;
+                                }
+
+                                if matches!(prop.val, Some(Pattern::Wildcard)) {
+                                    continue;
+                                }
                                 let bound_name = if let Some(Pattern::Ident(id)) = &prop.val {
                                     id.sym.clone()
                                 } else {
@@ -8898,36 +9056,45 @@ impl Codegen {
                                 Some(Type::Object(fs)) => Some(fs),
                                 _ => None,
                             };
-                            if let Some(tys) = obj_fields {
-                                for p in fields {
-                                    if matches!(p.val, Some(Pattern::Wildcard)) {
-                                        continue;
-                                    }
-                                    let ident = if let Some(Pattern::Ident(i)) = &p.val {
-                                        i
-                                    } else {
-                                        &p.key
-                                    };
-                                    let f_opt = tys.iter().find(|t| t.ident.sym == p.key.sym);
-                                    let t_str = f_opt
-                                        .map(|t| self.map_type(&t.ty))
-                                        .unwrap_or_else(|| "i32".to_string());
-                                    self.locals.insert(ident.sym.clone(), t_str);
-                                    if let Some(f) = f_opt {
-                                        self.var_cp_types.insert(ident.sym.clone(), f.ty.clone());
-                                    }
+                            let non_rest_keys: HashSet<String> = fields
+                                .iter()
+                                .filter(|p| !p.is_rest)
+                                .map(|p| p.key.sym.clone())
+                                .collect();
+
+                            for p in fields {
+                                if p.key.sym == "*" || matches!(p.val, Some(Pattern::Wildcard)) {
+                                    continue;
                                 }
-                            } else {
-                                for p in fields {
-                                    if matches!(p.val, Some(Pattern::Wildcard)) {
-                                        continue;
-                                    }
-                                    let ident = if let Some(Pattern::Ident(i)) = &p.val {
-                                        i
+                                if p.is_rest {
+                                    let remaining_fields = if let Some(tys) = obj_fields {
+                                        tys.iter()
+                                            .filter(|t| !non_rest_keys.contains(&t.ident.sym))
+                                            .cloned()
+                                            .collect::<Vec<_>>()
                                     } else {
-                                        &p.key
+                                        vec![]
                                     };
-                                    self.locals.insert(ident.sym.clone(), "i32".to_string());
+                                    let rest_cp_ty = Type::Object(remaining_fields);
+                                    let t_str = self.map_type(&rest_cp_ty);
+                                    self.locals.insert(p.key.sym.clone(), t_str);
+                                    self.var_cp_types.insert(p.key.sym.clone(), rest_cp_ty);
+                                    continue;
+                                }
+
+                                let ident = if let Some(Pattern::Ident(i)) = &p.val {
+                                    i
+                                } else {
+                                    &p.key
+                                };
+                                let f_opt = obj_fields
+                                    .and_then(|tys| tys.iter().find(|t| t.ident.sym == p.key.sym));
+                                let t_str = f_opt
+                                    .map(|t| self.map_type(&t.ty))
+                                    .unwrap_or_else(|| "i32".to_string());
+                                self.locals.insert(ident.sym.clone(), t_str);
+                                if let Some(f) = f_opt {
+                                    self.var_cp_types.insert(ident.sym.clone(), f.ty.clone());
                                 }
                             }
                         }
@@ -9162,37 +9329,44 @@ impl Codegen {
                                 Some(Type::Object(fs)) => Some(fs),
                                 _ => None,
                             };
-                            if let Some(tys) = obj_fields {
-                                for p in fields {
-                                    if matches!(p.val, Some(Pattern::Wildcard)) {
-                                        continue;
-                                    }
-                                    let ident = if let Some(Pattern::Ident(i)) = &p.val {
-                                        i
-                                    } else {
-                                        &p.key
-                                    };
-                                    let t_str = tys
-                                        .iter()
-                                        .find(|t| t.ident.sym == p.key.sym)
-                                        .map(|t| self.map_type(&t.ty))
-                                        .unwrap_or_else(|| "i32".to_string());
-                                    self.locals.insert(ident.sym.clone(), t_str.clone());
-                                    writeln!(output, "    {}: {},", ident.sym, t_str).unwrap();
+                            let non_rest_keys: HashSet<String> = fields
+                                .iter()
+                                .filter(|p| !p.is_rest)
+                                .map(|p| p.key.sym.clone())
+                                .collect();
+
+                            for p in fields {
+                                if p.key.sym == "*" || matches!(p.val, Some(Pattern::Wildcard)) {
+                                    continue;
                                 }
-                            } else {
-                                for p in fields {
-                                    if matches!(p.val, Some(Pattern::Wildcard)) {
-                                        continue;
-                                    }
-                                    let ident = if let Some(Pattern::Ident(i)) = &p.val {
-                                        i
+                                if p.is_rest {
+                                    let remaining_fields = if let Some(tys) = obj_fields {
+                                        tys.iter()
+                                            .filter(|t| !non_rest_keys.contains(&t.ident.sym))
+                                            .cloned()
+                                            .collect::<Vec<_>>()
                                     } else {
-                                        &p.key
+                                        vec![]
                                     };
-                                    self.locals.insert(ident.sym.clone(), "i32".to_string());
-                                    writeln!(output, "    {}: i32,", ident.sym).unwrap();
+                                    let rest_cp_ty = Type::Object(remaining_fields);
+                                    let t_str = self.map_type(&rest_cp_ty);
+                                    self.locals.insert(p.key.sym.clone(), t_str.clone());
+                                    writeln!(output, "    {}: {},", p.key.sym, t_str).unwrap();
+                                    continue;
                                 }
+
+                                let ident = if let Some(Pattern::Ident(i)) = &p.val {
+                                    i
+                                } else {
+                                    &p.key
+                                };
+                                let f_opt = obj_fields
+                                    .and_then(|tys| tys.iter().find(|t| t.ident.sym == p.key.sym));
+                                let t_str = f_opt
+                                    .map(|t| self.map_type(&t.ty))
+                                    .unwrap_or_else(|| "i32".to_string());
+                                self.locals.insert(ident.sym.clone(), t_str.clone());
+                                writeln!(output, "    {}: {},", ident.sym, t_str).unwrap();
                             }
                         }
                         _ => {}

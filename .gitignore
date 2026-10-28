@@ -32,6 +32,7 @@ _ref/
 **/*.backup
 **/*.orig
 *~
+*-bak*.md
 
 # CP Lang
 cap/.con-build/

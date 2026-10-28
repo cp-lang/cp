@@ -1187,7 +1187,14 @@ impl Analyzer {
                 *self.scopes.last_mut().unwrap() = merged;
             }
             Pattern::Object(props) => {
+                let rest_count = props.iter().filter(|p| p.is_rest).count();
+                if rest_count > 1 {
+                    return Err(SemaError::MultipleRestInPattern(Span { start: 0, end: 0 }));
+                }
                 for p in props {
+                    if p.key.sym == "*" {
+                        continue;
+                    }
                     if let Some(vp) = &p.val {
                         self.bind_match_pattern(vp)?;
                     } else {
@@ -1244,7 +1251,14 @@ impl Analyzer {
                 self.bind_for_pattern(inner, &Type::Array(Box::new(Type::Any)))?;
             }
             Pattern::Object(props) => {
+                let rest_count = props.iter().filter(|p| p.is_rest).count();
+                if rest_count > 1 {
+                    return Err(SemaError::MultipleRestInPattern(Span { start: 0, end: 0 }));
+                }
                 for p in props {
+                    if p.key.sym == "*" {
+                        continue;
+                    }
                     if let Some(vp) = &p.val {
                         self.bind_for_pattern(vp, &Type::Any)?;
                     } else {
@@ -1900,12 +1914,17 @@ impl Analyzer {
                 }
             }
             Pattern::Object(props) => {
+                let rest_count = props.iter().filter(|p| p.is_rest).count();
+                if rest_count > 1 {
+                    return Err(SemaError::MultipleRestInPattern(Span { start: 0, end: 0 }));
+                }
                 let mut base_ty = ty;
                 while let Type::BorrowType { inner, .. } = base_ty {
                     base_ty = *inner;
                 }
                 let fields = match base_ty {
                     Type::Object(fs) => fs,
+                    Type::Any | Type::Unknown => vec![],
                     _ => {
                         return Err(SemaError::TypeMismatch(
                             Type::Object(vec![]),
@@ -1914,21 +1933,57 @@ impl Analyzer {
                         ))
                     }
                 };
+                let non_rest_keys: std::collections::HashSet<String> = props
+                    .iter()
+                    .filter(|p| !p.is_rest)
+                    .map(|p| p.key.sym.clone())
+                    .collect();
+
                 for prop in props {
-                    let field = fields
-                        .iter()
-                        .find(|f| f.ident.sym == prop.key.sym)
-                        .ok_or_else(|| {
-                            SemaError::UndefinedSymbol(prop.key.sym.clone(), prop.key.span)
-                        })?;
-                    if let Some(inner_pat) = &prop.val {
-                        self.analyze_pattern(inner_pat, field.ty.clone(), kind)?;
+                    if prop.is_rest {
+                        if prop.key.sym == "*" || matches!(prop.val, Some(Pattern::Wildcard)) {
+                            continue;
+                        }
+                        let remaining_fields: Vec<Field> = fields
+                            .iter()
+                            .filter(|f| !non_rest_keys.contains(&f.ident.sym))
+                            .cloned()
+                            .collect();
+                        let rest_ty = Type::Object(remaining_fields);
+                        if let Some(inner_pat) = &prop.val {
+                            self.analyze_pattern(inner_pat, rest_ty, kind)?;
+                        } else {
+                            self.analyze_pattern(&Pattern::Ident(prop.key.clone()), rest_ty, kind)?;
+                        }
+                        continue;
+                    }
+
+                    if !fields.is_empty() {
+                        let field = fields
+                            .iter()
+                            .find(|f| f.ident.sym == prop.key.sym)
+                            .ok_or_else(|| {
+                                SemaError::UndefinedSymbol(prop.key.sym.clone(), prop.key.span)
+                            })?;
+                        if let Some(inner_pat) = &prop.val {
+                            self.analyze_pattern(inner_pat, field.ty.clone(), kind)?;
+                        } else {
+                            self.analyze_pattern(
+                                &Pattern::Ident(prop.key.clone()),
+                                field.ty.clone(),
+                                kind,
+                            )?;
+                        }
                     } else {
-                        self.analyze_pattern(
-                            &Pattern::Ident(prop.key.clone()),
-                            field.ty.clone(),
-                            kind,
-                        )?;
+                        if let Some(inner_pat) = &prop.val {
+                            self.analyze_pattern(inner_pat, Type::Any, kind)?;
+                        } else {
+                            self.analyze_pattern(
+                                &Pattern::Ident(prop.key.clone()),
+                                Type::Any,
+                                kind,
+                            )?;
+                        }
                     }
                 }
                 Ok(())

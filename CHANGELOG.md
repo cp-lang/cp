@@ -658,5 +658,31 @@
 ### 新增文件 (Added)
 - [`cap/test/test_pipe_star.cp`](file:///data/dev/cp/cap/test/test_pipe_star.cp): 验证管道操作符配合 `*` 通配占位符与 `.` 占位符的正向编译与执行测试。
 
+## [Unreleased] - 2026-10-29 (Part 8)
+
+### 对象解构全链路支持 `...rest` 剩余属性变量绑定与 `...` / `...*` 忽略通配
+
+### 修改文件 (Modified)
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs):
+  - `ObjectPatProp` 新增 `is_rest: bool` 标识符，精准表示具名剩余属性（`...rest`）或匿名忽略剩余属性（`...` / `...*`）。
+- [`cpc/src/ast_visitor.rs`](file:///data/dev/cp/cpc/src/ast_visitor.rs):
+  - 在 `Pattern::Object` 递归提取闭包变量时，准确支持识别并注册解构对象中的具名 `...rest` 变量。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - 重构对象模式解析：当遇到 `Token::DotDotDot` (`...`) 时，若后接标识符解析为 `ObjectPatProp { key: rest_id, val: None, is_rest: true }`；若后接 `*` 或直接为末尾/逗号，解析为通配忽略 `ObjectPatProp { key: "*", val: Some(Wildcard), is_rest: true }`。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 在 `bind_match_pattern` 与 `bind_for_pattern` 中支持对象解构模式中最多只能有 1 个 `...` 的合法性校验，并为具名 `...rest` 定义作用域变量；
+  - 在 `analyze_pattern` 中支持剩余字段强类型计算：自动筛除已被非 rest 属性提取的键，将剩余属性构建为强类型匿名对象 `Type::Object(remaining_fields)` 并绑定到 `rest` 变量中。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 在 `Stmt::Var`（`let { a, ...rest } = obj;`）中计算剩余字段，为 `rest` 生成强类型匿名结构体 `.{ .b = _tmp_obj.b, .c = _tmp_obj.c }`；
+  - 在 `generate_pattern_match`（`switch (obj) { { a, ...extra } => extra.b }`）中生成剩余字段结构体绑定；
+  - 在 `Stmt::For`（`for { a, ...rest } of list`）中支持循环迭代解构绑定剩余字段；
+  - 在 `extract_locals_simple` 与 `extract_local_vars_to_str` 中支持 CPS 状态机注册 `rest` 变量及其 `__CpObj` 类型。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 更新第 3.2 节与生态路线图，正式标记对象解构 `...rest` 剩余绑定已全面实装。
+
+### 新增文件 (Added)
+- [`cap/test/test_obj_destructure_rest.cp`](file:///data/dev/cp/cap/test/test_obj_destructure_rest.cp): 验证对象解构具名 `...rest`、裸 `...`、`...*`、`switch` 分支与 `for` 循环解构的全链路正向测试。
+- [`cap/test/test_obj_rest_fail_multiple.cp`](file:///data/dev/cp/cap/test/test_obj_rest_fail_multiple.cp): 验证对象解构中包含多个 `...` 时的编译期错误拦截反向测试。
+
 
 

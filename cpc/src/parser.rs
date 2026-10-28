@@ -1193,10 +1193,36 @@ impl<'a> Parser<'a> {
                 let mut props = Vec::new();
                 while self.peek() != Some(&Token::RBrace) {
                     if self.peek() == Some(&Token::DotDotDot) {
-                        self.bump()?;
-                        if !matches!(self.peek(), Some(Token::Comma | Token::RBrace) | None) {
-                            let _ = self.parse_ident()?;
-                        }
+                        let dot_span = self.bump()?.1;
+                        let (key, val) =
+                            if !matches!(self.peek(), Some(Token::Comma | Token::RBrace) | None) {
+                                if self.peek() == Some(&Token::Star) {
+                                    let (_, s) = self.bump()?;
+                                    (
+                                        Ident {
+                                            span: s,
+                                            sym: "*".to_string(),
+                                        },
+                                        Some(Pattern::Wildcard),
+                                    )
+                                } else {
+                                    let rest_ident = self.parse_ident()?;
+                                    (rest_ident, None)
+                                }
+                            } else {
+                                (
+                                    Ident {
+                                        span: dot_span,
+                                        sym: "*".to_string(),
+                                    },
+                                    Some(Pattern::Wildcard),
+                                )
+                            };
+                        props.push(ObjectPatProp {
+                            key,
+                            val,
+                            is_rest: true,
+                        });
                         if self.peek() == Some(&Token::Comma) {
                             self.bump()?;
                         }
@@ -1208,7 +1234,11 @@ impl<'a> Parser<'a> {
                         self.bump()?;
                         val = Some(self.parse_pattern()?);
                     }
-                    props.push(ObjectPatProp { key, val });
+                    props.push(ObjectPatProp {
+                        key,
+                        val,
+                        is_rest: false,
+                    });
                     if self.peek() == Some(&Token::Comma) {
                         self.bump()?;
                     }
@@ -1235,7 +1265,11 @@ impl<'a> Parser<'a> {
                 } else if self.peek() == Some(&Token::Pipe) {
                     self.bump()?;
                     let key = self.parse_ident()?;
-                    fields = Some(vec![ObjectPatProp { key, val: None }]);
+                    fields = Some(vec![ObjectPatProp {
+                        key,
+                        val: None,
+                        is_rest: false,
+                    }]);
                     self.expect(Token::Pipe)?;
                 }
                 Ok(Pattern::Enum(EnumPattern {
@@ -1324,7 +1358,11 @@ impl<'a> Parser<'a> {
                                 self.bump()?;
                                 val = Some(self.parse_pattern()?);
                             }
-                            props.push(ObjectPatProp { key, val });
+                            props.push(ObjectPatProp {
+                                key,
+                                val,
+                                is_rest: false,
+                            });
                             if self.peek() == Some(&Token::Comma) {
                                 self.bump()?;
                             }

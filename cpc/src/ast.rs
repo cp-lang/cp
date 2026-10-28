@@ -249,6 +249,8 @@ pub struct EnumPattern {
 pub struct ObjectPatProp {
     pub key: Ident,
     pub val: Option<Pattern>,
+    #[serde(default)]
+    pub is_rest: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

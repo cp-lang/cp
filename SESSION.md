@@ -3363,3 +3363,27 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 3. **验证与交付**：
    - 编写 [`cap/test/test_pipe_star.cp`](file:///data/dev/cp/cap/test/test_pipe_star.cp) 并验证通过；
    - 全套测试套件运行正常。
+
+---
+
+## 2026-10-29 (Session Update - 对象解构中 `...rest` 变量绑定修正与全链路支持)
+
+### 用户指令
+> 你检查发现的 cpc/src/parser.rs：对象解构中的 ...rest 仅做吞入跳过，未绑定变量, 需修正
+
+### 执行结果汇报
+1. **修正对象解构 `...rest` 变量绑定全链路**：
+   - **AST 扩展 ([`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs))**：为 `ObjectPatProp` 增加 `is_rest: bool` 标识符；
+   - **闭包引用遍历 ([`cpc/src/ast_visitor.rs`](file:///data/dev/cp/cpc/src/ast_visitor.rs))**：支持识别并提取 `Pattern::Object` 中的具名 `...rest` 变量；
+   - **语法解析 ([`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs))**：遇到 `...` 时，若后接标识符解析为 `ObjectPatProp { key: rest_id, val: None, is_rest: true }`；若后接 `*` 或直接为结尾解析为通配忽略 `ObjectPatProp { key: "*", val: Some(Wildcard), is_rest: true }`；
+   - **语义类型推导与拦截 ([`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs))**：
+     - 限制单个模式内最多 1 个 `...`，超过报错 `MultipleRestInPattern`；
+     - 在 `analyze_pattern` 中提取非 rest 键名集合 `non_rest_keys`，动态计算未被提取的字段，构造强类型匿名对象 `Type::Object(remaining_fields)` 并绑定到 `rest` 变量中；
+   - **代码生成 ([`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs))**：
+     - 在 `Stmt::Var` 中为 `rest` 构建 Zig 零堆开销匿名结构体 `.{ .b = _tmp_obj.b, ... }`；
+     - 在 `generate_pattern_match` 与 `Stmt::For` 迭代解构中打通 `...rest` 赋值与绑定；
+     - 在 CPS 状态机 `extract_locals_simple` 与 `extract_local_vars_to_str` 中将 `rest` 变量注册为 `Context` 的 `__CpObj` 字段；
+   - **规范同步 ([`cp_ref.md`](file:///data/dev/cp/cp_ref.md))**：更新第 3.2 节与路线图，正式标记对象解构 `...rest` 剩余绑定已全面实装。
+2. **测试验证**：
+   - 新增正向测试 [`cap/test/test_obj_destructure_rest.cp`](file:///data/dev/cp/cap/test/test_obj_destructure_rest.cp)（变量声明解构、`switch` 解构、`for` 迭代解构），全套通过；
+   - 新增反向测试 [`cap/test/test_obj_rest_fail_multiple.cp`](file:///data/dev/cp/cap/test/test_obj_rest_fail_multiple.cp)（验证重复 `...` 模式拦截），精准报错通过。
