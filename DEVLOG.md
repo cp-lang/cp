@@ -1458,5 +1458,62 @@ AI 智能体正经历从“单体聊天机器人（Single Agent / ChatBot）”�
 3. **`cap.json` 全规范**：详解元数据、并发模式、Semver、Monorepo `workspaces`、编译器透传参数与 Nest 智能体信箱容量；
 4. **模块解析三层攀升引擎**：详解当前目录 -> 工作区逐级向上攀升 -> 全局缓存兜底的依赖解析哲学。
 
+---
+
+## 2026-10-29 (Part 12): CAP ($C^P$) 统一工具链体系工业级落地：配置驱动构建、多模式优化矩阵、测试套件与脚手架全面实装
+
+### 1. 架构目标与工程挑战
+1. **定位与生态使命**：
+   - Bun.js 之于 TypeScript/JavaScript，犹如 CAP 之于 CP。工具链不仅是代码包装器，更是开发者交互的核心中枢；
+   - 现存问题：旧版 `cap` 仅具备最基础的编译运行路由，缺失测试发现器、基准评测套件、依赖卸载升级以及多模板脚手架，且完全未读取 `cap.json` 中的 `build` 与 `mode` 配置，无法通过项目清单配置 Zig 优化等级与多目标架构；
+2. **核心工程原则**：
+   - **单二进制自给自足**：纯 Zig 原生实现，零额外动态库依赖，启动耗时仅数毫秒；
+   - **配置与参数深度融合**：建立清晰的优先级决策链——`CLI 参数 > cap.json build 配置 > 内置默认值`；
+   - **对齐底层 Zig 0.17 体系**：完美桥接 Zig 四大优化级别（`Debug`, `ReleaseSafe`, `ReleaseFast`, `ReleaseSmall`）、交叉编译 Target Matrix 与 C 编译器参数。
+
+### 2. 核心架构与落地细节
+1. **清单数据模型升级 (`cap/src/project/manifest.zig`)**：
+   - 实现了对 `mode`、`description`、`dev_dependencies`、`build` 以及 `nest` 对象的完整 JSON 解析与序列化；
+   - 引入 `OptimizeMode` 枚举并适配大小写不敏感匹配（`debug`, `safe`, `fast`, `small`）；
+   - 构建配置 `BuildConfig` 支持 `opt`, `out_dir`, `target`, `targets`, `c_flags`, `link_libs`；
+   - 增加了 `removeDependency` 与带 `is_dev` 标志的 `addDependency`，并在 `save()` 时提供完整的 JSON 格式化写回能力。
+2. **构建与运行流水线重构 (`cap/src/main.zig`)**：
+   - 构建流程自动侦测并合并 `cap.json` 配置与 CLI 标志；
+   - CLI 选项全面丰富：`-f`/`--fast`, `-s`/`--small`, `--safe`, `--debug`, `--opt=<mode>`, `-o`/`--out-dir=<dir>`, `-t`/`--target=<triple>`, `-r`/`--release`, `-b`/`--beam`；
+   - 当执行 `-r` 时，若 `cap.json` 配置了 `targets` 列表，则优先编译配置矩阵；否则回退至 5 大跨平台发布矩阵（macOS ARM/x64, Linux x64/ARM, Windows x64）；
+   - 自动透传 `c_flags` 与 `link_libs`（如自动展开为 `-lc -lm`）至底层 Zig 链接器。
+3. **开箱即用工程脚手架 (`cap init [template]`)**：
+   - 支持 `app`（默认控制台应用）、`agent`（Nest/Actor 并发智能体服务）、`lib`（原生可重用库）三大经典模板；
+   - 自动生成标准化目录结构（`src/`, `test/`, `.gitignore`）与符合该模板定位的 `cap.json`（如 agent 模板自带 `mode: "parallel"`, `build: { opt: "fast" }`, `nest: { mailbox_capacity: 65536 }`）。
+4. **测试运行器与微秒级基准套件 (`cap test` & `cap bench`)**：
+   - `cap test`：递归扫描 `test/` 目录或指定目标，在 `Debug` 模式下秒级编译执行，实时捕获退出状态与耗时，输出 Bun 风格的高颜值测试结果摘要；
+   - `cap bench`：在 `ReleaseFast` 极致算力模式下编译运行，基于 `std.Io.Timestamp` 纳秒级精准度量执行耗时。
+5. **构建脚本自更新 (`cap/build.zig`)**：
+   - 将产物同步输出至 `cap/bin/cap` 与 `cap/zig-out/cap`，保持本地全局调用二进制永远为最新状态。
+
+### 3. 实测验证与成效
+- 运行 `./cap/bin/cap test cap/test/test_obj_destructure_rest.cp`：秒级编译并通过全部测试断言，耗时精确输出；
+- 运行 `./cap/bin/cap bench cap/test/test_obj_destructure_rest.cp`：在 `ReleaseFast` 模式下完成基准计时与测试；
+- 验证脚手架工程在独立目录下的 `cap init agent` -> `cap test` -> `cap src/main.cp`，全流程 100% 顺畅闭环。
+
+---
+
+## 2026-10-29 (Part 13): 研发工作流纪律校准：测试与临时文件目录边界规范
+
+### 1. 痛点反思与成因
+- 之前为探测 Zig 0.17 的新 API（如 `std.json` 数组结构与 `std.Io.Timestamp`），直接在 `/root/.../scratch/` 路径下生成探测文件并在测试后执行清理，触发了系统权限拦截，打扰了用户流程，破坏了项目内聚性；
+- 查阅项目结构，根目录 [`.gitignore`](file:///data/dev/cp/.gitignore#L15) 早已清晰规划了 `temp/` 忽略条目，理应将一切临时探测与中间态文件严格封闭在项目内的 `temp/` 目录中。
+
+### 2. 目录规范与长效铁律
+1. **临时探测与实验性验证目录（`temp/`）**：
+   - 所有中间探索性代码、一次性语法探测脚本、临时 JSON/Zig 验证用例，一律统一写入项目根目录的 `temp/`；
+   - `temp/` 目录已被 git 全局忽略，既不会污染代码仓库，也无需反复在敏感目录发起 `rm` 提权申请；
+2. **正式长期工程测试目录（`cap/test/`）**：
+   - 具有长期回归测试价值的正式 `.cp` 测试用例（如 `test_obj_destructure_rest.cp`、`test_actor.cp` 等），一律统一沉淀在 `cap/test/`；
+3. **严禁越界行为**：
+   - 彻底废除向 `/root/` 或全局应用数据目录写入任何临时测试文件的行为，严格遵循当前工作区上下文规范。
+
+
+
 
 

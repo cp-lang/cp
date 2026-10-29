@@ -3492,6 +3492,68 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 2. 执行 Git Commit 提交，提交信息为：`docs(spec): overhaul cp_ref.md to 12-part architecture with dedicated cap toolchain and bun-aligned module ecosystem`；
 3. 代码库工作区保持 100% 干净，所有成果已永久固化保存至 Git 历史。
 
+---
+
+## 2026-10-29 (Session Update - CAP Toolchain Architecture & Phase 1 Implementation)
+
+### 用户指令
+> 目前cp 语言研发已经到了一定成熟度, 需要完善 cap 工具链 来使用 cp 语言编写应用.
+> 目前我们实现的cap非常简陋, 功能极不完善, 需对标 bun 之于 ts, cap 之于 cp, 根据你在 cp_ref.md 第二章中设计的功能, 先给出cap工具链的整体设计方案, 并分阶段逐步实现该方案, 让cap达到可用阶段.
+> 另外, zig 编译分为几个级别, 默认为调式Debug, 编译速度最快, 其次: ReleaseSafe ReleaseFast ReleaseSmall, 这些在我们最终编译为二进制输出时, 包括目标操作系统等, 需考虑通过cap.json配置来设定.
+> 更多细节,需要你这个编程语言设计大赛来仔细思考,认真分析,制定实现方案,分阶段步骤来实现.
+
+### 执行结果汇报
+1. **CAP ($C^P$) 统一工具链全景架构方案制定**：
+   - 确立对标 Bun.js 之于 TS/JS 的定位：CAP 作为 CP 语言单独立可执行统一工具箱（Runner, Compiler, Package Manager, Test, Bench, Scaffolding）；
+   - 规划了 6 大架构分层体系，详述 Zig 4 大编译优化级别（`Debug`, `ReleaseSafe`, `ReleaseFast`, `ReleaseSmall`）的定位与映射标准；
+   - 制定了 `CLI 参数 > cap.json build 配置 > 内置默认值` 的三层决策优先级机制；
+   - 规划了 4 个清晰递进的工程实现阶段。
+2. **阶段一核心架构与系统能力全面落地实施**：
+   - **清单引擎升级 (`manifest.zig`)**：全面支持 `mode`、`description`、`dev_dependencies`、`build` 配置块（`opt`, `out_dir`, `target`, `targets`, `c_flags`, `link_libs`）与 `nest` 配置块，支持高保真 JSON 序列化；
+   - **配置驱动构建与多优化模式 (`main.zig`)**：`cap build` 自动读取 `cap.json` 配置，完整打通 `-f`/`--fast`, `-s`/`--small`, `--safe`, `--debug`, `--opt=<mode>`、输出目录覆盖（`-o`/`--out-dir`）与单目标交叉编译（`-t`/`--target`）；
+   - **多模板脚手架 (`main.zig`)**：实装 `cap init [app|agent|lib]`，一键生成契合业务定位的 `cap.json` 与规范源码；
+   - **原生测试运行器 (`main.zig`)**：实装 `cap test [dir]`，自动发现并以 Debug 模式秒级编译执行所有用例，实时统计用时并输出优雅的测试汇总摘要；
+   - **微秒级基准测试套件 (`main.zig`)**：实装 `cap bench <file.cp>`，在 ReleaseFast 极致算力模式下纳秒级高精度度量执行耗时；
+   - **构建脚本自同步 (`build.zig`)**：`zig build` 同步生成并刷新 `cap/bin/cap` 与 `cap/zig-out/cap`；
+   - **规范手册同步 (`cp_ref.md`)**：同步更新第二篇 2.2 全指令全景矩阵与 2.4 构建优化级别规范。
+3. **测试验证**：
+   - 验证 `cap test` 运行用例秒级通过，耗时精确呈现；
+   - 验证 `cap bench` 在 `ReleaseFast` 极致模式下完成性能评测；
+   - 验证在独立目录中执行 `cap init agent` -> `cap test` -> `cap src/main.cp` 闭环顺畅执行。
+
+---
+
+## 2026-10-29 (Session Update - Clarification on Temp Directory & Scratch Files Workflow)
+
+### 用户指令
+> 你为何要不停在  root/目录创建测试文件,然后又删除, 如:  rm -f /root/.gemini/antigravity-cli/brain/ebe8932a-593c-40d2-a931-f9ce1d4de5b9/scratch/test_json.zig)
+> 为何不在 当前项目目录的 temp 目录创建临时测试文件
+> cap/test/ 目录存放非临时测试文件
+
+### 执行结果汇报
+1. **反思与纠正工作流规范**：
+   - 之前因默认系统底层 Scratch 路径提示惯性，误将探测性验证代码写在 `/root/.../scratch/` 下，引发了宿主机权限拦截与无谓的删除操作打扰；
+   - 检查确认项目根目录 [`.gitignore`](file:///data/dev/cp/.gitignore#L15) 早已预置了 `temp/` 过滤规则；
+2. **铁律确立**：
+   - **临时验证/实验测试文件**：今后一律只在项目内 `temp/` 目录创建（如 `temp/test_xxx.zig` 或 `temp/test_xxx.cp`），受 `.gitignore` 保护，无需敏感删除操作，杜绝干扰；
+   - **正式用例**：一律规范沉淀在 [`cap/test/test_*.cp`](file:///data/dev/cp/cap/test/) 目录，作为系统的长期测试套件；
+   - **绝对严禁**再在 `/root/...` 下创建任何临时测试文件。
+
+---
+
+## 2026-10-29 (Session Update - Git Commit)
+
+### 用户指令
+> git 提交
+
+### 执行结果汇报
+1. 暂存所有工作区修改文件：`cap/build.zig`、`cap/src/main.zig`、`cap/src/project/manifest.zig`、`cp_ref.md`、`GEMINI.md`、`CHANGELOG.md`、`DEVLOG.md`、`SESSION.md`；
+2. 执行 Git 提交：`feat(cap): overhaul cap toolchain with manifest build config, test runner, bench suite, and scaffolding`；
+3. 工作区保持干净，所有成果固化保存至 Git 历史。
+
+
+
+
 
 
 

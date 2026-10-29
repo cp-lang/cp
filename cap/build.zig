@@ -13,10 +13,11 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    const install_artifact = b.addInstallArtifact(exe, .{
-        .dest_dir = .{ .override = .{ .custom = "" } }
-    });
+    const install_artifact = b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = .{ .custom = "" } } });
     b.getInstallStep().dependOn(&install_artifact.step);
+
+    const bin_install = b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = .{ .custom = "../bin" } } });
+    b.getInstallStep().dependOn(&bin_install.step);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());

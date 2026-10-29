@@ -745,6 +745,34 @@
     - **2.6 CAP 特性演进与对标路线图**：以对照表清晰展示 CAP 对标 Bun / Cargo 的全景落地现状与未来路线；
   - 同步全量更新全文顶部的 `## 目录索引 (Table of Contents)`。
 
+---
+
+## [Unreleased] - 2026-10-29 (Part 12)
+
+### CAP ($C^P$) 统一工具链工业级重构：配置驱动构建、多模式优化矩阵、测试套件与脚手架全面落地
+
+### 修改文件 (Modified)
+- [`cap/src/project/manifest.zig`](file:///data/dev/cp/cap/src/project/manifest.zig):
+  - 深度扩充 `cap.json` 清单数据模型：新增 `description`、`mode`、`dev_dependencies`、`build_config`（`opt`, `out_dir`, `target`, `targets`, `c_flags`, `link_libs`）与 `nest_config`（`mailbox_capacity`, `reduction_slice`）；
+  - 引入 `OptimizeMode` 枚举（`Debug`, `ReleaseSafe`, `ReleaseFast`, `ReleaseSmall`）及字符串双向映射方法；
+  - 增强 `addDependency` 支持开发依赖（`is_dev` 参数），新增 `removeDependency` 实现依赖全生命周期管理；
+  - 升级 `save()` 保证清单全字段高保真格式化输出，支持数组与对象树序列化。
+- [`cap/src/main.zig`](file:///data/dev/cp/cap/src/main.zig):
+  - 路由中枢全面升级：实装 `build`, `run`, `init`, `add`, `remove` (`rm`), `update` (`up`), `install`, `test`, `bench`, `sniff`, `help` 全指令矩阵；
+  - 构建系统打通 `cap.json` 配置解析与 CLI 参数覆盖：确立 `CLI 参数 > cap.json build 配置 > 内置默认值` 决策优先级链；
+  - 完整支持 Zig 4 级优化模式切换（`-f`/`--fast`, `-s`/`--small`, `--debug`, `--safe`, `--opt=<mode>`）；
+  - 支持单目标交叉编译覆盖（`-t`/`--target=<triple>`）与配置驱动的多平台发布矩阵（`-r`/`--release`）；
+  - 实装 `cap test [dir]`：自动递归扫描 `test/` 发现所有测试用例，在 `Debug` 模式下秒级编译执行并输出美观的进度耗时与汇总统计面板；
+  - 实装 `cap bench <file.cp>`：在 `ReleaseFast` 极致算力模式下编译并执行，使用 `std.Io.Timestamp` 进行纳秒级高精度基准计时；
+  - 实装 `cap init [app|agent|lib]`：开箱即用多模板脚手架，一键初始化规范目录结构、对应 `cap.json` 与代码样例；
+  - 实装 `cap remove` 与 `cap update` 依赖卸载与升级。
+- [`cap/build.zig`](file:///data/dev/cp/cap/build.zig):
+  - 增加对 `../bin` 的安装步骤，确保 `zig build` 能够同步生成并刷新 `cap/bin/cap` 与 `cap/zig-out/cap` 二进制文件。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 更新第二篇 2.2 全指令全景矩阵，将 `cap init`, `cap remove`, `cap update`, `cap bench` 状态升格为 **已全面实装**；
+  - 更新 2.4 `cap.json` 规范章节，详述 Zig 4 大编译优化级别（`debug`, `safe`, `fast`, `small`）、`targets` 平台矩阵以及构建参数覆盖三层优先级决策链。
+
+
 
 
 
