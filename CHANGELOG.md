@@ -821,6 +821,22 @@
 - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
   - 更新 2.2 CLI 全景矩阵表格，正式收录 `cap clean` 与 `cap build -B` 选项。
 
+---
+
+## [Unreleased] - 2026-10-29 (Part 17)
+
+### 官方用户门户与主自述文件 (README.md) 工业级重构与全景技术展示
+
+### 修改文件 (Modified)
+- [`README.md`](file:///data/dev/cp/README.md):
+  - 引入完整的 **CP 语言双字母徽标** 与 **CAP 工具链方案 A 向上大箭头徽标**（`C • ^ • P`）；
+  - 全面系统地剖析 Python、Node.js、Go、Rust、Erlang 在百万级 AI Agent 并发下的痛点与 CP 终极破局之道；
+  - 阐述“脑、神经、肌肉、血液”四位一体终极架构并嵌入 Mermaid 架构图；
+  - 新增 Actor 消息信箱、Bun 风格极速 HTTP 服务端与 `SharedTensor` 硬件原子零拷贝三大代码实战展示；
+  - 详述 CAP 工具链从调试（`cap <file>`）、增量编译（0ms）、极限性能（`-f`）、边缘微体积（`-s`）、矩阵发布（`-r`）、测试、基准到一键缓存清理（`cap clean`）的全流程工作流；
+  - 制作全方位横向对比矩阵，直观对比 Python、Node.js、Go、Rust 与 CP 在 8 大维度的核心指标。
+
+
 
 
 
