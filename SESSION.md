@@ -3612,11 +3612,82 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 2. 执行 Git 提交：`docs(brand): unify naming system to CP (Concurrent Plus) and CAP (Concurrent Application Plus) with Scheme A logo`；
 3. 工作区保持干净，所有成果固化保存至 Git 历史。
 
+---
 
+## 2026-10-29 (Session Update - CLI Global Setup & hello.cp Build/Run Guide)
 
+### 用户指令
+> 1. 如何设置, cap 与 cpc 能在命令行能运行
+> 2. 如何使用 cap 编译/运行 cap/test/hello.cp
 
+### 执行结果汇报
+1. **命令行全局运行环境配置指南**：
+   - 方案一（首选推荐）：将 `/data/dev/cp/cap/bin` 加入环境变量 PATH（`~/.bashrc`）；
+   - 方案二：软链接（`ln -sf`）到系统标准全局路径 `/usr/local/bin`；
+   - 方案三：对齐白皮书标准的 `~/.cap/bin` 沙盒体系。
+2. **`cap/test/hello.cp` 编译与运行全场景实操指南**：
+   - 即时运行（日常调试首选）：`cap cap/test/hello.cp` 或 `cap run cap/test/hello.cp`；
+   - 生产级编译构建：`cap build cap/test/hello.cp`（ReleaseSafe）、`cap build -f`（ReleaseFast）、`cap build -s`（ReleaseSmall）；
+   - 独立二进制运行：直接执行 `./bin/cap/test/hello`；
+   - 单元测试运行：`cap test cap/test/hello.cp`；
+   - 微基准评测运行：`cap bench cap/test/hello.cp`。
 
+---
 
+## 2026-10-29 (Session Update - Incremental Compilation, Build Duration & Cache Management)
+
+### 用户指令
+> cap build cap/test/hello.cp
+> Building: cap/test/hello.cp (Mode: ReleaseSafe)...
+> [TRACE] In generate_module: setting up globals
+> [TRACE] Generating Traits
+> [TRACE] Generating Enums & ErrorSets
+> [TRACE] Generating Interfaces
+> [TRACE] Generating Classes
+> [TRACE] Generating Impls
+> [TRACE] Generating Funcs and Imports
+> [TRACE] Finished Funcs
+>   → Compiling for Native (ReleaseSafe)...
+> Build completed! Artifacts in bin/
+> 
+> 生产编译输出如上, 时间有点久.
+> 1. 每次build 都需要这个时间吗, 没有增量编译加快编译速度吗
+> 2. 能否显示编译耗时
+> 3. 生成的hello.zig 中间代码在哪里
+> 4. zig编译产生的中间产物是什么(类似 obj之类的), 在哪里
+> 4. 如果项目中有的cp代码未更改, 输出的中间zig代码也未更改,此时cpc应该跳过zig输出, 同时 zig编译应该也有办法,跳过该zig编译, 直接使用之前编译生成的编译产物.
+> 5. 如何清理 生成的中间zig代码和zig生成的编译中间产物, 清理后, build,相当于完全重新编译.
+
+### 执行结果汇报
+1. **多级增量编译流水线实装**：
+   - 比较目标二进制与源 `.cp` 文件的 `mtime`，未发生变更时 0ms 瞬间跳过编译与链接；
+   - 比较中间态 `.cap/zig/xxx.zig` 与源 `.cp` 文件 `mtime`，中间源码未过期时跳过 `cpc` 转译；
+   - 在 `cpc` 编译器输出时引入内容一致性比较，若内容未改变则跳过写文件以保留 `mtime`；
+   - 引入 `-B` / `--force` 参数支持强制全量构建。
+2. **高精度编译耗时分段度量实装**：
+   - 精确展示 `cpc` 前端转译耗时（毫秒）以及 Zig 原生编译链接耗时（秒/毫秒）；
+   - 构建完成时输出全流程总耗时（如 `Build completed in 16.16s!` 或 `Build completed in 0ms!`）。
+3. **中间态与编译缓存目录明确**：
+   - 生成的转译中间 Zig 源码：存放于 `.cap/zig/`（如 `.cap/zig/cap/test/hello.zig`）；
+   - Zig 编译产生的机器码与元数据缓存：存放于 `.cap/zig-cache/`（哈希编址的增量编译单元）及全局 `~/.cache/zig/`。
+4. **一键缓存与产物清理命令 `cap clean` 实装**：
+   - 新增 `cap clean` 指令，一键安全清理 `.cap/zig/`、`.cap/zig-cache/`、`.cap/obj/` 与输出目录 `bin/`；
+   - 清理之后执行 `cap build` 将触发 100% 全量纯净编译。
+5. **日志与规范手册同步**：
+   - 净化 `cpc/src/codegen.rs` 中 8 处冗余 `[TRACE]` 终端打印；
+   - 同步更新 `cp_ref.md`、`CHANGELOG.md`、`DEVLOG.md`。
+
+---
+
+## 2026-10-29 (Session Update - Git Commit)
+
+### 用户指令
+> 将本次修改 提交到 代码库
+
+### 执行结果汇报
+1. 暂存所有工作区修改文件：`cpc/src/codegen.rs`、`cpc/src/main.rs`、`cap/src/main.zig`、`cp_ref.md`、`README.md`、`CHANGELOG.md`、`DEVLOG.md`、`SESSION.md`；
+2. 执行 Git 提交：`feat(cap): implement incremental build pipeline, compilation profiling, and cap clean command`；
+3. 工作区保持干净，所有成果固化保存至 Git 历史。
 
 
 

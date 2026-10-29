@@ -433,7 +433,6 @@ impl Codegen {
     }
 
     pub fn generate_module(&mut self, module: &Module) -> String {
-        println!("[TRACE] In generate_module: setting up globals");
         let mut class_order = Vec::new();
         let mut impl_decls = Vec::new();
         let mut has_single_thread_meta = false;
@@ -1251,13 +1250,11 @@ impl Codegen {
         self.writeln("pub fn cp_unpack_slice(v: anytype, comptime start: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start + suffix_len) { return m.array[start .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime T == Message) { if (v == .array and v.array.len >= start + suffix_len) { return v.array[start .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[start .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[start .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[start .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .array)) { return v[start .. v.len - suffix_len]; } else { const fields = @typeInfo(T).@\"struct\".fields; const end = fields.len - suffix_len; const count = if (end > start) end - start else 0; const Elem = if (start < fields.len) CpValType(fields[start].type) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, std.fmt.comptimePrint(\"{d}\", .{f_idx}))); } return buf; } }");
         self.writeln("");
 
-        println!("[TRACE] Generating Traits");
         for item in &module.body {
             if let ModuleItem::Decl(Decl::Trait(t)) = item {
                 self.generate_trait(t);
             }
         }
-        println!("[TRACE] Generating Enums & ErrorSets");
         for item in &module.body {
             if let ModuleItem::Decl(Decl::Enum(e)) = item {
                 self.generate_enum(e);
@@ -1339,13 +1336,11 @@ impl Codegen {
             self.dedent();
             self.writeln("};\n");
         }
-        println!("[TRACE] Generating Interfaces");
         for item in &module.body {
             if let ModuleItem::Decl(Decl::Interface(i)) = item {
                 self.generate_interface(i);
             }
         }
-        println!("[TRACE] Generating Classes");
         for item in &module.body {
             if let ModuleItem::Decl(Decl::Class(c)) = item {
                 if c.ident.sym == "PID" || c.ident.sym == "Message" || c.ident.sym == "Agent" {
@@ -1359,14 +1354,12 @@ impl Codegen {
                 self.generate_class(&resolved);
             }
         }
-        println!("[TRACE] Generating Impls");
         for item in &module.body {
             if let ModuleItem::Decl(Decl::Impl(i)) = item {
                 self.generate_impl(i);
             }
         }
 
-        println!("[TRACE] Generating Funcs and Imports");
         for item in &module.body {
             match item {
                 ModuleItem::Decl(Decl::Func(f)) => {
@@ -1391,7 +1384,6 @@ impl Codegen {
                 _ => {}
             }
         }
-        println!("[TRACE] Finished Funcs");
 
         for f in &self.lambda_funcs {
             self.output.push_str(f);

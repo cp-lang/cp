@@ -1556,6 +1556,21 @@ AI 智能体正经历从“单体聊天机器人（Single Agent / ChatBot）”�
 - 命令行编译器 [`cap/src/main.zig`](file:///data/dev/cp/cap/src/main.zig) 交互横幅与版本信息更新为 `CAP : Concurrent Application Plus v0.1.0`；
 - 原生编译并自刷新 `cap/bin/cap`。
 
+---
+
+## 2026-10-29 (Part 16): 增量编译流水线 (Incremental Build)、编译耗时度量 (Build Profiling) 与构建缓存清理 (cap clean) 实现
+
+### 1. 痛点分析与原理
+1. **时间构成与瓶颈**：
+   - 生产编译模式下，Zig 调用 LLVM 后端进行多重内联、向量化、安全插桩及全程序链接，耗时通常在数秒到十几秒不等；
+   - 之前版本缺乏增量缓存感知，每次运行 `cap build` 或 `cap run` 均无条件重新调用 `cpc` 覆写 `.zig` 文件，导致底层无法复用已有机器码产物。
+2. **多级增量感知机制 (Incremental Architecture)**：
+   - **Level 1 (文件级 Up-to-date 完全跳过)**：比较目标二进制 `bin/xxx` 与源码 `.cp` 的纳秒时间戳（`mtime`）。若二进制新于源码且未传 `-B`/`--force`，直接 0ms 跳过编译；
+   - **Level 2 (前端转译跳过与防抖)**：若中间态 `.cap/zig/xxx.zig` 的 `mtime` 新于 `.cp`，跳过 `cpc` 前端；若重新转译生成的代码与已有文件内容完全一致，`cpc` 不覆写文件以保留 `mtime`，使底层编译缓存最大化命中；
+   - **Level 3 (编译耗时分段度量)**：接入 `std.Io.Timestamp`，分别精确展示 `cpc` 转译耗时（毫秒）与 Zig 原生编译耗时（秒），并在完成时输出总耗时；
+   - **Level 4 (全量纯净编译与清理 `cap clean`)**：提供一键命令安全清理 `.cap/zig/`（转译源码）、`.cap/zig-cache/`（编译器缓存与对象文件）、`.cap/obj/` 与输出目录 `bin/`。
+
+
 
 
 

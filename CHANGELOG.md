@@ -801,6 +801,27 @@
   - 终端 `usage()`, `handleTest()`, `handleBench()` 欢迎横幅全量更新为 `CAP : Concurrent Application Plus v0.1.0`；
   - 重新编译输出最新原生二进制，全面通过实测。
 
+---
+
+## [Unreleased] - 2026-10-29 (Part 16)
+
+### 增量编译流水线 (Incremental Build)、编译耗时度量 (Build Profiling) 与缓存清理 (cap clean) 实装
+
+### 修改文件 (Modified)
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 移除 8 处调试遗留的 `[TRACE]` 标准输出，净化前端转译终端输出。
+- [`cpc/src/main.rs`](file:///data/dev/cp/cpc/src/main.rs):
+  - 增加转译内容一致性预检：若输出 `.zig` 内容与已有文件一致，跳过磁盘写入以保留文件修改时间戳（`mtime`），供下游构建工具进行增量缓存判定。
+- [`cap/src/main.zig`](file:///data/dev/cp/cap/src/main.zig):
+  - **增量构建系统 (Incremental Build)**：检查输出二进制与源码 `.cp` 的 `mtime`，未发生变更时 0ms 极速跳过转译与 LLVM 链接，对标 Bun/Go 的即时开发体验；
+  - **中间态感知复用**：若中间态 `.cap/zig/` 源码新于 `.cp` 源码，自动跳过 `cpc` 前端转译；
+  - **编译耗时度量 (Build Profiling)**：在编译过程中精确度量 `cpc` 前端转译毫秒数、Zig/LLVM 原生链接秒数与全流程总耗时；
+  - **强制构建参数 (`-B` / `--force`)**：支持跳过增量缓存直接强制重新编译；
+  - **缓存与产物清理 (`cap clean`)**：一键安全清理 `.cap/zig/` 中间源码、`.cap/zig-cache/` 编译器缓存、`.cap/obj/` 与产物目录 `bin/`。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 更新 2.2 CLI 全景矩阵表格，正式收录 `cap clean` 与 `cap build -B` 选项。
+
+
 
 
 

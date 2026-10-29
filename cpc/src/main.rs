@@ -75,7 +75,14 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             let zig_code = codegen.generate_module(&module);
 
             match output {
-                Some(path) => fs::write(path, zig_code)?,
+                Some(path) => {
+                    if let Ok(existing) = fs::read_to_string(&path) {
+                        if existing == zig_code {
+                            return Ok(());
+                        }
+                    }
+                    fs::write(path, zig_code)?;
+                }
                 None => println!("{}", zig_code),
             }
         }
