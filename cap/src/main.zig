@@ -148,12 +148,12 @@ fn resolveDirectoryMain(allocator: std.mem.Allocator, dir_path: []const u8) !?[]
 
 fn usage() void {
     std.debug.print(
-        \\  ██████╗ ██████╗ 
-        \\ ██╔════╝ ██╔══██╗   CAP (C^P) v0.1.0 : Concurrent Power & Capability
-        \\ ██║      ██████╔╝   The All-in-One AI Agent & Native Systems Toolchain
-        \\ ██║      ██╔═══╝    [ Package Manager • Compiler • Runner • Test • Bench ]
-        \\ ╚██████╗ ██║
-        \\  ╚═════╝ ╚═╝
+        \\  ██████╗      ██╗     ██████╗ 
+        \\ ██╔════╝     ████╗    ██╔══██╗   CAP : Concurrent Application Plus v0.1.0
+        \\ ██║         ██╔═██╗   ██████╔╝   The All-in-One AI Agent & Native Systems Toolchain
+        \\ ██║        ██╔╝ ╚██╗  ██╔═══╝    [ Package Manager • Compiler • Runner • Test • Bench ]
+        \\ ╚██████╗  ██╔╝   ╚██╗ ██║        ^ (Upward Arrow) Linking C & P as the Letter 'A' (Application)
+        \\  ╚═════╝  ╚═╝     ╚═╝ ╚═╝
         \\
         \\Usage:
         \\  cap <file.cp|dir>             Run a CP file or directory directly (Debug)
@@ -1073,11 +1073,12 @@ fn handleTest(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     std.debug.print(
-        \\  ██████╗ ██████╗ 
-        \\ ██╔════╝ ██╔══██╗   CAP Test Runner v0.1.0
-        \\ ██║      ██████╔╝   Fast & Native CP Testing Engine
-        \\ ╚██████╗ ██║
-        \\  ╚═════╝ ╚═╝
+        \\  ██████╗      ██╗     ██████╗ 
+        \\ ██╔════╝     ████╗    ██╔══██╗   CAP Test Runner v0.1.0
+        \\ ██║         ██╔═██╗   ██████╔╝   Fast & Native CP Testing Engine
+        \\ ██║        ██╔╝ ╚██╗  ██╔═══╝    [ Test Discovery • Parallel • Debug Mode ]
+        \\ ╚██████╗  ██╔╝   ╚██╗ ██║        CAP : Concurrent Application Plus
+        \\  ╚═════╝  ╚═╝     ╚═╝ ╚═╝
         \\
     , .{});
 
@@ -1213,11 +1214,12 @@ fn handleBench(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
     const target = args[0];
     std.debug.print(
-        \\  ██████╗ ██████╗ 
-        \\ ██╔════╝ ██╔══██╗   CAP Benchmark Suite v0.1.0
-        \\ ██║      ██████╔╝   Microsecond State Machine Profiler
-        \\ ╚██████╗ ██║
-        \\  ╚═════╝ ╚═╝
+        \\  ██████╗      ██╗     ██████╗ 
+        \\ ██╔════╝     ████╗    ██╔══██╗   CAP Benchmark Suite v0.1.0
+        \\ ██║         ██╔═██╗   ██████╔╝   Microsecond State Machine Profiler
+        \\ ██║        ██╔╝ ╚██╗  ██╔═══╝    [ ReleaseFast • High-Precision Timing ]
+        \\ ╚██████╗  ██╔╝   ╚██╗ ██║        CAP : Concurrent Application Plus
+        \\  ╚═════╝  ╚═╝     ╚═╝ ╚═╝
         \\
     , .{});
     std.debug.print("Benchmarking target: {s} (ReleaseFast)...\n\n", .{target});

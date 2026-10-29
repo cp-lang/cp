@@ -772,6 +772,37 @@
   - 更新第二篇 2.2 全指令全景矩阵，将 `cap init`, `cap remove`, `cap update`, `cap bench` 状态升格为 **已全面实装**；
   - 更新 2.4 `cap.json` 规范章节，详述 Zig 4 大编译优化级别（`debug`, `safe`, `fast`, `small`）、`targets` 平台矩阵以及构建参数覆盖三层优先级决策链。
 
+---
+
+## [Unreleased] - 2026-10-29 (Part 14)
+
+### 品牌标识与徽标体系重塑：确立 CP 语言专属双字母徽标与 CAP 工具链方案 A 向上跃升箭头徽标（C ^ P => CAP）
+
+### 修改文件 (Modified)
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 开篇正文引入 **CP 语言原生专属徽标**（`C` + `P` 经典双字母对称架构），代表 CP 语言本体（并发算力与精密掌控）；
+  - 第二篇 2.1 正式装配 **CAP 工具链方案 A 专属徽标**（`C` + `^` + `P`）；
+  - 彻底重塑品牌定义：明确 CAP 绝非“C 的 P 次方”，而是以代表并发算力向上跃迁、智能涌现与极速调度的向上大箭头 **`^` 代替字母 `A`**，直观牢固地连接 `C` 与 `P`，在视觉与语意上拼写出 **`CAP`**。
+- [`cap/src/main.zig`](file:///data/dev/cp/cap/src/main.zig):
+  - 全面更新终端 ASCII 艺术徽标为方案 A：包括 `cap help` 帮助头、`cap test` 测试套件运行头以及 `cap bench` 微基准评测运行头。
+
+---
+
+## [Unreleased] - 2026-10-29 (Part 15)
+
+### 官方命名体系全景统一：确立 CP (Concurrent Plus) 与 CAP (Concurrent Application Plus) 宏大格局
+
+### 修改文件 (Modified)
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 规范开篇与核心愿景全量统一为 **CP (Concurrent Plus)**；
+  - 第二篇 2.1 节正式定名为 **CAP (Concurrent Application Plus)**；
+  - 详述 `CP` 与 `CAP` 的同源血脉与几何同构：在 `C`（Concurrent 调度基座）与 `P`（Plus 性能安全增益）之间，注入字母 `A`（`Application`），由向上跃迁大箭头 `^`（Ascend）生动连接，象征由语言规范迈向生产级应用交付的全景赋能。
+- [`cap/src/main.zig`](file:///data/dev/cp/cap/src/main.zig):
+  - 终端 `usage()`, `handleTest()`, `handleBench()` 欢迎横幅全量更新为 `CAP : Concurrent Application Plus v0.1.0`；
+  - 重新编译输出最新原生二进制，全面通过实测。
+
+
+
 
 
 

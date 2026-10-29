@@ -28,7 +28,7 @@
   - [2.1 现有Zig项目的上层迁移层（Zig生态内部的升级选择）](#21-现有zig项目的上层迁移层zig生态内部的升级选择)
   - [2.2 边界：哪些场景CP不适合主推](#22-边界哪些场景cp不适合主推)
 - [第二篇：cap 统一工具链与模块生态体系 (The cap Toolchain & Ecosystem)](#第二篇cap-统一工具链与模块生态体系-the-cap-all-in-one-toolchain--ecosystem)
-  - [2.1 架构愿景：CAP (C^P) 核心定位与品牌标识](#21-架构愿景cap-cp-核心定位与品牌标识)
+  - [2.1 架构愿景：CAP (Concurrent Application Plus) 核心定位与品牌标识](#21-架构愿景cap-concurrent-application-plus-核心定位与品牌标识)
   - [2.2 cap CLI 全指令全景矩阵](#22-cap-cli-全指令全景矩阵)
   - [2.3 全局缓存与软链接零拷贝注入机制 (Symlink & Global Cache)](#23-全局缓存与软链接零拷贝注入机制-symlink--global-cache)
   - [2.4 cap.json 工程清单权威规范](#24-capjson-工程清单权威规范)
@@ -95,9 +95,20 @@
 
 # CP 语言规范 · 开篇
 
-> CP(C Plus / Concurrent Plus)：一门基于Zig、拥有Rust级内存安全、语法贴近TypeScript/ES6的全平台编译型系统语言，兼顾易用、安全与底层高性能, 在高安全、高并发、高性能、小体积、低内存场景独具优势。
+```text
+  ██████╗ ██████╗
+ ██╔════╝ ██╔══██╗   CP : Concurrent Plus
+ ██║      ██████╔╝   The AI Agent & Native Systems Language
+ ██║      ██╔═══╝    [ TS-Syntax • Rust-Safety • Zig-Performance • Nest-Actor ]
+ ╚██████╗ ██║
+  ╚═════╝ ╚═╝
+```
+
+> CP (Concurrent Plus)：一门基于Zig、拥有Rust级内存安全、语法贴近TypeScript/ES6的全平台编译型系统语言，兼顾易用、安全与底层高性能, 在AI、AI Agent、高安全、高并发、高性能、小体积、低内存场景独具优势。
 
 CP 为AI以及海量（百万级以上）AI Agent 并发运行提供了专门支持，提供编译选项（-nest）编译为智能体容器动态加载运行，抢占式协程调度，避免单智能体死循环影响其他智能体运行。
+
+CP 是 C/C++ 在并发与智能体时代的终极演进：TS 直觉 + Rust 安全 + Zig 底层 + Nest 并发。
 
 ## 第一篇：CP 语言哲学、核心愿景与全景场景矩阵
 
@@ -375,15 +386,15 @@ CP对他们来说 = **保留Zig全部能力，叠加Rust安全检查 + TS风格�
 
 ## 第二篇：`cap` 统一工具链与模块生态体系 (The `cap` All-in-One Toolchain & Ecosystem)
 
-### 2.1 架构愿景：CAP ($C^P$) 核心定位与品牌标识
+### 2.1 架构愿景：CAP (Concurrent Application Plus) 核心定位与品牌标识
 
 ```text
-  ██████╗ ██████╗
- ██╔════╝ ██╔══██╗   CAP (C^P) : Concurrent Power & Capability
- ██║      ██████╔╝   The All-in-One AI Agent & Native Systems Toolchain
- ██║      ██╔═══╝    [ Package Manager • Compiler • Runner • Test • Monorepo ]
- ╚██████╗ ██║
-  ╚═════╝ ╚═╝
+  ██████╗      ██╗     ██████╗
+ ██╔════╝     ████╗    ██╔══██╗   CAP : Concurrent Application Plus
+ ██║         ██╔═██╗   ██████╔╝   The All-in-One AI Agent & Native Systems Toolchain
+ ██║        ██╔╝ ╚██╗  ██╔═══╝    [ Package Manager • Compiler • Runner • Test • Bench ]
+ ╚██████╗  ██╔╝   ╚██╗ ██║        ^ (Upward Arrow) Linking C & P as the Letter 'A' (Application)
+  ╚═════╝  ╚═╝     ╚═╝ ╚═╝
 ```
 
 #### 1. 深度对标 Bun.js 的全合一哲学 (All-in-One Philosophy)
@@ -402,11 +413,17 @@ CP对他们来说 = **保留Zig全部能力，叠加Rust安全检查 + TS风格�
 - **全生态归一**：开发者使用 CP 语言的主要入口就是 `cap` 命令，无论是新建项目、安装依赖、日常秒级调试运行、单元测试、矩阵交叉编译发布，均由 `cap` 一站式全盘接管；
 - **生态生命线**：CP 智能体与原生库的繁荣分发完全依托 `cap`，它是开发者与底层硬件、网络、智能体集群交互的核心指挥塔。
 
-#### 2. 品牌寓意：$C^P$（CAP）
+#### 2. 品牌寓意：CP 与 CAP 的血脉同构 (Concurrent Plus & Concurrent Application Plus)
 
-- **$C^P$ (C to the power of P)**：以 C/Zig 的底层裸机极致性能为底座，赋予并发（Concurrent）、协议（Protocol）、生产力（Productivity）指数级爆发的能量；
-- **Capability**：全能一体化工具箱，赋能百万级 AI Agent 运行时；
-- **Captain**：工业级构建、依赖拓扑与多端发布的绝对指挥官。
+- **语言本体：CP (Concurrent Plus)**：
+  - **C (Concurrent)**：专为百万级 AI Agent 与高并发系统设计的无 GC、抢占式调度并发内核；
+  - **P (Plus)**：对 C++ 历史演进的正统继承与全维度增益（TypeScript 直觉语法 + Rust 借用所有权内存安全 + Zig 零成本裸机控制力）。
+- **工具链体系：CAP (Concurrent Application Plus)**：
+  - **在 `C` 与 `P` 之间注入字母 `A` (`Application`)**：视觉上由向上腾飞的箭头符号 **`^`** 精准呈现，直观牢固地链接语言内核（C）与生态增益（P），完整拼写出 **`CAP`**；
+  - **代表 CAP 绝非“C 的 P 次方”**：它象征着从“语言规范（CP）”通过“应用工程赋能（Application / `^` 腾飞之矢）”迈向全场景生产级交付（CAP）；
+  - **C (Concurrent)**：并发调度底座与多核算力引擎；
+  - **A / ^ (Application & Ascend)**：全场景应用支撑（涵盖 AI Agent 集群、高性能服务器、系统 CLI、嵌入式固件等全部应用形态），寓意算力与开发效率的向上跃升；
+  - **P (Plus)**：跨平台构建交付矩阵、统一模块依赖拓扑与自动化测试评测生态。
 
 ---
 
@@ -429,10 +446,10 @@ CP对他们来说 = **保留Zig全部能力，叠加Rust安全检查 + TS风格�
 | `cap add <pkg>`                 | -            | **项目级依赖安装**：极速拉取并软链接到 `cap_modules/`，自动将依赖与 Semver 写入 `cap.json`。                        | **已全面实装** |
 | `cap add -g <pkg>`              | -            | **全局依赖注入**：将公共高频依赖安装到 `~/.cap/global/cap_modules/`，作为当前系统所有项目的公共兜底池。             | **已全面实装** |
 | `cap test [dir]`                | Debug        | **单元与集成测试**：递归扫描并执行测试用例，结果输出至 `bin/test/`，与业务产物物理隔离。                            | **已全面实装** |
-| `cap init [template]`           | -            | **开箱即用工程脚手架**：快速初始化模板工程（支持 `app` 独立应用、`agent` 智能体服务、`lib` 库模块）。 | **已全面实装** |
-| `cap remove <pkg>`              | -            | **依赖卸载**：清理指定依赖项及其孤立软链接，同步更新 `cap.json` 清单。                              | **已全面实装** |
-| `cap update [pkg]`              | -            | **语义化版本升级**：按照 `^`/`~` 规则安全升级依赖包至符合 Semver 规范的最新版本。                   | **已全面实装** |
-| `cap bench <file.cp>`           | ReleaseFast  | **微秒级基准测试**：纳秒级高精度计时度量状态机、闭包与数据吞吐耗时。                               | **已全面实装** |
+| `cap init [template]`           | -            | **开箱即用工程脚手架**：快速初始化模板工程（支持 `app` 独立应用、`agent` 智能体服务、`lib` 库模块）。               | **已全面实装** |
+| `cap remove <pkg>`              | -            | **依赖卸载**：清理指定依赖项及其孤立软链接，同步更新 `cap.json` 清单。                                              | **已全面实装** |
+| `cap update [pkg]`              | -            | **语义化版本升级**：按照 `^`/`~` 规则安全升级依赖包至符合 Semver 规范的最新版本。                                   | **已全面实装** |
+| `cap bench <file.cp>`           | ReleaseFast  | **微秒级基准测试**：纳秒级高精度计时度量状态机、闭包与数据吞吐耗时。                                                | **已全面实装** |
 | `cap fmt`                       | -            | **代码格式化**：原生百毫秒级格式化全部 `.cp` 源代码，保持工业级统一风格。                                           | **规划实现**   |
 | `cap lint`                      | -            | **静态分析与安全审计**：扫描生命周期逃逸、借用冲突与性能反模式。                                                    | **规划实现**   |
 | `cap publish`                   | -            | **去中心化生态发布**：将编译好的原生包或源码包签名并发布至 CP 官方 Registry。                                       | **规划实现**   |
@@ -524,6 +541,7 @@ flowchart TD
 #### 构建参数覆盖优先级裁定 (Precedence Hierarchy)
 
 构建参数严格遵循以下三层优先级决策链：
+
 1. **最高优先级**：命令行显式参数（如 `-f`、`-s`、`--debug`、`--safe`、`--opt=fast`、`-o <dir>`、`-t <triple>`、`-r`）；
 2. **次高优先级**：当前项目 `cap.json` 中的 `"build"` 配置块；
 3. **内置默认值**：`cap build` 默认 `ReleaseSafe`，`cap run`/`test` 默认 `Debug`，默认产物目录为 `bin/`。
