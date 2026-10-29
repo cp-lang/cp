@@ -56,6 +56,12 @@
 
 有，这个语言就是CP(Concurrent Plus)。
 
+CP作为一门新语言，稳定吗？
+
+CP并非重新造轮子，类似Babel、SWC将Typescript、ES6编译为ES5，CP将代码编译为Zig代码，通过Zig实现全平台机器码编译。
+
+因此，CP的稳定性完全基于稳定与高性能的Zig。Typescript给JavaScript加了类型，来增强稳定性。CP给Zig加了内存检查，来避免内存泄露，如果使用CP来编写Bun，Bun就不用迁移到Rust。
+
 ## 🌟 什么是 CP 与 CAP？
 
 - **CP (Concurrent Plus)**：并发与智能体时代的 C/C++ 家族正统继任者。它融合了 **TypeScript 的直觉表达力**、**Rust 的无 GC 编译期内存安全**、**Nest 的抢占式 Actor 协程海并发**，以及 **Zig 的裸机暴力计算与即时跨平台编译**。
