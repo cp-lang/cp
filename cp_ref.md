@@ -110,7 +110,7 @@ CP 为AI以及海量（百万级以上）AI Agent 并发运行提供了专门支
 
 CP 是 C/C++ 在并发与智能体时代的终极演进：TS 直觉 + Rust 安全 + Zig 底层 + Nest 并发。
 
-## 第一篇：CP 语言哲学、核心愿景与全景场景矩阵
+## 一、CP 语言哲学、核心愿景与全景场景矩阵
 
 ### 1.1 核心设计定位
 
@@ -384,7 +384,7 @@ CP对他们来说 = **保留Zig全部能力，叠加Rust安全检查 + TS风格�
 
 ---
 
-## 第二篇：`cap` 统一工具链与模块生态体系 (The `cap` All-in-One Toolchain & Ecosystem)
+## 二、`cap` 统一工具链与模块生态体系 (The `cap` All-in-One Toolchain & Ecosystem)
 
 ### 2.1 架构愿景：CAP (Concurrent Application Plus) 核心定位与品牌标识
 
@@ -435,8 +435,8 @@ CP对他们来说 = **保留Zig全部能力，叠加Rust安全检查 + TS风格�
 | :------------------------------ | :----------- | :------------------------------------------------------------------------------------------------------------------ | :------------- |
 | `cap <file/dir>`                | Debug        | **日常极速运行**：直接运行 `.cp` 脚本或目录，百毫秒级 JIT 式极速构建并在内存/本地直接运行。                         | **已全面实装** |
 | `cap run <file/dir>`            | Debug        | **显式运行模式**：与 `cap <file>` 等价，支持透传参数给用户程序。                                                    | **已全面实装** |
-| `cap build [dir]`               | ReleaseSafe  | **当前平台安全发布**：支持增量构建检查，仅编译变动文件，输出独立 Native 可执行文件至 `bin/`。       | **已全面实装** |
-| `cap build -B` (或 `--force`)   | ReleaseSafe  | **强制全量编译**：忽略 mtime 与缓存状态，强制重新生成中间 Zig 代码与 Native 独立二进制。             | **已全面实装** |
+| `cap build [dir]`               | ReleaseSafe  | **当前平台安全发布**：支持增量构建检查，仅编译变动文件，输出独立 Native 可执行文件至 `bin/`。                       | **已全面实装** |
+| `cap build -B` (或 `--force`)   | ReleaseSafe  | **强制全量编译**：忽略 mtime 与缓存状态，强制重新生成中间 Zig 代码与 Native 独立二进制。                            | **已全面实装** |
 | `cap build -r` (或 `--release`) | ReleaseSafe  | **终极矩阵跨平台构建**：单机一口气编译输出 Windows、macOS-ARM、macOS-Intel、Linux-x64、Linux-ARM 全套生产级二进制！ | **已全面实装** |
 | `cap build -f`                  | ReleaseFast  | **极限计算性能优化**：榨干硬件算力，消除一切额外运行时检查（可结合 `-r`：`cap build -r -f`）。                      | **已全面实装** |
 | `cap build -s`                  | ReleaseSmall | **极小体积构建**：极限剔除调试信息与体积优化，专用于边缘计算、嵌入式设备与轻量容器（可结合 `-r`）。                 | **已全面实装** |
@@ -444,7 +444,7 @@ CP对他们来说 = **保留Zig全部能力，叠加Rust安全检查 + TS风格�
 | `cap build --obj`               | -            | 输出底层的 `.o` 机器码对象文件，供外部链接。                                                                        | **已全面实装** |
 | `cap build --lib`               | -            | 输出系统级静态库 `.a`，供 C/C++ 或宿主语言无缝桥接。                                                                | **已全面实装** |
 | `cap build -b` (或 `--beam`)    | ReleaseFast  | **Nest 智能体容器动态库**：编译为导出标准 C-ABI 的纯状态机动态库（`.so`/`.dll`），供 Nest 容器原生动态热加载。      | **已全面实装** |
-| `cap clean`                     | -            | **构建缓存清理**：一键安全清理 `.cap/zig/`、`.cap/zig-cache/`、`.cap/obj/` 与输出目录 `bin/`。                       | **已全面实装** |
+| `cap clean`                     | -            | **构建缓存清理**：一键安全清理 `.cap/zig/`、`.cap/zig-cache/`、`.cap/obj/` 与输出目录 `bin/`。                      | **已全面实装** |
 | `cap add <pkg>`                 | -            | **项目级依赖安装**：极速拉取并软链接到 `cap_modules/`，自动将依赖与 Semver 写入 `cap.json`。                        | **已全面实装** |
 | `cap add -g <pkg>`              | -            | **全局依赖注入**：将公共高频依赖安装到 `~/.cap/global/cap_modules/`，作为当前系统所有项目的公共兜底池。             | **已全面实装** |
 | `cap test [dir]`                | Debug        | **单元与集成测试**：递归扫描并执行测试用例，结果输出至 `bin/test/`，与业务产物物理隔离。                            | **已全面实装** |
@@ -491,7 +491,7 @@ flowchart TD
   "author": "Antigravity Team",
   "license": "Apache-2.0",
   "main": "src/main.cp",
-  "mode": "parallel",
+  "mode": "parallel", // 可选: "parallel" (多核工作窃取) | "single" (单线程事件循环)
   "scripts": {
     "start": "cap src/main.cp",
     "build:prod": "cap build -r -f",
@@ -516,6 +516,10 @@ flowchart TD
   "nest": {
     "mailbox_capacity": 65536,
     "reduction_slice": 2000
+  },
+  "runtime": {
+    "workers": "auto", // "auto" 自动检测核心数，或固定数字如 16
+    "max_blocking": 512 // 弹性阻塞计算线程池上限
   }
 }
 ```
@@ -539,6 +543,7 @@ flowchart TD
   - **`c_flags`**：透传给底层 C 编译器的专属参数（如 `["-O3", "-Wall"]`）；
   - **`link_libs`**：外部系统链接库数组（如 `["c", "m", "pthread"]`，自动转化为 `-lc -lm -lpthread` 链接）。
 - **`nest`**：Nest 智能体容器专有参数，定义智能体默认信箱容量上限与抢占式 Reductions 时间片阈值。
+- **`runtime`**：mode 为parallel时启动Worker线程与并发协程。
 
 #### 构建参数覆盖优先级裁定 (Precedence Hierarchy)
 
@@ -560,7 +565,13 @@ CP 彻底摒弃了老旧沉重的 C/C++ `#include` 头文件包含与 CommonJS �
 // 1. 命名导出与默认导出
 export const PI = 3.1415926;
 export fn add(a: i32, b: i32): i32 { return a + b; }
+// 说明：default export 适合主类型、主类；一个模块不允许多个 `export default`。
 export default class AgentCore {}
+
+fn foo() {}
+fn bar() {}
+export { foo, bar };
+export { foo as default, bar };
 
 // 2. 命名导入与命名空间导入
 import { AgentCore, add } from "./core";
@@ -578,7 +589,21 @@ import { @spawn, @receive, @reply } from "cap:actor";
 
 // 5. 第三方包导入 (自动触发向上攀升解析引擎)
 import { Matrix } from "tensor-math";
+
+// 导入默认导出
+import App from "./app.cp";
+
+// 默认 + 具名混合导入
+import App, { start } from "./app.cp";
+import {default as App, start } from "./app.cp";
 ```
+
+#### 2. 禁止行为
+
+1. 没有 `use`，禁止写 `use xxx;`。
+2. 不能在函数内部、代码块内部写 `import / export`，导入导出只能在模块顶层。
+3. 不能 export 局部变量、分支内临时绑定。
+4. 裸指针 `*T!`、`zig{}` 内嵌块内部定义不能跨模块导出（unsafe 内部实现隔离）。
 
 #### 3. 智能目录入口解析优先级
 
@@ -617,7 +642,7 @@ import { Matrix } from "tensor-math";
 
 ---
 
-## 第三篇：类型系统、不可变哲学与双轨对象模型
+## 三、类型系统、不可变哲学与双轨对象模型
 
 ### 3.1 标量基础类型系统
 
@@ -695,7 +720,7 @@ config.set("timeout", 5000);
 
 ---
 
-## 第四篇：解构赋值与 `switch` 模式匹配体系
+## 四、解构赋值与 `switch` 模式匹配体系
 
 ### 4.1 数组与元组解构体系
 
@@ -791,7 +816,7 @@ let info = switch (person) {
 
 ---
 
-## 第五篇：函数系统与参数方法契约
+## 五、函数系统与参数方法契约
 
 ### 5.1 函数修饰符与前缀矩阵
 
@@ -873,7 +898,7 @@ class Account {
 
 ---
 
-## 第六篇：所有权、借用检查与内存安全架构
+## 六、所有权、借用检查与内存安全架构
 
 ### 6.1 移动语义（Move Semantics）与单写者安全
 
@@ -937,7 +962,7 @@ v[0] = 6;    // 合法：p 生命周期已由 NLL 释放
 
 ---
 
-## 第七篇：面向对象与契约解耦体系
+## 七、面向对象与契约解耦体系
 
 ### 7.1 数据与行为彻底解耦哲学
 
@@ -1044,7 +1069,7 @@ for handler of handlers {
 
 ---
 
-## 第八篇：原生三态错误处理体系
+## 八、原生三态错误处理体系
 
 ### 8.1 终结传统 Result/Option 胶水装箱
 
@@ -1130,7 +1155,7 @@ print(e.code, e.message);
 
 ---
 
-## 第九篇：现代语法糖与函数式特性
+## 九、现代语法糖与函数式特性
 
 ### 9.1 管道操作符与通用通配占位符
 
@@ -1213,7 +1238,7 @@ if emailRegex.test("admin@cp-nest.org") {
 
 ---
 
-## 第十篇：异步编程、双轨并行计算与 Nest 智能体容器
+## 十、异步编程、双轨并行计算与 Nest 智能体容器
 
 ### 10.1 CPS 状态机异步内核
 
@@ -1309,9 +1334,9 @@ CP 语言是 **Nest 智能体容器** 的原生执行体：
 
 ---
 
-## 第十一篇：元编程、编译期计算与底层控制
+## 十一、元编程、编译期计算与底层控制
 
-### 11.1 编译期代码执行块（`!{ }` Comptime）
+### 1. 编译期代码执行块（`!{ }` Comptime）
 
 在 `!{ }` 内的代码完全在编译期由内置编译器求值展开：
 
@@ -1327,7 +1352,7 @@ const HASH_TABLE = !{
 
 ---
 
-### 11.2 宏系统（Macro Metaprogramming）
+### 2. 宏系统（Macro Metaprogramming）
 
 ```typescript
 macro define_getter(name) {
@@ -1344,37 +1369,476 @@ class User {
 
 ---
 
-### 11.3 自定义元注解与类/方法装饰器
+### 3. 自定义元注解与类/方法装饰器
 
-```typescript
-// 1. 元注解声明
+#### 3.1 核心定位与极简设计原则
+
+CP 语言将**元注解（`meta`）**与**装饰器（`dec`）**从语法与执行模型上彻底解耦：
+
+- **`meta`**：纯静态数据标记，编译期零开销，运行时进静态反射表（不执行任何逻辑代码）；
+- **`dec`**：可执行切面逻辑（AOP），在目标方法调用前后进行包装、拦截、重试或增强。
+
+#### 3.2 四大极简铁律：
+
+1. **极短关键字 `dec`**：统一采用 3 字母的 `dec` 声明装饰器，干脆利落；
+2. **消灭闭包样板的洋葱切面模型**：无参切面入参直写 `next`，自动捕获并透明透传原函数参数与返回值；
+3. **编译期静态合成 (Static Synthesis AOP)**：彻底消灭动态代理（Dynamic Proxy）、动态猴子补丁与运行时闭包堆分配，编译器就地展开静态包装函数（`_raw_xxx` 与 `_wrap_xxx`），直达裸机速度；
+4. **调用端三免法则**：无参免括号（`@timer`）、单参免键名（`@retry(3)`）、多装饰器洋葱式嵌套堆叠。
+
+---
+
+#### 3.3 装饰器定义与切面语法
+
+##### 3.3.1 无参直接切面（Around Aspect）
+
+```cp
+dec timer(next) {
+    let t0 = clock.now();
+    let res = next(); // 自动无损透传原参数，捕获返回值
+    print(`[Timer] 耗时: ${clock.now() - t0}ms`);
+    return res;
+}
+
+dec doubleResult(next) {
+    let res = next();
+    return res * 2;
+}
+```
+
+##### 3.3.2 带参装饰器（双轨风格支持）
+
+开发者可以自由选择以下两种风格之一：
+
+- **风格 A：直接参数风格（Direct Style）**
+
+  ```cp
+  dec tag(next, prefix: string) {
+      let res = next();
+      return "[" + prefix + "] " + res;
+  }
+  ```
+
+- **风格 B：高阶工厂风格（Higher-Order Closure Factory）**
+  ```cp
+  dec retry(times: i32 = 3) {
+      return fn(next) {
+          for i in 0..times {
+              let res = next();
+              if (res != null) { return res; }
+          }
+          return null;
+      };
+  }
+  ```
+
+---
+
+#### 3.4 洋葱模型（Onion Execution Model）
+
+##### 3.4.1 当一个方法堆叠了多个装饰器时，其执行顺序严格遵循工业级洋葱模型（从外层进入，内层返回）：
+
+```cp
+@outerWrap
+@innerWrap
+fn compute(x: i32): i32 {
+    return x * 2;
+}
+```
+
+- **调用链展开**：
+  `compute(x)` 入口 -> 执行 `outerWrap` 前置 -> 调用 `next()` -> 执行 `innerWrap` 前置 -> 调用 `next()` -> 执行 `_raw_compute` -> 返回并执行 `innerWrap` 后置 -> 返回并执行 `outerWrap` 后置。
+
+  在 CP 编译器底层，洋葱模型（Onion Execution Model）完全是在编译期通过 AST 静态重写（AST Rewriting）实现的，零堆分配、零闭包开销、零函数指针间接跳转。
+
+──────
+
+##### 3.4.2 next 到底是什么
+
+next 是装饰器 dec 声明中的编译期逻辑占位符（Syntactic Placeholder），代表“被当前装饰器拦截的目标逻辑（管道下一环）”。
+
+##### 3.4.3 洋葱模型的物理调用全景
+
+整个调用过程没有任何动态中间件调度器（Middleware Runner），而是化解成了纯静态函数调用链（Direct Function Call Chain）：
+
+```text
+  调用入口：compute(x)
+  │
+  ▼
+  ┌─────────────────────────────────────────────────────┐
+  │ 🧅 [Outer Layer] outerWrap 作用域                    │
+  │ 1. 执行 outerWrap 前置逻辑 (如计时起点、打印日志)         │
+  │ 2. 调用 next() ══════════════════════════════════╗   │
+  │                                                 ║   │
+  │ ┌─────────────────────────────────────────────┐ ║   │
+  │ │ 🧅 [Inner Layer] innerWrap 作用域            │ ║   │
+  │ │ 1. 执行 innerWrap 前置逻辑                    │ ║   │
+  │ │ 2. 调用 next() ══════════════════════╗       │ ║   │
+  │ │                                     ║       │ ║   │
+  │ │ ┌────────────────────────────────┐  ║       │ ║   │
+  │ │ │ 🎯 [Core] 核心逻辑 _raw_compute │  ║       │ ║   │
+  │ │ │ 计算: return x * 2;             │◀═╝       │ ║   │
+  │ │ └────────────────────────────────┘          │ ║   │
+  │ │                                             │ ║   │
+  │ │ 3. 拿到核心计算结果 res                        │ ║   │
+  │ │ 4. 执行 innerWrap 后置逻辑 (如修改结果)         │ ║   │
+  │ │ 5. return 结果 ═══════════════════════════╗  │ ║   │
+  │ └──────────────────────────────────────────╨───┘ ║  │
+  │                                                  ║  │
+  │ 3. 拿到内层返回结果 res   ◀═════════════════════════╝  │
+  │ 4. 执行 outerWrap 后置逻辑 (如统计耗时、包装数据)         │
+  │ 5. return 最终结果                                    │
+  └──────────────────────────────────────────────────────┘
+```
+
+──────
+
+##### 3.4.4 现场真实编译产物验证（以 test_dec_pass.cp 为例）
+
+在当前代码库中，我们有一段测试多层装饰器的方法：
+
+```ts
+// 4. Onion Model: Outer and Inner wrappers
+dec outerWrap(next) {
+  let res = next();
+  return "OUTER(" + res + ")";
+}
+
+dec innerWrap(next) {
+  let res = next();
+  return "INNER(" + res + ")";
+}
+
+@outerWrap
+@innerWrap
+fn computeName(id: string): string {
+  return "item-" + id;
+}
+```
+
+最终执行结果完全印证了洋葱从外到内、再从内到外的顺序：
+
+calc.computeName: OUTER(INNER(item-99))
+
+──────
+
+##### 3.4.5 为什么 CP 的洋葱模型彻底碾压 Node.js / Python？
+
+对比维度 │ Node.js (Koa / Express) │ Python (Flask / FastAPI) │ CP (Concurrent Plus)
+────────┼─────────────────────────┼──────────────────────────┼──────────────────────────────────────────
+底层实现机制 │ 运行时遍历中间件数组，每次递归生成闭包 dispatch(i) │ 运行时高阶函数嵌套，生成多重闭包对象 │ 编译期 AST 符号展开重写
+内存与堆分配 │ 每次请求/调用均分配闭包与 Context 堆内存 │ 依赖 Python 动态词法作用域与堆对象 │ 0 堆分配（Zero Heap Allocation）
+GC 与性能开销 │ 闭包链加重 V8 垃圾回收负担，产生 STW 停顿 │ 函数栈调用层级深，解释执行慢 │ 0 GC 负担，LLVM 原生直接跳转
+极致机器码优化 │ 无法跨闭包消除冗余 │ 无法静态优化 │ LLVM 自动触发函数内联（Inlining），多层装饰器在 Release
+│ │ │ 模式下直接被抹平成单段平铺汇编！
+
+因此，在 CP 语言中，您可以放心地给几万个 Agent 方法堆叠 5~10 层装饰器（权限拦截、性能追踪、参数校验、缓存预热），完全不用担心任何性能衰减与内存泄漏！
+
+---
+
+#### 3.5 与元注解（`meta`）及反射（`reflect`）的共存
+
+##### 3.5.1 装饰器与元数据天然共存
+
+```ts
+// 1. 定义元注解
+meta Auth(role: string);
+
+// 2. 定义结合了元数据的装饰器
+dec checkAuth(next) {
+  // 编译期内省：读取当前方法的 Auth 元数据
+  let requiredRole = meta.get("Auth");
+  if (currentUser.role != requiredRole) {
+      panic("权限不足！");
+  }
+  return next();
+}
+
+// 3. 业务代码中优雅组合
+class AdminService {
+  @checkAuth
+  @Auth("SUPER_ADMIN")
+  fn deleteDatabase() {
+      print("Database wiped!");
+  }
+}
+```
+
+##### 3.5.2 装饰器与元数据运行时反射
+
+```ts
+import { expect_eq } from "cap:test";
+import { print } from "cap:io";
+
+// 1. 定义元注解契约
+@target(method)
+meta Get(path: string = "");
+
+// 2. 定义带参 AOP 装饰器
+dec tag(next, prefix: string) {
+  let res = next();
+  return "[" + prefix + "] " + res;
+}
+
+// 3. 定义无参计时 AOP 装饰器
+dec timer(next) {
+  @print("[timer] 开始执行 listUsers");
+  let res = next();
+  @print("[timer] 执行结束");
+  return res;
+}
+
+// 4. 业务类声明（装饰器与元数据天然共存）
+@reflect
+class UserService {
+  @timer
+  @tag("AUTH")
+  @Get("/users")
+  fn listUsers(): string {
+      return "user_list_data";
+  }
+}
+
+fn main() {
+  let s = new UserService();
+
+  // 【运行态验证】：触发洋葱切面
+  let res = s.listUsers();
+  @print("调用返回: {s}", res);
+  expect_eq(res, "[AUTH] user_list_data");
+
+  // 【运行时反射态验证】：拿到干净的 /users 路由，且内部 _raw_ 函数安全隐藏
+  let info = reflect.type<UserService>();
+  let m = info.getMethod("listUsers");
+  expect_eq(m != null, true);
+  expect_eq(m.meta["Get"], "/users");
+  @print("反射内省成功: Route = {?}", m.meta["Get"]);
+}
+```
+
+- `@timer` 与 `@tag` 由编译器识别为切面逻辑并合成为包装函数；
+- `@Get("/users")` 保持为元数据进入反射字典；
+- `@reflect` 激活该类的运行时静态反射单例表，反射内省仅暴露公共接口 `listUsers`，内部合成的 `_raw_listUsers` 自动安全隐藏。
+
+---
+
+#### 3.6 弱类型元注解声明
+
+```ts
+// 1. 非强类型元注解声明
 @meta(author: "Antigravity", timeout: 3000)
 class PaymentAgent {}
+```
 
-// 2. 方法装饰器（编译期 AOP 拦截）
-@dec(trace_execution)
-fn process_order(id: u64) {
-    // 自动织入耗时统计与日志
-}
+#### 3.7 多个标签(注解 装饰器)
+
+```ts
+// 用 @[...] 一口气包裹多个标签(注解 装饰器)，整洁收拢
+@[Author("Antigravity"), Timeout(3000), Singleton],
 ```
 
 ---
 
-### 11.4 运行时与编译期反射系统
+### 4. 运行时与编译期反射系统
+
+#### 4.1 反射示例
+
+在 CP 语言中，类型反射已经作为一等公民完全落地（见测试 test_reflect_pass.cp）：
 
 ```typescript
 import { reflect } from "cap:reflect";
 
-let type_info = reflect.type_of<Point>();
-print("Type Name:", type_info.name);
+let info = reflect.type<UserService>();
+@print("类名:", info.name); // "UserService"
+@print("是否为 ref 类:", info.isRef); // false
 
-let fields = reflect.fields_of<Point>();
-for f of fields {
+let user = new UserService();
+let info = reflect.of(user); // 动态内省实例的类型
+@print("实例所属类型:", info.name); // "UserService"
+
+for f of info.fields {
     print("Field:", f.name, "Type:", f.type);
 }
 ```
 
+- 类型视角（静态泛型内省）：
+  在编译期或运行时任意逻辑中，通过类型名获取该类的静态单例元数据表：
+  let info = reflect.type<UserService>();
+  print("类名:", info.name); // "UserService"
+  print("是否为 ref 类:", info.isRef); // false
+
+- 实例视角（动态对象内省）：
+  当你拿到一个具体对象实例变量时，直接反查它的类型元数据：
+  let user = new UserService();
+  let info = reflect.of(user); // 动态内省实例的类型
+  print("实例所属类型:", info.name); // "UserService"
+
+拿到 TypeInfo 结构体后，在运行时可以完整内省：
+
+- info.fields：所有字段的名称（name）、类型名（typeName）以及字段上的元注解（meta）；
+- info.methods：所有方法的名称、返回值类型、形参列表、是否 async、是否 static，以及方法上的元注解（meta）；
+- info.meta：类自身挂载的所有元注解（如 @Controller、@Singleton 等）。
+
+注意：cp中反射系统分为编译期和运行期，默认只在编译期有效，运行期抹除类型信息，除非类型前面加上`@reflect`标注。
+
+“编译期内省（Compile-Time Introspection）是零成本的，不需要 @reflect；
+只有将元数据打包存活到产物运行态（Runtime Reflection），才需要 @reflect。”
+
+#### 4.2 为什么必须加 @reflect 才能反射？背后的架构哲学
+
+为什么 CP 不学 Java、Python 或 Go 那样“默认所有类都无条件支持反射”？
+这正是系统级语言中极其关键的 零开销抽象与按需付费哲学（Zero-Cost Abstraction & Pay-As-You-Go）：
+
+##### 4.2.1 痛点：Java / Go / Python 的全量反射灾难
+
+- 在 Java 或 Go 中，编译器会盲目地为每一个结构体、类、字段、方法名强制生成全套符号和元数据字符串并硬编码打包进二进制产物中；
+- 恶果：
+  - 二进制产物体积瞬间膨胀到几十 MB；
+  - 启动时占用大量常驻元数据内存堆；
+  - 极易被逆向工程轻易还原出全部业务类与内部私有字段名；
+  - 即使你的业务代码中 99% 的类根本不需要反射，你也必须为那 1% 的反射功能买单！
+
+##### 4.2.2 CP 语言的终极解法：精准白名单（Explicit Opt-in）
+
+- 未标注 @reflect 的普通类：
+  编译为 Native 机器码时，类型被最大程度擦除与内联优化，内存布局是极致紧凑的纯裸数据对齐，不产生哪怕 1 个字节的冗余元数据表，可执行文件体积仅数
+  KB，极其适合边缘设备与高频计算；
+- 标注了 @reflect 的类：
+  编译器才会精确定制生成一套专属的懒加载静态单例表（_get_typeinfo_ClassName()），单例在首次使用时初始化并全局复用。
+
+总结：
+
+- 不打 @reflect：编译器完全有能力拿到全部类型信息，但这些信息被且仅被用于编译期代码分析、借用检查、宏展开、AOP 装饰器合成与 Comptime计算，随后被“抹平销毁”，换取极致的机器码性能和仅数 MB 的轻量二进制产物；
+- 打上 @reflect：明确指示编译器“请把这个类的元数据清单打包进最终的可执行文件”，从而赋予程序在运行时动态获取类名、字段、方法和元注解的高级内省能力。需要反射的业务（如 Web 路由/ORM）精准享受完整内省, 绝不把性能税强加给无辜的裸机业务！
+
+这正是 CP 既能拥有 TS 的优雅高级表现力，又能达到 Zig/Rust 裸机无 GC 极致性能 的核心魔法所在！
+
 ---
+
+#### 4.3 编译期与运行时的“双轨内省体系”
+
+在 CP 语言中，类型信息的获取被严格划分在两个完全不同的时空维度：
+
+```text
+    ┌───────────────────────────────────────────────────────────────────────────────────┐
+    │  一、编译期世界 (Compile-Time) —— 纯 AST 与符号表内省                                  │
+    │  【无需 @reflect】零成本、零二进制体积膨胀、编译后全量抹平销毁                             │
+    ├───────────────────────────────────────────────────────────────────────────────────┤
+    │  • 宏代码生成 (@Json, @Table, 自定义 macro)  ────▶ 遍历类的字段，自动合成序列化代码       │
+    │  • AOP 装饰器 (dec 展开)                    ────▶ 读取方法形参和返回值，自动织入切面     │
+    │  • Comptime 编译期块 (!{ ... })              ────▶ 编译期常量折叠、类型特化与代码生成    │
+    │  • 自动 Drop Flag 内存释放机制              ────▶ 编译期 @typeInfo 探测 release() 方法 │
+    │  • 语义与借用检查 (Sema, Borrow Checker)    ────▶ 严格别名排他、NLL 生命周期安全检查      │
+    └────────────────────────────────────────────────────────────────────────────────────┘
+                                              │
+                                编译完成，生成可执行文件
+                                              ▼
+    ┌──────────────────────────────────────────────────────────────────────────────────────┐
+    │  二、运行期世界 (Runtime) —— 动态单例字典 (TypeInfo)                                     │
+    │  【必须显式标注 @reflect】按需付费 (Pay-as-you-go)                                       │
+    ├──────────────────────────────────────────────────────────────────────────────────────┤
+    │  • reflect.type<T>() / reflect.of(val)      ────▶ 生产环境动态检索类名/字段/路由元数据     │
+    │  • 动态插件热插拔与 IOC 依赖注入容器        ────▶ 运行时按需解析构造参数与生命周期             │
+    └──────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+──────
+
+#### 4.4 横向对比：为什么现代语言（Rust / Zig / CP）都推崇这种设计？
+
+语言与机制 │ 编译期内省（无需开启标志） │ 运行期动态反射（通常需显式启用）
+─────────┼────────────────────────┼───────────────────────────────
+Rust │ derive(Serialize)、macro_rules!、proc_macro（强大，编译后擦除） │ 默认无运行时反射（仅有极其受限的 Any / TypeId）
+Zig │ @typeInfo(T)、@hasDecl、comptime（编译期暴力内省，0 运行时体积） │ 官方不支持全量运行时反射，完全靠编译期泛型生成
+C# │ Source Generators（C# 9+ 引入的编译期代码生成，极速推荐） │ System.Reflection（全量运行时反射，体积大、速度慢）
+CP 语言 │ 编译期宏 (macro)、AOP 装饰器 (dec)、Comptime Drop（零开销） │ 精细化按需启用 (@reflect + reflect.type<T>() / reflect.of())
+──────
+
+#### 4.4 不标注 @reflect 时，编译期类型信息的典型应用场景
+
+在没有标注 @reflect 时，编译器前端（cpc/）自身在内存中已经掌握了整个程序完整的抽象语法树（AST）和符号表。这些信息被广泛应用于以下场景：
+
+##### 4.4.1 宏代码生成与自动派生（Macro & Derive）
+
+在 CP 语言中，类上即使不打 @reflect，也可以直接挂载宏（如 @Json、@Table、@Clone）：
+
+```ts
+// 并没有 @reflect，运行时没有反射表！
+@Json
+class OrderItem {
+  id: i32;
+  price: f64;
+  title: string;
+}
+```
+
+• 编译器内省过程（见 sema.rs:512）：
+• 编译器在编译阶段读取 OrderItem 的结构定义，发现它有 id、price、title 三个字段及其类型；
+• 宏处理器直接在编译期自动合成了 .toJson() 和 .fromJson() 的原生代码；
+• 结果：生成的序列化代码和手写的一样快（硬编码高效存取），既实现了自动化，又完全不需要在运行时维护任何反射字典！
+──────
+
+##### 4.4.2 编译期 AOP 装饰器感知（Decorators）
+
+当您为一个方法编写装饰器时，同样不需要 @reflect：
+
+```ts
+    dec validateParams(next) {
+        // 编译期内省：编译器知道目标方法有几个参数、分别叫什么名字
+        let res = next();
+        return res;
+    }
+
+    class PaymentService {
+        @validateParams
+        fn pay(account: string, amount: f64): bool {
+            return true;
+        }
+    }
+```
+
+• 编译器内省过程：
+• 编译器在重构 pay 方法时，自动通过符号表提取出 ["account", "amount"] 形参，并生成参数透传代码 self._raw_pay(account, amount)；
+• 整个过程在编译期 AST 层面完成消费，编译后生成的机器码就是几个嵌套跳转，不残留任何元数据包袱。
+
+──────
+
+##### 4.4.3 自动内存释放（Comptime Auto-Drop 机制）
+
+这是我们在编译器中实现的最具代表性的零成本编译期内省。
+当您在 CP 中写下：
+
+```ts
+    const t = new SharedTensor()?;
+```
+
+编译器在底层 Zig 状态机中自动注入了编译期反射代码：
+
+```ts
+defer if (!__t_moved) {
+  const T = @TypeOf(t);
+  // ⬅️ 这里完全是编译期内省 (Comptime Introspection)，零运行时开销！
+  if (@typeInfo(T) == .pointer) {
+    const Child = @typeInfo(T).pointer.child;
+    if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) {
+      t.release(); // 探测到拥有 release 方法，自动在函数退出时执行！
+    }
+  }
+};
+```
+
+价值：如果 t 是个普通整数或不需要释放的结构体，LLVM 在编译期就把这个 defer 整个裁掉（0 开销）；如果是大模型张量，自动精准释放。这个过程 100%
+依赖类型的元数据探测，但对运行时性能完全是 0 损耗。
+──────
+
+#### 4.4.4 严格编译期安全（借用检查与所有权分析）
+
+编译器在语义分析阶段（Sema）：
+
+- 检查哪个变量被 move 了（所有权转移）；
+- 检查是否存在同时存在的 &（只读借用）与 &mut（可变借用）；
+- 检查方法接收者是值接收、借用接收还是指针接收；
+- 这些全都是编译期的深度类型内省，在代码生成完成的那一刻使命就已达成，不需要存留到运行期。
+  ──────
 
 ### 11.5 底层控制与 `unsafe` 安全边界
 
@@ -1397,7 +1861,7 @@ pub unsafe fn direct_io_write(port: u16, val: u8) {
 
 ---
 
-## 第十二篇：标准库索引与生态路线图
+## 十二、标准库索引与生态路线图
 
 ### 12.1 已实装官方核心标准库索引（`cap:*`）
 

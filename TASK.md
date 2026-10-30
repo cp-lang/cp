@@ -1446,3 +1446,6 @@ rest 会在语义期报未定义变量。
 • 建议：在 infer_type 中增加 Expr::Match 分支，推断所有分支 body 的联合类型（或取首个非空分支类型）。
 
 #### 4. cpc/src/codegen.rs：只读借用容器时的防篡改保护已精确生效
+
+1. 实现 @[Author("Antigravity"), Timeout(3000), Singleton], 用 @[...] 一口气包裹多个标签(注解 装饰器)，整洁收拢
+2. 实现弱类型标注: @meta(author: "Antigravity", timeout: 3000)
