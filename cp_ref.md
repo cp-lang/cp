@@ -1,6 +1,6 @@
-# CP-Nest 语言设计规范与技术白皮书 (The CP-Nest Language Specification)
+# CP 语言设计规范与技术白皮书 (The CP Language Specification)
 
-**版本**：v0.5.0  
+**版本**：v0.6.0  
 **定级**：工业级官方参考规范手册与底层架构指南 (The Definitive Reference Manual)  
 **定位**：TypeScript 的直觉表达力 + Rust 的内存安全 + Zig 的极致底层掌控力与无 GC 暴力并发，专为高安全、高并发、高性能、小体积、低内存与AI、百万级AI Agent并发而设计的系统级编程语言。
 **特点**：上手像TypeScript，安全模型对标Rust，底层能力继承Zig。既能写优雅的业务代码，又能下到裸机、系统、高性能服务，不用在“好写”和“安全高性能”之间二选一。同时在AI与AI智能体编程方面有独特优势。
