@@ -9,7 +9,7 @@
 
 ## 目录索引 (Table of Contents)
 
-- [第一篇：CP 语言哲学、核心愿景与全景场景矩阵 (Philosophy, Vision & Scenarios)](#第一篇cp-语言哲学核心愿景与全景场景矩阵)
+- [一、CP 语言哲学、核心愿景与全景场景矩阵 (Philosophy, Vision & Scenarios)](#第一篇cp-语言哲学核心愿景与全景场景矩阵)
   - [1.1 核心设计定位](#11-核心设计定位)
   - [1.2 CP/Rust/Zig/Go/TypeScript 精简对比表](#12-cprustziggotypescript-精简对比表)
     - [1.2.1 对比竞品，CP最独特的差异化标签](#121-对比竞品cp最独特的差异化标签)
@@ -27,67 +27,67 @@
   - [2.0 教育、入门系统级编程（这个是很特别的差异化赛道）](#20-教育入门系统级编程这个是很特别的差异化赛道)
   - [2.1 现有Zig项目的上层迁移层（Zig生态内部的升级选择）](#21-现有zig项目的上层迁移层zig生态内部的升级选择)
   - [2.2 边界：哪些场景CP不适合主推](#22-边界哪些场景cp不适合主推)
-- [第二篇：cap 统一工具链与模块生态体系 (The cap Toolchain & Ecosystem)](#第二篇cap-统一工具链与模块生态体系-the-cap-all-in-one-toolchain--ecosystem)
+- [二、cap 统一工具链与模块生态体系 (The cap Toolchain & Ecosystem)](#第二篇cap-统一工具链与模块生态体系-the-cap-all-in-one-toolchain--ecosystem)
   - [2.1 架构愿景：CAP (Concurrent Application Plus) 核心定位与品牌标识](#21-架构愿景cap-concurrent-application-plus-核心定位与品牌标识)
   - [2.2 cap CLI 全指令全景矩阵](#22-cap-cli-全指令全景矩阵)
   - [2.3 全局缓存与软链接零拷贝注入机制 (Symlink & Global Cache)](#23-全局缓存与软链接零拷贝注入机制-symlink--global-cache)
   - [2.4 cap.json 工程清单权威规范](#24-capjson-工程清单权威规范)
   - [2.5 ES6 风格模块系统与依赖解析引擎](#25-es6-风格模块系统与依赖解析引擎)
   - [2.6 CAP 特性演进与对标路线图 (Implementation Status & Roadmap)](#26-cap-特性演进与对标路线图-implementation-status--roadmap)
-- [第三篇：类型系统、不可变哲学与双轨对象模型 (Types, Immutability & Objects)](#第三篇类型系统不可变哲学与双轨对象模型)
+- [三、类型系统、不可变哲学与双轨对象模型 (Types, Immutability & Objects)](#第三篇类型系统不可变哲学与双轨对象模型)
   - [3.1 标量基础类型系统](#31-标量基础类型系统)
   - [3.2 复合容器类型](#32-复合容器类型)
   - [3.3 变量可变性与不可变哲学](#33-变量可变性与不可变哲学)
   - [3.4 双轨对象模型（静态匿名对象 vs 动态字典对象）](#34-双轨对象模型静态匿名对象-vs-动态字典对象)
-- [第四篇：解构赋值与 switch 模式匹配体系 (Destructuring & Switch Matching)](#第四篇解构赋值与-switch-模式匹配体系)
+- [四、解构赋值与 switch 模式匹配体系 (Destructuring & Switch Matching)](#第四篇解构赋值与-switch-模式匹配体系)
   - [4.1 数组与元组解构体系](#41-数组与元组解构体系)
   - [4.2 对象解构体系](#42-对象解构体系)
   - [4.3 switch 原生模式匹配体系](#43-switch-原生模式匹配体系)
   - [4.4 守卫条件表达式与穷尽性检查](#44-守卫条件表达式与穷尽性检查)
-- [第五篇：函数系统与参数方法契约 (Function System & Method Contracts)](#第五篇函数系统与参数方法契约)
+- [五、函数系统与参数方法契约 (Function System & Method Contracts)](#第五篇函数系统与参数方法契约)
   - [5.1 函数修饰符与前缀矩阵](#51-函数修饰符与前缀矩阵)
   - [5.2 形参借用与所有权语义规范](#52-形参借用与所有权语义规范)
   - [5.3 方法接收者（Receiver）终极哲学](#53-方法接收者receiver终极哲学)
   - [5.4 返回值类型与省略原则](#54-返回值类型与省略原则)
-- [第六篇：所有权、借用检查与内存安全架构 (Ownership, Borrowing & Memory Safety)](#第六篇所有权借用检查与内存安全架构)
+- [六、所有权、借用检查与内存安全架构 (Ownership, Borrowing & Memory Safety)](#第六篇所有权借用检查与内存安全架构)
   - [6.1 移动语义（Move Semantics）与单写者安全](#61-移动语义move-semantics与单写者安全)
   - [6.2 严格别名排他律（Aliasing XOR Mutability）](#62-严格别名排他律aliasing-xor-mutability)
   - [6.3 容器写保护铁律（Container Mutation Guard）](#63-容器写保护铁律container-mutation-guard)
   - [6.4 结构体生命周期、非词法作用域（NLL）与自动化析构](#64-结构体生命周期非词法作用域nll与自动化析构)
   - [6.5 跨越 await 的资源生命周期安全](#65-跨越-await-的资源生命周期安全)
   - [6.6 闭包逃逸与 Arena 作用域内存生命周期](#66-闭包逃逸与-arena-作用域内存生命周期)
-- [第七篇：面向对象与契约解耦体系 (OOP, Structs, Classes & Traits)](#第七篇面向对象与契约解耦体系)
+- [七、面向对象与契约解耦体系 (OOP, Structs, Classes & Traits)](#第七篇面向对象与契约解耦体系)
   - [7.1 数据与行为彻底解耦哲学](#71-数据与行为彻底解耦哲学)
   - [7.2 类单继承与完整生命周期钩子](#72-类单继承与完整生命周期钩子)
   - [7.3 Trait 契约体系](#73-trait-契约体系)
   - [7.4 泛型与 Trait 约束](#74-泛型与-trait-约束)
   - [7.5 动态分发胖指针与运行时向下转型](#75-动态分发胖指针与运行时向下转型)
-- [第八篇：原生三态错误处理体系 (3-State Error Handling Architecture)](#第八篇原生三态错误处理体系)
+- [八、原生三态错误处理体系 (3-State Error Handling Architecture)](#第八篇原生三态错误处理体系)
   - [8.1 终结传统 Result/Option 胶水装箱](#81-终结传统-resultoption-胶水装箱)
   - [8.2 错误返回值构建与模式匹配](#82-错误返回值构建与模式匹配)
   - [8.3 错误传播链与解包原语](#83-错误传播链与解包原语)
   - [8.4 异常作用域与块级捕获](#84-异常作用域与块级捕获)
   - [8.5 业务层统一 Error 类](#85-业务层统一-error-类)
   - [8.6 胖指针动态错误与错误集自动转换](#86-胖指针动态错误与错误集自动转换)
-- [第九篇：现代语法糖与函数式特性 (Modern Syntax Sugar & Functional)](#第九篇现代语法糖与函数式特性)
+- [九、现代语法糖与函数式特性 (Modern Syntax Sugar & Functional)](#第九篇现代语法糖与函数式特性)
   - [9.1 管道操作符与通用通配占位符](#91-管道操作符与通用通配占位符)
   - [9.2 多模式现代集合遍历](#92-多模式现代集合遍历)
   - [9.3 范围表达式与切片语法](#93-范围表达式与切片语法)
   - [9.4 字符串模板插值与原生正则表达式](#94-字符串模板插值与原生正则表达式)
-- [第十篇：异步编程、双轨并行计算与 Nest 智能体容器 (Async, Dual-Track Parallel & Nest Runtime)](#第十篇异步编程双轨并行计算与-nest-智能体容器)
+- [十、异步编程、双轨并行计算与 Nest 智能体容器 (Async, Dual-Track Parallel & Nest Runtime)](#第十篇异步编程双轨并行计算与-nest-智能体容器)
   - [10.1 CPS 状态机异步内核](#101-cps-状态机异步内核)
   - [10.2 双轨派生模型：协程池与 Worker 物理线程池](#102-双轨派生模型协程池与-worker-物理线程池)
   - [10.3 并发运行时配置体系（注解与 cap.json）](#103-并发运行时配置体系注解与-capjson)
   - [10.4 跨并发边界内存安全防御（Send/Sync 铁律）](#104-跨并发边界内存安全防御sendsync-铁律)
   - [10.5 异步任务流与事件循环](#105-异步任务流与事件循环)
   - [10.6 Nest 智能体容器（Nest Agent Container / Nest Runtime）](#106-nest-智能体容器nest-agent-container--nest-runtime)
-- [第十一篇：元编程、编译期计算与底层控制 (Metaprogramming, Comptime & Unsafe)](#第十一篇元编程编译期计算与底层控制)
+- [十一、元编程、编译期计算与底层控制 (Metaprogramming, Comptime & Unsafe)](#第十一篇元编程编译期计算与底层控制)
   - [11.1 编译期代码执行块（!{ } Comptime）](#111-编译期代码执行块--comptime)
   - [11.2 宏系统（Macro Metaprogramming）](#112-宏系统macro-metaprogramming)
   - [11.3 自定义元注解与类/方法装饰器](#113-自定义元注解与类方法装饰器)
   - [11.4 运行时与编译期反射系统](#114-运行时与编译期反射系统)
   - [11.5 底层控制与 unsafe 安全边界](#115-底层控制与-unsafe-安全边界)
-- [第十二篇：标准库索引与生态路线图 (Standard Library & Ecosystem Roadmap)](#第十二篇标准库索引与生态路线图)
+- [十二、标准库索引与生态路线图 (Standard Library & Ecosystem Roadmap)](#第十二篇标准库索引与生态路线图)
   - [12.1 已实装官方核心标准库索引（cap:*）](#121-已实装官方核心标准库索引cap)
   - [12.2 生态演进与路线图（Roadmap）](#122-生态演进与路线图roadmap)
 
@@ -1523,13 +1523,12 @@ calc.computeName: OUTER(INNER(item-99))
 
 ##### 3.4.5 为什么 CP 的洋葱模型彻底碾压 Node.js / Python？
 
-对比维度 │ Node.js (Koa / Express) │ Python (Flask / FastAPI) │ CP (Concurrent Plus)
-────────┼─────────────────────────┼──────────────────────────┼──────────────────────────────────────────
-底层实现机制 │ 运行时遍历中间件数组，每次递归生成闭包 dispatch(i) │ 运行时高阶函数嵌套，生成多重闭包对象 │ 编译期 AST 符号展开重写
-内存与堆分配 │ 每次请求/调用均分配闭包与 Context 堆内存 │ 依赖 Python 动态词法作用域与堆对象 │ 0 堆分配（Zero Heap Allocation）
-GC 与性能开销 │ 闭包链加重 V8 垃圾回收负担，产生 STW 停顿 │ 函数栈调用层级深，解释执行慢 │ 0 GC 负担，LLVM 原生直接跳转
-极致机器码优化 │ 无法跨闭包消除冗余 │ 无法静态优化 │ LLVM 自动触发函数内联（Inlining），多层装饰器在 Release
-│ │ │ 模式下直接被抹平成单段平铺汇编！
+| 对比维度       | Node.js (Koa / Express)                            | Python (Flask / FastAPI)             | CP (Concurrent Plus)                                                                     |
+| -------------- | -------------------------------------------------- | ------------------------------------ | ---------------------------------------------------------------------------------------- |
+| 底层实现机制   | 运行时遍历中间件数组，每次递归生成闭包 dispatch(i) | 运行时高阶函数嵌套，生成多重闭包对象 | 编译期 AST 符号展开重写                                                                  |
+| 内存与堆分配   | 每次请求/调用均分配闭包与 Context 堆内存           | 依赖 Python 动态词法作用域与堆对象   | 0 堆分配（Zero Heap Allocation）                                                         |
+| GC 与性能开销  | 闭包链加重 V8 垃圾回收负担，产生 STW 停顿          | 函数栈调用层级深，解释执行慢         | 0 GC 负担，LLVM 原生直接跳转                                                             |
+| 极致机器码优化 | 无法跨闭包消除冗余                                 | 无法静态优化                         | LLVM 自动触发函数内联（Inlining），多层装饰器在 Release 模式下直接被抹平成单段平铺汇编！ |
 
 因此，在 CP 语言中，您可以放心地给几万个 Agent 方法堆叠 5~10 层装饰器（权限拦截、性能追踪、参数校验、缓存预热），完全不用担心任何性能衰减与内存泄漏！
 
