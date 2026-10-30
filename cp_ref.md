@@ -1745,13 +1745,14 @@ for f of info.fields {
 
 #### 4.4 横向对比：为什么现代语言（Rust / Zig / CP）都推崇这种设计？
 
-语言与机制 │ 编译期内省（无需开启标志） │ 运行期动态反射（通常需显式启用）
-─────────┼────────────────────────┼───────────────────────────────
-Rust │ derive(Serialize)、macro_rules!、proc_macro（强大，编译后擦除） │ 默认无运行时反射（仅有极其受限的 Any / TypeId）
-Zig │ @typeInfo(T)、@hasDecl、comptime（编译期暴力内省，0 运行时体积） │ 官方不支持全量运行时反射，完全靠编译期泛型生成
-C# │ Source Generators（C# 9+ 引入的编译期代码生成，极速推荐） │ System.Reflection（全量运行时反射，体积大、速度慢）
-CP 语言 │ 编译期宏 (macro)、AOP 装饰器 (dec)、Comptime Drop（零开销） │ 精细化按需启用 (@reflect + reflect.type<T>() / reflect.of())
-──────
+| 语言与机制 | 编译期内省（无需开启标志）                                       | 运行期动态反射（通常需显式启用）                             |
+| ---------- | ---------------------------------------------------------------- | ------------------------------------------------------------ |
+| Rust       | derive(Serialize)、macro_rules!、proc_macro（强大，编译后擦除）  | 默认无运行时反射（仅有极其受限的 Any / TypeId）              |
+| Zig        | @typeInfo(T)、@hasDecl、comptime（编译期暴力内省，0 运行时体积） | 官方不支持全量运行时反射，完全靠编译期泛型生成               |
+| C#         | Source Generators（C# 9+ 引入的编译期代码生成，极速推荐）        | System.Reflection（全量运行时反射，体积大、速度慢）          |
+| CP 语言    | 编译期宏 (macro)、AOP 装饰器 (dec)、Comptime Drop（零开销）      | 精细化按需启用 (@reflect + reflect.type<T>() / reflect.of()) |
+
+---
 
 #### 4.4 不标注 @reflect 时，编译期类型信息的典型应用场景
 
