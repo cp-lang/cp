@@ -1230,6 +1230,33 @@ impl Analyzer {
                     }
                 }
             }
+            Pattern::Binding { ident, subpat } => {
+                if let Some(SymbolKind::Var { .. }) = self.scopes.last().unwrap().get(&ident.sym) {
+                    return Err(SemaError::DuplicateVarDecl(ident.sym.clone(), ident.span));
+                }
+                self.define(
+                    ident.sym.clone(),
+                    SymbolKind::Var {
+                        ty: Type::Any,
+                        kind: VarDeclKind::Let,
+                    },
+                    ident.span,
+                )?;
+                self.bind_match_pattern(subpat)?;
+            }
+            Pattern::TypeMatch { ident, ty } => {
+                if let Some(SymbolKind::Var { .. }) = self.scopes.last().unwrap().get(&ident.sym) {
+                    return Err(SemaError::DuplicateVarDecl(ident.sym.clone(), ident.span));
+                }
+                self.define(
+                    ident.sym.clone(),
+                    SymbolKind::Var {
+                        ty: ty.clone(),
+                        kind: VarDeclKind::Let,
+                    },
+                    ident.span,
+                )?;
+            }
             _ => {}
         }
         Ok(())
@@ -2004,6 +2031,35 @@ impl Analyzer {
                 }
                 Ok(())
             }
+            Pattern::Binding { ident, subpat } => {
+                if let Some(SymbolKind::Var { .. }) = self.scopes.last().unwrap().get(&ident.sym) {
+                    return Err(SemaError::DuplicateVarDecl(ident.sym.clone(), ident.span));
+                }
+                self.define(
+                    ident.sym.clone(),
+                    SymbolKind::Var {
+                        ty: ty.clone(),
+                        kind: kind.clone(),
+                    },
+                    ident.span,
+                )?;
+                self.analyze_pattern(subpat, ty, kind)?;
+                Ok(())
+            }
+            Pattern::TypeMatch { ident, ty: pty } => {
+                if let Some(SymbolKind::Var { .. }) = self.scopes.last().unwrap().get(&ident.sym) {
+                    return Err(SemaError::DuplicateVarDecl(ident.sym.clone(), ident.span));
+                }
+                self.define(
+                    ident.sym.clone(),
+                    SymbolKind::Var {
+                        ty: pty.clone(),
+                        kind: kind.clone(),
+                    },
+                    ident.span,
+                )?;
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -2141,7 +2197,13 @@ impl Analyzer {
                 }
                 Err(SemaError::UndefinedSymbol("Class".to_string(), call.span))
             }
-            Expr::EnumInit(init) => Ok(Type::Ref(init.enum_name.clone())),
+            Expr::EnumInit(init) => {
+                if !init.enum_name.sym.is_empty() {
+                    Ok(Type::Ref(init.enum_name.clone()))
+                } else {
+                    Ok(Type::Any)
+                }
+            }
             Expr::Spawn(_) => Ok(Type::PID),
             Expr::Receive(ty) => Ok(ty.as_ref().map(|t| (**t).clone()).unwrap_or(Type::I32)),
             Expr::Slice(slice) => self.infer_type(&slice.obj),

@@ -21,9 +21,9 @@ fn main(): ?void {
     let task: Task = Task.Compute { batch: 100 };
     let worker = new AIWorker();
     worker.id = 1;
-    match (task) {
-        .Compute |fields| => {
-            worker.work(fields.batch);
+    switch (task) {
+        .Compute { batch } => {
+            worker.work(batch);
         }
         .Idle => {
             @print("Worker idle.");

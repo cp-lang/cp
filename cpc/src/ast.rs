@@ -233,6 +233,14 @@ pub enum Pattern {
         inclusive: bool,
     },
     Or(Vec<Pattern>),
+    Binding {
+        ident: Ident,
+        subpat: Box<Pattern>,
+    },
+    TypeMatch {
+        ident: Ident,
+        ty: Type,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -386,6 +394,8 @@ pub struct EnumInitExpr {
     pub enum_name: Ident,
     pub variant_name: Ident,
     pub fields: Option<Vec<EnumInitField>>,
+    #[serde(default)]
+    pub tuple_args: Option<Vec<Expr>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

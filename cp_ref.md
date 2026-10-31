@@ -39,11 +39,13 @@
   - [3.2 复合容器类型](#32-复合容器类型)
   - [3.3 变量可变性与不可变哲学](#33-变量可变性与不可变哲学)
   - [3.4 双轨对象模型（静态匿名对象 vs 动态字典对象）](#34-双轨对象模型静态匿名对象-vs-动态字典对象)
+  - [3.5 枚举与代数数据类型（Enum & Tagged Union）](#35-枚举与代数数据类型enum--tagged-union)
 - [四、解构赋值与 switch 模式匹配体系 (Destructuring & Switch Matching)](#第四篇解构赋值与-switch-模式匹配体系)
   - [4.1 数组与元组解构体系](#41-数组与元组解构体系)
   - [4.2 对象解构体系](#42-对象解构体系)
   - [4.3 switch 原生模式匹配体系](#43-switch-原生模式匹配体系)
   - [4.4 守卫条件表达式与穷尽性检查](#44-守卫条件表达式与穷尽性检查)
+  - [4.5 枚举载荷解构、Walrus 绑定与动态类型匹配](#45-枚举载荷解构walrus-绑定与动态类型匹配)
 - [五、函数系统与参数方法契约 (Function System & Method Contracts)](#第五篇函数系统与参数方法契约)
   - [5.1 函数修饰符与前缀矩阵](#51-函数修饰符与前缀矩阵)
   - [5.2 形参借用与所有权语义规范](#52-形参借用与所有权语义规范)
@@ -720,6 +722,44 @@ config.set("timeout", 5000);
 
 ---
 
+### 3.5 枚举与代数数据类型（Enum & Tagged Union）
+
+CP 支持全特性的代数数据类型（ADT，底层对齐 Zig 的带标签联合体 `union(enum)`）。定义语法全面融入 TypeScript / ES6 现代风格，彻底告别 Rust 晦涩的元组嵌套与冗长样板代码：
+
+#### 3.5.1 枚举与变体定义
+- **纯标签变体**：`Idle,`
+- **单类型载荷**：`Text: string,`
+- **元组载荷**：`Move: [i32, i32],`
+- **结构体载荷**：`Compute: { batch: usize, priority: i32 }`
+
+```typescript
+enum Task {
+    Idle,
+    Text: string,
+    Move: [i32, i32],
+    Compute: { batch: usize, priority: i32 }
+}
+```
+
+#### 3.5.2 上下文前缀推导与初始化语法
+在上下文类型已知（变量类型标注、函数参数、返回值或 switch 比较项）时，**支持直接省略枚举名前缀，使用 `.Variant` 简写构造**：
+
+```typescript
+// 1. 无载荷变体构造
+let t1: Task = .Idle;
+
+// 2. 单类型载荷变体构造
+let t2: Task = .Text("hello");
+
+// 3. 元组载荷变体构造（直接使用方括号，无需冗余外层小括号）
+let t3: Task = .Move [15, 25];
+
+// 4. 结构体载荷变体构造
+let t4: Task = .Compute { batch: 200, priority: 7 };
+```
+
+---
+
 ## 四、解构赋值与 `switch` 模式匹配体系
 
 ### 4.1 数组与元组解构体系
@@ -813,6 +853,68 @@ let info = switch (person) {
     * => "Standard User"
 };
 ```
+
+---
+
+### 4.5 枚举载荷解构、Walrus 绑定与动态类型匹配
+
+CP 的 `switch` 匹配体系彻底废除早期 Zig 风格的 `|fields|` 管道捕获语法，全面拥抱原生解构、海象操作符（`:=`）绑定与动态类型匹配：
+
+#### 4.5.1 枚举载荷解构匹配
+- **结构体载荷精确解构**：`.Compute { batch, priority }`
+- **结构体剩余字段整包捕获**：`.Compute { ...fields }`（将所有未显式列出的字段整包绑定为只读结构体变量 `fields`，零堆开销）
+- **元组载荷解构**：`.Move [x, y]`（直接使用方括号解构，无需冗余外层小括号）
+- **单载荷变量捕获**：`.Text text` 或 `.Text(text)`
+
+```typescript
+fn process_task(task: Task): i32 {
+    return switch (task) {
+        .Idle => 0,
+        // 单载荷变量捕获
+        .Text text => text.len as i32,
+        // 原生元组方括号解构
+        .Move [x, y] => x + y,
+        // 结构体属性精确解构
+        .Compute { batch, priority } => (batch as i32) + priority,
+        // 结构体剩余/整包解构捕获
+        .Compute { ...fields } => fields.batch as i32,
+        * => -1
+    };
+}
+```
+
+#### 4.5.2 Walrus（海象操作符 `:=`）子模式绑定
+在复杂子模式（如区间匹配、复合对象解构）中，CP 使用现代化的 `ident := pattern` 语法（取代 Rust 晦涩的 `@` 符号），在成功匹配模式的同时将原值完整绑定到变量：
+
+```typescript
+let grade = switch (score) {
+    s := 90..=100 => s * 2,
+    s := 60..=89 => s + 10,
+    s := 0..=59 => s,
+    * => 0
+};
+
+let user_role = switch (session) {
+    // 匹配包含 role: "admin" 的对象，同时将整个 session 对象绑定到 ctx
+    ctx := { role: "admin", ... } => ctx.id,
+    * => 0
+};
+```
+
+#### 4.5.3 动态类型分支匹配（`ident: Type`）
+在处理动态多态、Trait 对象或动态类型（`dyn` / `any`）时，CP 允许直接使用 `ident: Type` 进行类型窄化与向下转型绑定：
+
+```typescript
+switch (worker) {
+    w: AIWorker => w.work(100),
+    s: string => print(`字符串长度: ${s.len}`),
+    n: i32 => print(`整型数值: ${n}`),
+    * => print("其他未知类型")
+}
+```
+
+> [!NOTE] 语法精简与废弃说明
+> CP 已彻底移除旧版 Zig 风格的 `|fields|` 管道捕获语法。在模式匹配中，变量捕获统一使用标准解构（`{ batch }`, `[x, y]`）、单载荷直捕（`.Text text`）、海象绑定（`ident := subpat`）与类型匹配（`ident: Type`）。
 
 ---
 

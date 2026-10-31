@@ -263,6 +263,13 @@ pub fn extract_idents_from_pat(pat: &Pattern, vars: &mut HashSet<String>) {
         Pattern::Rest(inner) => {
             extract_idents_from_pat(inner, vars);
         }
+        Pattern::Binding { ident, subpat } => {
+            vars.insert(ident.sym.clone());
+            extract_idents_from_pat(subpat, vars);
+        }
+        Pattern::TypeMatch { ident, .. } => {
+            vars.insert(ident.sym.clone());
+        }
         _ => {}
     }
 }

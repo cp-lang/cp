@@ -193,6 +193,8 @@ pub enum Token {
     Comma,
     #[token(":")]
     Colon,
+    #[token(":=")]
+    ColonAssign,
     #[token(";")]
     Semicolon,
     #[token(".")]

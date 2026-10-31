@@ -3796,6 +3796,69 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 2. 执行 Git 提交：`feat(meta): implement batch annotation collection syntax @[...] and ad-hoc @meta(...) with zero-cost orthogonality`（提交哈希：`1370e95`）；
 3. 工作区保持干净，所有成果与测试套件固化保存至 Git 历史。
 
+---
+
+## 2026-11-01 (Session Update - Tagged Union Enums & Switch Destructuring Binding)
+
+### 用户指令
+> 1. switch 模式匹配中, 我们是否实现了变量捕获功能,如果没有, 给出cp实现方案
+> 2. 枚举载荷变量捕获：我们只用 switch,不用 match, 这个功能要使用 switch来实现。Rust 捕获使用 @ 符号, CP 中也使用这个符号吗? 有其他更好的选择吗? 比如 := 之类的
+> 3. .Idle 是 job.Idle 吗? 除了Err和switch, 还有哪里 可以使用这种语法? |fields| 是 zig 语法吧, cp 中有这种捕获语法吗?
+> 4. 元组变体定义为何不是 enum Message { Text: string, Move: [i32, i32] } 或其他方式定义? fields := .Compute 如何理解? 动态类型捕获是如何匹配类型的?
+> 5. 带载荷的枚举是一个 Tagged Union 语法 cp_ref.md 中有吗? switch中 .Compute: fields 与 fields := .Compute 有何区别?
+> 6. .Move([x, y]) 可以使用 .Move [x, y] => 吗?
+> 7. 1. 实现 确定类型的 前缀省略, 直接使用 .xxx
+>    2. 实现 补全上面你提到的各种未实现 switch 功能, 包括 类型 带载荷枚举, 明确 : string, := 捕获 和 .Move [x, y]、.Compute { batch } 等各种解构捕获
+>    3. 载荷枚举的定义与初始化
+>    4. 实现的这些功能需全部写入 cp_ref.md 对应章节.
+>    5. 实现你上面分析应该实现我本次未提及的功能.
+>    6. 去掉你上面提到的, cp 中不应该保留, 属于早期或遗留的功能.
+> 8. 规范铁律：禁止非必要 rm -rf 删除测试/缓存文件触发权限授权；直接使用原生覆盖编译。
+> 9. 继续你的任务, 尽量少触发没有必要的 授权
+> 10. 继续你的工作
+
+### 执行结果汇报
+1. **词法与语法扩展 (Lexer & AST & Parser)**：
+   - Lexer 新增 `#[token(":=")] ColonAssign`；
+   - AST `Pattern` 新增 `Binding { ident, subpat }` 与 `TypeMatch { ident, ty }`，`EnumInitExpr` 扩展 `tuple_args` 支持元组构造；
+   - Parser 增加 `in_switch_arm` 状态机，实现 `.Variant` 匹配直接接 `{ batch }`、`[x, y]`、`(...)` 或单载荷标识符，支持 `ident := subpat` 海象绑定与 `ident: Type` 动态类型匹配；
+   - 彻底切除旧版 Zig 遗留的 `|fields|` 管道捕获语法；
+   - 支持 TS 风格的带载荷枚举声明 `enum Task { Idle, Text: string, Move: [i32, i32], Compute: { batch: usize, priority: i32 } }`，以及无前缀上下文推导初始化 `.Idle`、`.Text("hello")`、`.Move [15, 25]`、`.Compute { batch: 200, priority: 7 }`。
+2. **语义分析与代码生成优化 (Sema & Codegen)**：
+   - Sema 完整支持 Walrus 绑定符号推导与动态类型匹配分支；
+   - Codegen 支持 Zig Tagged Union 内存布局及 `std.meta.activeTag` 判别，支持 `cp_unpack_elem` 元组解构与 `...fields` 结构体剩余整包绑定；
+   - 修复 `Expr::Cast` 对标量整数/浮点数错误发射指针转换 `@ptrCast` 的底层缺陷，精确对齐 `@intCast` / `@floatCast`；
+   - 重命名协程运行时的内部 `Task` 结构体为 `CpTask`，彻底消除符号冲突。
+3. **测试验证与规范同步**：
+   - 新增正向综合测试 [`cap/test/test_switch_binding_pass.cp`](file:///data/dev/cp/cap/test/test_switch_binding_pass.cp)，验证无载荷、单载荷、元组方括号解构、结构体花括号解构、整包剩余捕获与 Walrus 区间绑定，执行 `./cap/bin/cap cap/test/test_switch_binding_pass.cp` 100% 通过；
+   - 升级 [`cap/test/test_traits_enums.cp`](file:///data/dev/cp/cap/test/test_traits_enums.cp) 为新语法，回归测试 100% 通过；
+   - 规范规范更新 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md) 第 3.5 节与第 4.5 节；
+   - 同步更新 [`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md) 与 [`SESSION.md`](file:///data/dev/cp/SESSION.md)。
+
+---
+
+## 2026-11-01 (Session Update - Git Commit)
+
+### 用户指令
+> git 提交
+
+### 执行结果汇报
+1. 暂存所有工作区修改与新增测试文件：
+   - `cpc/src/lexer.rs`
+   - `cpc/src/ast.rs`
+   - `cpc/src/ast_visitor.rs`
+   - `cpc/src/parser.rs`
+   - `cpc/src/sema.rs`
+   - `cpc/src/codegen.rs`
+   - `cap/test/test_switch_binding_pass.cp`
+   - `cap/test/test_traits_enums.cp`
+   - `cp_ref.md`
+   - `CHANGELOG.md`
+   - `DEVLOG.md`
+   - `SESSION.md`
+2. 执行 Git 提交：`feat(enum,switch): implement tagged union enums, contextual variant constructors, and switch pattern matching with destructuring and walrus binding`；
+3. 成果与测试套件固化保存至 Git 历史，工作区干净。
+
 
 
 

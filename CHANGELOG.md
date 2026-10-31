@@ -867,6 +867,51 @@
 - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
   - 完整规范化第 3.6 节《弱类型/即席元标注（Ad-hoc Metadata：`@meta(...)`）》与第 3.7 节《批量标签收拢语法（`@[...]`）》，强调 `[]` 集合语义与零成本正交设计。
 
+---
+
+## [Unreleased] - 2026-11-01
+
+### 标载荷代数数据类型 (Tagged Union Enum) 与 Switch 全模式解构变量捕获体系实装
+
+### 新增文件 (Added)
+- [`cap/test/test_switch_binding_pass.cp`](file:///data/dev/cp/cap/test/test_switch_binding_pass.cp):
+  - 覆盖带载荷枚举（无载荷 `Idle`、单载荷 `Text: string`、元组载荷 `Move: [i32, i32]`、结构体载荷 `Compute: { batch: usize, priority: i32 }`）；
+  - 覆盖上下文推导前缀省略构造（`.Idle`, `.Text("hello")`, `.Move [15, 25]`, `.Compute { ... }`）；
+  - 覆盖 `switch` 元组方括号解构模式匹配（`.Move [x, y]`）；
+  - 覆盖 `switch` 结构体字段解构匹配（`.Compute { batch, priority }`）；
+  - 覆盖 `switch` 结构体剩余/全捕获匹配（`.Compute { ...fields }`）；
+  - 覆盖 `switch` 海象操作符区间变量绑定（`s := 90..=100`）；
+  - 验证运行结果 100% 符合预期。
+
+### 修改文件 (Modified)
+- [`cpc/src/lexer.rs`](file:///data/dev/cp/cpc/src/lexer.rs):
+  - 新增 `#[token(":=")] ColonAssign` 词法标记，支持 Walrus（海象操作符）变量绑定语法。
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs):
+  - `Pattern` 枚举新增 `Pattern::Binding { ident: Ident, subpat: Box<Pattern> }`（变量与子模式绑定）与 `Pattern::TypeMatch { ident: Ident, ty: Type }`（动态类型匹配分支）；
+  - `EnumInitExpr` 增加 `#[serde(default)] pub tuple_args: Option<Vec<Expr>>`，原生支持 `.Move [x, y]` 元组构造。
+- [`cpc/src/ast_visitor.rs`](file:///data/dev/cp/cpc/src/ast_visitor.rs):
+  - 在 `extract_idents_from_pat` 中适配 `Pattern::Binding` 与 `Pattern::TypeMatch`，确保变量分析与借用检查完整捕获绑定标识符。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - `Parser` 引入 `in_switch_arm: usize` 状态追踪，精准消除 `switch` 分支中 `ident: Type` 类型分支与对象字面量键值对的文法歧义；
+  - `parse_single_pattern`：支持 `.Variant` 匹配时直接接 `{ ... }`（含 `...rest` 字段解构）、`[ ... ]`（元组解构）、`(...)`（括号解构）与单个 `Ident` 载荷捕获；
+  - 支持 `ident := subpat` 海象操作符绑定与 `ident: Type` 动态类型匹配；
+  - 彻底移除旧版 Zig 风格的 `|fields|` 管道捕获语法；
+  - `parse_enum`：支持 `Ident: Type` 语法定义枚举载荷变体；
+  - `parse_primary_expr` & `parse_postfix_expr`：支持在已知类型上下文中直接使用 `.Variant { ... }`、`.Variant [ ... ]`、`.Variant( ... )` 进行隐式推导构造。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 在 `bind_match_pattern`、`bind_for_pattern` 与 `analyze_pattern` 中支持 `Pattern::Binding` 与 `Pattern::TypeMatch` 的作用域符号注入与类型推导；
+  - 放行前缀为空的隐式推导枚举构造（推断为 `Type::Any` 或上下文目标类型）。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - `generate_pattern_match`：支持带载荷枚举多元素元组解构绑定（`cp_unpack_elem`）、结构体属性提取与剩余字段全量打包绑定（`...fields`）；
+  - 支持 `Pattern::Binding` 生成 `const ident = val_expr;` 绑定，以及 `Pattern::TypeMatch` 的运行时类型判断与指针安全窄化转换；
+  - 修复 `Expr::Cast` 对数值类型（整数、浮点数）无脑生成 `@ptrCast(@alignCast(...))` 的底层缺陷，精确按目标类型生成 Zig `@intCast`、`@floatCast`、`@intFromFloat` 与 `@floatFromInt`；
+  - 重命名内部异步任务结构为 `CpTask`，避免用户定义 `enum Task` 时与 Zig 预置上下文名称冲突。
+- [`cap/test/test_traits_enums.cp`](file:///data/dev/cp/cap/test/test_traits_enums.cp):
+  - 语法升级：将旧版遗留的 `match (task) { .Compute |fields| => ... }` 重构为规范的 `switch (task) { .Compute { batch } => ... }`。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 增补第 3.5 节《枚举与代数数据类型（Enum & Tagged Union）》，规范化定义、上下文推导与构造语法；
+  - 增补第 4.5 节《枚举载荷解构、Walrus 绑定与动态类型匹配》，详细记录结构体解构、元组解构、海象绑定、类型分支匹配及废除 `|fields|` 的设计。
+
 
 
 

@@ -1626,6 +1626,63 @@ AI 智能体正经历从“单体聊天机器人（Single Agent / ChatBot）”�
    - `test_meta_pass.cp`、`test_dec_pass.cp`、`test_reflect_pass.cp` 100% 通过；
    - Rust 编译器经 `cargo check` (1.2s) 与 `cargo fmt` 验证无误。
 
+---
+
+## 2026-11-01: 标载荷代数数据类型 (Tagged Union) 与 Switch 解构变量捕获全体系实装
+
+### 1. 任务背景与核心哲学
+1. **彻底告别 Rust/Zig 的历史包袱，拥抱 TypeScript/ES6 解构心智**：
+   - 传统系统级语言（如 Rust）的带载荷枚举使用元组圆括号嵌套与 `@` 绑定语法（如 `s @ 90..=100`），在与现代前端/全栈心智对接时显得晦涩突兀；
+   - 早期 CP 遗留的 Zig 风格管道捕获 `|fields|` 破坏了模式解构的一致性与正交性；
+   - 本次重构目标：
+     - **枚举定义语法对齐 TS**：无载荷 `Idle,`、单载荷 `Text: string,`、元组载荷 `Move: [i32, i32],`、结构体载荷 `Compute: { batch: usize, priority: i32 }`；
+     - **上下文前缀推导构造**：类型明确时直接省略前缀书写 `.Idle`、`.Text("hello")`、`.Move [10, 20]`、`.Compute { batch: 100 }`；
+     - **Switch 模式解构捕获**：
+       - 元组载荷原生方括号解构：`.Move [x, y]`（无需外层小括号包装）；
+       - 结构体载荷解构：`.Compute { batch, priority }`；
+       - 结构体整包与剩余字段捕获：`.Compute { ...fields }`；
+       - Walrus 变量绑定：采用现代化的 `ident := subpat`（取代 `@`）；
+       - 动态类型匹配：`ident: Type`（如 `s: string`, `n: i32`）；
+     - **彻底切除遗留的 `|fields|` 语法**，遵循奥卡姆剃刀原则，使 CP 语言的语法树更为纯净统一。
+
+### 2. 核心架构设计与执行落地
+
+#### 2.1 词法与语法分析器 (Lexer & Parser)
+1. **Lexer**：
+   - 注册 `#[token(":=")] ColonAssign`，赋予海象绑定一等公民地位。
+2. **AST**：
+   - `Pattern` 新增 `Pattern::Binding { ident, subpat }` 与 `Pattern::TypeMatch { ident, ty }`；
+   - `EnumInitExpr` 新增 `tuple_args: Option<Vec<Expr>>`，支持直接使用方括号构建元组变体。
+3. **Parser**：
+   - 引入 `in_switch_arm: usize` 状态栈：在 `switch` arm 模式匹配头部，遇到 `ident: Type` 时优先识别为 `Pattern::TypeMatch`，在 arm 体内精准恢复对象字面量解析，消除语法回溯歧义；
+   - 重构 `parse_single_pattern`：支持 `.Variant` 后直接跟随 `{ ... }`（含 `...rest` 结构体解构）、`[ ... ]`（元组解构）以及单标识符载荷捕获，移除 `|...|` 管道分支；
+   - 升级 `parse_enum` 支持属性冒号语法 `Ident: Type`；
+   - 升级 `parse_primary_expr` 支持 `.Variant` 上下文推导字面量构建。
+
+#### 2.2 语义分析与静态推导 (Sema)
+1. 在 `bind_match_pattern`、`bind_for_pattern` 与 `analyze_pattern` 中支持 `Pattern::Binding`（同时绑定变量与递归检查子模式）与 `Pattern::TypeMatch`；
+2. 升级符号表推导，当枚举构造的 `enum_name` 为空时，通过上下文类型标注进行推断，推断失败时优雅回退至 `Type::Any`。
+
+#### 2.3 代码生成与运行时降准 (Codegen)
+1. **Zig Tagged Union 内存映射**：
+   - 纯标签映射为 Zig 单元枚举，结构体载荷映射为 Zig 匿名结构体 `.{ .Variant = .{ ... } }`，元组载荷映射为 Zig 匿名元组 `.{ .Variant = .{ ... } }`；
+   - 模式匹配分支生成：利用 `std.meta.activeTag(...) == .Variant` 作为判别条件；
+   - 元组解构生成：通过 `cp_unpack_elem(payload, idx)` 安全提取各元素；
+   - 结构体剩余/整包捕获生成：将 `val_expr` 完整打包并绑定为 `const fields = ...;`；
+2. **Walrus 绑定生成**：
+   - 生成 `const ident = val_expr;` 并递归级联展开子模式判定与解构绑定；
+3. **类型分支生成**：
+   - 针对 `TypeMatch`，若是基本类型则匹配 `std.meta.activeTag(...)`，若是类引用则匹配 `vtable.__type_id` 并生成向下安全类型转换；
+4. **编译期缺陷修复与去碰撞**：
+   - 修复 `Expr::Cast` 对标量整型/浮点型使用 `@ptrCast(@alignCast(...))` 的底层缺陷，精准发射 `@intCast`、`@floatCast`、`@intFromFloat`、`@floatFromInt`；
+   - 重命名协程运行时的内部 `Task` 结构体为 `CpTask`，避免当用户定义 `enum Task` 时触发 Zig 重复结构体成员名称错误。
+
+### 3. 测试与验证
+1. 新增综合回归测试 [`cap/test/test_switch_binding_pass.cp`](file:///data/dev/cp/cap/test/test_switch_binding_pass.cp)，覆盖无载荷、单载荷、元组解构、结构体解构、全包捕获、海象区间绑定，执行 `./cap/bin/cap cap/test/test_switch_binding_pass.cp`，一次性通过！
+2. 升级回归测试 [`cap/test/test_traits_enums.cp`](file:///data/dev/cp/cap/test/test_traits_enums.cp) 为规范语法，执行通过输出 `AIWorker 1 computing batch 100`；
+3. 既有特性测试套件（`test_features.cp`、`test_advanced.cp`）全量回归通过；
+4. `cargo check` (0.98s) 与 `cargo fmt` 验证无语法/格式问题。
+
 
 
 
