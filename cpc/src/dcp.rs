@@ -232,6 +232,7 @@ impl DcpEmitter {
             Type::String => "string".to_string(),
             Type::Void => "void".to_string(),
             Type::Any => "any".to_string(),
+            Type::Auto => "auto".to_string(),
             Type::PID => "PID".to_string(),
             Type::Unknown => "unknown".to_string(),
             Type::Array(inner) => format!("[]{}", self.format_type(inner)),

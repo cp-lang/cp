@@ -571,6 +571,11 @@ impl<'a> Parser<'a> {
             let meta = self.parse_meta_list()?;
             let mut is_mut = false;
             let mut is_move = false;
+            let mut is_comptime = meta.iter().any(|m| m.name.sym == "comptime");
+            if matches!(self.peek(), Some(Token::Ident(id)) if id == "comptime") {
+                self.bump()?;
+                is_comptime = true;
+            }
 
             if self.peek() == Some(&Token::Mut) {
                 self.bump()?;
@@ -618,7 +623,7 @@ impl<'a> Parser<'a> {
                     span: p_ident.span,
                     ident: p_ident,
                     ty,
-                    is_comptime: false,
+                    is_comptime,
                     is_mut,
                     is_move,
                     default,
@@ -671,7 +676,7 @@ impl<'a> Parser<'a> {
                     span: p_ident.span,
                     ident: p_ident,
                     ty,
-                    is_comptime: false,
+                    is_comptime,
                     is_mut,
                     is_move,
                     default,
@@ -710,7 +715,7 @@ impl<'a> Parser<'a> {
                 span: p_ident.span,
                 ident: p_ident,
                 ty,
-                is_comptime: false,
+                is_comptime,
                 is_mut,
                 is_move,
                 meta,
@@ -980,6 +985,7 @@ impl<'a> Parser<'a> {
             Token::String => Type::String,
             Token::Void => Type::Void,
             Token::Any => Type::Any,
+            Token::Auto => Type::Auto,
             Token::Bool => Type::Bool,
             Token::ErrorKw => Type::Ref(Ident {
                 span,
@@ -988,6 +994,8 @@ impl<'a> Parser<'a> {
             Token::Ident(sym) => {
                 if sym == "pid" {
                     Type::PID
+                } else if sym == "auto" || sym == "anytype" {
+                    Type::Auto
                 } else if sym == "Shared" && self.peek() == Some(&Token::Less) {
                     self.bump()?;
                     let inner = self.parse_type()?;
@@ -1121,7 +1129,33 @@ impl<'a> Parser<'a> {
                     self.bump()?;
                     Ok(Stmt::ComptimeBlock(self.parse_block_stmt()?))
                 } else {
-                    Ok(Stmt::Expr(self.parse_expr()?))
+                    let expr = self.parse_expr()?;
+                    if self.peek() == Some(&Token::Semicolon) {
+                        self.bump()?;
+                    }
+                    Ok(Stmt::Expr(expr))
+                }
+            }
+            Some(Token::At) => {
+                if self.peek_next() == Some(&Token::LBrace) {
+                    self.bump()?; // consume @
+                    Ok(Stmt::ComptimeBlock(self.parse_block_stmt()?))
+                } else if self.peek_next() == Some(&Token::If)
+                    || matches!(self.peek_next(), Some(Token::Ident(id)) if id == "if")
+                {
+                    self.bump()?; // consume @
+                    Ok(Stmt::If(self.parse_if_stmt_with_comptime(true)?))
+                } else if self.peek_next() == Some(&Token::For)
+                    || matches!(self.peek_next(), Some(Token::Ident(id)) if id == "for")
+                {
+                    self.bump()?; // consume @
+                    Ok(Stmt::For(self.parse_for_stmt_with_comptime(true)?))
+                } else {
+                    let expr = self.parse_expr()?;
+                    if self.peek() == Some(&Token::Semicolon) {
+                        self.bump()?;
+                    }
+                    Ok(Stmt::Expr(expr))
                 }
             }
             Some(Token::Unsafe) => {
@@ -1643,7 +1677,17 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_for_stmt(&mut self) -> ParseResult<ForStmt> {
-        let start = self.expect(Token::For)?.start;
+        self.parse_for_stmt_with_comptime(false)
+    }
+
+    fn parse_for_stmt_with_comptime(&mut self, is_comptime: bool) -> ParseResult<ForStmt> {
+        let start = if self.peek() == Some(&Token::For) {
+            self.bump()?.1.start
+        } else if matches!(self.peek(), Some(Token::Ident(id)) if id == "for") {
+            self.bump()?.1.start
+        } else {
+            self.expect(Token::For)?.start
+        };
         let has_paren = if self.peek() == Some(&Token::LParen) {
             self.bump()?;
             true
@@ -1704,18 +1748,41 @@ impl<'a> Parser<'a> {
             pat,
             expr,
             body: Box::new(body),
+            is_comptime,
         })
     }
 
     fn parse_if_stmt(&mut self) -> ParseResult<IfStmt> {
-        let start = self.expect(Token::If)?.start;
-        self.expect(Token::LParen)?;
-        let test = self.parse_expr()?;
-        self.expect(Token::RParen)?;
+        self.parse_if_stmt_with_comptime(false)
+    }
+
+    fn parse_if_stmt_with_comptime(&mut self, is_comptime: bool) -> ParseResult<IfStmt> {
+        let start = if self.peek() == Some(&Token::If) {
+            self.bump()?.1.start
+        } else if matches!(self.peek(), Some(Token::Ident(id)) if id == "if") {
+            self.bump()?.1.start
+        } else {
+            self.expect(Token::If)?.start
+        };
+        let test = if self.peek() == Some(&Token::LParen) {
+            self.bump()?;
+            let t = self.parse_expr()?;
+            self.expect(Token::RParen)?;
+            t
+        } else {
+            self.parse_bin_expr(0)?
+        };
         let cons = self.parse_stmt()?;
         let mut alt = None;
         if self.peek() == Some(&Token::Else) {
             self.bump()?;
+            alt = Some(Box::new(self.parse_stmt()?));
+        } else if self.peek() == Some(&Token::At)
+            && (self.peek_next() == Some(&Token::Else)
+                || matches!(self.peek_next(), Some(Token::Ident(id)) if id == "else"))
+        {
+            self.bump()?; // consume @
+            self.bump()?; // consume else
             alt = Some(Box::new(self.parse_stmt()?));
         }
         Ok(IfStmt {
@@ -1723,6 +1790,7 @@ impl<'a> Parser<'a> {
             test,
             cons: Box::new(cons),
             alt,
+            is_comptime,
         })
     }
 
@@ -2972,6 +3040,10 @@ impl<'a> Parser<'a> {
                 }
             }
             Token::At => {
+                if self.peek() == Some(&Token::LBrace) {
+                    let block = self.parse_block_stmt()?;
+                    return Ok(Expr::Comptime(block));
+                }
                 let ident = self.parse_ident()?;
                 let name = format!("@{}", ident.sym);
                 if name == "@is_beam" {
@@ -2991,15 +3063,63 @@ impl<'a> Parser<'a> {
                         self.bump()?;
                     }
                 }
-                self.expect(Token::RParen)?;
-                Ok(Expr::Builtin(BuiltinCall {
-                    span: Span {
-                        start: span.start,
-                        end: self.peek_span().end,
-                    },
-                    name,
-                    args,
-                }))
+                let end = self.expect(Token::RParen)?.end;
+                let is_known_builtin = matches!(
+                    name.as_str(),
+                    "@print"
+                        | "@not"
+                        | "@spawn"
+                        | "@net_accept_async"
+                        | "@net_read_async"
+                        | "@net_write_async"
+                        | "@self"
+                        | "@sender"
+                        | "@reply"
+                        | "@send"
+                        | "@receive"
+                        | "@task_join"
+                        | "@create_pending_task"
+                        | "@complete_task"
+                        | "@alloc"
+                        | "@free"
+                        | "@get_arena"
+                        | "@shared_tensor_init"
+                        | "@release"
+                        | "@json_parse"
+                        | "@json_stringify"
+                        | "@compileError"
+                        | "@compileLog"
+                        | "@typeOf"
+                        | "@typeName"
+                        | "@fieldsOf"
+                        | "@field"
+                        | "@hasField"
+                        | "@sizeOf"
+                        | "@alignOf"
+                        | "@as"
+                        | "@test"
+                        | "@expect_eq"
+                );
+                if is_known_builtin {
+                    Ok(Expr::Builtin(BuiltinCall {
+                        span: Span {
+                            start: span.start,
+                            end,
+                        },
+                        name,
+                        args,
+                    }))
+                } else {
+                    Ok(Expr::Call(CallExpr {
+                        span: Span {
+                            start: span.start,
+                            end,
+                        },
+                        callee: Box::new(Expr::Ident(ident)),
+                        args,
+                        is_comptime: true,
+                    }))
+                }
             }
             Token::Match | Token::Switch => {
                 let match_expr = self.parse_match_expr()?;
@@ -3469,7 +3589,7 @@ fn left_span(expr: &Expr) -> Span {
         Expr::Range { span, .. } => *span,
         Expr::Cast { span, .. } => *span,
         Expr::Deref(d) => left_span(d),
-        Expr::Unsafe(b) => b.span,
+        Expr::Unsafe(b) | Expr::Comptime(b) => b.span,
     }
 }
 
@@ -3508,6 +3628,6 @@ fn right_span(expr: &Expr) -> Span {
         Expr::Range { span, .. } => *span,
         Expr::Cast { span, .. } => *span,
         Expr::Deref(d) => right_span(d),
-        Expr::Unsafe(b) => b.span,
+        Expr::Unsafe(b) | Expr::Comptime(b) => b.span,
     }
 }

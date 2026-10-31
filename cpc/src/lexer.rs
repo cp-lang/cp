@@ -97,6 +97,8 @@ pub enum Token {
     Void,
     #[token("any")]
     Any,
+    #[token("auto")]
+    Auto,
 
     // --- Types (RFC-001 4.1) ---
     #[token("i32")]

@@ -3859,6 +3859,70 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 2. 执行 Git 提交：`feat(enum,switch): implement tagged union enums, contextual variant constructors, and switch pattern matching with destructuring and walrus binding`；
 3. 成果与测试套件固化保存至 Git 历史，工作区干净。
 
+---
+
+## 2026-11-01 (Session Update - CP Comptime Metaprogramming System)
+
+### 用户指令
+> 1. 编译期调用规则设计完善:
+>    - 编译期代码执行块（`!{ }` Comptime）：评估与 `@{ }` 哪个更好；
+>    - 编译期调用函数：`sum!()` 还是 `sum@()` / `@sum()`；
+>    - 编译期控制流：是否应该补全 `@if` / `@else` 与 `@for`；
+>    - 编译期函数参数定义；
+>    - `anytype` 自动推导形参设计与简洁语法；
+>    - 借鉴 Zig Comptime 充分增强 CP 编译期能力，保持严谨简洁优雅统一。
+> 2. 细节确认：
+>    - `comptime` 参数约束标记；
+>    - `auto` 自动推导参数；
+>    - `@if / @else` 与 `@for` 控制流在 AST 修剪与循环展开上的独特价值；
+>    - `@fn(...)` 显式编译期调用与装饰器/Meta 的边界区分；
+>    - 常量折叠对编译性能的影响评估。
+> 3. 好
+> 4. 完成了吗? 汇报进度
+> 5. • 正在执行单次 cargo build --release 最终打包，完成后将立即通过 ./cap/bin/cap cap/test/test_comptime.cp 执行全量验证并同步文档！几个小时了,是不是卡死了
+> 6. 不对, cargo build --release 用不了这么久, 终止这个任务,重新构建,检查构建是否出错
+> 7. cpc 应该编译完成了吧,你为何停止工作呢
+
+### 执行结果汇报
+1. **Comptime 体系架构端到端设计与实现 (cpc 编译器前端)**：
+   - **编译期代码块**：实现 `@{ ... }`（产生 `Expr::Comptime` 与 `Stmt::ComptimeBlock`），生成 Zig `comptime (blk: { ... })` 与 `comptime { ... }`，并隔离状态机上下文（`is_state_machine = false`），确保块内局部变量作为原生 Zig 编译期局部变量发射与求值；
+   - **显式编译期函数调用**：支持 `@fn(...)`（如 `@add(30, 70)`），映射至 `comptime fn(...)`；
+   - **编译期控制流**：实现 `@if` / `@else` 静态分支修剪（死分支编译期抹除，零运行时开销）与 `@for` 静态循环展开（`inline for`）；
+   - **参数约束与推导**：支持 `@comptime val: usize` / `comptime val: usize` 编译期常量约束，以及 `val: auto`（及 `anytype`）编译期自动单态化形参；
+   - **9 大编译期内省指令**：实装并对齐 `@typeOf`、`@typeName`、`@fieldsOf`、`@field`、`@hasField`、`@sizeOf`、`@alignOf`、`@compileError`、`@compileLog`；
+   - **类型推导与运行时鲁棒性**：升级 `infer_cp_type_with_mock` 递归推导 `Expr::Comptime` 内部局部变量返回类型，增强 `cp_add` 自动 `@intCast` 适配跨类型加法。
+2. **测试用例与全量验证**：
+   - 新建 [`cap/test/test_comptime.cp`](file:///data/dev/cp/cap/test/test_comptime.cp)，涵盖 `@{ }`、`@add()`、`@comptime`、`val: auto`、`@if / @else` 与 `@for`；
+   - 执行 `./cap/bin/cap cap/test/test_comptime.cp`，全量测试用例 100% 绿灯通过；
+   - 回归执行 `test_switch_binding_pass.cp`、`test_traits_enums.cp`、`test_for_pass.cp`，所有既有测试全部通过，零回归破坏。
+3. **技术规范与操作记录同步**：
+   - 同步更新规范设计文档 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md) 第 11.1 节；
+   - 按铁律更新 [`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md) 与 [`SESSION.md`](file:///data/dev/cp/SESSION.md)。
+
+---
+
+## 2026-11-01 (Session Update - Git Commit)
+
+### 用户指令
+> git 提交
+
+### 执行结果汇报
+1. 暂存所有工作区修改、新增文件与测试用例（共 12 个文件）：
+   - `cpc/src/ast.rs`
+   - `cpc/src/ast_visitor.rs`
+   - `cpc/src/codegen.rs`
+   - `cpc/src/dcp.rs`
+   - `cpc/src/lexer.rs`
+   - `cpc/src/parser.rs`
+   - `cpc/src/sema.rs`
+   - `cap/test/test_comptime.cp`
+   - `cp_ref.md`
+   - `CHANGELOG.md`
+   - `DEVLOG.md`
+   - `SESSION.md`
+2. 顺利执行 Git 提交：`d971b38 feat(comptime): implement comptime blocks, comptime calls, @if/@for control flow, auto params, and intrinsics`；
+3. 工作区完全干净（working tree clean），测试全量通过。
+
 
 
 

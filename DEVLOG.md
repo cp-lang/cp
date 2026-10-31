@@ -1683,6 +1683,70 @@ AI 智能体正经历从“单体聊天机器人（Single Agent / ChatBot）”�
 3. 既有特性测试套件（`test_features.cp`、`test_advanced.cp`）全量回归通过；
 4. `cargo check` (0.98s) 与 `cargo fmt` 验证无语法/格式问题。
 
+---
+
+## 2026-11-01: CP 编译期元编程系统 (Comptime) 设计与完整端到端实装
+
+### 1. 任务背景与核心设计目标
+用户提出对 CP 编译期执行体系（Comptime）进行完善升级，借鉴 Zig 领先的 Comptime 理念，同时保持 CP 语言统一严谨、优雅简洁的语法风格。关键设计考量：
+1. **编译期执行块**：以 `@{ }` 替代遗留的 `!{ }`，完全在编译期求值展开为常量或预计算静态表；
+2. **编译期函数调用**：支持 `@fn(...)`（与 `@{ fn(...) }` 并存），强制要求函数在编译期完成求值并折叠展开；
+3. **编译期控制流**：引入 `@if / @else`（静态分支修剪，死分支在编译期彻底丢弃，不进入运行时也不产生类型/借用报错）与 `@for`（静态循环展开，消除跳转开销）；
+4. **编译期参数约束**：支持 `@comptime val: usize` / `comptime val: usize` 强约束实参在编译期已知；
+5. **编译期自动类型推导形参**：支持 `val: auto`（及 `anytype`），编译器自动依据入参类型进行单态化展开，对齐 Zig `anytype`，无需繁琐泛型 `<T>`；
+6. **编译期内省与诊断指令**：内置 `@typeOf`、`@typeName`、`@fieldsOf`、`@field`、`@hasField`、`@sizeOf`、`@alignOf`、`@compileError`、`@compileLog` 原生编译器直通原语。
+
+### 2. 技术架构与关键实现机制
+
+#### 2.1 语法分析与 AST 重构 (Parser & AST)
+1. **AST**：
+   - 为 `IfStmt` 与 `ForStmt` 增加 `is_comptime: bool`；
+   - 新增 `Expr::Comptime(BlockStmt)` 与 `Type::Auto`；
+   - 为 `Param` 标注 `is_comptime: bool`。
+2. **Parser**：
+   - 在 `parse_stmt` 中拦截 `@{ ... }` 与 `!{ ... }` 生成 `Stmt::ComptimeBlock`；拦截 `@if` 与 `@for` 并将 `is_comptime` 置为 `true`；
+   - 在 `parse_primary_expr` 中拦截 `@{ ... }` 生成 `Expr::Comptime`；
+   - 区分编译器内置宏指令（如 `@print`、`@spawn`、`@sizeOf`、`@test`、`@expect_eq` 等）与用户函数显式编译期调用：若是非内置标识符的 `@name(...)`，解析为 `Expr::Call { callee: name, is_comptime: true }`；
+   - `parse_params` 支持 `@comptime param: Type` 与 `comptime param: Type`；
+   - `parse_base_type` 将 `auto` 与 `anytype` 统一映射为 `Type::Auto`。
+
+#### 2.2 语义检查与类型推导 (Sema)
+1. 增强 `Expr::Comptime` 与 `Expr::Unsafe` 的类型推导逻辑：允许在类型推断期间优雅处理局部作用域临时变量，推导失败时平滑降级为 `Type::Any`，避免在符号表预扫描阶段报 `UndefinedSymbol` 假阳性；
+2. 确保在 `analyze_expr` 阶段正常创建作用域并对块内语句进行完整语义验证。
+
+#### 2.3 代码生成与 Zig Lowering (Codegen)
+1. **纯净编译期执行环境隔离**：
+   - 在生成 `Expr::Comptime` 与 `Stmt::ComptimeBlock` 时，暂时保存并将 `self.is_state_machine` 置为 `false`，同时置 `self.is_comptime = true`；
+   - 彻底解决状态机函数将 `@{ ... }` 内部的 `let a = 15;` 错误发射为 `ctx.a = 15;` 的致命缺陷，确保编译期变量直接作为 Zig 本地编译期变量发射，并在末尾输出 `break :blk last_expr;`；
+2. **静态分支修剪与循环展开**：
+   - `@if` 发射为 `if (comptime condition) { ... } else { ... }`，利用 Zig 编译期的分支死代码消除；
+   - `@for` 发射为 `inline for (range) |item| { ... }`，自动在编译期完成循环展开；
+3. **自动单态化与参数约束**：
+   - `Type::Auto` 直接映射为 Zig 的 `anytype`；
+   - `p.is_comptime` 在函数签名中生成 `comptime ` 前缀，并在函数体前置过滤中跳过对其取地址（Zig 严禁对 comptime 形参执行 `_ = &p;`）；
+4. **编译期内省指令映射**：
+   - `@typeOf(e)` -> `@TypeOf(e)`；
+   - `@sizeOf(T)` -> `@sizeOf(T)`；
+   - `@typeName(T)` -> `@typeName(T)`；
+   - `@fieldsOf(T)` -> `@typeInfo(T).@"struct".fields`；
+   - `@compileError(msg)` -> `@compileError(msg)`；
+   - `@compileLog(...)` -> `@compileLog(...)`；
+5. **编译期类型回填与算术鲁棒性**：
+   - 在 `infer_cp_type_with_mock` 中递归推断 `Expr::Comptime` 的最后表达式返回类型；
+   - 增强 `cp_add` 运算宏，对 `i32` 与 `usize`（如循环展开索引）的跨类型整数加法自动施加 `@intCast` 适配，消除 Zig 强类型加法冲突。
+
+### 3. 测试与验证
+1. 新建全面回归测试用例 [`cap/test/test_comptime.cp`](file:///data/dev/cp/cap/test/test_comptime.cp)，测试覆盖：
+   - `@{ }` 编译期代码块求值；
+   - `@add(30, 70)` 显式编译期函数调用；
+   - `@comptime val: usize` 形参约束；
+   - `val: auto` 编译期自动推导形参与 `@sizeOf(@typeOf(val))`；
+   - `@if / @else` 编译期分支修剪；
+   - `@for` 编译期循环展开；
+2. 执行 `./cap/bin/cap cap/test/test_comptime.cp`，全量测试用例 100% 绿灯通过；
+3. 执行既有核心套件（`test_switch_binding_pass.cp`、`test_traits_enums.cp`、`test_for_pass.cp`），零回归破损；
+4. 同步更新规范文档 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md) 第 11.1 节。
+
 
 
 

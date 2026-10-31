@@ -127,7 +127,7 @@ pub fn find_referenced_vars_in_expr(expr: &Expr, vars: &mut HashSet<String>) {
         }
         Expr::Cast { expr, .. } => find_referenced_vars_in_expr(expr, vars),
         Expr::Deref(d) => find_referenced_vars_in_expr(d, vars),
-        Expr::Unsafe(b) => find_referenced_vars_in_block(b, vars),
+        Expr::Unsafe(b) | Expr::Comptime(b) => find_referenced_vars_in_block(b, vars),
         _ => {}
     }
 }

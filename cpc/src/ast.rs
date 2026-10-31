@@ -273,6 +273,8 @@ pub struct IfStmt {
     pub test: Expr,
     pub cons: Box<Stmt>,
     pub alt: Option<Box<Stmt>>,
+    #[serde(default)]
+    pub is_comptime: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -296,6 +298,8 @@ pub struct ForStmt {
     pub pat: Pattern,
     pub expr: Expr,
     pub body: Box<Stmt>,
+    #[serde(default)]
+    pub is_comptime: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -372,6 +376,7 @@ pub enum Expr {
     },
     Deref(Box<Expr>),
     Unsafe(BlockStmt),
+    Comptime(BlockStmt),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -566,6 +571,7 @@ pub enum Type {
         inner: Box<Type>,
         depth: usize,
     },
+    Auto,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

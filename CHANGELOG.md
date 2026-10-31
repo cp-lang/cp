@@ -912,6 +912,46 @@
   - 增补第 3.5 节《枚举与代数数据类型（Enum & Tagged Union）》，规范化定义、上下文推导与构造语法；
   - 增补第 4.5 节《枚举载荷解构、Walrus 绑定与动态类型匹配》，详细记录结构体解构、元组解构、海象绑定、类型分支匹配及废除 `|fields|` 的设计。
 
+---
+
+## 2026-11-01 (全量编译期元编程系统 Comptime、自动单态化与静态内省原语)
+
+### 修改文件 (Modified)
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs):
+  - 为 `IfStmt` 与 `ForStmt` 增加 `is_comptime: bool` 字段，支持静态分支修剪与循环展开；
+  - 新增 `Expr::Comptime(BlockStmt)` 表达式变体，支持 `@{ ... }` 编译期求值代码块；
+  - 新增 `Type::Auto` 类型变体，支持 `auto` 编译期参数类型推导。
+- [`cpc/src/lexer.rs`](file:///data/dev/cp/cpc/src/lexer.rs):
+  - 新增 `Token::Auto` 关键字词元。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - `parse_params`：解析 `@comptime param: Type` 与 `comptime param: Type`，将形参标记为 `is_comptime = true`；
+  - `parse_base_type`：将 `auto` 与 `anytype` 解析为 `Type::Auto`；
+  - `parse_stmt`：识别 `@{ ... }` 与 `!{ ... }` 产生 `Stmt::ComptimeBlock`；识别 `@if` 与 `@for` 并置 `is_comptime = true`；
+  - `parse_primary_expr`：支持 `@{ ... }` 产生 `Expr::Comptime`；将非内置宏指令的 `@fn(...)` 统一解析为 `Expr::Call { is_comptime: true, ... }` 编译期函数显式调用；将 `@test`、`@expect_eq` 以及其他标准库宏指令纳入内置宏保护清单。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 增强 `infer_type` 对 `Expr::Comptime` 与 `Expr::Unsafe` 的类型推导容错，支持块内局部变量推导并在未解析时优雅降级；
+  - 完善 `Stmt::ComptimeBlock` 与 `Expr::Comptime` 块内语义检查与作用域管理。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 将 `Type::Auto` 映射为 Zig 原生 `anytype`；
+  - `Expr::Comptime` 与 `Stmt::ComptimeBlock`：生成 `comptime (blk: { ... })` 与 `comptime { ... }`，生成期间自动将 `is_state_machine` 置为 false 并置 `is_comptime` 为 true，确保局部变量直接生成为编译期变量而非状态机字段；
+  - `Stmt::If`：当 `is_comptime` 时，生成 `if (comptime ...) { ... } else { ... }` 实现编译期静态分支修剪；
+  - `Stmt::For`：当 `is_comptime` 时，生成 `inline for (...) |...| { ... }` 实现编译期静态循环展开；
+  - 函数形参：`is_comptime` 形参生成 `comptime ` 前缀，跳过取地址操作；
+  - 函数调用：`is_comptime` 函数调用生成 `comptime callee(args)`；
+  - 内建编译期内省指令映射：支持 `@typeOf`、`@typeName`、`@fieldsOf`、`@field`、`@hasField`、`@sizeOf`、`@alignOf`、`@compileError`、`@compileLog`；
+  - `infer_cp_type_with_mock` 与 `infer_zig_type`：递归分析 `Expr::Comptime` 与 `Expr::Unsafe` 内部局部变量推断真实返回类型；
+  - `cp_add`：增强多整数类型混用的原生加法支持（自动通过 `@intCast` 适配 `i32` 与 `usize` 等混合运算）。
+- [`cpc/src/dcp.rs`](file:///data/dev/cp/cpc/src/dcp.rs):
+  - 支持 `Type::Auto` 格式化为 `"auto"`。
+- [`cpc/src/ast_visitor.rs`](file:///data/dev/cp/cpc/src/ast_visitor.rs):
+  - 支持 `Expr::Comptime` 遍历与访问。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 更新第 11.1 节《编译期元编程系统（Comptime Metaprogramming）》，详细记录 `@{ }` 编译期代码块、`@fn()` 编译期函数调用、`@comptime` 参数约束、`val: auto` 单态化、`@if` 静态分支修剪、`@for` 静态循环展开及 9 种内建编译期内省指令。
+
+### 新增文件 (Added)
+- [`cap/test/test_comptime.cp`](file:///data/dev/cp/cap/test/test_comptime.cp):
+  - 涵盖 `@{ }` 编译期求值、`@add()` 编译期函数调用、`@comptime` 参数约束、`val: auto` 编译期推导参数、`@if / @else` 分支修剪与 `@for` 循环展开的完整自动化回归测试用例，100% 测试通过。
+
 
 
 

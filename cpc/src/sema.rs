@@ -1342,6 +1342,7 @@ impl Analyzer {
                 self.analyze_expr(expr)?;
             }
             Stmt::Block(block) => self.analyze_block(block)?,
+            Stmt::ComptimeBlock(block) => self.analyze_block(block)?,
             Stmt::UnsafeBlock(block) => {
                 self.unsafe_depth += 1;
                 let res = self.analyze_block(block);
@@ -1724,6 +1725,9 @@ impl Analyzer {
                 let res = self.analyze_block(block);
                 self.unsafe_depth -= 1;
                 res?;
+            }
+            Expr::Comptime(block) => {
+                self.analyze_block(block)?;
             }
             Expr::Template(t) => {
                 for e in &t.expressions {
@@ -2417,10 +2421,12 @@ impl Analyzer {
                     other => Ok(other),
                 }
             }
-            Expr::Unsafe(b) => {
-                if let Some(Stmt::Return(r)) = b.body.last() {
+            Expr::Unsafe(b) | Expr::Comptime(b) => {
+                if let Some(Stmt::Expr(e)) = b.body.last() {
+                    return Ok(self.infer_type(e).unwrap_or(Type::Any));
+                } else if let Some(Stmt::Return(r)) = b.body.last() {
                     if let Some(arg) = &r.arg {
-                        return self.infer_type(arg);
+                        return Ok(self.infer_type(arg).unwrap_or(Type::Any));
                     }
                 }
                 Ok(Type::Void)

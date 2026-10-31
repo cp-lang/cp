@@ -83,8 +83,8 @@
   - [10.4 跨并发边界内存安全防御（Send/Sync 铁律）](#104-跨并发边界内存安全防御sendsync-铁律)
   - [10.5 异步任务流与事件循环](#105-异步任务流与事件循环)
   - [10.6 Nest 智能体容器（Nest Agent Container / Nest Runtime）](#106-nest-智能体容器nest-agent-container--nest-runtime)
-- [十一、元编程、编译期计算与底层控制 (Metaprogramming, Comptime & Unsafe)](#第十一篇元编程编译期计算与底层控制)
-  - [11.1 编译期代码执行块（!{ } Comptime）](#111-编译期代码执行块--comptime)
+- [十一、元编程、编译期计算与底层控制 (Metaprogramming, Comptime & Unsafe)](#十一元编程编译期计算与底层控制)
+  - [11.1 编译期元编程系统（Comptime Metaprogramming）](#111-编译期元编程系统comptime-metaprogramming)
   - [11.2 宏系统（Macro Metaprogramming）](#112-宏系统macro-metaprogramming)
   - [11.3 自定义元注解与类/方法装饰器](#113-自定义元注解与类方法装饰器)
   - [11.4 运行时与编译期反射系统](#114-运行时与编译期反射系统)
@@ -1438,12 +1438,24 @@ CP 语言是 **Nest 智能体容器** 的原生执行体：
 
 ## 十一、元编程、编译期计算与底层控制
 
-### 1. 编译期代码执行块（`!{ }` Comptime）
+### 1. 编译期元编程系统（Comptime Metaprogramming）
 
-在 `!{ }` 内的代码完全在编译期由内置编译器求值展开：
+CP 语言深度借鉴并融合了 Zig 的编译期计算哲学，同时继承 TypeScript 简洁优美的语法表达。所有带 `@` 的编译期机制在编译期求值展开，运行时零开销，死代码自动修剪。
+
+#### 1.1 编译期代码执行块（`@{ }` Comptime Block）
+
+在 `@{ }` 内的代码完全在编译期由编译器执行求值，求值结果直接作为编译期常量或数据结构注入 AST（向下兼容 `!{ }`）：
 
 ```typescript
-const HASH_TABLE = !{
+// 编译期执行计算，运行时直接作为常量 40 嵌入二进制
+const COMPUTED_VAL = @{
+    let a = 15;
+    let b = 25;
+    a + b
+};
+
+// 编译期生成预置哈希表 / 查找表
+const HASH_TABLE = @{
     let table: [i32] = [];
     for i of 0..256 {
         table.push(i * 31 % 255);
@@ -1451,6 +1463,81 @@ const HASH_TABLE = !{
     table
 };
 ```
+
+#### 1.2 编译期函数显式调用（`@fn(...)`）
+
+函数调用前加 `@`，强制编译器在编译期对函数进行常量求值展开，若参数无法在编译期确定则触发编译报错：
+
+```typescript
+fn add(a: i32, b: i32): i32 {
+    return a + b;
+}
+
+// 编译期直接折叠展开为 100
+const SUM = @add(30, 70);
+```
+
+#### 1.3 编译期参数约束（`@comptime` / `comptime`）
+
+函数形参标注 `@comptime`（或 `comptime`），强制要求调用方传入的值必须在编译期已知：
+
+```typescript
+fn create_buffer(@comptime size: usize): [u8] {
+    return [0; size];
+}
+
+const buf = create_buffer(1024); // ✔️ 合法，1024 为编译期常量
+```
+
+#### 1.4 编译期自动推导参数（`val: auto` / `anytype`）
+
+函数形参声明为 `auto`（或 `anytype`），代表该参数为编译期类型泛型化参数。编译器根据传入实参的具体类型自动单态化（Monomorphization）生成专门版本，无需手动书写泛型 `<T>`：
+
+```typescript
+fn get_type_size(val: auto): usize {
+    return @sizeOf(@typeOf(val));
+}
+
+let int_size = get_type_size(42 as i32);   // 单态化为 i32 版本，返回 4
+let float_size = get_type_size(3.14 as f64); // 单态化为 f64 版本，返回 8
+```
+
+#### 1.5 编译期控制流（`@if` / `@else` 与 `@for`）
+
+- **`@if` / `@else`（静态分支修剪）**：条件必须在编译期可判定。编译器在编译期只保留命中分支的代码，死分支被彻底修剪，绝不残留到运行时，且死分支内的代码不会触发类型或借用错误。
+- **`@for`（静态循环展开）**：循环边界必须在编译期可判定。编译器在编译期自动将循环体完全展开（Inline unrolling），消除循环跳转指令与分支开销。
+
+```typescript
+// 1. 编译期分支修剪
+@if true {
+    let mode = "fast_path";
+} @else {
+    let mode = "slow_path"; // 完全被编译器丢弃，零运行时开销
+}
+
+// 2. 编译期循环展开
+let total = 0;
+@for i of 0..5 {
+    total = total + (i as i32);
+}
+// 展开为: total = total + 0; total = total + 1; ... total = total + 4;
+```
+
+#### 1.6 编译期内建内省原语（Comptime Intrinsics）
+
+CP 语言原生提供与底层无缝对接的编译期内省与诊断指令：
+
+| 原语指令 | 说明 | 示例 |
+| :--- | :--- | :--- |
+| `@typeOf(val)` | 获取表达式在编译期的类型 | `@typeOf(42)` -> `i32` |
+| `@typeName(T)` | 获取类型的字符串名称 | `@typeName(i32)` -> `"i32"` |
+| `@sizeOf(T)` | 获取类型所占用的字节大小 | `@sizeOf(i64)` -> `8` |
+| `@alignOf(T)` | 获取类型的内存对齐字节数 | `@alignOf(f64)` -> `8` |
+| `@fieldsOf(T)` | 获取结构体在编译期的字段数组 | `@fieldsOf(User)` |
+| `@hasField(T, name)` | 编译期探测类型是否拥有某字段 | `@hasField(User, "id")` |
+| `@field(obj, name)` | 编译期字段反射访问与赋值 | `@field(u, "name")` |
+| `@compileError(msg)` | 在编译期主动抛出编译失败错误 | `@compileError("Unsupported architecture")` |
+| `@compileLog(args...)` | 在编译期向控制台打印编译诊断信息 | `@compileLog("Type size:", @sizeOf(T))` |
 
 ---
 

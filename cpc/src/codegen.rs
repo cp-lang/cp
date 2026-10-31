@@ -1114,7 +1114,7 @@ impl Codegen {
         self.writeln("fn CpValType(comptime T: type) type { if (is_string_like(T)) return []const u8; if (T == comptime_int) return i32; if (T == comptime_float) return f32; return T; }");
         self.writeln("fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == comptime_int) { return @as(i32, v); } else if (comptime T == comptime_float) { return @as(f32, v); } else { return v; } }");
         self.writeln("fn CpAddReturn(comptime Ta: type, comptime Tb: type) type { if (is_string_like(Ta) or is_string_like(Tb)) return []const u8; if (Ta == comptime_int and Tb == comptime_int) return i32; if (Ta == comptime_int) return Tb; if (Tb == comptime_int) return Ta; if (Ta == comptime_float and Tb == comptime_float) return f32; if (Ta == comptime_float) return Tb; if (Tb == comptime_float) return Ta; return Ta; }");
-        self.writeln("fn cp_add(a: anytype, b: anytype) CpAddReturn(@TypeOf(a), @TypeOf(b)) { const Ta = @TypeOf(a); const Tb = @TypeOf(b); if (comptime (is_string_like(Ta) and is_string_like(Tb))) { return std.fmt.allocPrint(std.heap.page_allocator, \"{s}{s}\", .{ to_string_slice(a), to_string_slice(b) }) catch unreachable; } else if (comptime is_string_like(Ta)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{s}{any}\", .{ to_string_slice(a), b }) catch unreachable; } else if (comptime is_string_like(Tb)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{any}{s}\", .{ a, to_string_slice(b) }) catch unreachable; } else { return a + b; } }");
+        self.writeln("fn cp_add(a: anytype, b: anytype) CpAddReturn(@TypeOf(a), @TypeOf(b)) { const Ta = @TypeOf(a); const Tb = @TypeOf(b); if (comptime (is_string_like(Ta) and is_string_like(Tb))) { return std.fmt.allocPrint(std.heap.page_allocator, \"{s}{s}\", .{ to_string_slice(a), to_string_slice(b) }) catch unreachable; } else if (comptime is_string_like(Ta)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{s}{any}\", .{ to_string_slice(a), b }) catch unreachable; } else if (comptime is_string_like(Tb)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{any}{s}\", .{ a, to_string_slice(b) }) catch unreachable; } else if (comptime (@typeInfo(Ta) == .int and @typeInfo(Tb) == .int)) { return a + @as(Ta, @intCast(b)); } else { return a + b; } }");
         self.writeln("fn CpUnwrapOkType(comptime T: type) type { if (is_cp_result(T)) { const OkT = @FieldType(T, \"ok\"); if (@typeInfo(OkT) == .optional) return @typeInfo(OkT).optional.child; return OkT; } if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child; return T; }");
         self.writeln("fn cp_has_ok_val(v: anytype) bool { const T = @TypeOf(v); if (comptime is_cp_result(T)) { if (v != .ok) return false; const OkT = @FieldType(T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok != null; } else { return true; } } else if (comptime @typeInfo(T) == .optional) { return v != null; } else { return true; } }");
         self.writeln("fn cp_unwrap_ok_val(v: anytype) CpUnwrapOkType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_cp_result(T)) { const OkT = @FieldType(T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok.?; } else { return v.ok; } } else if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; } }");
@@ -3320,6 +3320,31 @@ impl Codegen {
                 sym: "TypeInfo".to_string(),
             })),
             Expr::Range { .. } => Some(Type::I32),
+            Expr::Comptime(b) | Expr::Unsafe(b) => {
+                let mut local_mocks = mock_types.clone();
+                for s in &b.body {
+                    if let Stmt::Var(v) = s {
+                        if let Pattern::Ident(id) = &v.pat {
+                            let init_ty = v
+                                .init
+                                .as_ref()
+                                .and_then(|init| self.infer_cp_type_with_mock(init, &local_mocks));
+                            let vty = v.ty.clone().or(init_ty);
+                            if let Some(t) = vty {
+                                local_mocks.insert(id.sym.clone(), t);
+                            }
+                        }
+                    }
+                }
+                if let Some(Stmt::Expr(e)) = b.body.last() {
+                    return self.infer_cp_type_with_mock(e, &local_mocks);
+                } else if let Some(Stmt::Return(r)) = b.body.last() {
+                    if let Some(arg) = &r.arg {
+                        return self.infer_cp_type_with_mock(arg, &local_mocks);
+                    }
+                }
+                Some(Type::Void)
+            }
             _ => None,
         }
     }
@@ -4650,7 +4675,11 @@ impl Codegen {
                 if !params_str.is_empty() {
                     params_str.push_str(", ");
                 }
-                params_str.push_str(&format!("{}: {}", p.ident.sym, mapped_ty));
+                let comptime_prefix = if p.is_comptime { "comptime " } else { "" };
+                params_str.push_str(&format!(
+                    "{}{}: {}",
+                    comptime_prefix, p.ident.sym, mapped_ty
+                ));
             }
             self.extract_locals_simple(&func.body);
             writeln!(
@@ -4669,7 +4698,9 @@ impl Codegen {
             }
             for p in &func.params {
                 if p.ident.sym != "this" && p.ident.sym != "_" {
-                    self.writeln(&format!("_ = &{};", p.ident.sym));
+                    if !p.is_comptime {
+                        self.writeln(&format!("_ = &{};", p.ident.sym));
+                    }
                     if p.is_move {
                         self.writeln(&format!(
                             "var __{}_moved = false; _ = &__{}_moved;",
@@ -5573,6 +5604,22 @@ impl Codegen {
                 }
                 self.current_scope_depth -= 1;
             }
+            Stmt::ComptimeBlock(b) => {
+                let saved = self.current_case_content.clone();
+                let saved_sm = self.is_state_machine;
+                let saved_comptime = self.is_comptime;
+                self.is_state_machine = false;
+                self.is_comptime = true;
+                self.current_case_content.clear();
+                for s in &b.body {
+                    self.generate_stmt(s);
+                }
+                let body_str = self.current_case_content.clone();
+                self.current_case_content = saved;
+                self.is_state_machine = saved_sm;
+                self.is_comptime = saved_comptime;
+                self.write_to_case(&format!("comptime {{\n{}\n}}", body_str));
+            }
             Stmt::Defer(defer_stmt) => {
                 self.write_to_case("defer {");
                 self.generate_stmt(defer_stmt);
@@ -5584,6 +5631,33 @@ impl Codegen {
                 self.write_to_case("}");
             }
             Stmt::If(i) => {
+                if i.is_comptime {
+                    let test = self.generate_expr(&i.test);
+                    self.write_to_case(&format!("if (comptime {}) {{", test));
+                    self.indent();
+                    if let Stmt::Block(b) = &*i.cons {
+                        for s in &b.body {
+                            self.generate_stmt(s);
+                        }
+                    } else {
+                        self.generate_stmt(&i.cons);
+                    }
+                    self.dedent();
+                    if let Some(alt) = &i.alt {
+                        self.write_to_case("} else {");
+                        self.indent();
+                        if let Stmt::Block(b) = &**alt {
+                            for s in &b.body {
+                                self.generate_stmt(s);
+                            }
+                        } else {
+                            self.generate_stmt(alt);
+                        }
+                        self.dedent();
+                    }
+                    self.write_to_case("}");
+                    return;
+                }
                 let test = self.generate_expr(&i.test);
                 let old_uninit = self.uninitialized_vars.clone();
                 if test == "true" {
@@ -5657,6 +5731,63 @@ impl Codegen {
                 self.uninitialized_vars.extend(uninit_body);
             }
             Stmt::For(f) => {
+                if f.is_comptime {
+                    if let Expr::Range {
+                        start,
+                        end,
+                        inclusive,
+                        ..
+                    } = &f.expr
+                    {
+                        let start_code = self.generate_expr(start);
+                        let end_code = self.generate_expr(end);
+                        let bound_id = match &f.pat {
+                            Pattern::Ident(id) => id.sym.clone(),
+                            _ => "i".to_string(),
+                        };
+                        let range_end = if *inclusive {
+                            format!("({} + 1)", end_code)
+                        } else {
+                            end_code
+                        };
+                        self.write_to_case(&format!(
+                            "inline for ({}..{}) |{}| {{",
+                            start_code, range_end, bound_id
+                        ));
+                        self.indent();
+                        if let Stmt::Block(b) = &*f.body {
+                            for s in &b.body {
+                                self.generate_stmt(s);
+                            }
+                        } else {
+                            self.generate_stmt(&f.body);
+                        }
+                        self.dedent();
+                        self.write_to_case("}");
+                        return;
+                    } else {
+                        let coll_code = self.generate_expr(&f.expr);
+                        let bound_id = match &f.pat {
+                            Pattern::Ident(id) => id.sym.clone(),
+                            _ => "item".to_string(),
+                        };
+                        self.write_to_case(&format!(
+                            "inline for ({}) |{}| {{",
+                            coll_code, bound_id
+                        ));
+                        self.indent();
+                        if let Stmt::Block(b) = &*f.body {
+                            for s in &b.body {
+                                self.generate_stmt(s);
+                            }
+                        } else {
+                            self.generate_stmt(&f.body);
+                        }
+                        self.dedent();
+                        self.write_to_case("}");
+                        return;
+                    }
+                }
                 let tmp_id = self.tmp_counter;
                 self.tmp_counter += 1;
                 let old_uninit = self.uninitialized_vars.clone();
@@ -7287,7 +7418,11 @@ impl Codegen {
                         args.push_str(", ");
                     }
                 }
-                let call_res = format!("{}({})", callee, args);
+                let call_res = if call.is_comptime {
+                    format!("comptime {}({})", callee, args)
+                } else {
+                    format!("{}({})", callee, args)
+                };
                 self.maybe_wrap_try_call(
                     call_res,
                     fn_sig_opt.as_ref().and_then(|s| s.return_type.as_ref()),
@@ -8296,6 +8431,47 @@ impl Codegen {
                     let obj = self.generate_expr(&call.args[0]);
                     format!("(blk: {{ break :blk try @import(\"std\").fmt.allocPrint(std.heap.page_allocator, \"{{f}}\", .{{@import(\"std\").json.fmt({}.*, .{{}})}}); }})", obj)
                 }
+                "@compileError" => {
+                    let msg = self.generate_expr(&call.args[0]);
+                    format!("@compileError({})", msg)
+                }
+                "@compileLog" => {
+                    let mut args_code = Vec::new();
+                    for a in &call.args {
+                        args_code.push(self.generate_expr(a));
+                    }
+                    format!("@compileLog({})", args_code.join(", "))
+                }
+                "@typeOf" => {
+                    let val = self.generate_expr(&call.args[0]);
+                    format!("@TypeOf({})", val)
+                }
+                "@typeName" => {
+                    let t = self.generate_expr(&call.args[0]);
+                    format!("@typeName({})", t)
+                }
+                "@fieldsOf" => {
+                    let t = self.generate_expr(&call.args[0]);
+                    format!("@typeInfo({}).@\"struct\".fields", t)
+                }
+                "@field" => {
+                    let obj = self.generate_expr(&call.args[0]);
+                    let f = self.generate_expr(&call.args[1]);
+                    format!("@field({}, {})", obj, f)
+                }
+                "@hasField" => {
+                    let t = self.generate_expr(&call.args[0]);
+                    let f = self.generate_expr(&call.args[1]);
+                    format!("@hasField({}, {})", t, f)
+                }
+                "@sizeOf" => {
+                    let t = self.generate_expr(&call.args[0]);
+                    format!("@sizeOf({})", t)
+                }
+                "@alignOf" => {
+                    let t = self.generate_expr(&call.args[0]);
+                    format!("@alignOf({})", t)
+                }
                 _ => "0".to_string(),
             },
             Expr::Arrow(arrow) => {
@@ -8631,6 +8807,32 @@ impl Codegen {
                 let body_str = self.current_case_content.clone();
                 self.current_case_content = saved;
                 format!("(blk: {{\n{}\n}})", body_str)
+            }
+            Expr::Comptime(b) => {
+                let saved = self.current_case_content.clone();
+                let saved_sm = self.is_state_machine;
+                let saved_comptime = self.is_comptime;
+                self.is_state_machine = false;
+                self.is_comptime = true;
+                self.current_case_content.clear();
+                let len = b.body.len();
+                for (idx, s) in b.body.iter().enumerate() {
+                    if idx + 1 == len {
+                        if let Stmt::Expr(e) = s {
+                            let ec = self.generate_expr(e);
+                            self.write_to_case(&format!("break :blk {};", ec));
+                        } else {
+                            self.generate_stmt(s);
+                        }
+                    } else {
+                        self.generate_stmt(s);
+                    }
+                }
+                let body_str = self.current_case_content.clone();
+                self.current_case_content = saved;
+                self.is_state_machine = saved_sm;
+                self.is_comptime = saved_comptime;
+                format!("comptime (blk: {{\n{}\n}})", body_str)
             }
             Expr::Template(t) => {
                 if t.expressions.is_empty() {
@@ -9112,6 +9314,11 @@ impl Codegen {
                     return "*const TypeInfo".to_string();
                 }
                 Expr::Index { .. } => {
+                    if let Some(cp_ty) = self.infer_cp_type(expr) {
+                        return self.map_type(&cp_ty);
+                    }
+                }
+                Expr::Comptime(_) | Expr::Unsafe(_) => {
                     if let Some(cp_ty) = self.infer_cp_type(expr) {
                         return self.map_type(&cp_ty);
                     }
@@ -9614,6 +9821,7 @@ impl Codegen {
             Type::PID => "PID".to_string(),
             Type::Void => "void".to_string(),
             Type::Any => "*anyopaque".to_string(),
+            Type::Auto => "anytype".to_string(),
             Type::Array(inner) => format!("[]const {}", self.map_type(inner)),
             Type::Map(_, _) => "*Map".to_string(),
             Type::Dict(_, _) => "*Dict".to_string(),
