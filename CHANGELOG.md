@@ -836,6 +836,38 @@
   - 详述 CAP 工具链从调试（`cap <file>`）、增量编译（0ms）、极限性能（`-f`）、边缘微体积（`-s`）、矩阵发布（`-r`）、测试、基准到一键缓存清理（`cap clean`）的全流程工作流；
   - 制作全方位横向对比矩阵，直观对比 Python、Node.js、Go、Rust 与 CP 在 8 大维度的核心指标。
 
+---
+
+## [Unreleased] - 2026-10-31 (Part 18)
+
+### 批量标签收拢语法 (`@[...]`) 与弱类型即席元标注 (`@meta(...)`) 零成本正交设计实装
+
+### 新增文件 (Added)
+- [`cap/test/test_batch_meta_pass.cp`](file:///data/dev/cp/cap/test/test_batch_meta_pass.cp):
+  - 覆盖类、方法、字段级批量收拢容器 `@[...]`，切面装饰器与元注解混排；
+  - 验证弱类型即席元标注 `@meta(...)` 搭配 `@[reflect, ...]` 时属性扁平直读与命名空间嵌套读取；
+  - 验证未加 `@reflect` 的纯元数据类拥有零运行时开销。
+- [`cap/test/test_meta_fail_unreflected.cp`](file:///data/dev/cp/cap/test/test_meta_fail_unreflected.cp):
+  - 反向测试：未标注 `@reflect` 的类在调用 `reflect.type<T>()` 时，编译器精准拦截并输出诊断引导。
+
+### 修改文件 (Modified)
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - `parse_meta_ident` 与 `parse_meta_arg`：扩展支持 `Token::Meta`, `Token::Dec`, `Token::Macro` 等关键字作为元标注标识符，解决关键字作为标注名的语法解析问题；
+  - `parse_single_meta_inner`：严格遵循函数式括号传参规范 `(...)`，纠正方括号参数误区（`[]` 专属于批量集合容器 `@[...]`）；
+  - `parse_meta_list`：实装 `@[...]` 批量语法，一口气收拢声明多个元注解、装饰器与即席标注，末尾逗号自动容错；
+  - `parse_module_item`：前瞻分析器支持 `@[...]` 括号深度精准匹配，确保声明关键字安全解析。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 注册内建 `@meta` 弱类型元注解契约（允许多目标全覆盖：类、方法、字段、参数、Trait、Enum，支持多实例重复标注）；
+  - 践行“零成本抽象（Zero-Cost Abstraction）”方案 A：严格保持正交性，`@meta` 专注于元数据挂载，运行时反射必须由 `@reflect` 统一显式授权激活，未授权时精确报错。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - `generate_meta_population`：为 `@meta` 实现平铺注入顶层属性（`info.meta["author"]`）与嵌套命名空间（`info.meta["meta"]["author"]`）的双重读取支持；
+  - `generate_reflection_tables`：仅对显式标注 `reflect` 的类生成运行时反射单例字典，杜绝无谓的二进制代码膨胀与 Tree-Shaking 阻碍；
+  - `generate_class`：增加对 `TypeInfo`、`FieldInfo`、`MethodInfo` 等内建类型的重复生成过滤，防止导入时符号重复定义冲突；
+  - `cp_message_from` & `cp_index_get`：修复指针类型包装时取栈局部变量地址导致的悬垂指针缺陷，并让 `cp_index_get` 支持对 `Message.any` 动态 Map 的链式属性递归读取。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 完整规范化第 3.6 节《弱类型/即席元标注（Ad-hoc Metadata：`@meta(...)`）》与第 3.7 节《批量标签收拢语法（`@[...]`）》，强调 `[]` 集合语义与零成本正交设计。
+
+
 
 
 

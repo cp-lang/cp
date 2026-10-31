@@ -1045,9 +1045,15 @@ impl Codegen {
         self.writeln("        if (val) |m| {");
         self.writeln("            switch (m) {");
         self.writeln("                .array => |arr| {");
-        self.writeln("                    const idx: usize = @intCast(key);");
-        self.writeln("                    if (idx < arr.len) return arr[idx];");
+        self.writeln("                    if (comptime (@typeInfo(@TypeOf(key)) == .int or @typeInfo(@TypeOf(key)) == .comptime_int)) {");
+        self.writeln("                        const idx: usize = @intCast(key);");
+        self.writeln("                        if (idx < arr.len) return arr[idx];");
+        self.writeln("                    }");
         self.writeln("                    return null;");
+        self.writeln("                },");
+        self.writeln("                .any => |ptr| {");
+        self.writeln("                    const map: *Map = @ptrCast(@alignCast(ptr));");
+        self.writeln("                    return map.get(key);");
         self.writeln("                },");
         self.writeln("                else => return null,");
         self.writeln("            }");
@@ -1097,6 +1103,7 @@ impl Codegen {
             const slice: []const u8 = v;
             return .{ .string = slice };
         }
+        return .{ .any = @ptrCast(@constCast(v)) };
     }",
         );
         self.writeln("    return .{ .any = @ptrCast(@constCast(&v)) };");
@@ -1662,7 +1669,14 @@ impl Codegen {
     }
 
     fn generate_class(&mut self, class: &Class) {
-        if class.ident.sym == "Task" {
+        if class.ident.sym == "Task"
+            || class.ident.sym == "TypeInfo"
+            || class.ident.sym == "FieldInfo"
+            || class.ident.sym == "MethodInfo"
+            || class.ident.sym == "Map"
+            || class.ident.sym == "Set"
+            || class.ident.sym == "Box"
+        {
             return;
         }
         let type_id = Self::fnv1a_type_id(&class.ident.sym);
@@ -1737,6 +1751,33 @@ impl Codegen {
         }
         for name in order {
             let items = &grouped[&name];
+            if name == "meta" {
+                out.push_str("{\nconst __sub = Map._create(alloc) catch unreachable;\n");
+                for item in items {
+                    for arg in &item.args {
+                        match arg {
+                            MetaArg::Named(id, expr) => {
+                                let v = self.meta_expr_to_zig(expr);
+                                out.push_str(&format!("_ = __sub.set(\"{}\", {});\n", id.sym, v));
+                                out.push_str(&format!(
+                                    "_ = {}.set(\"{}\", {});\n",
+                                    map_var, id.sym, v
+                                ));
+                            }
+                            MetaArg::Positional(expr) => {
+                                let v = self.meta_expr_to_zig(expr);
+                                out.push_str(&format!("_ = __sub.set(\"value\", {});\n", v));
+                                out.push_str(&format!("_ = {}.set(\"value\", {});\n", map_var, v));
+                            }
+                        }
+                    }
+                }
+                out.push_str(&format!(
+                    "_ = {}.set(\"meta\", cp_message_from(__sub));\n}}\n",
+                    map_var
+                ));
+                continue;
+            }
             if items.len() == 1 {
                 let item = items[0];
                 if item.args.is_empty() {

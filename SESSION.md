@@ -3724,6 +3724,79 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 2. 执行 Git 提交：`docs(readme): comprehensive overhaul with dual logos, architecture philosophy, code showcases, and comparison matrix`；
 3. 工作区保持干净，所有成果固化保存至 Git 历史。
 
+---
+
+## 2026-10-31 (Session Update - Batch Annotations & Weak-typed Ad-hoc Meta Implementation)
+
+### 用户指令
+> 1. 实现 @[Author("Antigravity"), Timeout(3000), Singleton], 用 @[...] 一口气包裹多个标签(注解 装饰器)，整洁收拢
+> 2. 实现弱类型标注: @meta(author: "Antigravity", timeout: 3000)
+
+### 执行结果汇报
+1. **编译器前端解析扩展 (`cpc/src/parser.rs`)**：
+   - 扩展 `parse_meta_ident` 与 `parse_meta_arg`，将 `Token::Meta`、`Token::Dec`、`Token::Macro` 等关键字列入合法元标注标识符，消灭关键字被误当成非法标识符抛出 `ExpectedToken` 的问题；
+   - 提取 `parse_single_meta_inner`，同时支持位置参数与命名参数（`key: val`），并原生兼容小括号 `(...)` 与方括号 `[...]` 传参形式；
+   - 重构 `parse_meta_list`，实现 `@[Item1, Item2, ...]` 批量收拢语法，支持标签内任意混排无参、有参及弱类型标注，末尾逗号自动容错；
+   - 升级 `parse_module_item` 前瞻解析，支持 `@[...]` 方括号深度平衡跳过，确保类与函数声明关键字安全识别。
+2. **语义分析与反射自动激活 (`cpc/src/sema.rs`)**：
+   - 在 `Analyzer::new()` 中将 `meta` 注册为内建元注解，支持类、方法、字段、参数全目标且允许多实例复用；
+   - 在 `Expr::ReflectType` 与 `Expr::ReflectOf` 中配置类标注含 `meta` 时自动激活运行时反射单例字典生成，无须再强制手写 `@reflect`。
+3. **代码生成与内存安全保证 (`cpc/src/codegen.rs`)**：
+   - 在 `generate_meta_population` 中为 `@meta` 实现平铺直读（`info.meta["author"]`）与隔离命名空间（`info.meta["meta"]["author"]`）双重读取通道；
+   - 屏蔽内建反射结构 `TypeInfo`、`FieldInfo`、`MethodInfo` 的重复生成，解决导入 `cap:reflect` 时的符号冲突；
+   - 修复 `cp_message_from` 对指针变量再次取地址（`&v`）导致的临时栈变量悬垂指针问题，安全升级为 `.{ .any = @ptrCast(@constCast(v)) }`；
+   - 增强 `cp_index_get`，当访问 `Message.any` 时自动解包为 `*Map`，实现对嵌套元数据字典的链式动态索引。
+4. **测试验证与规范同步**：
+   - 新增长期正向回归测试 [`cap/test/test_batch_meta_pass.cp`](file:///data/dev/cp/cap/test/test_batch_meta_pass.cp)，包含批量类/方法/字段标注、切面执行、弱类型扁平直读、命名空间嵌套读取与方括号语法验证，编译链接耗时 618ms，测试 100% 通过；
+   - 全量回归 `test_meta_pass.cp`、`test_dec_pass.cp`、`test_reflect_pass.cp` 均 100% 通过；
+   - 规范规范更新 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md) 第 3.6 与 3.7 节；
+   - 同步更新 [`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md) 与 [`SESSION.md`](file:///data/dev/cp/SESSION.md)。
+
+---
+
+## 2026-10-31 (Session Update - Orthogonal Scheme A & Syntax Purification)
+
+### 用户指令
+> 类一旦标注 @meta，编译器自动为其生成运行时反射单例表，开发者无需额外手写 @reflect
+> 这个设计合理吗?
+> 方案A
+> 同时,你提到的@meta[author: "Antigravity", timeout: 3000],写法是错的,[] 是集合, 不是标注
+
+### 执行结果汇报
+1. **采纳方案 A：零成本正交设计（Zero-Cost Orthogonality）**：
+   - 彻底解耦 `@meta(...)` 与 `@reflect`：`@meta(...)` 专注于静态元数据挂载，不隐式自动生成运行时反射字典，确保未启用反射的类保持 0 运行时二进制膨胀；
+   - 运行时反射由 `@reflect` 统一显式授权激活，结合刚实装的批量语法 `@[reflect, meta(...)]` 实现极简收拢；
+   - 在 `cpc/src/sema.rs` 中，未标注 `@reflect` 的类若调用 `reflect.type<T>()`，编译器精准报错并引导添加 `@reflect`。
+2. **语法纯正性纠正**：
+   - 澄清并确立 `[]` 是集合/批量收拢容器（Collection Container），专用于 `@[Tag1, Tag2, ...]`；
+   - 标注传参严格统一采用函数式括号 `(...)`，如 `@meta(...)`、`@Author(...)`；在 `cpc/src/parser.rs` 中恢复 `parse_single_meta_inner` 仅接受 `LParen` 语法。
+3. **测试与回归**：
+   - 更新正向回归测试 [`cap/test/test_batch_meta_pass.cp`](file:///data/dev/cp/cap/test/test_batch_meta_pass.cp)；
+   - 新增反向拦截测试 [`cap/test/test_meta_fail_unreflected.cp`](file:///data/dev/cp/cap/test/test_meta_fail_unreflected.cp)，验证未授权反射时的编译期拦截；
+   - 全量回归测试通过，同步更新规范与日志。
+
+---
+
+## 2026-10-31 (Session Update - Git Commit)
+
+### 用户指令
+> git 提交
+
+### 执行结果汇报
+1. 暂存所有工作区修改与新增测试文件：
+   - `cpc/src/parser.rs`
+   - `cpc/src/sema.rs`
+   - `cpc/src/codegen.rs`
+   - `cap/test/test_batch_meta_pass.cp`
+   - `cap/test/test_meta_fail_unreflected.cp`
+   - `cp_ref.md`
+   - `CHANGELOG.md`
+   - `DEVLOG.md`
+   - `SESSION.md`
+2. 执行 Git 提交：`feat(meta): implement batch annotation collection syntax @[...] and ad-hoc @meta(...) with zero-cost orthogonality`（提交哈希：`1370e95`）；
+3. 工作区保持干净，所有成果与测试套件固化保存至 Git 历史。
+
+
 
 
 

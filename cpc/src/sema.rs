@@ -136,6 +136,22 @@ impl Analyzer {
                 is_once: true,
             },
         );
+        let mut meta_targets = std::collections::HashSet::new();
+        meta_targets.insert("class".to_string());
+        meta_targets.insert("struct".to_string());
+        meta_targets.insert("function".to_string());
+        meta_targets.insert("method".to_string());
+        meta_targets.insert("field".to_string());
+        meta_targets.insert("param".to_string());
+        meta_targets.insert("trait".to_string());
+        meta_targets.insert("enum".to_string());
+        meta_defs.insert(
+            "meta".to_string(),
+            MetaDefInfo {
+                allowed_targets: meta_targets,
+                is_once: false,
+            },
+        );
 
         let mut macro_defs = HashMap::new();
         let mock_span = Span { start: 0, end: 0 };

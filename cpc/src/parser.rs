@@ -167,6 +167,13 @@ impl<'a> Parser<'a> {
             Token::Ref => "ref".to_string(),
             Token::Let => "let".to_string(),
             Token::Const => "const".to_string(),
+            Token::Meta => "meta".to_string(),
+            Token::Dec => "dec".to_string(),
+            Token::Macro => "macro".to_string(),
+            Token::Async => "async".to_string(),
+            Token::Static => "static".to_string(),
+            Token::Mut => "mut".to_string(),
+            Token::Move => "move".to_string(),
             _ => {
                 return Err(ParseError::ExpectedToken(
                     Token::Ident("identifier".to_string()),
@@ -186,6 +193,15 @@ impl<'a> Parser<'a> {
                 | Some(Token::Struct)
                 | Some(Token::Fn)
                 | Some(Token::Ref)
+                | Some(Token::Let)
+                | Some(Token::Const)
+                | Some(Token::Meta)
+                | Some(Token::Dec)
+                | Some(Token::Macro)
+                | Some(Token::Async)
+                | Some(Token::Static)
+                | Some(Token::Mut)
+                | Some(Token::Move)
         );
         if is_ident_like {
             let ident = self.parse_meta_ident()?;
@@ -201,8 +217,7 @@ impl<'a> Parser<'a> {
         Ok(MetaArg::Positional(expr))
     }
 
-    fn parse_meta_item(&mut self) -> ParseResult<MetaItem> {
-        let start = self.expect(Token::At)?.start;
+    fn parse_single_meta_inner(&mut self, start: usize) -> ParseResult<MetaItem> {
         let name = self.parse_meta_ident()?;
         let mut args = Vec::new();
         if self.peek() == Some(&Token::LParen) {
@@ -223,10 +238,36 @@ impl<'a> Parser<'a> {
         })
     }
 
+    #[allow(dead_code)]
+    fn parse_meta_item(&mut self) -> ParseResult<MetaItem> {
+        let start = self.expect(Token::At)?.start;
+        self.parse_single_meta_inner(start)
+    }
+
     fn parse_meta_list(&mut self) -> ParseResult<Vec<MetaItem>> {
         let mut list = Vec::new();
         while self.peek() == Some(&Token::At) {
-            list.push(self.parse_meta_item()?);
+            if self.peek_next() == Some(&Token::LBracket) {
+                let _ = self.bump()?; // consume '@'
+                self.expect(Token::LBracket)?; // consume '['
+                while self.peek() != Some(&Token::RBracket) && self.peek().is_some() {
+                    let start = if self.peek() == Some(&Token::At) {
+                        self.bump()?.1.start
+                    } else {
+                        self.peek_span().start
+                    };
+                    let item = self.parse_single_meta_inner(start)?;
+                    list.push(item);
+                    if self.peek() == Some(&Token::Comma) {
+                        self.bump()?;
+                    }
+                }
+                self.expect(Token::RBracket)?;
+            } else {
+                let start = self.expect(Token::At)?.start;
+                let item = self.parse_single_meta_inner(start)?;
+                list.push(item);
+            }
         }
         Ok(list)
     }
@@ -327,22 +368,39 @@ impl<'a> Parser<'a> {
                 if clone.bump().is_err() {
                     break;
                 }
-                if clone.bump().is_err() {
-                    break;
-                }
-                if clone.peek() == Some(&Token::LParen) {
+                if clone.peek() == Some(&Token::LBracket) {
                     if clone.bump().is_err() {
                         break;
                     }
                     let mut depth = 1;
                     while depth > 0 && clone.peek().is_some() {
-                        if clone.peek() == Some(&Token::LParen) {
+                        if clone.peek() == Some(&Token::LBracket) {
                             depth += 1;
-                        } else if clone.peek() == Some(&Token::RParen) {
+                        } else if clone.peek() == Some(&Token::RBracket) {
                             depth -= 1;
                         }
                         if clone.bump().is_err() {
                             break;
+                        }
+                    }
+                } else {
+                    if clone.bump().is_err() {
+                        break;
+                    }
+                    if clone.peek() == Some(&Token::LParen) {
+                        if clone.bump().is_err() {
+                            break;
+                        }
+                        let mut depth = 1;
+                        while depth > 0 && clone.peek().is_some() {
+                            if clone.peek() == Some(&Token::LParen) {
+                                depth += 1;
+                            } else if clone.peek() == Some(&Token::RParen) {
+                                depth -= 1;
+                            }
+                            if clone.bump().is_err() {
+                                break;
+                            }
                         }
                     }
                 }

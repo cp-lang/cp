@@ -1586,6 +1586,46 @@ AI 智能体正经历从“单体聊天机器人（Single Agent / ChatBot）”�
 5. **CAP 极速工具链全景指南**：从安装配置到日常即时运行（百毫秒）、增量构建（0ms 跳过）、矩阵发布（`-r`）、性能基准（`bench`）以及一键安全清理（`clean`）全覆盖；
 6. **五大语言核心维度横向对比矩阵**：直观展示并发上限、GC 停顿、独立产物体积与嵌入式支持能力。
 
+---
+
+## 2026-10-31 (Part 18): 批量标签收拢语法 (@[...]) 与弱类型即席元标注 (@meta(...) / @meta[...]) 实装
+
+### 1. 需求背景与设计哲学
+1. **开发者体验与代码密度**：
+   - 随系统功能扩展，类、方法或字段上可能同时叠加多项声明：如权限切面 `@checkAuth`、强类型元注解 `@Auth("ADMIN")`、单例 `@Singleton`、即席元数据 `@meta(...)`；
+   - 若每项单独占一行，前缀 `@` 频繁重复导致视觉噪音重。因此引入 Rust/C# 风格的 `@[Tag1, Tag2, Tag3]` 批量收拢语法，实现整洁收拢。其中 `[]` 代表集合容器（Collection），而非单个标注的参数语法。
+2. **免契约声明的弱类型即席标注 (`@meta(...)`) 与零成本正交设计 (方案 A)**：
+   - 某些场景下开发者只想临时随手挂载键值对元数据（如 `author: "Antigravity"`, `timeout: 3000`），无须强行先声明 `meta MyTag(...)` 契约；
+   - 标注的参数调用严格采用函数式小括号 `(...)`：`@meta(key: val, ...)`；
+   - **正交性与零成本（方案 A）**：`@meta(...)` 仅负责静态附加元数据，绝不破坏系统语言的零开销原则去隐式强制生成运行时反射表；运行时反射必须由 `@reflect` 统一显式授权（开发者可写 `@[reflect, meta(...)]` 优雅收拢）。未授权时在调用 `reflect.type<T>()` 时给出精确诊断引导。
+
+### 2. 底层架构与执行方案
+
+#### 2.1 词法与语法分析器 (Parser)
+- **标识符容错**：在 `parse_meta_ident` 与 `parse_meta_arg` 中，扩展支持 `Token::Meta`、`Token::Dec`、`Token::Macro` 等关键字，消灭关键字被误当成非法标识符抛出 `ExpectedToken` 的问题；
+- **函数式括号参数传参规范**：`parse_single_meta_inner` 严格规范采用 `(...)` 传递参数，纠正误用方括号传参（`[]` 专属于 `@[...]` 批量集合容器）；
+- **批量列表统一收口**：在 `parse_meta_list` 检测 `@[`，通过内部循环批量提取各项（兼容末尾可选逗号与内部独立 `@` 容错），并在 `parse_module_item` 前瞻解析中引入方括号深度平衡检测，确保类/函数关键字不被跳过。
+
+#### 2.2 语义分析与反射授权拦截 (Sema)
+- **内建 `@meta` 契约注册**：在 `Analyzer::new()` 中将 `meta` 注册为内建元注解，配置全生命周期目标（类、结构体、方法、函数、字段、参数、Trait、Enum）且设为非单例（`is_once: false`）；
+- **方案 A 严格正交拦截**：在 `Expr::ReflectType` 与 `Expr::ReflectOf` 中，严格要求类必须显式标注 `reflect`；若仅标注 `@meta` 但未加 `@reflect`，触发 `SemaError::ReflectNotEnabled` 拦截并输出友好诊断信息。
+
+#### 2.3 代码生成与内存安全 (Codegen)
+- **字典双重注入**：在 `generate_meta_population` 中拦截 `name == "meta"`，将命名实参直接 set 进顶层 `map_var` 保证扁平直读，同时构筑 `__sub` Map 挂载至 `map_var.set("meta", ...)` 保证命名空间隔离访问；
+- **零开销反射裁剪**：`generate_reflection_tables` 仅针对含有 `reflect` 的类生成 `_get_typeinfo_X()`，纯元数据标注类 0 运行时体积膨胀；
+- **类型定义防冲突**：在 `generate_class` 中屏蔽内建反射结构 `TypeInfo`、`FieldInfo`、`MethodInfo` 的重复生成，防止导入 `cap:reflect` 时与 Zig 预置声明冲突；
+- **指针安全与递归解构修复**：
+  - 修复 `cp_message_from` 对指针变量再次取地址（`&v`）生成指向栈帧的悬垂指针问题，安全升级为 `.{ .any = @ptrCast(@constCast(v)) }`；
+  - 增强 `cp_index_get`，当操作对象为 `Message.any` 时自动解包为 `*Map` 并调用 `.get(key)`，实现任意深度的链式属性安全读取。
+
+### 3. 测试验证与全量回归成果
+1. **测试套件**：
+   - 正向测试：[`cap/test/test_batch_meta_pass.cp`](file:///data/dev/cp/cap/test/test_batch_meta_pass.cp) 验证 `@[reflect, Singleton, ...]` 批量语法、切面执行、弱类型扁平直读、命名空间读取与纯元数据零开销类正常运行；
+   - 反向测试：[`cap/test/test_meta_fail_unreflected.cp`](file:///data/dev/cp/cap/test/test_meta_fail_unreflected.cp) 验证仅标注 `@meta` 的类在调用 `reflect.type<T>()` 时被编译器拦截并提示添加 `@reflect`。
+2. **回归验证**：
+   - `test_meta_pass.cp`、`test_dec_pass.cp`、`test_reflect_pass.cp` 100% 通过；
+   - Rust 编译器经 `cargo check` (1.2s) 与 `cargo fmt` 验证无误。
+
 
 
 

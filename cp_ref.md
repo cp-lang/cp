@@ -1620,20 +1620,93 @@ fn main() {
 
 ---
 
-#### 3.6 弱类型元注解声明
+#### 3.6 弱类型/即席元标注（Ad-hoc Metadata：`@meta(...)`）
 
-```ts
-// 1. 非强类型元注解声明
-@meta(author: "Antigravity", timeout: 3000)
-class PaymentAgent {}
+除了通过 `meta Name(...)` 预定义强类型元注解模式外，CP 语言原生提供了免预定义的**弱类型/即席元标注**原语 `@meta(...)`。注解的参数传递统一严格遵循函数式括号语法 `(...)`：
+
+```cp
+// 1. 纯编译期弱类型元标注（零运行时开销，不产生任何运行时反射单例表）
+@meta(author: "Antigravity", timeout: 3000, version: "2.1")
+class PaymentAgent {
+    // 2. 字段级别弱类型标注
+    @meta(column: "tx_hash", sensitive: true)
+    txId: string;
+
+    // 3. 方法级别弱类型标注
+    @meta(role: "admin", audit: true)
+    fn processPayment(): string {
+        return "SUCCESS";
+    }
+}
+
+// 4. 若需要在运行期内省该元数据，搭配 @reflect 显式授权激活（推荐使用 @[...] 批量收拢）：
+@[reflect, meta(author: "Antigravity", timeout: 5000)]
+class OrderService {}
 ```
 
-#### 3.7 多个标签(注解 装饰器)
+##### 3.6.1 核心特性与零成本正交设计
 
-```ts
-// 用 @[...] 一口气包裹多个标签(注解 装饰器)，整洁收拢
-@[Author("Antigravity"), Timeout(3000), Singleton],
+- **免模式声明**：无需事先声明 `meta ...` 契约，直接以键值对注入编译期元数据字典，供宏（Macro）、切面装饰器（Dec）与静态分析工具读取；
+- **严格零成本抽象（Zero-Cost Abstraction）**：
+  - `@meta(...)` 仅负责静态附加元数据，**绝不隐式自动生成运行时反射字典**；
+  - 避免无谓生成 `TypeInfo` 导致的机器码体积膨胀（保障 `cap build -s` 极致轻量产物与 Tree-Shaking 剪枝能力）；
+  - 运行时反射由 `@reflect` 统一显式授权。若在未标注 `@reflect` 的类上调用 `reflect.type<T>()`，编译器会直接拦截并友好提示：
+    `Compile Error: Type 'T' cannot be reflected at runtime. Add '@reflect' to the class definition to enable runtime reflection`；
+- **双重内省读取路径**（在 `@reflect` 激活后）：
+  1. **扁平直读**：`info.meta["author"]`、`info.meta["timeout"]` 直接返回对应属性值；
+  2. **命名空间读取**：`info.meta["meta"]["author"]` 支持隔离命名空间访问；
+- **全目标支持**：支持标注于类（`class`/`struct`）、字段（`field`）、方法（`method`）与参数（`param`）。
+
+---
+
+#### 3.7 批量标签收拢语法（`@[...]`）
+
+在 CP 语言的设计哲学中，`[]` 代表**集合容器**，而非单个标注的参数语法。为了避免在类、字段或方法前堆叠冗长的 `@` 标记，CP 语言提供了高颜值的批量收拢语法 `@[...]`，用单个方括号容器一口气包裹收拢多个元注解、切面装饰器与即席标注：
+
+```cp
+dec checkAuth(next) {
+    return next();
+}
+
+meta Author(name: string);
+meta Timeout(ms: i32);
+meta Singleton;
+meta Column(name: string);
+meta JsonIgnore;
+meta Get(path: string);
+
+// 1. 类级别批量收拢：一行搞定运行时反射激活 + 单例 + 自定义注解 + 即席元数据
+@[reflect, Singleton, Author("Antigravity"), Timeout(3000), meta(version: "1.0")]
+class UserService {
+    // 2. 字段级别批量收拢
+    @[JsonIgnore, Column("user_pwd")]
+    secret: string;
+
+    // 3. 方法级别批量收拢：切面装饰器与元注解天然共存
+    @[checkAuth, Get("/users")]
+    fn listUsers(): string {
+        return "all_users";
+    }
+}
 ```
+
+##### 3.7.1 语法规则与设计哲学
+
+1. **容器与调用语法正交解耦**：
+   - `@[ ... ]` 是**集合收拢容器**，用于收拢多个标签；
+   - 集合内的具体标注自身（如 `meta(...)`, `Author(...)`, `Column(...)`）严格采用小括号 `(...)` 传参，语义清晰统一；
+2. **零成本与高内聚**：单行 `@[reflect, meta(...)]` 既完全符合“显式开启反射”的系统语言严谨性，又彻底消除了多行堆叠的视觉繁琐；
+3. **多态混排**：在同一个 `@[...]` 容器内，编译器智能自动识别：
+   - 匹配 `dec` 声明的标识符 -> 编译期织入洋葱切面逻辑（AOP Wrapper）；
+   - 匹配 `meta` 或即席声明的标识符 -> 录入元数据字典；
+   - 包含 `reflect` -> 编译期为该类生成原生运行时单例反射表；
+4. **语法容错**：容器内支持任意排列，末尾逗号可选，可写无参（`Singleton`）、位置实参（`Column("user_pwd")`）或命名实参（`meta(version: "1.0")`）。
+
+1. **统一整洁**：单个 `@[...]` 收拢替代多行分散的 `@Tag`，代码结构更加紧凑；
+2. **多态混排**：在同一个 `@[...]` 内，编译器智能自动识别：
+   - 匹配 `dec` 声明的标识符 -> 编译期织入洋葱切面逻辑（AOP Wrapper）；
+   - 匹配 `meta` 或即席声明的标识符 -> 编译期零开销录入反射字典；
+3. **参数语法自由**：方括号内的标签可无参（`Singleton`）、位置实参（`Column("user_pwd")`）或命名实参（`meta(version: "1.0")`），末尾逗号可选容错。
 
 ---
 
