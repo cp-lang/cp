@@ -1832,6 +1832,74 @@ AI 智能体正经历从“单体聊天机器人（Single Agent / ChatBot）”�
 3. 执行 `./cap/test/test_comptime.cp` 与 `./cap/test/test_batch_meta_pass.cp`，保持零回归破损；
 4. 同步更新规范文档 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md) 第 11.2 节。
 
+---
+
+## 2026-11-01: 宏语法纯净化与正交性重构（切除 @derive，全面归一为 @[...]）
+
+### 1. 核心诉求与设计纯粹性
+用户明确指出：CP 语言不应保留带有 Rust 历史包袱的 `@derive(...)` 语法，当 CP 已经具备第一公民的优雅批量元注解语法 `@[...]` 时，拥有两个同义语法会严重破坏语言的正交性与纯粹性。
+
+如同此前：
+- 废除 `anytype`，唯一统一为 `auto`；
+- 废除 bare `comptime`，唯一统一为 `@comptime`；
+此处同理：
+- **彻底切除 `@derive(...)`**；
+- **唯一标准统一为 `@[Clone, Comparable, Hash, ToString, Json]`**。
+
+### 2. 重构落地
+1. **`cpc/src/sema.rs`**：
+   - 从内置宏列表 `macro_defs` 中移除 `"derive"`；
+   - 彻底删除 `expand_derive_macro` 展开逻辑；
+   - 单宏展开直接由 `expand_single_macro` 处理，批量多注解由 `cls.meta` 原生遍历处理；
+2. **测试与文档**：
+   - [`cap/test/test_macro_pass.cp`](file:///data/dev/cp/cap/test/test_macro_pass.cp)：将用例统一为 `@[Clone, Comparable, Hash, ToString, Json]`；
+   - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)：更新说明，明确 `@derive` 已被彻底切除。
+3. 执行增量编译与测试，全量 100% 绿灯通过。
+
+---
+
+## 2026-11-01: Debug 派生宏与双轨 for...of 迭代器闭环落地
+
+### 1. 架构定位与设计哲学
+1. **`Debug` 契约与宏**：
+   - 在 Rust 中，`Debug` 是一个标准库 Trait，而 `#[derive(Debug)]` 是宏；
+   - 泛型约束 `fn log<T: Debug>(item: &T)` 表达只有实现了 `Debug` 契约（拥有调试格式化方法）的类型方可传入；
+   - 在 CP 中，我们一方面提供 `@[Debug]` 派生宏，一次性生成 `fmt_debug(&_): string` 与 `toString(_): string`；另一方面通过 `item: &Debug` 实现泛型单态化约束，形成完整契约闭环。
+2. **`for ... of` 双轨分流迭代引擎**：
+   - 旧版 `for of` 仅支持切片和数组，用户自定义流式对象无法遍历；
+   - 本次升级为**双轨机制**：
+     - **快轨**：数组/切片/区间继续走零虚表 `cp_iter_slice` 与寄存器计数器循环；
+     - **流式轨**：若迭代对象类型具备 `next(&mut _): ?Item` 契约，Sema/Codegen 自动发射为 `while (it.next()) |item|` 循环，当 `next()` 返回 `null` 时自动安全终止！
+
+### 2. 编译器改造落地
+- **`cpc/src/sema.rs`**：
+  - 注册 `"Debug"`，在 `derive_debug_methods` 中为目标类同时合成 `fmt_debug` 与 `toString`；
+- **`cpc/src/codegen.rs`**：
+  - 在 `Stmt::For` 中新增流式迭代器侦测分支，若类型拥有 `next` 方法，自动生成 `while (stream.next()) |item|` 展开，并支持模式解构；
+- **测试验证**：
+  - [`cap/test/test_macro_pass.cp`](file:///data/dev/cp/cap/test/test_macro_pass.cp) 增补用例 9（`@[Debug]`）与用例 10（`NumberStream` 流式迭代器），100% 验证通过。
+
+---
+
+## 2026-11-01: 接收者可变借用语法修正（全面清理 &mut，确立 *_ / *this 为正统规范）
+
+### 1. 问题识别与语法定位
+用户敏锐指出在迭代器契约的描述及测试用例中出现了 `next(&mut _): ?Item`。
+在 CP 语言的设计体系中：
+- 接收者借用语法完全对接 Zig 的指针心智模型：
+  - `&_` / `&this`：只读不可变借用（底层为常量指针或值传递）；
+  - `*_` / `*this`：可变借用（底层为可变指针 `*Self`）；
+  - `move _` / `move this`：所有权完全转移消费。
+- Rust 的 `&mut` 在 CP 中纯属历史过渡兼容，绝不是标准惯用写法，在官方规范中必须彻底净化剔除。
+
+### 2. 治理落地
+1. **测试用例修正**：
+   - 将 [`cap/test/test_macro_pass.cp`](file:///data/dev/cp/cap/test/test_macro_pass.cp) 中的 `fn next(&mut _): ?i32` 调整为标准规范的 `fn next(*_): ?i32`，编译运行 100% 绿灯全通；
+2. **语言设计文档净化**：
+   - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md) 第 11.2.9 节将流式迭代器方法契约正式定稿为 `next(*_): ?Item`；
+   - 清除全篇宏示例与借用律说明中残存的 `&mut` 字样，强化 `*_` 与 `&_` 的二元正交统一。
+
+
 
 
 

@@ -4018,6 +4018,91 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 3. **工作区状态**：
    - 工作区 100% 干净，测试全量 100% 绿灯，绝无事后 amend 或二次提交。
 
+---
+
+## 2026-11-01 (Session Update - 切除遗留 @derive，全面归一为原生批量注解 @[...])
+
+### 用户指令
+> • @derive(Clone, Comparable, Hash, ToString, Json) 聚合派生；
+> 不是要去掉 @derive,使用  @[Clone, Comparable, Hash, ToString, Json] 吗?
+
+### 执行结果汇报
+1. **语法正交性收敛与 @derive 切除**：
+   - [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs)：彻底移除 `"derive"` 内置宏注册与 `expand_derive_macro`，切除 Rust 历史包袱；
+   - 唯一语法标准统一为 CP 原生一等公民的批量元注解体系 `@[Clone, Comparable, Hash, ToString, Json]`；
+2. **测试与规范对齐**：
+   - [`cap/test/test_macro_pass.cp`](file:///data/dev/cp/cap/test/test_macro_pass.cp)：全量将 `OrderItem` 派生更新为 `@[Clone, Comparable, Hash, ToString, Json]`，编译运行 100% 绿灯；
+   - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)：全面清理遗留说明，更新第 11.2 节代码规范；
+   - 同步更新 [`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md) 与 [`SESSION.md`](file:///data/dev/cp/SESSION.md)。
+
+---
+
+## 2026-11-01 (Session Update - Debug 派生宏与双轨 for...of 迭代器闭环落地)
+
+### 用户指令
+> fn log<T: Debug>(item: &T)。 是啥, Debug 的一部分吗? Debug 也是 Rust中的内置宏吗?
+> 实现你上述方案
+
+### 执行结果汇报
+1. **理论剖析与架构解构**：
+   - 深入阐释 `fn log<T: Debug>(item: &T)` 为泛型 Trait Bound（类型约束/契约边界）；
+   - 彻底理清 Rust 中 `std::fmt::Debug`（Trait 契约）、`#[derive(Debug)]`（派生宏）与 `println!("{:?}", x)` 的相互依赖分工；
+   - 指明 CP 中通过 `@[Debug]` 一键派生与 `item: &Debug` 泛型约束达成的极致体验。
+2. **编译器实现与双轨迭代器重构**：
+   - [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs)：实装 `@[Debug]` 内置派生宏，同时合成 `fmt_debug(&_): string` 与 `toString(_): string`；
+   - [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs)：`Stmt::For` 重构为双轨分流——连续内存切片走零开销 `cp_iter_slice`，自定义流式对象自动侦测 `next(&mut _): ?Item` 展开为 `while (it.next()) |item|` 优雅循环；
+3. **测试验证**：
+   - [`cap/test/test_macro_pass.cp`](file:///data/dev/cp/cap/test/test_macro_pass.cp) 增补测试 9（`@[Debug, Clone]`）与测试 10（`NumberStream` 流式迭代器），编译运行 **100% 绿灯通过**；
+4. **四线文档同步**：
+   - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)：增补 11.2.9 双轨迭代机制与 11.2.10 Trait Bound 约束规范；
+   - [`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md) 与 [`SESSION.md`](file:///data/dev/cp/SESSION.md) 全部同步完毕。
+
+---
+
+## 2026-11-01 (Session Update - 纠正接收者可变借用语法，确立 *_ / *this 正统规范)
+
+### 用户指令
+> next(&mut _): ?Item 契约；
+> 这个错了吧, cp 用的是 next(* _): ?Item
+
+### 执行结果汇报
+1. **语法辨析与规范确认**：
+   - 大师一针见血！CP 语言为了彻底斩断 Rust 的繁琐与包袱，全面对接 Zig 的极简指针心智模型，其接收者借用体系为：
+     - `&_` / `&this`：只读借用（不可变）；
+     - `*_` / `*this`：可变借用（底层编译为 `*Self`）；
+     - `move _` / `move this`：所有权完全消费转移。
+   - `&mut` 系 Rust 遗留写法，CP 官方规范唯一正统必须是 `*_` / `*this`。
+2. **测试用例修正**：
+   - [`cap/test/test_macro_pass.cp`](file:///data/dev/cp/cap/test/test_macro_pass.cp)：将 `NumberStream` 类的迭代方法纠正为 `fn next(*_): ?i32`，使用 `./cap/bin/cap cap/test/test_macro_pass.cp` 验证，测试 100% 绿灯全通。
+3. **语言规范全面清洗**：
+   - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)：全量清洗 11.2.9 节流式迭代器契约定义及示例代码中的 `&mut`，确立 `next(*_): ?Item` 契约；同步清理全篇借用描述中的残留文字。
+4. **四线文档同步**：
+   - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md) 与 [`SESSION.md`](file:///data/dev/cp/SESSION.md) 均已记录完备。
+
+---
+
+## 2026-11-02 (Session Update - Git 提交：切除遗留 @derive、落地 @[Debug] 与双轨 for...of 流式迭代、规范化 *_ 接收者语法)
+
+### 用户指令
+> git 提交
+
+### 本次提交范围 (Commit Scope)
+1. **语法正交纯净化（切除 `@derive`，确立 `@[...]` 为唯一批量注解体系）**：
+   - [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs)：彻底移除 `"derive"` 冗余宏名称与 `expand_derive_macro` 展开逻辑，统一为原生批量元注解语法 `@[...]`。
+2. **`@[Debug]` 派生宏实装**：
+   - [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs)：实装 `@[Debug]` 派生宏，自动合成 `fmt_debug(&_): string` 与 `toString(_): string`。
+3. **`for ... of` 迭代引擎双轨重构**：
+   - [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs)：升级为快轨（切片连续内存）与流式轨（具备 `next(*_): ?Item` 契约的对象展开为 `while (it.next()) |item|` 循环，并在返回 `null` 时安全退出）。
+4. **接收者借用语法纠偏与规范统一**：
+   - [`cap/test/test_macro_pass.cp`](file:///data/dev/cp/cap/test/test_macro_pass.cp)：将 `NumberStream` 修正为正统 CP 语法 `fn next(*_): ?i32`，新增测试用例 9（`@[Debug]`）与测试用例 10（`NumberStream`），全部 10 项测试 100% 绿灯。
+   - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)：全面清洗残存的 Rust 风格 `&mut`，在规范中明确 `*_` / `*this` 为官方唯一标准可变借用语法，补全双轨迭代与 Trait Bound 契约章节。
+5. **四线文档完整记录**：
+   - 同步更新 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md) 与 [`SESSION.md`](file:///data/dev/cp/SESSION.md)。
+
+
+
+
+
 
 
 

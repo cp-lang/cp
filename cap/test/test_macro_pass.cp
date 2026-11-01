@@ -68,8 +68,8 @@ class Book {
     }
 }
 
-// 7. Full @derive aggregator testing Clone, Comparable, Hash, ToString, Json
-@derive(Clone, Comparable, Hash, ToString, Json)
+// 7. Full Batch Annotation testing Clone, Comparable, Hash, ToString, Json
+@[Clone, Comparable, Hash, ToString, Json]
 class OrderItem {
     sku: string;
     price: f64;
@@ -85,6 +85,33 @@ class Point {
     fn init(x: i32, y: i32) {
         _.x = x;
         _.y = y;
+    }
+}
+
+// 9. Class using @[Debug, Clone]
+@[Debug, Clone]
+class Customer {
+    name: string;
+    level: i32;
+}
+
+// 10. Custom Iterator Stream
+class NumberStream {
+    current: i32;
+    limit: i32;
+
+    fn init(start: i32, limit: i32) {
+        _.current = start;
+        _.limit = limit;
+    }
+
+    fn next(*_): ?i32 {
+        if (_.current >= _.limit) {
+            return null;
+        }
+        let val = _.current;
+        _.current = _.current + 1;
+        return val;
     }
 }
 
@@ -132,7 +159,7 @@ fn main(): void {
     @print("Book get_title: {s}", book_title);
     expect_eq(book_title, "Design Patterns");
 
-    @print("=== [Test 7] Full @derive(Clone, Comparable, Hash, ToString, Json) ===");
+    @print("=== [Test 7] Full Batch Annotation @[Clone, Comparable, Hash, ToString, Json] ===");
     let item1 = new OrderItem("SKU-APPLE", 9.99, 10);
     let item2 = new OrderItem("SKU-APPLE", 9.99, 10);
     let item3 = new OrderItem("SKU-BANANA", 5.50, 20);
@@ -172,6 +199,22 @@ fn main(): void {
     let pt2 = pt1.clone();
     expect_eq(pt2.toString(), "Point(x=100, y=200)");
     expect_eq(pt2.toJson(), "{\"x\":100,\"y\":200}");
+
+    @print("=== [Test 9] @[Debug] Derivation (fmt_debug & toString) ===");
+    let cust = new Customer("Bob", 5);
+    @print("Customer toString: {s}", cust.toString());
+    expect_eq(cust.toString(), "Customer(name=Bob, level=5)");
+    @print("Customer fmt_debug: {s}", cust.fmt_debug());
+    expect_eq(cust.fmt_debug(), "Customer(name=Bob, level=5)");
+
+    @print("=== [Test 10] Custom Iterator Stream for...of Loop ===");
+    let mut stream = new NumberStream(1, 6);
+    let mut stream_sum = 0;
+    for n of stream {
+        stream_sum = stream_sum + n;
+    }
+    @print("Iterator Stream Sum: {d}", stream_sum);
+    expect_eq(stream_sum, 15);
 
     @print("=== All Macro Metaprogramming tests passed 100%! ===");
 }

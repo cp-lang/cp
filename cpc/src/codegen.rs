@@ -5872,6 +5872,119 @@ impl Codegen {
                     }
                 }
 
+                // Iterator Stream Path (if target type implements a `next()` method)
+                let expr_ty = self.infer_cp_type(&f.expr);
+                let clean_type_name = expr_ty.as_ref().and_then(|t| match t {
+                    Type::Ref(id) => Some(id.sym.clone()),
+                    Type::BorrowType { inner, .. } => match &**inner {
+                        Type::Ref(id) => Some(id.sym.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                });
+                let has_next_method = clean_type_name
+                    .as_ref()
+                    .and_then(|c_name| self.lookup_method(c_name, "next"));
+
+                if let Some((_, ret_ty_opt, _)) = has_next_method {
+                    let iter_var = if matches!(f.expr, Expr::Ident(_)) {
+                        expr_code.clone()
+                    } else {
+                        let tmp_name = format!("__iter_{}", tmp_id);
+                        self.write_to_case(&format!("var {} = {};", tmp_name, expr_code));
+                        tmp_name
+                    };
+                    let item_ty = match ret_ty_opt {
+                        Some(Type::Optional(inner)) => *inner,
+                        Some(other) => other,
+                        None => Type::Any,
+                    };
+
+                    if let Pattern::Ident(id) = &f.pat {
+                        self.var_scope_depth
+                            .insert(id.sym.clone(), self.current_scope_depth);
+                        self.var_cp_types.insert(id.sym.clone(), item_ty);
+                        self.write_to_case(&format!("while ({}.next()) |{}| {{", iter_var, id.sym));
+                        self.indent();
+                        self.current_scope_depth += 1;
+                        self.write_to_case(&format!("_ = &{};", id.sym));
+                        if let Stmt::Block(b) = &*f.body {
+                            for s in &b.body {
+                                self.generate_stmt(s);
+                            }
+                        } else {
+                            self.generate_stmt(&f.body);
+                        }
+                        self.current_scope_depth -= 1;
+                        self.dedent();
+                        self.write_to_case("}");
+                        let uninit_body = self.uninitialized_vars.clone();
+                        self.uninitialized_vars = old_uninit;
+                        self.uninitialized_vars.extend(uninit_body);
+                        return;
+                    } else {
+                        let item_var = format!("__item_{}", tmp_id);
+                        self.write_to_case(&format!(
+                            "while ({}.next()) |{}| {{",
+                            iter_var, item_var
+                        ));
+                        self.indent();
+                        self.current_scope_depth += 1;
+                        match &f.pat {
+                            Pattern::Tuple(elems) => {
+                                let rest_pos =
+                                    elems.iter().position(|p| matches!(p, Pattern::Rest(_)));
+                                for (idx, p) in elems.iter().enumerate() {
+                                    if let Pattern::Ident(id) = p {
+                                        self.var_scope_depth
+                                            .insert(id.sym.clone(), self.current_scope_depth);
+                                        let val_expr = if let Some(r_idx) = rest_pos {
+                                            if idx > r_idx {
+                                                let offset_from_end = elems.len() - idx;
+                                                format!(
+                                                    "cp_unpack_elem_from_end({}, {})",
+                                                    item_var, offset_from_end
+                                                )
+                                            } else if idx < r_idx {
+                                                format!("cp_unpack_elem({}, {})", item_var, idx)
+                                            } else {
+                                                let left_count = r_idx;
+                                                let right_count = elems.len() - 1 - r_idx;
+                                                format!(
+                                                    "cp_unpack_rest({}, {}, {})",
+                                                    item_var, left_count, right_count
+                                                )
+                                            }
+                                        } else {
+                                            format!("cp_unpack_elem({}, {})", item_var, idx)
+                                        };
+                                        self.write_to_case(&format!(
+                                            "const {} = {};",
+                                            id.sym, val_expr
+                                        ));
+                                        self.write_to_case(&format!("_ = &{};", id.sym));
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        if let Stmt::Block(b) = &*f.body {
+                            for s in &b.body {
+                                self.generate_stmt(s);
+                            }
+                        } else {
+                            self.generate_stmt(&f.body);
+                        }
+                        self.current_scope_depth -= 1;
+                        self.dedent();
+                        self.write_to_case("}");
+                        let uninit_body = self.uninitialized_vars.clone();
+                        self.uninitialized_vars = old_uninit;
+                        self.uninitialized_vars.extend(uninit_body);
+                        return;
+                    }
+                }
+
                 let (for_target, ptr_star) = match f.mode {
                     IterMode::MutBorrow => (format!("cp_mut_slice(&{})", expr_code), "*"),
                     IterMode::Borrow => (format!("cp_iter_slice({})", expr_code), ""),

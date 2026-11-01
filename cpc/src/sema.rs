@@ -162,7 +162,7 @@ impl Analyzer {
             "ToString",
             "Comparable",
             "Hash",
-            "derive",
+            "Debug",
         ] {
             macro_defs.insert(
                 name.to_string(),
@@ -532,11 +532,8 @@ impl Analyzer {
 
                     self.macro_call_stack.push(call_key);
 
-                    let derived_list: Vec<Function> = if macro_name == "derive" {
-                        self.expand_derive_macro(cls, meta_item)?
-                    } else {
-                        self.expand_single_macro(macro_name, cls, meta_item)?
-                    };
+                    let derived_list: Vec<Function> =
+                        self.expand_single_macro(macro_name, cls, meta_item)?;
 
                     self.macro_call_stack.pop();
 
@@ -641,6 +638,7 @@ impl Analyzer {
             "Json" => Ok(vec![self.derive_json_method(cls)]),
             "Table" => Ok(vec![self.derive_table_method(cls, meta_item)]),
             "ToString" => Ok(vec![self.derive_tostring_method(cls)]),
+            "Debug" => Ok(self.derive_debug_methods(cls)),
             "Clone" => Ok(vec![self.derive_clone_method(cls)]),
             "Comparable" => Ok(self.derive_comparable_methods(cls)),
             "Hash" => Ok(vec![self.derive_hash_method(cls)]),
@@ -648,22 +646,15 @@ impl Analyzer {
         }
     }
 
-    fn expand_derive_macro(&self, cls: &Class, meta_item: &MetaItem) -> SemaResult<Vec<Function>> {
-        let mut methods = Vec::new();
-        for arg in &meta_item.args {
-            let sub_macro_name = match arg {
-                MetaArg::Positional(Expr::Ident(id)) => id.sym.clone(),
-                MetaArg::Positional(Expr::Lit(Lit::Str(s))) => s.clone(),
-                MetaArg::Named(id, _) => id.sym.clone(),
-                _ => continue,
-            };
-            let mut sub_meta = meta_item.clone();
-            sub_meta.name.sym = sub_macro_name.clone();
-            sub_meta.args.clear();
-            let sub_methods = self.expand_single_macro(&sub_macro_name, cls, &sub_meta)?;
-            methods.extend(sub_methods);
-        }
-        Ok(methods)
+    fn derive_debug_methods(&self, cls: &Class) -> Vec<Function> {
+        let mock_span = Span { start: 0, end: 0 };
+        let to_str = self.derive_tostring_method(cls);
+        let mut fmt_debug = to_str.clone();
+        fmt_debug.ident = Ident {
+            span: mock_span,
+            sym: "fmt_debug".to_string(),
+        };
+        vec![to_str, fmt_debug]
     }
 
     fn derive_clone_method(&self, cls: &Class) -> Function {

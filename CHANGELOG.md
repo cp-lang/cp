@@ -982,8 +982,48 @@
   - `Expr::Builtin`：为 `@hash` 原语生成零开销 FNV-1a 编译期级联哈希内联块 `(blk: { var _h: usize = ...; break :blk _h; })`。
 - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
   - 全面更新第 11.2 节《宏元编程（Macro Metaprogramming）》，详尽记录内置派生宏清单（`@Clone`、`@Comparable`、`@Hash`、`@ToString`、`@Json`、`@Table`）、`@derive(...)` 聚合宏、`@[...]` 批量注解语法、第三方 AST 模板宏（`${param}` 插值）与 Comptime 过程宏的最佳实践与代码范式。
+---
+
+## 2026-11-01 (语法纯净化：切除遗留 @derive，全面归一为原生批量注解 @[...])
+
+### 修改文件 (Modified)
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 彻底切除并移除 Rust 遗留的 `@derive` 冗余宏名称与 `expand_derive_macro` 展开逻辑；
+  - 消除语法冗余与表达割裂，唯一标准统一为 CP 原生一等公民的批量元注解体系 `@[Clone, Comparable, Hash, ToString, Json]`。
 - [`cap/test/test_macro_pass.cp`](file:///data/dev/cp/cap/test/test_macro_pass.cp):
-  - 全面升级宏系统回归套件：测试覆盖 `@Json`、`@Table`、`@ToString`、`@Clone`、`@Comparable`（`eq` & `cmp`）、`@Hash`、`@derive(...)` 全量五大契约组合、`@[Clone, ToString, Json]` 批量派生，以及用户自定义 AST 模板宏 `@Accessor("title")`，100% 运行通过。
+  - 将 `OrderItem` 上的 `@derive(...)` 替换为规范的 `@[Clone, Comparable, Hash, ToString, Json]`，全量测试 100% 绿灯。
+---
+
+## 2026-11-01 (Debug 派生宏与双轨 for...of 流式迭代器架构完整落地)
+
+### 修改文件 (Modified)
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 注册并实装内置派生宏 `Debug`，自动合成 `fmt_debug(&_): string` 与 `toString(_): string` 双重调试打印方法；
+  - 完美打通 `@[Debug]` 与 `trait Debug` 的契约装配，支持标准 Trait 格式化约束。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - `Stmt::For` 迭代引擎升级为**双轨智能分流架构**：
+    - **快轨（Fast Path）**：针对连续切片与数组，保持极致的 `cp_iter_slice` 裸机遍历与 `while` 计数器循环；
+    - **流式轨（Iterator Stream Path）**：针对包含 `next(*_): ?Item` 契约的对象或数据流，全自动展开为 `while (__iter.next()) |item|` 循环，当 `next()` 返回 `null` 时零开销自动终止，并支持元组/结构体解构模式。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 增补第 11.2.9 节《迭代器契约与双轨 `for ... of` 迭代机制》，详尽规范快轨连续内存遍历与流式迭代器实现；
+  - 增补第 11.2.10 节《泛型 Trait Bound 契约约束》，阐述 `fn log(item: &Debug)` 与 `@[Debug]` 协作范式。
+- [`cap/test/test_macro_pass.cp`](file:///data/dev/cp/cap/test/test_macro_pass.cp):
+  - 新增测试用例 9：`@[Debug, Clone]` 自动合成 `fmt_debug` 与 `toString`；
+  - 新增测试用例 10：自定义流式迭代器 `NumberStream` 经由 `for n of stream` 成功遍历求和，全量 100% 绿灯通过。
+
+---
+
+## 2026-11-01 (语法纯净化：全面清理 Rust 风格 &mut，统一为 CP 正统 *_ / *this 可变借用)
+
+### 修改文件 (Modified)
+- [`cap/test/test_macro_pass.cp`](file:///data/dev/cp/cap/test/test_macro_pass.cp):
+  - 将流式迭代器 `NumberStream` 中的 `fn next(&mut _): ?i32` 彻底纠正为 CP 正规正统的 `fn next(*_): ?i32`；
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 将 11.2.9 节迭代器流式契约从 `next(&mut _): ?Item` 纠正为 `next(*_): ?Item`；
+  - 清理 11.2 节宏示例中的 `set_${field}(*_)` 与 `reset(*_)` 接收者修饰符；
+  - 清除全篇遗留的 Rust 风格 `&mut` 痕迹，强化 CP 中 `*_`（可变借用）与 `&_`（只读借用）的正交语义。
+
+
 
 
 
