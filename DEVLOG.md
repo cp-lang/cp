@@ -1899,6 +1899,37 @@ AI 智能体正经历从“单体聊天机器人（Single Agent / ChatBot）”�
    - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md) 第 11.2.9 节将流式迭代器方法契约正式定稿为 `next(*_): ?Item`；
    - 清除全篇宏示例与借用律说明中残存的 `&mut` 字样，强化 `*_` 与 `&_` 的二元正交统一。
 
+---
+
+## 2026-11-02: 完备标准容器矩阵构建（VecDeque、BinaryHeap、BTreeMap、BTreeSet 及完整借用检查体系）
+
+### 1. 任务背景与架构目标
+Rust 语言强大的系统级表达能力在很大程度上归功于其完备的高性能容器体系（`std::collections`）。
+CP 语言此前已经实现了基础的连续数组（`[T]` / `Vec<T>`）以及基于哈希表的 `Map` / `Set` / `Dict`，但在工程复杂场景下，缺少：
+- **`VecDeque<T>`**：双端环形队列，为高吞吐消息信箱和工作窃取调度器提供两端 $O(1)$ 的无锁/零内存移动操作；
+- **`BinaryHeap<T>`**：二叉大顶堆优先队列，提供 $O(\log N)$ 优先排序流；
+- **`BTreeMap<K, V>` & `BTreeSet<T>`**：有序平衡树，提供基于键字典序的 $O(\log N)$ 稳定检索与极值探测；
+- **Rust Parity 命名统一**：通过 `HashMap` / `HashSet` 实现无缝认知迁移；
+- **完备的借用检查保护**：
+  - 只读借用 `&c` 严禁结构改变；
+  - `for ... of` 迭代遍历期间静态锁定容器，杜绝迭代器失效。
+
+### 2. 方案落地与关键突破
+1. **纯 Native 高效内存布局**：
+   - 在 Zig 运行时基座注入 `VecDeque`（动态两倍扩容环形缓冲区）、`BinaryHeap`（堆排自平衡）、`BTreeMap`（动态二分有序树）与 `BTreeSet`；
+   - 实现 `cp_msg_cmp` 全序比对器，支持数值、字符串、布尔及指针的字典序与全序比对；
+2. **编译器前端与借用检查器升级**：
+   - `cpc/src/parser.rs`：升级 `parse_base_type`，支持容器泛型语法 `BTreeMap<K, V>` 等及其类型参数消费；
+   - `cpc/src/sema.rs`：在全局作用域注册 6 大容器符号，并将 `push_back`、`push_front`、`pop_back`、`pop_front`、`insert`、`remove` 纳入循环借用锁定检查；
+   - `cpc/src/codegen.rs`：对齐 `check_mutation_allowed` / `check_read_allowed`，支持在调用时先解包 `BorrowType` 精准推导容器实体类型，避免误判为连续切片宏处理；
+   - 双轨 `for of` 升级：4 大新容器全部原生支持 `while (stream.next()) |item|` 流式消费遍历。
+3. **标准库模块发布与回归验证**：
+   - 建立 [`lib/cap/collections.cp`](file:///data/dev/cp/lib/cap/collections.cp)；
+   - [`cap/test/test_collections_matrix.cp`](file:///data/dev/cp/cap/test/test_collections_matrix.cp) 7 项综合测试 **100% 绿灯全通**；
+   - 负向测试验证编译期对违规只读修改与循环中修改的静态拦截；
+   - 同步更新规范文档 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)。
+
+
 
 
 

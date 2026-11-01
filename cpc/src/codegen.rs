@@ -685,6 +685,12 @@ impl Codegen {
         self.globals.insert("Map".to_string());
         self.globals.insert("Dict".to_string());
         self.globals.insert("Set".to_string());
+        self.globals.insert("HashMap".to_string());
+        self.globals.insert("HashSet".to_string());
+        self.globals.insert("VecDeque".to_string());
+        self.globals.insert("BinaryHeap".to_string());
+        self.globals.insert("BTreeMap".to_string());
+        self.globals.insert("BTreeSet".to_string());
         self.globals.insert("PID".to_string());
         self.globals.insert("Message".to_string());
         self.globals.insert("Mailbox".to_string());
@@ -983,6 +989,305 @@ impl Codegen {
         self.writeln("    }");
         self.writeln("};");
         self.writeln("");
+        self.writeln("const HashMap = Map;");
+        self.writeln("const HashSet = Set;");
+        self.writeln("");
+        self.writeln("fn cp_msg_cmp(a: Message, b: Message) i32 {");
+        self.writeln("    const tag_a = @intFromEnum(a);");
+        self.writeln("    const tag_b = @intFromEnum(b);");
+        self.writeln("    if (tag_a != tag_b) return if (tag_a < tag_b) -1 else 1;");
+        self.writeln("    switch (a) {");
+        self.writeln("        .int => |ia| { const ib = b.int; if (ia < ib) return -1; if (ia > ib) return 1; return 0; },");
+        self.writeln("        .float => |fa| { const fb = b.float; if (fa < fb) return -1; if (fa > fb) return 1; return 0; },");
+        self.writeln("        .string => |sa| { const sb = b.string; return switch (std.mem.order(u8, sa, sb)) { .lt => -1, .eq => 0, .gt => 1 }; },");
+        self.writeln("        .boolean => |ba| { const bb = b.boolean; if (ba == bb) return 0; return if (!ba and bb) -1 else 1; },");
+        self.writeln("        .array => |aa| { const ab = b.array; if (aa.len < ab.len) return -1; if (aa.len > ab.len) return 1; return 0; },");
+        self.writeln("        .any => |pa| { const pb = b.any; const ia = @intFromPtr(pa); const ib = @intFromPtr(pb); if (ia < ib) return -1; if (ia > ib) return 1; return 0; },");
+        self.writeln("    }");
+        self.writeln("}");
+        self.writeln("");
+        self.writeln("const VecDeque = struct {");
+        self.writeln("    allocator: std.mem.Allocator,");
+        self.writeln("    buf: []Message,");
+        self.writeln("    head: usize,");
+        self.writeln("    tail: usize,");
+        self.writeln("    count: usize,");
+        self.writeln("    capacity: usize,");
+        self.writeln("");
+        self.writeln("    pub fn _create(allocator: std.mem.Allocator) !*VecDeque {");
+        self.writeln("        const self = try allocator.create(VecDeque);");
+        self.writeln("        const init_cap: usize = 8;");
+        self.writeln("        const b = try allocator.alloc(Message, init_cap);");
+        self.writeln("        self.* = .{");
+        self.writeln("            .allocator = allocator,");
+        self.writeln("            .buf = b,");
+        self.writeln("            .head = 0,");
+        self.writeln("            .tail = 0,");
+        self.writeln("            .count = 0,");
+        self.writeln("            .capacity = init_cap,");
+        self.writeln("        };");
+        self.writeln("        return self;");
+        self.writeln("    }");
+        self.writeln("    pub fn init(self: *VecDeque) void { _ = self; }");
+        self.writeln("    pub fn release(self: *VecDeque) void {");
+        self.writeln("        self.allocator.free(self.buf);");
+        self.writeln("        self.allocator.destroy(self);");
+        self.writeln("    }");
+        self.writeln("    fn ensure_capacity(self: *VecDeque) void {");
+        self.writeln("        if (self.count == self.capacity) {");
+        self.writeln("            const new_cap = self.capacity * 2;");
+        self.writeln("            const new_buf = self.allocator.alloc(Message, new_cap) catch unreachable;");
+        self.writeln("            var i: usize = 0;");
+        self.writeln("            while (i < self.count) : (i += 1) {");
+        self.writeln("                new_buf[i] = self.buf[(self.head + i) % self.capacity];");
+        self.writeln("            }");
+        self.writeln("            self.allocator.free(self.buf);");
+        self.writeln("            self.buf = new_buf;");
+        self.writeln("            self.head = 0;");
+        self.writeln("            self.tail = self.count;");
+        self.writeln("            self.capacity = new_cap;");
+        self.writeln("        }");
+        self.writeln("    }");
+        self.writeln("    pub fn push_back(self: *VecDeque, val: anytype) void {");
+        self.writeln("        self.ensure_capacity();");
+        self.writeln("        self.buf[self.tail] = cp_message_from(val);");
+        self.writeln("        self.tail = (self.tail + 1) % self.capacity;");
+        self.writeln("        self.count += 1;");
+        self.writeln("    }");
+        self.writeln("    pub fn push_front(self: *VecDeque, val: anytype) void {");
+        self.writeln("        self.ensure_capacity();");
+        self.writeln("        self.head = if (self.head == 0) self.capacity - 1 else self.head - 1;");
+        self.writeln("        self.buf[self.head] = cp_message_from(val);");
+        self.writeln("        self.count += 1;");
+        self.writeln("    }");
+        self.writeln("    pub fn pop_front(self: *VecDeque) ?Message {");
+        self.writeln("        if (self.count == 0) return null;");
+        self.writeln("        const val = self.buf[self.head];");
+        self.writeln("        self.head = (self.head + 1) % self.capacity;");
+        self.writeln("        self.count -= 1;");
+        self.writeln("        return val;");
+        self.writeln("    }");
+        self.writeln("    pub fn pop_back(self: *VecDeque) ?Message {");
+        self.writeln("        if (self.count == 0) return null;");
+        self.writeln("        self.tail = if (self.tail == 0) self.capacity - 1 else self.tail - 1;");
+        self.writeln("        const val = self.buf[self.tail];");
+        self.writeln("        self.count -= 1;");
+        self.writeln("        return val;");
+        self.writeln("    }");
+        self.writeln("    pub fn peek_front(self: *VecDeque) ?Message {");
+        self.writeln("        if (self.count == 0) return null;");
+        self.writeln("        return self.buf[self.head];");
+        self.writeln("    }");
+        self.writeln("    pub fn peek_back(self: *VecDeque) ?Message {");
+        self.writeln("        if (self.count == 0) return null;");
+        self.writeln("        const idx = if (self.tail == 0) self.capacity - 1 else self.tail - 1;");
+        self.writeln("        return self.buf[idx];");
+        self.writeln("    }");
+        self.writeln("    pub fn get(self: *VecDeque, index: anytype) ?Message {");
+        self.writeln("        const m = cp_message_from(index);");
+        self.writeln("        const idx_val: usize = switch (m) { .int => |i| if (i >= 0) @intCast(i) else return null, else => return null };");
+        self.writeln("        if (idx_val >= self.count) return null;");
+        self.writeln("        return self.buf[(self.head + idx_val) % self.capacity];");
+        self.writeln("    }");
+        self.writeln("    pub fn len(self: *VecDeque) usize { return self.count; }");
+        self.writeln("    pub fn size(self: *VecDeque) i32 { return @intCast(self.count); }");
+        self.writeln("    pub fn is_empty(self: *VecDeque) bool { return self.count == 0; }");
+        self.writeln("    pub fn clear(self: *VecDeque) void { self.head = 0; self.tail = 0; self.count = 0; }");
+        self.writeln("    pub fn next(self: *VecDeque) ?Message { return self.pop_front(); }");
+        self.writeln("};");
+        self.writeln("");
+        self.writeln("const BinaryHeap = struct {");
+        self.writeln("    allocator: std.mem.Allocator,");
+        self.writeln("    items: std.ArrayList(Message),");
+        self.writeln("");
+        self.writeln("    pub fn _create(allocator: std.mem.Allocator) !*BinaryHeap {");
+        self.writeln("        const self = try allocator.create(BinaryHeap);");
+        self.writeln("        self.* = .{ .allocator = allocator, .items = .empty };");
+        self.writeln("        return self;");
+        self.writeln("    }");
+        self.writeln("    pub fn init(self: *BinaryHeap) void { _ = self; }");
+        self.writeln("    pub fn release(self: *BinaryHeap) void {");
+        self.writeln("        self.items.deinit(self.allocator);");
+        self.writeln("        self.allocator.destroy(self);");
+        self.writeln("    }");
+        self.writeln("    pub fn push(self: *BinaryHeap, val: anytype) void {");
+        self.writeln("        const m = cp_message_from(val);");
+        self.writeln("        self.items.append(self.allocator, m) catch unreachable;");
+        self.writeln("        var idx = self.items.items.len - 1;");
+        self.writeln("        while (idx > 0) {");
+        self.writeln("            const parent = (idx - 1) / 2;");
+        self.writeln("            if (cp_msg_cmp(self.items.items[idx], self.items.items[parent]) > 0) {");
+        self.writeln("                const tmp = self.items.items[idx];");
+        self.writeln("                self.items.items[idx] = self.items.items[parent];");
+        self.writeln("                self.items.items[parent] = tmp;");
+        self.writeln("                idx = parent;");
+        self.writeln("            } else { break; }");
+        self.writeln("        }");
+        self.writeln("    }");
+        self.writeln("    pub fn pop(self: *BinaryHeap) ?Message {");
+        self.writeln("        if (self.items.items.len == 0) return null;");
+        self.writeln("        const top = self.items.items[0];");
+        self.writeln("        const last = self.items.pop();");
+        self.writeln("        if (self.items.items.len > 0) {");
+        self.writeln("            self.items.items[0] = last.?;");
+        self.writeln("            var idx: usize = 0;");
+        self.writeln("            const n = self.items.items.len;");
+        self.writeln("            while (true) {");
+        self.writeln("                var largest = idx;");
+        self.writeln("                const left = 2 * idx + 1;");
+        self.writeln("                const right = 2 * idx + 2;");
+        self.writeln("                if (left < n and cp_msg_cmp(self.items.items[left], self.items.items[largest]) > 0) { largest = left; }");
+        self.writeln("                if (right < n and cp_msg_cmp(self.items.items[right], self.items.items[largest]) > 0) { largest = right; }");
+        self.writeln("                if (largest != idx) {");
+        self.writeln("                    const tmp = self.items.items[idx];");
+        self.writeln("                    self.items.items[idx] = self.items.items[largest];");
+        self.writeln("                    self.items.items[largest] = tmp;");
+        self.writeln("                    idx = largest;");
+        self.writeln("                } else { break; }");
+        self.writeln("            }");
+        self.writeln("        }");
+        self.writeln("        return top;");
+        self.writeln("    }");
+        self.writeln("    pub fn peek(self: *BinaryHeap) ?Message {");
+        self.writeln("        if (self.items.items.len == 0) return null;");
+        self.writeln("        return self.items.items[0];");
+        self.writeln("    }");
+        self.writeln("    pub fn len(self: *BinaryHeap) usize { return self.items.items.len; }");
+        self.writeln("    pub fn size(self: *BinaryHeap) i32 { return @intCast(self.items.items.len); }");
+        self.writeln("    pub fn is_empty(self: *BinaryHeap) bool { return self.items.items.len == 0; }");
+        self.writeln("    pub fn clear(self: *BinaryHeap) void { self.items.clearRetainingCapacity(); }");
+        self.writeln("    pub fn next(self: *BinaryHeap) ?Message { return self.pop(); }");
+        self.writeln("};");
+        self.writeln("");
+        self.writeln("const BTreeMap = struct {");
+        self.writeln("    allocator: std.mem.Allocator,");
+        self.writeln("    entries: std.ArrayList(MessageEntry),");
+        self.writeln("");
+        self.writeln("    pub fn _create(allocator: std.mem.Allocator) !*BTreeMap {");
+        self.writeln("        const self = try allocator.create(BTreeMap);");
+        self.writeln("        self.* = .{ .allocator = allocator, .entries = .empty };");
+        self.writeln("        return self;");
+        self.writeln("    }");
+        self.writeln("    pub fn init(self: *BTreeMap) void { _ = self; }");
+        self.writeln("    pub fn release(self: *BTreeMap) void {");
+        self.writeln("        self.entries.deinit(self.allocator);");
+        self.writeln("        self.allocator.destroy(self);");
+        self.writeln("    }");
+        self.writeln("    fn binary_search(self: *BTreeMap, k: Message) struct { found: bool, index: usize } {");
+        self.writeln("        var low: usize = 0;");
+        self.writeln("        var high: usize = self.entries.items.len;");
+        self.writeln("        while (low < high) {");
+        self.writeln("            const mid = low + (high - low) / 2;");
+        self.writeln("            const c = cp_msg_cmp(self.entries.items[mid].key, k);");
+        self.writeln("            if (c == 0) return .{ .found = true, .index = mid };");
+        self.writeln("            if (c < 0) { low = mid + 1; } else { high = mid; }");
+        self.writeln("        }");
+        self.writeln("        return .{ .found = false, .index = low };");
+        self.writeln("    }");
+        self.writeln("    pub fn insert(self: *BTreeMap, key: anytype, val: anytype) ?Message {");
+        self.writeln("        const k = cp_message_from(key);");
+        self.writeln("        const v = cp_message_from(val);");
+        self.writeln("        const search = self.binary_search(k);");
+        self.writeln("        if (search.found) {");
+        self.writeln("            const old = self.entries.items[search.index].value;");
+        self.writeln("            self.entries.items[search.index].value = v;");
+        self.writeln("            return old;");
+        self.writeln("        } else {");
+        self.writeln("            self.entries.insert(self.allocator, search.index, .{ .key = k, .value = v }) catch unreachable;");
+        self.writeln("            return null;");
+        self.writeln("        }");
+        self.writeln("    }");
+        self.writeln("    pub fn set(self: *BTreeMap, key: anytype, val: anytype) *BTreeMap {");
+        self.writeln("        _ = self.insert(key, val);");
+        self.writeln("        return self;");
+        self.writeln("    }");
+        self.writeln("    pub fn get(self: *BTreeMap, key: anytype) ?Message {");
+        self.writeln("        const k = cp_message_from(key);");
+        self.writeln("        const search = self.binary_search(k);");
+        self.writeln("        if (search.found) return self.entries.items[search.index].value;");
+        self.writeln("        return null;");
+        self.writeln("    }");
+        self.writeln("    pub fn has(self: *BTreeMap, key: anytype) bool {");
+        self.writeln("        const k = cp_message_from(key);");
+        self.writeln("        return self.binary_search(k).found;");
+        self.writeln("    }");
+        self.writeln("    pub fn remove(self: *BTreeMap, key: anytype) ?Message {");
+        self.writeln("        const k = cp_message_from(key);");
+        self.writeln("        const search = self.binary_search(k);");
+        self.writeln("        if (search.found) {");
+        self.writeln("            const old = self.entries.items[search.index].value;");
+        self.writeln("            _ = self.entries.orderedRemove(search.index);");
+        self.writeln("            return old;");
+        self.writeln("        }");
+        self.writeln("        return null;");
+        self.writeln("    }");
+        self.writeln("    pub fn delete(self: *BTreeMap, key: anytype) bool { return self.remove(key) != null; }");
+        self.writeln("    pub fn min_key(self: *BTreeMap) ?Message {");
+        self.writeln("        if (self.entries.items.len == 0) return null;");
+        self.writeln("        return self.entries.items[0].key;");
+        self.writeln("    }");
+        self.writeln("    pub fn max_key(self: *BTreeMap) ?Message {");
+        self.writeln("        if (self.entries.items.len == 0) return null;");
+        self.writeln("        return self.entries.items[self.entries.items.len - 1].key;");
+        self.writeln("    }");
+        self.writeln("    pub fn len(self: *BTreeMap) usize { return self.entries.items.len; }");
+        self.writeln("    pub fn size(self: *BTreeMap) i32 { return @intCast(self.entries.items.len); }");
+        self.writeln("    pub fn is_empty(self: *BTreeMap) bool { return self.entries.items.len == 0; }");
+        self.writeln("    pub fn clear(self: *BTreeMap) void { self.entries.clearRetainingCapacity(); }");
+        self.writeln("    pub fn keys(self: *BTreeMap) []Message {");
+        self.writeln("        const list = self.allocator.alloc(Message, self.entries.items.len) catch unreachable;");
+        self.writeln("        for (self.entries.items, 0..) |entry, i| { list[i] = entry.key; }");
+        self.writeln("        return list;");
+        self.writeln("    }");
+        self.writeln("    pub fn values(self: *BTreeMap) []Message {");
+        self.writeln("        const list = self.allocator.alloc(Message, self.entries.items.len) catch unreachable;");
+        self.writeln("        for (self.entries.items, 0..) |entry, i| { list[i] = entry.value; }");
+        self.writeln("        return list;");
+        self.writeln("    }");
+        self.writeln("    pub fn next(self: *BTreeMap) ?MessageEntry {");
+        self.writeln("        if (self.entries.items.len == 0) return null;");
+        self.writeln("        return self.entries.orderedRemove(0);");
+        self.writeln("    }");
+        self.writeln("};");
+        self.writeln("");
+        self.writeln("const BTreeSet = struct {");
+        self.writeln("    map: *BTreeMap,");
+        self.writeln("");
+        self.writeln("    pub fn _create(allocator: std.mem.Allocator) !*BTreeSet {");
+        self.writeln("        const self = try allocator.create(BTreeSet);");
+        self.writeln("        self.map = try BTreeMap._create(allocator);");
+        self.writeln("        return self;");
+        self.writeln("    }");
+        self.writeln("    pub fn init(self: *BTreeSet) void { _ = self; }");
+        self.writeln("    pub fn release(self: *BTreeSet) void {");
+        self.writeln("        const alloc = self.map.allocator;");
+        self.writeln("        self.map.release();");
+        self.writeln("        alloc.destroy(self);");
+        self.writeln("    }");
+        self.writeln("    pub fn add(self: *BTreeSet, val: anytype) bool {");
+        self.writeln("        return self.map.insert(val, true) == null;");
+        self.writeln("    }");
+        self.writeln("    pub fn has(self: *BTreeSet, val: anytype) bool {");
+        self.writeln("        return self.map.has(val);");
+        self.writeln("    }");
+        self.writeln("    pub fn remove(self: *BTreeSet, val: anytype) ?Message {");
+        self.writeln("        if (self.map.remove(val) != null) return cp_message_from(true);");
+        self.writeln("        return null;");
+        self.writeln("    }");
+        self.writeln("    pub fn delete(self: *BTreeSet, val: anytype) bool { return self.map.delete(val); }");
+        self.writeln("    pub fn min(self: *BTreeSet) ?Message { return self.map.min_key(); }");
+        self.writeln("    pub fn max(self: *BTreeSet) ?Message { return self.map.max_key(); }");
+        self.writeln("    pub fn len(self: *BTreeSet) usize { return self.map.len(); }");
+        self.writeln("    pub fn size(self: *BTreeSet) i32 { return self.map.size(); }");
+        self.writeln("    pub fn is_empty(self: *BTreeSet) bool { return self.map.is_empty(); }");
+        self.writeln("    pub fn clear(self: *BTreeSet) void { self.map.clear(); }");
+        self.writeln("    pub fn values(self: *BTreeSet) []Message { return self.map.keys(); }");
+        self.writeln("    pub fn next(self: *BTreeSet) ?Message {");
+        self.writeln("        if (self.map.next()) |entry| { return entry.key; }");
+        self.writeln("        return null;");
+        self.writeln("    }");
+        self.writeln("};");
+        self.writeln("");
         self.writeln("pub const FieldInfo = struct {");
         self.writeln("    name: []const u8,");
         self.writeln("    typeName: []const u8,");
@@ -1113,8 +1418,8 @@ impl Codegen {
         self.writeln("fn to_string_slice(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime (T == []const u8 or T == []u8)) { return v; } else { const slice: []const u8 = v; return slice; } }");
         self.writeln("fn CpValType(comptime T: type) type { if (is_string_like(T)) return []const u8; if (T == comptime_int) return i32; if (T == comptime_float) return f32; return T; }");
         self.writeln("fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == comptime_int) { return @as(i32, v); } else if (comptime T == comptime_float) { return @as(f32, v); } else { return v; } }");
-        self.writeln("fn CpAddReturn(comptime Ta: type, comptime Tb: type) type { if (is_string_like(Ta) or is_string_like(Tb)) return []const u8; if (Ta == comptime_int and Tb == comptime_int) return i32; if (Ta == comptime_int) return Tb; if (Tb == comptime_int) return Ta; if (Ta == comptime_float and Tb == comptime_float) return f32; if (Ta == comptime_float) return Tb; if (Tb == comptime_float) return Ta; return Ta; }");
-        self.writeln("fn cp_add(a: anytype, b: anytype) CpAddReturn(@TypeOf(a), @TypeOf(b)) { const Ta = @TypeOf(a); const Tb = @TypeOf(b); if (comptime (is_string_like(Ta) and is_string_like(Tb))) { return std.fmt.allocPrint(std.heap.page_allocator, \"{s}{s}\", .{ to_string_slice(a), to_string_slice(b) }) catch unreachable; } else if (comptime is_string_like(Ta)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{s}{any}\", .{ to_string_slice(a), b }) catch unreachable; } else if (comptime is_string_like(Tb)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{any}{s}\", .{ a, to_string_slice(b) }) catch unreachable; } else if (comptime (@typeInfo(Ta) == .int and @typeInfo(Tb) == .int)) { return a + @as(Ta, @intCast(b)); } else { return a + b; } }");
+        self.writeln("fn CpAddReturn(comptime Ta: type, comptime Tb: type) type { if (Ta == Message and Tb == Message) return i32; if (Ta == Message and @typeInfo(Tb) == .int) return Tb; if (@typeInfo(Ta) == .int and Tb == Message) return Ta; if (is_string_like(Ta) or is_string_like(Tb)) return []const u8; if (Ta == comptime_int and Tb == comptime_int) return i32; if (Ta == comptime_int) return Tb; if (Tb == comptime_int) return Ta; if (Ta == comptime_float and Tb == comptime_float) return f32; if (Ta == comptime_float) return Tb; if (Tb == comptime_float) return Ta; return Ta; }");
+        self.writeln("fn cp_add(a: anytype, b: anytype) CpAddReturn(@TypeOf(a), @TypeOf(b)) { const Ta = @TypeOf(a); const Tb = @TypeOf(b); if (comptime (Ta == Message and Tb == Message)) { return a.to_int() + b.to_int(); } else if (comptime (Ta == Message and @typeInfo(Tb) == .int)) { return @as(Tb, @intCast(a.to_int())) + b; } else if (comptime (@typeInfo(Ta) == .int and Tb == Message)) { return a + @as(Ta, @intCast(b.to_int())); } else if (comptime (is_string_like(Ta) and is_string_like(Tb))) { return std.fmt.allocPrint(std.heap.page_allocator, \"{s}{s}\", .{ to_string_slice(a), to_string_slice(b) }) catch unreachable; } else if (comptime is_string_like(Ta)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{s}{any}\", .{ to_string_slice(a), b }) catch unreachable; } else if (comptime is_string_like(Tb)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{any}{s}\", .{ a, to_string_slice(b) }) catch unreachable; } else if (comptime (@typeInfo(Ta) == .int and @typeInfo(Tb) == .int)) { return a + @as(Ta, @intCast(b)); } else { return a + b; } }");
         self.writeln("fn CpUnwrapOkType(comptime T: type) type { if (is_cp_result(T)) { const OkT = @FieldType(T, \"ok\"); if (@typeInfo(OkT) == .optional) return @typeInfo(OkT).optional.child; return OkT; } if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child; return T; }");
         self.writeln("fn cp_has_ok_val(v: anytype) bool { const T = @TypeOf(v); if (comptime is_cp_result(T)) { if (v != .ok) return false; const OkT = @FieldType(T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok != null; } else { return true; } } else if (comptime @typeInfo(T) == .optional) { return v != null; } else { return true; } }");
         self.writeln("fn cp_unwrap_ok_val(v: anytype) CpUnwrapOkType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_cp_result(T)) { const OkT = @FieldType(T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok.?; } else { return v.ok; } } else if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; } }");
@@ -5882,11 +6187,16 @@ impl Codegen {
                     },
                     _ => None,
                 });
+                let is_builtin_container_stream = matches!(
+                    clean_type_name.as_deref(),
+                    Some("VecDeque" | "BinaryHeap" | "BTreeMap" | "BTreeSet")
+                );
                 let has_next_method = clean_type_name
                     .as_ref()
                     .and_then(|c_name| self.lookup_method(c_name, "next"));
 
-                if let Some((_, ret_ty_opt, _)) = has_next_method {
+                if has_next_method.is_some() || is_builtin_container_stream {
+                    let ret_ty_opt = has_next_method.and_then(|(_, r, _)| r);
                     let iter_var = if matches!(f.expr, Expr::Ident(_)) {
                         expr_code.clone()
                     } else {
@@ -6685,23 +6995,40 @@ impl Codegen {
             Expr::Call(call) => {
                 if let Expr::Member(mem) = &*call.callee {
                     let prop = mem.prop.sym.as_str();
-                    if prop == "push" {
+                    let mut raw_obj_ty = self.infer_cp_type(&mem.obj);
+                    while let Some(Type::BorrowType { inner, .. }) = raw_obj_ty {
+                        raw_obj_ty = Some(*inner);
+                    }
+                    let is_builtin_container = matches!(
+                        raw_obj_ty,
+                        Some(Type::Ref(id)) if id.sym == "BinaryHeap" || id.sym == "VecDeque" || id.sym == "BTreeMap" || id.sym == "BTreeSet" || id.sym == "Map" || id.sym == "Set" || id.sym == "HashMap" || id.sym == "HashSet"
+                    );
+                    if prop == "push" && !is_builtin_container {
                         self.check_mutation_allowed(&mem.obj, "container method 'push'");
                         let obj = self.generate_expr(&mem.obj);
                         let arg = self.generate_expr(&call.args[0]);
                         return format!("cp_array_push(&{}, {})", obj, arg);
-                    } else if prop == "pop" {
+                    } else if prop == "pop" && !is_builtin_container {
                         self.check_mutation_allowed(&mem.obj, "container method 'pop'");
                         let obj = self.generate_expr(&mem.obj);
                         return format!("cp_array_pop(&{})", obj);
-                    } else if prop == "clear" {
+                    } else if prop == "clear" && !is_builtin_container {
                         self.check_mutation_allowed(&mem.obj, "container method 'clear'");
                         let obj = self.generate_expr(&mem.obj);
                         return format!("cp_container_clear(&{})", obj);
-                    } else if prop == "set"
+                    } else if prop == "push"
+                        || prop == "push_back"
+                        || prop == "push_front"
+                        || prop == "pop"
+                        || prop == "pop_back"
+                        || prop == "pop_front"
+                        || prop == "clear"
+                        || prop == "set"
                         || prop == "put_all"
                         || prop == "add"
                         || prop == "delete"
+                        || prop == "insert"
+                        || prop == "remove"
                     {
                         self.check_mutation_allowed(
                             &mem.obj,
@@ -6718,8 +7045,23 @@ impl Codegen {
                         || prop == "keys"
                         || prop == "values"
                         || prop == "entries"
+                        || prop == "peek"
+                        || prop == "peek_front"
+                        || prop == "peek_back"
+                        || prop == "len"
+                        || prop == "is_empty"
+                        || prop == "min_key"
+                        || prop == "max_key"
+                        || prop == "min"
+                        || prop == "max"
                     {
                         self.check_read_allowed(&mem.obj);
+                        let obj = self.generate_expr(&mem.obj);
+                        let mut args_code = Vec::new();
+                        for a in &call.args {
+                            args_code.push(self.generate_expr(a));
+                        }
+                        return format!("{}.{}({})", obj, prop, args_code.join(", "));
                     } else if prop == "indexOf" {
                         self.check_read_allowed(&mem.obj);
                         let obj = self.generate_expr(&mem.obj);
@@ -9309,14 +9651,33 @@ impl Codegen {
                         if mem.prop.sym == "accept" {
                             return "*Socket".to_string();
                         }
-                        if mem.prop.sym == "get" {
+                        if mem.prop.sym == "get"
+                            || mem.prop.sym == "peek"
+                            || mem.prop.sym == "peek_front"
+                            || mem.prop.sym == "peek_back"
+                            || mem.prop.sym == "pop"
+                            || mem.prop.sym == "pop_front"
+                            || mem.prop.sym == "pop_back"
+                            || mem.prop.sym == "min_key"
+                            || mem.prop.sym == "max_key"
+                            || mem.prop.sym == "min"
+                            || mem.prop.sym == "max"
+                            || mem.prop.sym == "insert"
+                            || mem.prop.sym == "remove"
+                        {
                             return "?Message".to_string();
                         }
-                        if mem.prop.sym == "has" || mem.prop.sym == "delete" {
+                        if mem.prop.sym == "has"
+                            || mem.prop.sym == "delete"
+                            || mem.prop.sym == "is_empty"
+                        {
                             return "bool".to_string();
                         }
                         if mem.prop.sym == "size" {
                             return "i32".to_string();
+                        }
+                        if mem.prop.sym == "len" {
+                            return "usize".to_string();
                         }
                         if mem.prop.sym == "keys" || mem.prop.sym == "values" {
                             return "[]Message".to_string();

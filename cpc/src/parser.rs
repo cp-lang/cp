@@ -1022,7 +1022,7 @@ impl<'a> Parser<'a> {
                     let tr = self.parse_ident()?;
                     self.expect(Token::Greater)?;
                     Type::BoxDyn(tr)
-                } else if (sym == "Map" || sym == "Dict") && self.peek() == Some(&Token::Less) {
+                } else if (sym == "Map" || sym == "Dict" || sym == "HashMap" || sym == "BTreeMap") && self.peek() == Some(&Token::Less) {
                     self.bump()?;
                     let k = self.parse_type()?;
                     self.expect(Token::Comma)?;
@@ -1033,7 +1033,7 @@ impl<'a> Parser<'a> {
                     } else {
                         Type::Map(Box::new(k), Box::new(v))
                     }
-                } else if sym == "Set" && self.peek() == Some(&Token::Less) {
+                } else if (sym == "Set" || sym == "HashSet" || sym == "BTreeSet") && self.peek() == Some(&Token::Less) {
                     self.bump()?;
                     let elem = self.parse_type()?;
                     self.expect(Token::Greater)?;
@@ -1044,6 +1044,16 @@ impl<'a> Parser<'a> {
                     self.expect(Token::Greater)?;
                     Type::Array(Box::new(elem))
                 } else {
+                    if self.peek() == Some(&Token::Less) {
+                        self.bump()?;
+                        while self.peek() != Some(&Token::Greater) && self.peek().is_some() {
+                            self.parse_type()?;
+                            if self.peek() == Some(&Token::Comma) {
+                                self.bump()?;
+                            }
+                        }
+                        self.expect(Token::Greater)?;
+                    }
                     Type::Ref(Ident { span, sym })
                 }
             }

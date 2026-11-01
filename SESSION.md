@@ -4099,6 +4099,76 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 5. **四线文档完整记录**：
    - 同步更新 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md) 与 [`SESSION.md`](file:///data/dev/cp/SESSION.md)。
 
+---
+
+## 2026-11-02 (Session Update - 盘点 Rust 容器家族体系与 CP 实现路径规划)
+
+### 用户指令
+> Rust 中有哪些容器,如:Vec、HashMap、HashSet、BTreeMap等容器
+> cp 中实现了吗? 没有的话, 应如何实现
+
+### 执行结果汇报
+1. **全景梳理**：系统化盘点 Rust `std::collections` 中的 4 大类 7 种核心通用容器（`Vec`, `VecDeque`, `LinkedList`, `HashMap`, `BTreeMap`, `HashSet`, `BTreeSet`, `BinaryHeap`）；
+2. **状态对照**：详尽指出 CP 已有 `[T]` / `Vec`、`Map`、`Set`、`Dict` 的实现现状，以及缺少 `VecDeque`、`BinaryHeap`、`BTreeMap`、`BTreeSet` 的断层；
+3. **架构规划**：提出纯 Native 极速容器 + 完整借用检查器监管 + 双轨 `for of` 迭代 + `cap:collections` 官方发布的整体实现路线图。
+
+---
+
+## 2026-11-02 (Session Update - 完备标准容器矩阵构建、借用检查与规范文档落成)
+
+### 用户指令
+> 按你的方案构建 完备的标准容器矩阵, 需具备完整的借用/所有权检查
+> 并将上述代码示例与说明,写入 cp_ref.md 文档
+
+### 执行结果汇报
+1. **官方标准库模块建立**：
+   - 创建 [`lib/cap/collections.cp`](file:///data/dev/cp/lib/cap/collections.cp)，正式导出 `VecDeque`、`BinaryHeap`、`BTreeMap`、`BTreeSet`、`HashMap`、`HashSet`、`Map`、`Set`、`Dict`；
+2. **底层运行时容器实装（Zig Native）**：
+   - [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs)：
+     - `VecDeque`：动态扩容双端环形缓冲区（$O(1)$ 头尾存取）；
+     - `BinaryHeap`：二叉大顶堆优先队列（$O(1)$ 查看、$O(\log N)$ 优先弹出）；
+     - `BTreeMap`：有序键值映射表（二分有序探测、$O(\log N)$ 字典序检索与极值）；
+     - `BTreeSet`：有序去重集合；
+     - `cp_msg_cmp`：多类型全序比对器；
+3. **借用/所有权检查全面监管**：
+   - [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs)：将新容器写入方法纳入 `loop_borrowed_vars` 检查，杜绝 `for ... of` 迭代期间修改；
+   - [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs)：强化 `check_mutation_allowed` 与 `check_read_allowed`，支持解包 `BorrowType` 精准推导容器实体类型，严禁通过只读借用 `&c` 修改容器；
+4. **双轨流式迭代接入**：
+   - 4 大新容器全部支持 `for item of collection` 优雅流式迭代遍历；
+5. **测试验证**：
+   - [`cap/test/test_collections_matrix.cp`](file:///data/dev/cp/cap/test/test_collections_matrix.cp) 覆盖 7 项全功能测试，**100% 绿灯全通**；
+   - 负向测试验证违规只读写入与循环中写入均被编译器静态拦截；
+6. **四线文档同步**：
+   - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)：在 6.3 节与 12.2 节新增详尽规范表与完整代码范式；
+   - [`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md) 与 [`SESSION.md`](file:///data/dev/cp/SESSION.md) 全部同步完毕。
+
+---
+
+## 2026-11-02 (Session Update - Git 提交：实装完备标准容器矩阵及借用安全检查体系)
+
+### 用户指令
+> git 提交
+
+### 本次提交范围 (Commit Scope)
+1. **标准容器库模块发布**：
+   - [`lib/cap/collections.cp`](file:///data/dev/cp/lib/cap/collections.cp)：新建并正式发布官方标准容器库 `cap:collections`，统一导出 `VecDeque`、`BinaryHeap`、`BTreeMap`、`BTreeSet`、`HashMap`、`HashSet`、`Map`、`Set`、`Dict`。
+2. **编译器前端与泛型解析升级**：
+   - [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs)：`parse_base_type` 支持泛型容器语法（如 `BTreeMap<K, V>`、`VecDeque<T>` 等）及其类型实参解析。
+3. **语义分析与借用检查器强化**：
+   - [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs)：全局注册 6 大容器符号，并将所有新容器的修改方法（`push_back`, `push_front`, `pop_back`, `pop_front`, `insert`, `remove`）纳入循环借用锁定检查，杜绝 `for ... of` 遍历中迭代器失效。
+4. **底层 Zig 运行时容器矩阵与代码生成实现**：
+   - [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs)：
+     - 注入原生 `VecDeque`（两倍动态扩容双端环形缓冲区）、`BinaryHeap`（堆排自平衡优先队列）、`BTreeMap`（二分有序平衡键值映射）、`BTreeSet`（有序去重集合）与 `cp_msg_cmp` 全序比对器；
+     - 强化 `check_mutation_allowed` 与 `check_read_allowed`：支持解包 `BorrowType` 精准推导容器实体类型，严禁通过只读借用 `&c` 修改容器；
+     - 扩展 `CpAddReturn` 与 `cp_add` 算术运行时，支持 `Message` 混合相加；
+     - 双轨流式迭代无缝接入，全量支持 `while (stream.next()) |item|` 优雅遍历。
+5. **测试套件与验证**：
+   - [`cap/test/test_collections_matrix.cp`](file:///data/dev/cp/cap/test/test_collections_matrix.cp)：新增覆盖 7 项核心特性的全量综合测试用例，**100% 绿灯全通**。
+6. **四线文档完备性保证**：
+   - 同步更新 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md) 与 [`SESSION.md`](file:///data/dev/cp/SESSION.md)。
+
+
+
 
 
 

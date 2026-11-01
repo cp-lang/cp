@@ -347,7 +347,18 @@ impl Analyzer {
             self.scopes[0].insert(reflect_name.to_string(), SymbolKind::Class(cls));
         }
 
-        for name in &["Task", "Event", "EventEmitter"] {
+        for name in &[
+            "Task",
+            "Event",
+            "EventEmitter",
+            "Set",
+            "VecDeque",
+            "BinaryHeap",
+            "BTreeMap",
+            "BTreeSet",
+            "HashMap",
+            "HashSet",
+        ] {
             let cls = crate::ast::Class {
                 span: mock_span.clone(),
                 ident: crate::ast::Ident {
@@ -2100,12 +2111,18 @@ impl Analyzer {
                         if self.loop_borrowed_vars.contains(&id.sym) {
                             let prop = mem.prop.sym.as_str();
                             if prop == "push"
+                                || prop == "push_back"
+                                || prop == "push_front"
                                 || prop == "clear"
                                 || prop == "delete"
                                 || prop == "pop"
+                                || prop == "pop_back"
+                                || prop == "pop_front"
                                 || prop == "set"
                                 || prop == "put_all"
                                 || prop == "add"
+                                || prop == "insert"
+                                || prop == "remove"
                             {
                                 return Err(SemaError::MutateWhileBorrowedInFor(
                                     id.sym.clone(),

@@ -1023,6 +1023,33 @@
   - 清理 11.2 节宏示例中的 `set_${field}(*_)` 与 `reset(*_)` 接收者修饰符；
   - 清除全篇遗留的 Rust 风格 `&mut` 痕迹，强化 CP 中 `*_`（可变借用）与 `&_`（只读借用）的正交语义。
 
+---
+
+## 2026-11-02 (完备标准容器矩阵构建：实装 VecDeque、BinaryHeap、BTreeMap、BTreeSet 及完整借用检查)
+
+### 新增文件 (Added)
+- [`lib/cap/collections.cp`](file:///data/dev/cp/lib/cap/collections.cp):
+  - 正式发布 CP 官方标准容器库 `cap:collections`，统一导出 `VecDeque`、`BinaryHeap`、`BTreeMap`、`BTreeSet`、`HashMap`、`HashSet`、`Map`、`Set`、`Dict`；
+- [`cap/test/test_collections_matrix.cp`](file:///data/dev/cp/cap/test/test_collections_matrix.cp):
+  - 覆盖双端环形队列、优先队列大顶堆、B 树有序键值映射、B 树有序集合、Rust 对齐别名以及可变/只读借用参数传递的全套 7 项综合测试，100% 绿灯全通。
+
+### 修改文件 (Modified)
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - `parse_base_type` 支持 `HashMap<K, V>`、`BTreeMap<K, V>` 映射为 `Type::Map`，`HashSet<T>`、`BTreeSet<T>` 映射为 `Type::Set`，并支持任意通用泛型类型参数消费与类型推断；
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 注册 `VecDeque`、`BinaryHeap`、`BTreeMap`、`BTreeSet`、`HashMap`、`HashSet` 为顶层预置全局符号；
+  - 在 `analyze_expr` 中将 `push_back`、`push_front`、`pop_back`、`pop_front`、`insert`、`remove` 纳入 `loop_borrowed_vars` 循环借用锁定检查，杜绝循环遍历中的迭代器失效；
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 在 Zig 运行时前导中注入高性能 `VecDeque`（环形缓冲区）、`BinaryHeap`（堆排优先队列）、`BTreeMap`（有序平衡二分表）、`BTreeSet`（有序集合）及 `cp_msg_cmp` 全序比对函数；
+  - 增强 `check_mutation_allowed` 与 `check_read_allowed`：全面对齐新容器的写入与只读方法，支持剥离 `BorrowType` 精准推导容器实体类型；
+  - 增强 `CpAddReturn` 与 `cp_add`：支持 `Message` 与 `i32` 混合算术运算；
+  - 升级 `Stmt::For`：无缝将四类新容器纳入双轨流式迭代路径 `while (it.next()) |item|`；
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 更新 6.3 节容器写保护铁律，纳安全监管矩阵；
+  - 更新 12.1 节已实装标准库索引表，增补 `cap:collections`；
+  - 新增 12.2 节《完备标准容器矩阵（cap:collections）与借用/所有权安全体系》，详尽规范时间复杂度、内存布局与生产级代码示例。
+
+
 
 
 

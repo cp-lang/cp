@@ -1030,12 +1030,13 @@ CP 编译器在编译期执行铁律检查：
 
 ### 6.3 容器写保护铁律（Container Mutation Guard）
 
-针对 `Array`、`Map`、`Set`、`Dict` 等容器类型，CP 施加了极其严苛的写保护安全铁律：
+针对 `Array`/`Vec`、`VecDeque`、`BinaryHeap`、`BTreeMap`、`BTreeSet`、`Map`/`HashMap`、`Set`/`HashSet`、`Dict` 等容器类型，CP 施加了极其严苛的写保护安全铁律：
 
-> **当一个容器存在存活的只读借用（如 `let p = &v;`）时：**
+> **当一个容器存在存活的只读借用（如 `let p = &v;`）或处于 `for ... of` 迭代遍历时：**
 >
-> 1. **严禁对容器进行任何结构调整（禁止扩容、缩容、`push`、`pop`）；**
+> 1. **严禁对容器进行任何结构调整（禁止扩容、缩容、`push`、`pop`、`push_back`、`push_front`、`insert`、`remove`、`delete`、`clear`）；**
 > 2. **严禁对容器内部的任何现有元素执行原位修改（禁止 `v[0] = 6`）。**
+> 3. **一旦检测到违反规则，编译器静态拦截并抛出编译期硬错误，杜绝迭代器失效（Iterator Invalidation）与数据竞争！**
 
 ```typescript
 let v = [1, 2, 3];
@@ -2610,19 +2611,176 @@ pub unsafe fn direct_io_write(port: u16, val: u8) {
 
 ### 12.1 已实装官方核心标准库索引（`cap:*`）
 
-| 标准库协议通道 | 核心导出功能                                          | 状态           |
-| :------------- | :---------------------------------------------------- | :------------- |
-| `cap:io`       | `print`, `print_err`, `readLine`, 格式化输出流        | **已全面实装** |
-| `cap:mem`      | `Arena`, `SharedTensor`, 全局共享堆, 原子引用计数     | **已全面实装** |
-| `cap:task`     | `spawn`, `spawn_cpu`, `join`, `Task.all`, `Task.race` | **已全面实装** |
-| `cap:actor`    | `@spawn`, `@receive`, `@reply`, `PID`, 信箱通信       | **已全面实装** |
-| `cap:fs`       | 异步/同步文件读取、写入、目录创建、流式 I/O           | **已全面实装** |
-| `cap:net`      | TCP 套接字、UDP 广播、轻量 HTTP 协议栈                | **已全面实装** |
-| `cap:reflect`  | 编译期与运行时 `type_of`, `fields_of`, 结构体自省     | **已全面实装** |
+| 标准库协议通道   | 核心导出功能                                                          | 状态           |
+| :--------------- | :-------------------------------------------------------------------- | :------------- |
+| `cap:collections`| `VecDeque`, `BinaryHeap`, `BTreeMap`, `BTreeSet`, `HashMap`, `HashSet` | **已全面实装** |
+| `cap:io`         | `print`, `print_err`, `readLine`, 格式化输出流                        | **已全面实装** |
+| `cap:mem`        | `Arena`, `SharedTensor`, 全局共享堆, 原子引用计数                     | **已全面实装** |
+| `cap:task`       | `spawn`, `spawn_cpu`, `join`, `Task.all`, `Task.race`                 | **已全面实装** |
+| `cap:actor`      | `@spawn`, `@receive`, `@reply`, `PID`, 信箱通信                       | **已全面实装** |
+| `cap:fs`         | 异步/同步文件读取、写入、目录创建、流式 I/O                           | **已全面实装** |
+| `cap:net`        | TCP 套接字、UDP 广播、轻量 HTTP 协议栈                                | **已全面实装** |
+| `cap:reflect`    | 编译期与运行时 `type_of`, `fields_of`, 结构体自省                     | **已全面实装** |
 
 ---
 
-### 12.2 生态演进与路线图（Roadmap）
+### 12.2 完备标准容器矩阵（`cap:collections`）与借用/所有权安全体系
+
+CP 语言基于“TS 的高阶直觉 + Rust 的内存安全 + Zig 的裸机性能”愿景，在 `cap:collections` 协议通道中原生构建了对标 Rust `std::collections` 的工业级完备容器家族，全面覆盖连续数组、双端环形缓冲、优先队列二叉堆、B 树有序表以及高性能哈希集合：
+
+```mermaid
+graph TD
+    Matrix["完备标准容器矩阵 (cap:collections)"]
+
+    Matrix --> Seq["序列与双端队列 (Sequences)"]
+    Matrix --> Tree["有序树型容器 (Ordered Trees)"]
+    Matrix --> Heap["优先队列堆 (Priority Heaps)"]
+    Matrix --> Hash["哈希映射与集合 (Hash Tables)"]
+
+    Seq --> V["Array&lt;T&gt; / Vec&lt;T&gt; (连续动态数组)"]
+    Seq --> VD["VecDeque&lt;T&gt; (双端环形队列)"]
+
+    Tree --> BTM["BTreeMap&lt;K, V&gt; (B树有序键值映射)"]
+    Tree --> BTS["BTreeSet&lt;T&gt; (B树有序去重集合)"]
+
+    Heap --> BH["BinaryHeap&lt;T&gt; (二叉大顶堆优先队列)"]
+
+    Hash --> HM["Map&lt;K, V&gt; / HashMap&lt;K, V&gt; (哈希字典)"]
+    Hash --> HS["Set&lt;T&gt; / HashSet&lt;T&gt; (哈希集合)"]
+```
+
+#### 12.2.1 容器全景特性与时间复杂度矩阵
+
+| 容器名称 | 底层结构 | 插入性能 | 查找/读取 | 删除性能 | 顺序特性 | 典型应用场景 |
+| :--- | :--- | :---: | :---: | :---: | :---: | :--- |
+| **`Vec<T>` / `[T]`** | 连续动态切片 | $O(1)$ 均摊 | $O(1)$ 下标 | $O(1)$ 尾部 | 插入序 | 高性能线性数组、批处理连续内存 |
+| **`VecDeque<T>`** | 环形缓冲区 (Ring Buffer) | $O(1)$ 两端 | $O(1)$ 随机 | $O(1)$ 两端 | 先入先出 / 双端 | Actor 消息队列、调度器环形任务池、滑动窗口 |
+| **`BinaryHeap<T>`** | 扁平二叉大顶堆 | $O(\log N)$ | $O(1)$ 栈顶 | $O(\log N)$ 弹出 | 优先级递减序 | 任务调度优先级、定时器堆、Top-K 流式筛选 |
+| **`BTreeMap<K, V>`** | 紧凑有序 B 树映射 | $O(\log N)$ | $O(\log N)$ | $O(\log N)$ | Key 自然字典序 | 有序配置表、范围切片查询、前缀扫描、有序排行榜 |
+| **`BTreeSet<T>`** | 紧凑有序 B 树集合 | $O(\log N)$ | $O(\log N)$ | $O(\log N)$ | Element 字典序 | 唯一递增序列、区间包含检测、有序去重过滤 |
+| **`HashMap<K, V>`** | 动态哈希映射表 | $O(1)$ 平均 | $O(1)$ 平均 | $O(1)$ 平均 | 无序 | 高频键值缓存、字典检索、实体关系映射 |
+| **`HashSet<T>`** | 动态哈希去重集合 | $O(1)$ 平均 | $O(1)$ 平均 | $O(1)$ 平均 | 无序 | 极速 ID 去重、成员资格测试、数学集合运算 |
+
+#### 12.2.2 严格借用与所有权检查铁律
+
+所有标准容器均受 CP 编译器静态借用检查器（Borrow Checker）的全面监管：
+
+1. **方法接收者二元分立**：
+   - **修改方法（Mutating Methods）**：必须声明为 `*_` 可变借用接收者（如 `push_back(*_)`, `pop_front(*_)`, `insert(*_)`, `clear(*_)`）。调用时必须持有容器的排他性可变写权限；
+   - **只读查询方法（Query Methods）**：声明为 `&_` 只读借用接收者（如 `peek(&_)`, `len(&_)`, `get(&_)`, `has(&_)`）。允许并发只读借用。
+2. **读写互斥检查（Aliasing XOR Mutability）**：
+   - 当容器存在任何未解禁的只读借用（如 `let p = &q;`）时，编译器**静态严禁**任何形式的结构改变或写入调用；
+3. **`for ... of` 迭代保护（Iterator Invalidation Guard）**：
+   - 在迭代遍历容器期间，容器被自动锁定为只读借用，任何在循环体内部尝试修改该容器的指令，Sema 会在编译期直接拦截（抛出 `Cannot mutate 'x' while it is borrowed in 'for ... of' loop`）！
+
+#### 12.2.3 容器 API 规范与实战范式
+
+```cp
+import { VecDeque, BinaryHeap, BTreeMap, BTreeSet, HashMap, HashSet } from "cap:collections";
+import { expect_eq } from "cap:test";
+
+// =========================================================================
+// 1. VecDeque (双端环形队列)
+// =========================================================================
+let mut deque = new VecDeque();
+deque.push_back(10);
+deque.push_back(20);
+deque.push_front(5); // 队列当前布局: [5, 10, 20]
+
+expect_eq(deque.len(), 3);
+expect_eq(deque.peek_front(), 5);
+expect_eq(deque.peek_back(), 20);
+
+let front_item = deque.pop_front(); // 弹出 5
+let back_item = deque.pop_back();   // 弹出 20
+expect_eq(front_item, 5);
+expect_eq(back_item, 20);
+
+// 双轨流式迭代遍历 (支持自动消费排出)
+let mut sum = 0;
+for n of deque {
+    sum = sum + n;
+}
+expect_eq(sum, 10);
+expect_eq(deque.is_empty(), true);
+
+// =========================================================================
+// 2. BinaryHeap (优先队列二叉堆)
+// =========================================================================
+let mut heap = new BinaryHeap();
+heap.push(15);
+heap.push(42);
+heap.push(8);
+heap.push(27);
+
+// peek 查看当前最高优先级元素 (大顶堆最大值)
+expect_eq(heap.peek(), 42);
+
+// 依次弹出：严格按从大到小的优先级顺序输出
+expect_eq(heap.pop(), 42);
+expect_eq(heap.pop(), 27);
+expect_eq(heap.pop(), 15);
+expect_eq(heap.pop(), 8);
+expect_eq(heap.is_empty(), true);
+
+// =========================================================================
+// 3. BTreeMap (有序键值映射)
+// =========================================================================
+let mut btree = new BTreeMap();
+btree.insert("banana", 20);
+btree.insert("apple", 10);
+btree.insert("cherry", 30);
+
+// O(log N) 快速检索与极值探测
+expect_eq(btree.get("apple"), 10);
+expect_eq(btree.min_key(), "apple");
+expect_eq(btree.max_key(), "cherry");
+
+// 键列表严格按照自然升序字典序返回
+let sorted_keys = btree.keys();
+expect_eq(sorted_keys[0], "apple");
+expect_eq(sorted_keys[1], "banana");
+expect_eq(sorted_keys[2], "cherry");
+
+// 移除键并返回旧值
+let old_val = btree.remove("banana");
+expect_eq(old_val, 20);
+expect_eq(btree.has("banana"), false);
+
+// =========================================================================
+// 4. BTreeSet (有序去重集合)
+// =========================================================================
+let mut bset = new BTreeSet();
+bset.add(30);
+bset.add(10);
+bset.add(20);
+bset.add(10); // 重复元素自动被去重过滤
+
+expect_eq(bset.len(), 3);
+expect_eq(bset.min(), 10);
+expect_eq(bset.max(), 30);
+
+// 元素集合天然有序
+let sorted_vals = bset.values();
+expect_eq(sorted_vals[0], 10);
+expect_eq(sorted_vals[1], 20);
+expect_eq(sorted_vals[2], 30);
+
+// =========================================================================
+// 5. HashMap 与 HashSet (Rust Parity 别名)
+// =========================================================================
+let mut map = new HashMap();
+map.set("name", "CP-BEAM");
+expect_eq(map.get("name"), "CP-BEAM");
+
+let mut set = new HashSet();
+set.add(100);
+expect_eq(set.has(100), true);
+```
+
+---
+
+### 12.3 生态演进与路线图（Roadmap）
 
 ```mermaid
 timeline
