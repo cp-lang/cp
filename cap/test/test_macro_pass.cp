@@ -1,14 +1,22 @@
 // cap/test/test_macro_pass.cp
-// Comprehensive Phase 4 Test for Type-Directed Macros & Anti-Cycle System
+// Comprehensive Phase 4 Test for Builtin Macros (@Clone, @Comparable, @Hash, @ToString, @Json, @Table)
+// Aggregator @derive(...), Batch Syntax @[...], and Third-Party Template Macros
 
 import { expect_eq } from "cap:test";
 import { print } from "cap:io";
 
-// 1. User-Defined Custom Macros
+// 1. User-Defined Custom Template Macro
+macro Accessor(target, field) {
+    fn get_${field}(_): string {
+        return _.${field};
+    }
+}
+
+// 2. User-Defined Legacy Empty Tag Macros
 macro Tag(target) {}
 macro Environment(target) {}
 
-// 2. Class using @Json, @Table("t_users"), and custom @Tag("UserModule")
+// 3. Class using @Json, @Table("t_users"), and custom @Tag("UserModule")
 @Json
 @Table("t_users")
 @Tag("UserModule")
@@ -22,7 +30,7 @@ class User {
     }
 }
 
-// 3. Two-Tier TypeInfo: Mutual/Nested Symbolic Reference without deadlock
+// 4. Two-Tier TypeInfo: Mutual/Nested Symbolic Reference without deadlock
 @Json
 @Table
 class Order {
@@ -35,7 +43,7 @@ class Order {
     }
 }
 
-// 4. Class using @ToString and custom @Environment without args
+// 5. Class using @ToString and custom @Environment without args
 @ToString
 @Environment
 class ServerConfig {
@@ -45,6 +53,38 @@ class ServerConfig {
     fn init(host: string, port: i32) {
         _.host = host;
         _.port = port;
+    }
+}
+
+// 6. User-Defined Template Macro on Book
+@Accessor("title")
+class Book {
+    title: string;
+    author: string;
+
+    fn init(title: string, author: string) {
+        _.title = title;
+        _.author = author;
+    }
+}
+
+// 7. Full @derive aggregator testing Clone, Comparable, Hash, ToString, Json
+@derive(Clone, Comparable, Hash, ToString, Json)
+class OrderItem {
+    sku: string;
+    price: f64;
+    quantity: i32;
+}
+
+// 8. Batch Annotation syntax @[Clone, ToString, Json]
+@[Clone, ToString, Json]
+class Point {
+    x: i32;
+    y: i32;
+
+    fn init(x: i32, y: i32) {
+        _.x = x;
+        _.y = y;
     }
 }
 
@@ -86,5 +126,52 @@ fn main(): void {
     @print("ServerConfig Environment: {s}", env_name);
     expect_eq(env_name, "Environment");
 
-    @print("=== All Phase 4 Type-Directed Macro tests passed! ===");
+    @print("=== [Test 6] Third-Party Template Macro @Accessor ===");
+    let book = new Book("Design Patterns", "GoF");
+    let book_title = book.get_title();
+    @print("Book get_title: {s}", book_title);
+    expect_eq(book_title, "Design Patterns");
+
+    @print("=== [Test 7] Full @derive(Clone, Comparable, Hash, ToString, Json) ===");
+    let item1 = new OrderItem("SKU-APPLE", 9.99, 10);
+    let item2 = new OrderItem("SKU-APPLE", 9.99, 10);
+    let item3 = new OrderItem("SKU-BANANA", 5.50, 20);
+
+    // 1. ToString
+    let item1_str = item1.toString();
+    @print("OrderItem 1 toString: {s}", item1_str);
+    expect_eq(item1_str, "OrderItem(sku=SKU-APPLE, price=9.99, quantity=10)");
+
+    // 2. Json
+    let item1_json = item1.toJson();
+    @print("OrderItem 1 toJson: {s}", item1_json);
+    expect_eq(item1_json, "{\"sku\":\"SKU-APPLE\",\"price\":9.99,\"quantity\":10}");
+
+    // 3. Clone
+    let item1_cloned = item1.clone();
+    @print("OrderItem 1 cloned: {s}", item1_cloned.toString());
+    expect_eq(item1.eq(item1_cloned), true);
+
+    // 4. Comparable (eq & cmp)
+    expect_eq(item1.eq(item2), true);
+    expect_eq(item1.eq(item3), false);
+    expect_eq(item1.cmp(item2), 0);
+    expect_eq(item1.cmp(item3), -1);
+    expect_eq(item3.cmp(item1), 1);
+
+    // 5. Hash
+    let h1 = item1.hash();
+    let h2 = item2.hash();
+    let h3 = item3.hash();
+    @print("Hash item1: {d}, Hash item2: {d}, Hash item3: {d}", h1, h2, h3);
+    expect_eq(h1 == h2, true);
+    expect_eq(h1 == h3, false);
+
+    @print("=== [Test 8] Batch Annotation @[Clone, ToString, Json] ===");
+    let pt1 = new Point(100, 200);
+    let pt2 = pt1.clone();
+    expect_eq(pt2.toString(), "Point(x=100, y=200)");
+    expect_eq(pt2.toJson(), "{\"x\":100,\"y\":200}");
+
+    @print("=== All Macro Metaprogramming tests passed 100%! ===");
 }

@@ -43,6 +43,8 @@ pub struct MacroDef {
     pub return_type: Option<Type>,
     pub body: BlockStmt,
     #[serde(default)]
+    pub methods: Vec<Function>,
+    #[serde(default)]
     pub meta: Vec<MetaItem>,
 }
 

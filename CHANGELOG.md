@@ -952,6 +952,39 @@
 - [`cap/test/test_comptime.cp`](file:///data/dev/cp/cap/test/test_comptime.cp):
   - 涵盖 `@{ }` 编译期求值、`@add()` 编译期函数调用、`@comptime` 参数约束、`val: auto` 编译期推导参数、`@if / @else` 分支修剪与 `@for` 循环展开的完整自动化回归测试用例，100% 测试通过。
 
+---
+
+## 2026-11-01 (工业级宏元编程系统：内置派生宏、聚合派生 @derive 与第三方 AST 模板宏完整实装)
+
+### 修改文件 (Modified)
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs):
+  - 为 `MacroDef` 结构体新增 `methods: Vec<Function>`，支持宏体内定义可注入目标类型的模板方法。
+- [`cpc/src/lexer.rs`](file:///data/dev/cp/cpc/src/lexer.rs):
+  - 扩展 `Ident` 正则词元规则，原生支持识别 `${field}` 与 `get_${field}` 等 AST 模板插值标识符；
+  - 注册 `#[token("$")] Dollar` 词元。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - 重构 `parse_macro_def`：支持解析宏体花括号 `{ ... }` 内声明的函数（`fn` / `pub fn`）与语句，注入 `MacroDef.methods`；
+  - 在 `is_known_builtin` 注册清单中补全 `@hash` 原语以及全部底层系统内置宏（`@io_*`、`@fs_*`、`@net_*`、`@http_*`、`@crypto_*` 等）。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 全量内置派生宏支持：
+    - `@Clone`：自动合成 `fn clone(_): Self` 深拷贝方法（返回 `new Class(_.f1, _.f2, ...)`）；
+    - `@Comparable`：自动合成字典序比较 `fn cmp(_, other: &Self): i32` 与等价性比对 `fn eq(_, other: &Self): bool`；
+    - `@Hash`：自动合成 `fn hash(_): usize`，结合全字段级联 FNV-1a 计算稳定哈希值；
+    - `@ToString`、`@Json`、`@Table`：稳定继承并支持多方法批量衍生；
+  - `@derive(...)` 聚合宏与 `@[...]` 批量语法：统一展开引擎，支持任意组合派生（如 `@derive(Clone, Comparable, Hash, ToString, Json)`）；
+  - 第三方 AST 模板插值宏（Template Macros）：
+    - 支持宏定义形参到实参的映射绑定与 AST 变量替换（函数名 `${field}`、属性访问 `_.${field}`、返回类型及字面量文本）；
+    - 保留无体空宏向后兼容性（如 `macro Tag(target) {}` 自动回退生成 `getTag(): string`）；
+  - 零样板构造函数自动合成：当类中包含字段且开发者未显式编写 `fn init(...)` 时，编译期 Sema Phase 2 自动生成成员级 `init` 构造函数。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 在 Zig 运行时基座注入 `cp_lt`、`cp_gt`、`cp_lte`、`cp_gte` 与 `cp_hash_val` 强类型原生辅助函数；
+  - `BinaryOp`：`<`、`>`、`<=`、`>=` 自动映射为 `cp_lt` / `cp_gt` / `cp_lte` / `cp_gte`，支持字符串与复杂结构的原生字典序比对；
+  - `Expr::Builtin`：为 `@hash` 原语生成零开销 FNV-1a 编译期级联哈希内联块 `(blk: { var _h: usize = ...; break :blk _h; })`。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 全面更新第 11.2 节《宏元编程（Macro Metaprogramming）》，详尽记录内置派生宏清单（`@Clone`、`@Comparable`、`@Hash`、`@ToString`、`@Json`、`@Table`）、`@derive(...)` 聚合宏、`@[...]` 批量注解语法、第三方 AST 模板宏（`${param}` 插值）与 Comptime 过程宏的最佳实践与代码范式。
+- [`cap/test/test_macro_pass.cp`](file:///data/dev/cp/cap/test/test_macro_pass.cp):
+  - 全面升级宏系统回归套件：测试覆盖 `@Json`、`@Table`、`@ToString`、`@Clone`、`@Comparable`（`eq` & `cmp`）、`@Hash`、`@derive(...)` 全量五大契约组合、`@[Clone, ToString, Json]` 批量派生，以及用户自定义 AST 模板宏 `@Accessor("title")`，100% 运行通过。
+
 
 
 

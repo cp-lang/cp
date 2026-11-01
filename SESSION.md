@@ -3941,6 +3941,84 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
    - 重新执行增量构建并运行 [`cap/test/test_comptime.cp`](file:///data/dev/cp/cap/test/test_comptime.cp)，全量测试 100% 绿灯通过；
    - 按铁律更新 [`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md) 与 [`SESSION.md`](file:///data/dev/cp/SESSION.md)。
 
+---
+
+## 2026-11-01 (Session Update - Git Commit)
+
+### 用户指令
+> git 提交
+
+### 执行结果汇报
+1. 暂存所有修改文件：
+   - `cpc/src/parser.rs`
+   - `cp_ref.md`
+   - `CHANGELOG.md`
+   - `DEVLOG.md`
+   - `SESSION.md`
+---
+
+## 2026-11-01 (Session Update - 工业级宏元编程系统与五大契约派生宏落地)
+
+### 用户指令
+> 根据我们上述讨论的, 完整实现上述 内置宏并开放给第三方模板宏和过程宏
+
+### 执行结果汇报
+1. **编译器前端与 AST 模板系统完整实装**：
+   - [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs)：在 `MacroDef` 中引入 `methods: Vec<Function>`，为宏体代码注入提供 AST 容器；
+   - [`cpc/src/lexer.rs`](file:///data/dev/cp/cpc/src/lexer.rs)：升级 `Ident` 词法正则，无缝识别 `${field}` 与 `get_${field}` 等 AST 插值表达式为合法词元，增加 `Token::Dollar`；
+   - [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs)：支持在 `macro Name(...) { ... }` 宏体内解析声明的函数（`fn` / `pub fn`）与语句，将 `@hash` 纳入编译器已知内置原语；
+   - [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs)：
+     - **内置派生宏矩阵**：全面实装 `@Clone`（合成 `clone` 深拷贝）、`@Comparable`（合成 `cmp` 与 `eq` 全序比对）、`@Hash`（合成级联 FNV-1a 哈希）、`@ToString`、`@Json`、`@Table`；
+     - **聚合宏与批量语法**：统一 `@derive(...)` 与 `@[...]` 执行管线，支持五大契约一键全自动装配；
+     - **第三方 AST 模板宏**：实现实参映射替换引擎（`${param}` 递归替换方法名、类型、形参、属性访问及字符串字面量）；同时保持无体空宏向下兼容；
+     - **零样板构造函数**：未显式声明 `fn init(...)` 时自动合成全参数成员初始化构造函数；
+   - [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs)：
+     - 注入原生强类型比较辅助函数 `cp_lt`、`cp_gt`、`cp_lte`、`cp_gte`（全面打通字符串与数值的全序比对）；
+     - 注入原生哈希辅助函数 `cp_hash_val`，为 `@hash` 生成零开销编译期级联内联块。
+2. **测试验证**：
+   - 升级 [`cap/test/test_macro_pass.cp`](file:///data/dev/cp/cap/test/test_macro_pass.cp)，包含 8 大全场景宏测试：
+     - `@Json` 单层序列化；
+     - `@Table` 表名提取；
+     - 自定义 `@Tag` 元数据；
+     - 双层嵌套 `@Json` 内省；
+     - `@ToString` 格式化；
+     - 第三方模板宏 `@Accessor("title")` 动态注入 `get_title()`；
+     - 全量聚合派生 `@derive(Clone, Comparable, Hash, ToString, Json)` 在 `OrderItem` 上的深拷贝、全等、字典序比较与哈希表现；
+     - 批量注解 `@[Clone, ToString, Json]`；
+   - 执行 `./cap/bin/cap cap/test/test_macro_pass.cp`，全量测试 **100% 绿灯通过**；
+   - 回归运行 `test_comptime.cp` 与 `test_batch_meta_pass.cp`，保持零回归破损。
+3. **四线文档同步**：
+   - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)：详尽更新第 11.2 节《宏元编程》，补齐内置派生宏、聚合派生宏、Trait 与宏的协同哲学及第三方模板宏示例代码；
+   - [`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)：登记全部修改与增强；
+   - [`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)：记录架构设计考量、AST 插值原理及全套实现机制；
+   - [`SESSION.md`](file:///data/dev/cp/SESSION.md)：完整记录本次指令与成果汇报。
+
+---
+
+## 2026-11-01 (Session Update - Git Commit)
+
+### 用户指令
+> git 提交
+
+### 执行结果汇报
+1. **暂存全部修改文件（含四线文档与全部核心组件）**：
+   - `cpc/src/ast.rs`
+   - `cpc/src/lexer.rs`
+   - `cpc/src/parser.rs`
+   - `cpc/src/sema.rs`
+   - `cpc/src/codegen.rs`
+   - `cap/test/test_macro_pass.cp`
+   - `cp_ref.md`
+   - `GEMINI.md`
+   - `CHANGELOG.md`
+   - `DEVLOG.md`
+   - `SESSION.md`
+2. **一次性原子提交**：
+   - 提交信息：`feat(macro): implement builtin derive macros, @derive aggregator, and third-party AST template macros`
+3. **工作区状态**：
+   - 工作区 100% 干净，测试全量 100% 绿灯，绝无事后 amend 或二次提交。
+
+
 
 
 

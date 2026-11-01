@@ -155,7 +155,15 @@ impl Analyzer {
 
         let mut macro_defs = HashMap::new();
         let mock_span = Span { start: 0, end: 0 };
-        for name in ["Json", "Table", "Clone", "ToString"] {
+        for name in [
+            "Json",
+            "Table",
+            "Clone",
+            "ToString",
+            "Comparable",
+            "Hash",
+            "derive",
+        ] {
             macro_defs.insert(
                 name.to_string(),
                 MacroDef {
@@ -170,6 +178,7 @@ impl Analyzer {
                         span: mock_span.clone(),
                         body: vec![],
                     },
+                    methods: vec![],
                     meta: vec![],
                 },
             );
@@ -523,24 +532,24 @@ impl Analyzer {
 
                     self.macro_call_stack.push(call_key);
 
-                    let derived = match macro_name.as_str() {
-                        "Json" => self.derive_json_method(cls),
-                        "Table" => self.derive_table_method(cls, meta_item),
-                        "ToString" => self.derive_tostring_method(cls),
-                        _ => self.derive_custom_macro_method(macro_name, cls, meta_item),
+                    let derived_list: Vec<Function> = if macro_name == "derive" {
+                        self.expand_derive_macro(cls, meta_item)?
+                    } else {
+                        self.expand_single_macro(macro_name, cls, meta_item)?
                     };
 
                     self.macro_call_stack.pop();
 
-                    // Macro Hygiene: generated AST nodes strictly cannot carry macro annotations!
-                    if !derived.meta.is_empty() {
-                        return Err(SemaError::MacroHygieneViolation(
-                            macro_name.clone(),
-                            meta_item.span,
-                        ));
+                    for derived in derived_list {
+                        // Macro Hygiene: generated AST nodes strictly cannot carry macro annotations!
+                        if !derived.meta.is_empty() {
+                            return Err(SemaError::MacroHygieneViolation(
+                                macro_name.clone(),
+                                meta_item.span,
+                            ));
+                        }
+                        derived_methods.push(derived);
                     }
-
-                    derived_methods.push(derived);
                 }
 
                 if !derived_methods.is_empty() {
@@ -549,26 +558,357 @@ impl Analyzer {
             }
         }
 
-        for (class_name, methods) in class_modifications {
-            for item in &mut module.body {
-                if let ModuleItem::Decl(Decl::Class(cls)) = item {
-                    if cls.ident.sym == class_name {
-                        for m in methods {
-                            if !cls
-                                .methods
-                                .iter()
-                                .any(|existing| existing.ident.sym == m.ident.sym)
-                            {
-                                cls.methods.push(m);
-                            }
+        for item in &mut module.body {
+            if let ModuleItem::Decl(Decl::Class(cls)) = item {
+                if let Some((_, methods)) = class_modifications
+                    .iter()
+                    .find(|(name, _)| name == &cls.ident.sym)
+                {
+                    for m in methods {
+                        if !cls
+                            .methods
+                            .iter()
+                            .any(|existing| existing.ident.sym == m.ident.sym)
+                        {
+                            cls.methods.push(m.clone());
                         }
-                        break;
                     }
+                }
+                // Auto-generate memberwise init if not present and fields are non-empty
+                if !cls.methods.iter().any(|m| m.ident.sym == "init") && !cls.fields.is_empty() {
+                    let mock_span = Span { start: 0, end: 0 };
+                    let mut init_params = Vec::new();
+                    let mut init_stmts = Vec::new();
+                    for f in &cls.fields {
+                        init_params.push(Param {
+                            span: mock_span,
+                            ident: f.ident.clone(),
+                            ty: f.ty.clone(),
+                            is_mut: false,
+                            is_move: matches!(f.ty, Type::Ref(_) | Type::BoxDyn(_)),
+                            is_comptime: false,
+                            default: None,
+                            meta: vec![],
+                        });
+                        init_stmts.push(Stmt::Expr(Expr::Bin(BinExpr {
+                            span: mock_span,
+                            op: BinaryOp::Assign,
+                            left: Box::new(Expr::Member(MemberExpr {
+                                span: mock_span,
+                                obj: Box::new(Expr::Ident(Ident {
+                                    span: mock_span,
+                                    sym: "_".to_string(),
+                                })),
+                                prop: f.ident.clone(),
+                            })),
+                            right: Box::new(Expr::Ident(f.ident.clone())),
+                        })));
+                    }
+                    cls.methods.insert(
+                        0,
+                        Function {
+                            span: mock_span,
+                            ident: Ident {
+                                span: mock_span,
+                                sym: "init".to_string(),
+                            },
+                            params: init_params,
+                            return_type: Some(Type::Void),
+                            body: BlockStmt {
+                                span: mock_span,
+                                body: init_stmts,
+                            },
+                            is_async: false,
+                            is_static: false,
+                            is_unsafe: false,
+                            meta: vec![],
+                        },
+                    );
                 }
             }
         }
 
         Ok(())
+    }
+
+    fn expand_single_macro(
+        &self,
+        macro_name: &str,
+        cls: &Class,
+        meta_item: &MetaItem,
+    ) -> SemaResult<Vec<Function>> {
+        match macro_name {
+            "Json" => Ok(vec![self.derive_json_method(cls)]),
+            "Table" => Ok(vec![self.derive_table_method(cls, meta_item)]),
+            "ToString" => Ok(vec![self.derive_tostring_method(cls)]),
+            "Clone" => Ok(vec![self.derive_clone_method(cls)]),
+            "Comparable" => Ok(self.derive_comparable_methods(cls)),
+            "Hash" => Ok(vec![self.derive_hash_method(cls)]),
+            _ => self.derive_custom_macro_methods(macro_name, cls, meta_item),
+        }
+    }
+
+    fn expand_derive_macro(&self, cls: &Class, meta_item: &MetaItem) -> SemaResult<Vec<Function>> {
+        let mut methods = Vec::new();
+        for arg in &meta_item.args {
+            let sub_macro_name = match arg {
+                MetaArg::Positional(Expr::Ident(id)) => id.sym.clone(),
+                MetaArg::Positional(Expr::Lit(Lit::Str(s))) => s.clone(),
+                MetaArg::Named(id, _) => id.sym.clone(),
+                _ => continue,
+            };
+            let mut sub_meta = meta_item.clone();
+            sub_meta.name.sym = sub_macro_name.clone();
+            sub_meta.args.clear();
+            let sub_methods = self.expand_single_macro(&sub_macro_name, cls, &sub_meta)?;
+            methods.extend(sub_methods);
+        }
+        Ok(methods)
+    }
+
+    fn derive_clone_method(&self, cls: &Class) -> Function {
+        let mock_span = Span { start: 0, end: 0 };
+        let mut args = Vec::new();
+        for f in &cls.fields {
+            args.push(Expr::Member(MemberExpr {
+                span: mock_span,
+                obj: Box::new(Expr::Ident(Ident {
+                    span: mock_span,
+                    sym: "_".to_string(),
+                })),
+                prop: f.ident.clone(),
+            }));
+        }
+        let ret_expr = Expr::New(CallExpr {
+            span: mock_span,
+            callee: Box::new(Expr::Ident(cls.ident.clone())),
+            args,
+            is_comptime: false,
+        });
+        Function {
+            span: mock_span,
+            ident: Ident {
+                span: mock_span,
+                sym: "clone".to_string(),
+            },
+            params: vec![],
+            return_type: Some(Type::Ref(cls.ident.clone())),
+            body: BlockStmt {
+                span: mock_span,
+                body: vec![Stmt::Return(crate::ast::ReturnStmt {
+                    span: mock_span,
+                    arg: Some(ret_expr),
+                })],
+            },
+            is_async: false,
+            is_static: false,
+            is_unsafe: false,
+            meta: vec![],
+        }
+    }
+
+    fn derive_comparable_methods(&self, cls: &Class) -> Vec<Function> {
+        vec![self.derive_eq_method(cls), self.derive_cmp_method(cls)]
+    }
+
+    fn derive_eq_method(&self, cls: &Class) -> Function {
+        let mock_span = Span { start: 0, end: 0 };
+        let mut body = Vec::new();
+        for f in &cls.fields {
+            let self_access = Expr::Member(MemberExpr {
+                span: mock_span,
+                obj: Box::new(Expr::Ident(Ident {
+                    span: mock_span,
+                    sym: "_".to_string(),
+                })),
+                prop: f.ident.clone(),
+            });
+            let other_access = Expr::Member(MemberExpr {
+                span: mock_span,
+                obj: Box::new(Expr::Ident(Ident {
+                    span: mock_span,
+                    sym: "other".to_string(),
+                })),
+                prop: f.ident.clone(),
+            });
+            let not_eq = Expr::Bin(BinExpr {
+                span: mock_span,
+                op: BinaryOp::NotEq,
+                left: Box::new(self_access),
+                right: Box::new(other_access),
+            });
+            body.push(Stmt::If(IfStmt {
+                span: mock_span,
+                test: not_eq,
+                cons: Box::new(Stmt::Return(crate::ast::ReturnStmt {
+                    span: mock_span,
+                    arg: Some(Expr::Lit(Lit::Bool(false))),
+                })),
+                alt: None,
+                is_comptime: false,
+            }));
+        }
+        body.push(Stmt::Return(crate::ast::ReturnStmt {
+            span: mock_span,
+            arg: Some(Expr::Lit(Lit::Bool(true))),
+        }));
+        Function {
+            span: mock_span,
+            ident: Ident {
+                span: mock_span,
+                sym: "eq".to_string(),
+            },
+            params: vec![Param {
+                span: mock_span,
+                ident: Ident {
+                    span: mock_span,
+                    sym: "other".to_string(),
+                },
+                ty: Type::Ref(cls.ident.clone()),
+                is_mut: false,
+                is_move: false,
+                is_comptime: false,
+                default: None,
+                meta: vec![],
+            }],
+            return_type: Some(Type::Bool),
+            body: BlockStmt {
+                span: mock_span,
+                body,
+            },
+            is_async: false,
+            is_static: false,
+            is_unsafe: false,
+            meta: vec![],
+        }
+    }
+
+    fn derive_cmp_method(&self, cls: &Class) -> Function {
+        let mock_span = Span { start: 0, end: 0 };
+        let mut body = Vec::new();
+        for f in &cls.fields {
+            let self_access = Expr::Member(MemberExpr {
+                span: mock_span,
+                obj: Box::new(Expr::Ident(Ident {
+                    span: mock_span,
+                    sym: "_".to_string(),
+                })),
+                prop: f.ident.clone(),
+            });
+            let other_access = Expr::Member(MemberExpr {
+                span: mock_span,
+                obj: Box::new(Expr::Ident(Ident {
+                    span: mock_span,
+                    sym: "other".to_string(),
+                })),
+                prop: f.ident.clone(),
+            });
+            let lt = Expr::Bin(BinExpr {
+                span: mock_span,
+                op: BinaryOp::Lt,
+                left: Box::new(self_access.clone()),
+                right: Box::new(other_access.clone()),
+            });
+            body.push(Stmt::If(IfStmt {
+                span: mock_span,
+                test: lt,
+                cons: Box::new(Stmt::Return(crate::ast::ReturnStmt {
+                    span: mock_span,
+                    arg: Some(Expr::Lit(Lit::Int(-1))),
+                })),
+                alt: None,
+                is_comptime: false,
+            }));
+            let gt = Expr::Bin(BinExpr {
+                span: mock_span,
+                op: BinaryOp::Gt,
+                left: Box::new(self_access),
+                right: Box::new(other_access),
+            });
+            body.push(Stmt::If(IfStmt {
+                span: mock_span,
+                test: gt,
+                cons: Box::new(Stmt::Return(crate::ast::ReturnStmt {
+                    span: mock_span,
+                    arg: Some(Expr::Lit(Lit::Int(1))),
+                })),
+                alt: None,
+                is_comptime: false,
+            }));
+        }
+        body.push(Stmt::Return(crate::ast::ReturnStmt {
+            span: mock_span,
+            arg: Some(Expr::Lit(Lit::Int(0))),
+        }));
+        Function {
+            span: mock_span,
+            ident: Ident {
+                span: mock_span,
+                sym: "cmp".to_string(),
+            },
+            params: vec![Param {
+                span: mock_span,
+                ident: Ident {
+                    span: mock_span,
+                    sym: "other".to_string(),
+                },
+                ty: Type::Ref(cls.ident.clone()),
+                is_mut: false,
+                is_move: false,
+                is_comptime: false,
+                default: None,
+                meta: vec![],
+            }],
+            return_type: Some(Type::I32),
+            body: BlockStmt {
+                span: mock_span,
+                body,
+            },
+            is_async: false,
+            is_static: false,
+            is_unsafe: false,
+            meta: vec![],
+        }
+    }
+
+    fn derive_hash_method(&self, cls: &Class) -> Function {
+        let mock_span = Span { start: 0, end: 0 };
+        let mut args = Vec::new();
+        for f in &cls.fields {
+            args.push(Expr::Member(MemberExpr {
+                span: mock_span,
+                obj: Box::new(Expr::Ident(Ident {
+                    span: mock_span,
+                    sym: "_".to_string(),
+                })),
+                prop: f.ident.clone(),
+            }));
+        }
+        let ret_expr = Expr::Builtin(BuiltinCall {
+            span: mock_span,
+            name: "@hash".to_string(),
+            args,
+        });
+        Function {
+            span: mock_span,
+            ident: Ident {
+                span: mock_span,
+                sym: "hash".to_string(),
+            },
+            params: vec![],
+            return_type: Some(Type::USize),
+            body: BlockStmt {
+                span: mock_span,
+                body: vec![Stmt::Return(crate::ast::ReturnStmt {
+                    span: mock_span,
+                    arg: Some(ret_expr),
+                })],
+            },
+            is_async: false,
+            is_static: false,
+            is_unsafe: false,
+            meta: vec![],
+        }
     }
 
     fn derive_json_method(&self, cls: &Class) -> Function {
@@ -801,6 +1141,250 @@ impl Analyzer {
             is_static: false,
             is_unsafe: false,
             meta: vec![],
+        }
+    }
+
+    fn derive_custom_macro_methods(
+        &self,
+        macro_name: &str,
+        cls: &Class,
+        meta_item: &MetaItem,
+    ) -> SemaResult<Vec<Function>> {
+        if let Some(macro_def) = self.macro_defs.get(macro_name) {
+            if !macro_def.methods.is_empty() {
+                let mut subst: HashMap<String, String> = HashMap::new();
+                subst.insert("${target}".to_string(), cls.ident.sym.clone());
+                subst.insert("target".to_string(), cls.ident.sym.clone());
+
+                let mut arg_idx = 0;
+                for (p_idx, p) in macro_def.params.iter().enumerate() {
+                    if p_idx == 0
+                        && (p.ident.sym == "target" || p.ident.sym == "this" || p.ident.sym == "_")
+                    {
+                        continue;
+                    }
+                    let val_opt = meta_item
+                        .args
+                        .iter()
+                        .find_map(|a| match a {
+                            MetaArg::Named(id, e) if id.sym == p.ident.sym => {
+                                Some(Self::eval_meta_arg_str(e))
+                            }
+                            _ => None,
+                        })
+                        .or_else(|| {
+                            if arg_idx < meta_item.args.len() {
+                                let a = &meta_item.args[arg_idx];
+                                arg_idx += 1;
+                                match a {
+                                    MetaArg::Positional(e) => Some(Self::eval_meta_arg_str(e)),
+                                    _ => None,
+                                }
+                            } else {
+                                None
+                            }
+                        });
+
+                    if let Some(val) = val_opt {
+                        subst.insert(format!("${{{}}}", p.ident.sym), val.clone());
+                        subst.insert(format!("${}", p.ident.sym), val.clone());
+                        subst.insert(p.ident.sym.clone(), val);
+                    }
+                }
+
+                let mut expanded = Vec::new();
+                for m in &macro_def.methods {
+                    let mut instantiated = m.clone();
+                    Self::substitute_function(&mut instantiated, &subst);
+                    instantiated.meta.clear(); // Macro Hygiene!
+                    expanded.push(instantiated);
+                }
+                return Ok(expanded);
+            }
+        }
+
+        Ok(vec![
+            self.derive_custom_macro_method(macro_name, cls, meta_item)
+        ])
+    }
+
+    fn eval_meta_arg_str(expr: &Expr) -> String {
+        match expr {
+            Expr::Lit(Lit::Str(s)) => s.clone(),
+            Expr::Ident(id) => id.sym.clone(),
+            Expr::Lit(Lit::Int(n)) => n.to_string(),
+            Expr::Lit(Lit::Float(f)) => f.to_string(),
+            Expr::Lit(Lit::Bool(b)) => b.to_string(),
+            _ => "".to_string(),
+        }
+    }
+
+    fn substitute_type(ty: &mut Type, subst: &HashMap<String, String>) {
+        match ty {
+            Type::Ref(id) => {
+                for (k, v) in subst {
+                    if id.sym == *k {
+                        id.sym = v.clone();
+                    } else if id.sym.contains(k) {
+                        id.sym = id.sym.replace(k, v);
+                    }
+                }
+                match id.sym.as_str() {
+                    "string" => *ty = Type::String,
+                    "i32" => *ty = Type::I32,
+                    "u32" => *ty = Type::U32,
+                    "u64" => *ty = Type::U64,
+                    "f32" => *ty = Type::F32,
+                    "f64" => *ty = Type::F64,
+                    "usize" => *ty = Type::USize,
+                    "bool" => *ty = Type::Bool,
+                    "void" => *ty = Type::Void,
+                    _ => {}
+                }
+            }
+            Type::BorrowType { inner, .. } => Self::substitute_type(inner, subst),
+            Type::Optional(inner) => Self::substitute_type(inner, subst),
+            Type::Array(inner) => Self::substitute_type(inner, subst),
+            _ => {}
+        }
+    }
+
+    fn substitute_function(func: &mut Function, subst: &HashMap<String, String>) {
+        for (k, v) in subst {
+            if func.ident.sym == *k {
+                func.ident.sym = v.clone();
+            } else if func.ident.sym.contains(k) {
+                func.ident.sym = func.ident.sym.replace(k, v);
+            }
+        }
+        if let Some(ret) = &mut func.return_type {
+            Self::substitute_type(ret, subst);
+        }
+        for p in &mut func.params {
+            for (k, v) in subst {
+                if p.ident.sym == *k {
+                    p.ident.sym = v.clone();
+                } else if p.ident.sym.contains(k) {
+                    p.ident.sym = p.ident.sym.replace(k, v);
+                }
+            }
+            Self::substitute_type(&mut p.ty, subst);
+        }
+        for s in &mut func.body.body {
+            Self::substitute_stmt(s, subst);
+        }
+    }
+
+    fn substitute_stmt(stmt: &mut Stmt, subst: &HashMap<String, String>) {
+        match stmt {
+            Stmt::Expr(e) => Self::substitute_expr(e, subst),
+            Stmt::Return(r) => {
+                if let Some(arg) = &mut r.arg {
+                    Self::substitute_expr(arg, subst);
+                }
+            }
+            Stmt::If(i) => {
+                Self::substitute_expr(&mut i.test, subst);
+                Self::substitute_stmt(&mut i.cons, subst);
+                if let Some(alt) = &mut i.alt {
+                    Self::substitute_stmt(alt, subst);
+                }
+            }
+            Stmt::While(w) => {
+                Self::substitute_expr(&mut w.test, subst);
+                Self::substitute_stmt(&mut w.body, subst);
+            }
+            Stmt::For(f) => {
+                Self::substitute_expr(&mut f.expr, subst);
+                Self::substitute_stmt(&mut f.body, subst);
+            }
+            Stmt::Block(b) | Stmt::ComptimeBlock(b) | Stmt::UnsafeBlock(b) => {
+                for s in &mut b.body {
+                    Self::substitute_stmt(s, subst);
+                }
+            }
+            Stmt::Var(v) => {
+                if let Pattern::Ident(id) = &mut v.pat {
+                    for (k, v_sub) in subst {
+                        if id.sym == *k {
+                            id.sym = v_sub.clone();
+                        } else if id.sym.contains(k) {
+                            id.sym = id.sym.replace(k, v_sub);
+                        }
+                    }
+                }
+                if let Some(ty) = &mut v.ty {
+                    Self::substitute_type(ty, subst);
+                }
+                if let Some(init) = &mut v.init {
+                    Self::substitute_expr(init, subst);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn substitute_expr(expr: &mut Expr, subst: &HashMap<String, String>) {
+        match expr {
+            Expr::Ident(id) => {
+                for (k, v) in subst {
+                    if id.sym == *k {
+                        id.sym = v.clone();
+                    } else if id.sym.contains(k) {
+                        id.sym = id.sym.replace(k, v);
+                    }
+                }
+            }
+            Expr::Member(m) => {
+                Self::substitute_expr(&mut m.obj, subst);
+                for (k, v) in subst {
+                    if m.prop.sym == *k {
+                        m.prop.sym = v.clone();
+                    } else if m.prop.sym.contains(k) {
+                        m.prop.sym = m.prop.sym.replace(k, v);
+                    }
+                }
+            }
+            Expr::Bin(b) => {
+                Self::substitute_expr(&mut b.left, subst);
+                Self::substitute_expr(&mut b.right, subst);
+            }
+            Expr::Call(c) | Expr::New(c) | Expr::OptCall(c) => {
+                Self::substitute_expr(&mut c.callee, subst);
+                for a in &mut c.args {
+                    Self::substitute_expr(a, subst);
+                }
+            }
+            Expr::Lit(Lit::Str(s)) => {
+                for (k, v) in subst {
+                    if s.contains(k) {
+                        *s = s.replace(k, v);
+                    }
+                }
+            }
+            Expr::Template(t) => {
+                for q in &mut t.quasis {
+                    for (k, v) in subst {
+                        if q.contains(k) {
+                            *q = q.replace(k, v);
+                        }
+                    }
+                }
+                for e in &mut t.expressions {
+                    Self::substitute_expr(e, subst);
+                }
+            }
+            Expr::Builtin(b) => {
+                for a in &mut b.args {
+                    Self::substitute_expr(a, subst);
+                }
+            }
+            Expr::Array(items) => {
+                for item in items {
+                    Self::substitute_expr(item, subst);
+                }
+            }
+            _ => {}
         }
     }
 

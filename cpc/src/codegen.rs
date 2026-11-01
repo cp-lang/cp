@@ -1149,6 +1149,11 @@ impl Codegen {
         self.writeln("    return a == b;");
         self.writeln("}");
         self.writeln("fn cp_neq(a: anytype, b: anytype) bool { return !cp_eq(a, b); }");
+        self.writeln("fn cp_lt(a: anytype, b: anytype) bool { const Ta = @TypeOf(a); const Tb = @TypeOf(b); if (comptime is_string_like(Ta) and is_string_like(Tb)) { return std.mem.order(u8, to_string_slice(a), to_string_slice(b)) == .lt; } return a < b; }");
+        self.writeln("fn cp_gt(a: anytype, b: anytype) bool { const Ta = @TypeOf(a); const Tb = @TypeOf(b); if (comptime is_string_like(Ta) and is_string_like(Tb)) { return std.mem.order(u8, to_string_slice(a), to_string_slice(b)) == .gt; } return a > b; }");
+        self.writeln("fn cp_lte(a: anytype, b: anytype) bool { const Ta = @TypeOf(a); const Tb = @TypeOf(b); if (comptime is_string_like(Ta) and is_string_like(Tb)) { const ord = std.mem.order(u8, to_string_slice(a), to_string_slice(b)); return ord == .lt or ord == .eq; } return a <= b; }");
+        self.writeln("fn cp_gte(a: anytype, b: anytype) bool { const Ta = @TypeOf(a); const Tb = @TypeOf(b); if (comptime is_string_like(Ta) and is_string_like(Tb)) { const ord = std.mem.order(u8, to_string_slice(a), to_string_slice(b)); return ord == .gt or ord == .eq; } return a >= b; }");
+        self.writeln("fn cp_hash_val(val: anytype) usize { const T = @TypeOf(val); if (comptime is_string_like(T)) { const s = to_string_slice(val); var h: usize = 2166136261; for (s) |byte| { h = (h ^ byte) *% 16777619; } return h; } if (comptime @typeInfo(T) == .int or @typeInfo(T) == .float or @typeInfo(T) == .bool) { var h: usize = 2166136261; const bytes = std.mem.asBytes(&val); for (bytes) |byte| { h = (h ^ byte) *% 16777619; } return h; } if (comptime @typeInfo(T) == .pointer) { if (@hasDecl(@typeInfo(T).pointer.child, \"hash\")) { return val.hash(); } } return 0; }");
         self.writeln("fn cp_array_lit(comptime Elem: type, init_slice: []const Elem) []const Elem { const buf = std.heap.page_allocator.alloc(Elem, init_slice.len) catch unreachable; if (init_slice.len > 0) @memcpy(buf, init_slice); return buf; }");
         self.writeln("fn CpArrayElemType(comptime PtrT: type) type { const S0 = @typeInfo(PtrT).pointer.child; const S1 = if (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one) @typeInfo(S0).pointer.child else S0; return @typeInfo(S1).pointer.child; }");
         self.writeln("fn cp_array_push(arr_ptr: anytype, item: anytype) void { const S0 = @TypeOf(arr_ptr.*); const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) arr_ptr.* else arr_ptr; const SliceT = @TypeOf(target_ptr.*); const Elem = @typeInfo(SliceT).pointer.child; const old_slice = target_ptr.*; const new_slice = std.heap.page_allocator.alloc(Elem, old_slice.len + 1) catch unreachable; if (old_slice.len > 0) @memcpy(new_slice[0..old_slice.len], old_slice); new_slice[old_slice.len] = @as(Elem, cp_val(item)); target_ptr.* = new_slice; }");
@@ -6549,15 +6554,15 @@ impl Codegen {
                     BinaryOp::Eq => format!("cp_eq({}, {})", l, r),
                     BinaryOp::NotEq => format!("cp_neq({}, {})", l, r),
                     BinaryOp::Add => format!("cp_add({}, {})", l, r),
+                    BinaryOp::Lt => format!("cp_lt({}, {})", l, r),
+                    BinaryOp::Gt => format!("cp_gt({}, {})", l, r),
+                    BinaryOp::LtEq => format!("cp_lte({}, {})", l, r),
+                    BinaryOp::GtEq => format!("cp_gte({}, {})", l, r),
                     _ => {
                         let op = match bin.op {
                             BinaryOp::Sub => "-",
                             BinaryOp::Mul => "*",
                             BinaryOp::Div => "/",
-                            BinaryOp::Lt => "<",
-                            BinaryOp::Gt => ">",
-                            BinaryOp::LtEq => "<=",
-                            BinaryOp::GtEq => ">=",
                             _ => "",
                         };
                         format!("({} {} {})", l, op, r)
@@ -8099,6 +8104,21 @@ impl Codegen {
                 }
             }
             Expr::Builtin(call) => match call.name.as_str() {
+                "@hash" => {
+                    if call.args.is_empty() {
+                        "0".to_string()
+                    } else if call.args.len() == 1 {
+                        format!("cp_hash_val({})", self.generate_expr(&call.args[0]))
+                    } else {
+                        let mut block = String::from("(blk: { var _h: usize = 2166136261; ");
+                        for arg in &call.args {
+                            let gen = self.generate_expr(arg);
+                            block.push_str(&format!("_h = (_h *% 16777619) ^ cp_hash_val({}); ", gen));
+                        }
+                        block.push_str("break :blk _h; })");
+                        block
+                    }
+                }
                 "@not" => {
                     let inner = self.generate_expr(&call.args[0]);
                     format!("cp_not({})", inner)

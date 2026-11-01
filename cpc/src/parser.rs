@@ -348,14 +348,31 @@ impl<'a> Parser<'a> {
             self.bump()?;
             return_type = Some(self.parse_type()?);
         }
-        let body = self.parse_block_stmt()?;
-        let end = body.span.end;
+        self.expect(Token::LBrace)?;
+        let mut methods = Vec::new();
+        let mut body_stmts = Vec::new();
+        while self.peek() != Some(&Token::RBrace) && self.peek().is_some() {
+            if matches!(self.peek(), Some(Token::Ident(id)) if id == "pub") {
+                self.bump()?;
+            }
+            if self.peek() == Some(&Token::Fn) || self.peek() == Some(&Token::Async) {
+                let func = self.parse_function()?;
+                methods.push(func);
+            } else {
+                body_stmts.push(self.parse_stmt()?);
+            }
+        }
+        let end = self.expect(Token::RBrace)?.end;
         Ok(MacroDef {
             span: Span { start, end },
             ident,
             params,
             return_type,
-            body,
+            body: BlockStmt {
+                span: Span { start, end },
+                body: body_stmts,
+            },
+            methods,
             meta: meta_list,
         })
     }
@@ -3063,11 +3080,37 @@ impl<'a> Parser<'a> {
                 let is_known_builtin = matches!(
                     name.as_str(),
                     "@print"
+                        | "@print_err"
                         | "@not"
                         | "@spawn"
+                        | "@worker_spawn"
                         | "@net_accept_async"
                         | "@net_read_async"
                         | "@net_write_async"
+                        | "@net_listen"
+                        | "@net_close"
+                        | "@net_connect"
+                        | "@net_send"
+                        | "@yield_to_beam"
+                        | "@io_write_stdout"
+                        | "@io_write_stderr"
+                        | "@io_read_stdin_line"
+                        | "@http_fetch"
+                        | "@http_serve"
+                        | "@fs_read_async"
+                        | "@fs_write_file"
+                        | "@fs_mkdir"
+                        | "@fs_stat_size"
+                        | "@fs_is_dir"
+                        | "@fs_remove"
+                        | "@fs_rmdir"
+                        | "@fs_rename"
+                        | "@fs_copy_file"
+                        | "@fs_exists"
+                        | "@fs_read_file"
+                        | "@crypto_uuid"
+                        | "@crypto_hash"
+                        | "@hash"
                         | "@self"
                         | "@sender"
                         | "@reply"

@@ -1764,6 +1764,75 @@ AI 智能体正经历从“单体聊天机器人（Single Agent / ChatBot）”�
   - 同步清理第 11.1 节中的 `anytype` 与 bare `comptime` 描述，保持文档绝对纯粹统一。
 - 执行 `./cap/bin/cap cap/test/test_comptime.cp`，全量验证通过。
 
+---
+
+## 2026-11-01: 工业级宏元编程系统与五大契约内置派生宏完整落地
+
+### 1. 架构目标与设计哲学
+宏系统是现代系统级语言（Rust、Zig、Elixir）表达能力的皇冠。CP 语言追求：
+1. **开箱即用内置宏**：
+   - `@Clone`：自动注入深拷贝构造方法 `fn clone(_): Self`；
+   - `@Comparable`：自动注入全序字典序比较方法 `fn cmp(_, other: &Self): i32` 与全等性判断方法 `fn eq(_, other: &Self): bool`；
+   - `@Hash`：自动注入级联 FNV-1a 哈希方法 `fn hash(_): usize`；
+   - `@ToString`、`@Json`、`@Table`：稳定继承并支持批量多派生；
+2. **聚合宏与批量语法统一**：
+   - 支持 `@derive(Clone, Comparable, Hash, ToString, Json)` 聚合声明；
+   - 完美对接 CP 现代原生批量元注解语法 `@[Clone, Comparable, Hash, ToString, Json]`；
+3. **开放第三方 AST 模板宏（Template Macros）**：
+   - 允许开发者编写自定义宏体，利用 `${field}` 等参数插值占位符，在编译期动态合成方法注入目标类；
+   - 保留无体空宏（`macro Tag(target) {}`）生成默认 getter 的向后兼容性；
+4. **零样板构造函数自动合成**：
+   - 类未显式书写 `fn init(...)` 且拥有成员字段时，编译期 Sema 自动为其合成全参数成员初始化构造函数，彻底消灭机械赋值样板。
+
+---
+
+### 2. 核心技术实现路径
+
+#### 2.1 Lexer & AST 扩展
+1. **`cpc/src/lexer.rs`**：
+   - 升级 `Ident` 正则：允许识别 `${field}`、`get_${field}` 等 AST 插值表达式作为合法标识符词元；
+   - 注册 `Token::Dollar` 词元。
+2. **`cpc/src/ast.rs`**：
+   - `MacroDef` 新增 `methods: Vec<Function>`，承载宏体内声明的模板方法。
+
+#### 2.2 Parser 升级
+- **`cpc/src/parser.rs`**：
+  - `parse_macro_def`：支持宏体内包含函数声明（`fn` / `pub fn`）与语句，分别存入 `methods` 与 `body`；
+  - `is_known_builtin`：注册 `@hash` 原语与全部底层系统宏。
+
+#### 2.3 Sema 语义分析与 AST 代码合成
+- **`cpc/src/sema.rs`**：
+  - `macro_defs` 注册完整内置宏集合：`["Json", "Table", "Clone", "ToString", "Comparable", "Hash", "derive"]`；
+  - `expand_macros`：
+    - 支持一个宏生成多个方法（如 `Comparable` 生成 `cmp` 与 `eq`）；
+    - 支持 `@derive(...)` 解构各参数，逐一调用对应宏生成逻辑；
+    - 针对第三方模板宏，按传入参数（位置实参/命名实参）建立 `${param}` 替换表，对宏体内的方法名、返回类型、形参、语句与属性访问表达式进行递归 AST 节点无损替换；
+    - 维持 Macro Hygiene 铁律，合成后的方法严格清除宏注解；
+    - 注入默认构造函数合成逻辑。
+
+#### 2.4 Codegen 原生运行时与代码发射
+- **`cpc/src/codegen.rs`**：
+  - 注入 `cp_lt`、`cp_gt`、`cp_lte`、`cp_gte`：通过 `std.mem.order` 支持字符串的原生字典序比对；
+  - 注入 `cp_hash_val`：实现对数值、布尔、字符串（FNV-1a 级联运算）及实现了 `hash()` 方法的结构体指针的递归哈希；
+  - 为 `@hash` 生成编译期级联内联块 `(blk: { var _h: usize = ...; break :blk _h; })`。
+
+---
+
+### 3. 测试与验证
+1. 全面升级测试用例 [`cap/test/test_macro_pass.cp`](file:///data/dev/cp/cap/test/test_macro_pass.cp)：
+   - 测试 1：`@Json` 单层序列化；
+   - 测试 2：`@Table` 表名提取；
+   - 测试 3：自定义 `@Tag` 元数据；
+   - 测试 4：双层类型嵌套 `@Json` 内省；
+   - 测试 5：`@ToString` 格式化；
+   - 测试 6：第三方 AST 模板宏 `@Accessor("title")` 动态注入 `get_title()`；
+   - 测试 7：全量五大契约聚合派生 `@derive(Clone, Comparable, Hash, ToString, Json)` 在 `OrderItem` 上的完整表现（深拷贝、等价性判断、字典序全序比对、哈希碰撞验证）；
+   - 测试 8：`@[Clone, ToString, Json]` 批量注解语法；
+2. 执行 `./cap/bin/cap cap/test/test_macro_pass.cp`，全量测试 100% 绿灯通过；
+3. 执行 `./cap/test/test_comptime.cp` 与 `./cap/test/test_batch_meta_pass.cp`，保持零回归破损；
+4. 同步更新规范文档 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md) 第 11.2 节。
+
+
 
 
 

@@ -727,6 +727,7 @@ config.set("timeout", 5000);
 CP 支持全特性的代数数据类型（ADT，底层对齐 Zig 的带标签联合体 `union(enum)`）。定义语法全面融入 TypeScript / ES6 现代风格，彻底告别 Rust 晦涩的元组嵌套与冗长样板代码：
 
 #### 3.5.1 枚举与变体定义
+
 - **纯标签变体**：`Idle,`
 - **单类型载荷**：`Text: string,`
 - **元组载荷**：`Move: [i32, i32],`
@@ -742,6 +743,7 @@ enum Task {
 ```
 
 #### 3.5.2 上下文前缀推导与初始化语法
+
 在上下文类型已知（变量类型标注、函数参数、返回值或 switch 比较项）时，**支持直接省略枚举名前缀，使用 `.Variant` 简写构造**：
 
 ```typescript
@@ -861,6 +863,7 @@ let info = switch (person) {
 CP 的 `switch` 匹配体系彻底废除早期 Zig 风格的 `|fields|` 管道捕获语法，全面拥抱原生解构、海象操作符（`:=`）绑定与动态类型匹配：
 
 #### 4.5.1 枚举载荷解构匹配
+
 - **结构体载荷精确解构**：`.Compute { batch, priority }`
 - **结构体剩余字段整包捕获**：`.Compute { ...fields }`（将所有未显式列出的字段整包绑定为只读结构体变量 `fields`，零堆开销）
 - **元组载荷解构**：`.Move [x, y]`（直接使用方括号解构，无需冗余外层小括号）
@@ -884,6 +887,7 @@ fn process_task(task: Task): i32 {
 ```
 
 #### 4.5.2 Walrus（海象操作符 `:=`）子模式绑定
+
 在复杂子模式（如区间匹配、复合对象解构）中，CP 使用现代化的 `ident := pattern` 语法（取代 Rust 晦涩的 `@` 符号），在成功匹配模式的同时将原值完整绑定到变量：
 
 ```typescript
@@ -902,6 +906,7 @@ let user_role = switch (session) {
 ```
 
 #### 4.5.3 动态类型分支匹配（`ident: Type`）
+
 在处理动态多态、Trait 对象或动态类型（`dyn` / `any`）时，CP 允许直接使用 `ident: Type` 进行类型窄化与向下转型绑定：
 
 ```typescript
@@ -1438,7 +1443,38 @@ CP 语言是 **Nest 智能体容器** 的原生执行体：
 
 ## 十一、元编程、编译期计算与底层控制
 
-### 1. 编译期元编程系统（Comptime Metaprogramming）
+编译期运行时与元编程规范
+
+### 1. 编译全管线时序（Pipeline）
+
+    源码输入
+      │
+      ▼
+    [1. 词法与语法分析] ──生成原始 AST──> [收集元注解 MetaCollection]
+      │
+      ▼
+    [2. Phase 1: 语法宏与编译期装饰器] ──> 在类型检查前执行，转换/包装原始 AST，允许新建类型
+      │
+      ▼
+    [3. 第一轮基础类型检查 (Pass 1 Sema)] ──> 构建全局符号表，确立 Tier 1 TypeDeclInfo
+      │
+      ▼
+    [4. Phase 2: 类型感知派生宏 (Type-Directed Macro)] ──> 运行在 CT Runtime 沙箱中
+      │   ├── 读取完整的 Tier 1 / Tier 2 TypeInfo
+      │   ├── 【铁律】仅允许新增 `impl` 块与辅助函数，严禁新增 class/struct/trait
+      │   ├── 【铁律】生成的 AST 严禁附加任何宏注解
+      │   └── 维护展开调用栈与深度熔断 (Max Depth: 128)
+      │
+      ▼
+    [5. 对新增 impl 进行局部类型检查]
+      │
+      ▼
+    [6. 所有权与借用检查 (Borrowck / NLL)]
+      │
+      ▼
+    [7. Native Codegen] ──> 翻译为零开销 Zig 原生状态机 / 机器码
+
+### 2. 编译期元编程系统（Comptime Metaprogramming）
 
 CP 语言深度借鉴并融合了 Zig 的编译期计算哲学，同时继承 TypeScript 简洁优美的语法表达。所有带 `@` 的编译期机制在编译期求值展开，运行时零开销，死代码自动修剪。
 
@@ -1527,34 +1563,419 @@ let total = 0;
 
 CP 语言原生提供与底层无缝对接的编译期内省与诊断指令：
 
-| 原语指令 | 说明 | 示例 |
-| :--- | :--- | :--- |
-| `@typeOf(val)` | 获取表达式在编译期的类型 | `@typeOf(42)` -> `i32` |
-| `@typeName(T)` | 获取类型的字符串名称 | `@typeName(i32)` -> `"i32"` |
-| `@sizeOf(T)` | 获取类型所占用的字节大小 | `@sizeOf(i64)` -> `8` |
-| `@alignOf(T)` | 获取类型的内存对齐字节数 | `@alignOf(f64)` -> `8` |
-| `@fieldsOf(T)` | 获取结构体在编译期的字段数组 | `@fieldsOf(User)` |
-| `@hasField(T, name)` | 编译期探测类型是否拥有某字段 | `@hasField(User, "id")` |
-| `@field(obj, name)` | 编译期字段反射访问与赋值 | `@field(u, "name")` |
-| `@compileError(msg)` | 在编译期主动抛出编译失败错误 | `@compileError("Unsupported architecture")` |
-| `@compileLog(args...)` | 在编译期向控制台打印编译诊断信息 | `@compileLog("Type size:", @sizeOf(T))` |
+| 原语指令               | 说明                             | 示例                                        |
+| :--------------------- | :------------------------------- | :------------------------------------------ |
+| `@typeOf(val)`         | 获取表达式在编译期的类型         | `@typeOf(42)` -> `i32`                      |
+| `@typeName(T)`         | 获取类型的字符串名称             | `@typeName(i32)` -> `"i32"`                 |
+| `@sizeOf(T)`           | 获取类型所占用的字节大小         | `@sizeOf(i64)` -> `8`                       |
+| `@alignOf(T)`          | 获取类型的内存对齐字节数         | `@alignOf(f64)` -> `8`                      |
+| `@fieldsOf(T)`         | 获取结构体在编译期的字段数组     | `@fieldsOf(User)`                           |
+| `@hasField(T, name)`   | 编译期探测类型是否拥有某字段     | `@hasField(User, "id")`                     |
+| `@field(obj, name)`    | 编译期字段反射访问与赋值         | `@field(u, "name")`                         |
+| `@compileError(msg)`   | 在编译期主动抛出编译失败错误     | `@compileError("Unsupported architecture")` |
+| `@compileLog(args...)` | 在编译期向控制台打印编译诊断信息 | `@compileLog("Type size:", @sizeOf(T))`     |
 
 ---
 
-### 2. 宏系统（Macro Metaprogramming）
+### 3. 宏系统（Macro Metaprogramming）
 
-```typescript
-macro define_getter(name) {
-    pub fn get_${name}(_): string {
-        return _.${name};
+> 宏的作用是在编译时自动插入模版代码，实现一些通用功能，不用每个结构、类都编写相同代码，实现这些功能，提高编码效率。
+
+#### 3.1 底层到底是怎么实现的？（是像 C 语言那样的文本替换吗？）
+
+绝对不是 C 语言那种原始、危险的字符串/Token 替换！
+CP 的宏是强类型感知、结构化的 AST 过程宏（Type-Directed Procedural AST Synthesizer）。
+整个底层展开流程发生在 Sema Phase 2（语义分析第二阶段），分为 4 步：
+
+```text
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                      CP 宏底层展开流水线 (Sema Pass 2)                          │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ 1. 提取类的字段元数据 (AST Inspection)                                          │
+│    OrderItem 包含: [sku: string, price: f64, quantity: i32]                   │
+│                                                                              │
+│ 2. 动态拼装 AST 函数节点 (AST Code Synthesis)                                   │
+│    • 遍历 cls.fields；                                                        │
+│    • 在 Rust 内存中构造一个真实的 ast::Function 节点；                            │
+│    • 函数体构造一个 ast::ReturnStmt，拼接字段表达式；                              │
+│                                                                               │
+│ 3. 注入类结构体 (AST Injection)                                                 │
+│    • cls.methods.push(synthesized_fn)； // 物理塞入该类的方法列表中               │
+│    • 更新全局符号表 scopes，让外部代码能正常调用 item.toJson()                      │
+│                                                                               │
+│ 4. 宏擦除与生成机器码 (Macro Erasure & Codegen)                                  │
+│    • 宏本身在 AST 展开后被彻底销毁，不进入运行时；                                   │
+│    • 合成的新方法与其他普通手写方法一样，无差别编译为原生 Zig 机器码状态机。             │
+└───────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 3.2 AST 模板插值宏（Template Macros）
+
+#### 3.2.1 核心定位
+
+- 心智模型：类似现代化、带强类型检查的语法模板（Quasi-Quoting）；
+- 适用场景：参数驱动型代码生成。针对开发者传入的字段名、方法名前缀或特定类型，按模板快速派生出单个或一组辅助方法（如自动生成 Getter、Setter、Fluent 链式调用 Builder）。
+
+#### 3.2.2 示例代码
+
+```ts
+    import { print } from "cap:io";
+
+    // ============================================================
+    // 1. 声明 AST 模板宏：为指定字段自动生成 Getter 与 Setter
+    //    ${name} 会在编译期将传入的标识符或字符串无缝拼接为 AST 方法名和属性访问
+    // ============================================================
+    macro Accessor(target, field, field_type) {
+        // 自动生成 getter
+        pub fn get_${field}(_): field_type {
+            return _.${field};
+        }
+
+        // 自动生成 setter（支持 Fluent 链式调用，返回自身引用）
+        pub fn set_${field}(&mut _, val: field_type): Self {
+            _.${field} = val;
+            return _;
+        }
     }
-}
 
-class User {
-    nickname: string;
-    !define_getter(nickname);
+    // ============================================================
+    // 2. 声明 AST 模板宏：为类注入事件监听订阅方法
+    // ============================================================
+    macro EventHook(target, event_name) {
+        pub fn on_${event_name}(_, handler: fn(string): void): void {
+            @print("Registered hook for event: {s}", "${event_name}");
+            handler("Event Payload from " + "${event_name}");
+        }
+    }
+
+    // ============================================================
+    // 3. 在业务类上应用模板宏
+    // ============================================================
+    class Account {
+        balance: f64;
+        owner: string;
+
+        // 直接在类体内应用模板宏注入方法
+        @Accessor("balance", f64)
+        @Accessor("owner", string)
+        @EventHook("transfer")
+
+        fn init(owner: string, balance: f64) {
+            _.owner = owner;
+            _.balance = balance;
+        }
+    }
+
+    // ============================================================
+    // 4. 业务调用验证
+    // ============================================================
+    fn main(): void {
+        let mut acc = new Account("Alice", 1000.0);
+
+        // 调用由 @Accessor("balance") 自动展开生成的 getter
+        @print("Initial Balance: {}", acc.get_balance()); // 1000.0
+
+        // 调用由 @Accessor 自动生成的链式 setter
+        acc.set_balance(2500.0).set_owner("Alice Cooper");
+
+        @print("Updated Owner: {s}", acc.get_owner());     // Alice Cooper
+        @print("Updated Balance: {}", acc.get_balance());  // 2500.0
+
+        // 调用由 @EventHook("transfer") 自动展开生成的事件订阅方法
+        acc.on_transfer((msg) => {
+            @print("Received callback message: {s}", msg);
+        });
+    }
+```
+
+---
+
+#### 3.4 Comptime 过程宏（Comptime Procedural Macros）
+
+##### 3.4.1 核心定位
+
+- 心智模型：结合 CP 的 Comptime 编译期图灵完备计算（@{ }） 与 静态内省原语（@fieldsOf、@typeOf）；
+- 适用场景：全自动化整类派生型代码生成。无需开发者手工传入字段名，宏自动在编译期全量扫描目标类的所有字段，完成如通用克隆、重置初始值、自动化校验或自定义 YAML/JSON 格式化。
+
+##### 3.4.2 示例代码
+
+```ts
+    import { print } from "cap:io";
+
+    // ============================================================
+    // 1. 声明 Comptime 过程宏：AutoReset
+    //    自动遍历 target 类的全部字段，并将数值归 0、字符串归空、布尔归 false！
+    // ============================================================
+    macro AutoReset(target) {
+        // 注入 reset 方法
+        pub fn reset(&mut _): void {
+            // ⬇️ 利用 Comptime 编译期循环展开：遍历 target 类的字段元数据
+            @for f of @fieldsOf(target) {
+                @if f.type == i32 || f.type == f64 {
+                    _.${f.name} = 0;
+                } @else @if f.type == string {
+                    _.${f.name} = "";
+                } @else @if f.type == bool {
+                    _.${f.name} = false;
+                }
+            }
+        }
+    }
+
+    // ============================================================
+    // 2. 声明 Comptime 过程宏：AutoClone（深拷贝派生）
+    //    自动提取字段构造参数，为类动态注入深拷贝 clone() 方法！
+    // ============================================================
+    macro AutoClone(target) {
+        pub fn clone(&_): target {
+            // 编译期生成 new Target(_.f1, _.f2, ...) 的完整 AST 构造调用
+            return new target(
+                @{
+                    // 编译期动态组装构造参数元组
+                    ...
+    		}
+            );
+        }
+    }
+
+    // ============================================================
+    // 3. 声明 Comptime 过程宏：ToYaml（自定义 YAML 文本序列化）
+    // ============================================================
+    macro ToYaml(target) {
+        pub fn toYaml(&_): string {
+            let mut yaml_output = "---\n";
+            // 编译期全静态展开，运行时零反射开销！
+            @for f of @fieldsOf(target) {
+                yaml_output = yaml_output + `  ${f.name}: ` + `${_.${f.name}}\n`;
+            }
+            return yaml_output;
+        }
+    }
+
+    // ============================================================
+    // 4. 在业务类上应用 Comptime 过程宏
+    // ============================================================
+    @[AutoReset, ToYaml]
+    class GamePlayer {
+        nickname: string;
+        level: i32;
+        score: f64;
+        isVip: bool;
+
+        fn init(nickname: string, level: i32, score: f64, isVip: bool) {
+            _.nickname = nickname;
+            _.level = level;
+            _.score = score;
+            _.isVip = isVip;
+        }
+    }
+
+    // ============================================================
+    // 5. 业务调用验证
+    // ============================================================
+    fn main(): void {
+        let mut player = new GamePlayer("ShadowHunter", 99, 15800.5, true);
+
+        // 1. 调用由 @ToYaml 自动展开生成的 YAML 序列化方法
+        let yaml_str = player.toYaml();
+        @print("--- Generated YAML Output ---\n{s}", yaml_str);
+        /* 运行时输出：
+           ---
+             nickname: ShadowHunter
+             level: 99
+             score: 15800.5
+             isVip: true
+        */
+
+        // 2. 调用由 @AutoReset 自动根据类型重置所有字段的方法
+        @print("Resetting player data...");
+        player.reset();
+
+        @print("After Reset YAML Output ---\n{s}", player.toYaml());
+        /* 运行时输出：
+           ---
+             nickname:
+             level: 0
+             score: 0
+             isVip: false
+        */
+    }
+```
+
+---
+
+#### 3.5 两种模式的横向对比与完美分工
+
+| 维度             | 方案 A：AST 模板插值宏                           | 方案 B：Comptime 过程宏                                     |
+| ---------------- | ------------------------------------------------ | ----------------------------------------------------------- |
+| 驱动机制         | 形参驱动：开发者显式传入 `${field_name}`         | 内省驱动：通过 `@fieldsOf(target)` 自动扫描目标类型         |
+| 核心语法         | AST/语法模板插值 `${name}`、`${field}`           | 编译期执行 `@{ }`、`@fieldsOf`、`@for`、`@if`               |
+| 典型场景         | 字段级 Getter/Setter、Builder、事件钩子 `on_xxx` | 整类全自动派生：AutoClone、ToYaml、Reset、Validate          |
+| 代码量与认知     | 代码量极少，几行模板即可；直观，近似高级文本宏   | 代码可复用度高；能力图灵完备，但内省/合成逻辑的认知成本更高 |
+| 适用边界         | 单字段/单成员粒度的重复代码消除                  | 跨成员、需要读取类型结构才能生成的代码                      |
+| 失败模式         | 模板变量名拼错 → 展开期报错，定位直观            | 内省逻辑错误 → 宏展开期报错，堆栈较深                       |
+| 与另一方案的关系 | 可作为 B 的底层原语                              | 内部可用 A 做代码合成                                       |
+
+#### 3.6 内置宏
+
+```cp
+@[Clone, Comparable, Hash, ToString, Json]
+class OrderItem {
+  sku: string;
+  price: f64;
+  quantity: i32;
 }
 ```
+
+这段代码是现代系统级语言中最经典、最富表现力的**“数据布局与能力契约自动装配”**范式。
+
+以下从代码内涵、@derive 的本质、5 大能力的实现现状，以及宏与 Trait 的深层协作机制进行全面透彻的拆解：
+
+##### 3.6.1 这段代码在表达什么
+
+- 数据容器极度纯粹：开发者只关注核心业务数据的内存排布（sku, price, quantity 三个字段），不写任何冗长机械的方法；
+- 能力一键静态织入：通过顶部的 @derive(...)，命令编译器在**编译期（Compile-Time）**自动为该类合成并注入 5 种工业级能力（深拷贝、全序比较、哈希运算、调试打印、JSON序列化）；
+- 零运行时开销：所有方法在编译期直接由 AST 代码生成器写好，生成高效的裸机机器码，零反射损耗、零 GC 开销。
+
+---
+
+##### 3.6.2 编译期 AST 聚合派生宏（Aggregated Derive Macro）
+
+`@[Clone, Comparable, Hash, ToString, Json]` 在编译原理中被称为**“编译期 AST 聚合派生宏（Aggregated Derive Macro）”**。
+
+- 它的语法定位：
+  它是一个语法糖聚合器。写 @[Clone, ToString, Json] 等价于依次写独立的派生注解：
+  @Clone
+  @Comparable
+  @Hash
+  @ToString
+  @Json
+  class OrderItem { ... }
+
+- 它的执行时期：
+  在编译器前端的 Sema Phase 2（类型导向宏展开阶段） 执行；
+- 它的工作原理：
+  编译器扫描到 @derive 后的参数列表，将 OrderItem 的 AST 结构体（字段名、字段类型）作为输入，在内存中动态构造出一组 Function 抽象语法树节点，并自动推入 cls.methods
+  中，然后无缝更新编译器的全局符号表。
+
+---
+
+##### 3.6.3 这 5 大能力的作用分别是什么？
+
+| 能力 / 契约    | 核心作用与调用方式                                                                | 目前在 CP 编译器中的实装现状                                                        |
+| :------------- | :-------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------- |
+| **Json**       | 自动生成 `toJson(): string` 方法，支持多层嵌套类的深层 JSON 序列化                | ✅ **100% 已实现并测试通过**，在 `sema.rs` 中动态生成 AST，已在测试集验证。         |
+| **ToString**   | 自动生成 `toString(): string`，输出 `OrderItem(sku=..., price=..., quantity=...)` | ✅ **100% 已实现并测试通过**，在 `sema.rs` 中动态生成字符串拼接 AST。               |
+| **Clone**      | 自动生成 `clone(_): Self` 深拷贝方法，创建并返回独立所有权的新对象                | ✅ **100% 已实现并测试通过**，自动合成 `return new Class(_.f1, _.f2, ...)`。        |
+| **Comparable** | 自动生成 `cmp(_, other: &Self): i32` 字典序比对与 `eq(_, other: &Self): bool`     | ✅ **100% 已实现并测试通过**，底层全面打通 `cp_lt` / `cp_gt` / `cp_eq` 强类型比对。 |
+| **Hash**       | 自动生成 `hash(_): usize`，自动遍历字段级联计算 FNV-1a 哈希                       | ✅ **100% 已实现并测试通过**，内置 `@hash` 原语对数值、字符串、布尔及引用统一计算。 |
+| **Table**      | 自动生成 `getTableName(): string` 数据库映射方法                                  | ✅ **100% 已实现并测试通过**，支持显式表名 `@Table("t_users")` 或隐式推导。         |
+
+此外，CP 编译器引入了**零样板成员构造函数自动合成**机制：当类中包含字段且开发者未手写 `fn init(...)` 时，编译器在 Sema Phase 2 自动生成全参数 `fn init(f1: T1, f2: T2, ...)`，彻底告别冗长的样板构造赋值代码！
+
+---
+
+##### 3.6.4 这些宏（@Clone, @Hash, @Comparable）与 Trait 的深层关系
+
+这是理解现代编译型语言最核心、最精妙的关键点：宏与 Trait 不是二选一，而是“契约”与“自动化劳工”的双簧关系！
+
+```text
+    ┌────────────────────────────────────────────────────────────────────────────────────┐
+    │                           Trait 与 Macro 的职责划分与协同                             │
+    ├───────────────────────────────────────────────────────┬────────────────────────────┤
+    │                Trait（契约规范 - What）                 │  Macro 宏（代码生成 - How）   │
+    ├───────────────────────────────────────────────────────┼─────────────────────────────┤
+    │ • 定义“接口规范”（如：必须有个 cmp 方法）                  │ • 充当“打字员与自动化代码生成器” │
+    │ • 用于编译期泛型约束：fn sort<T: Comparable>(arr: [T])   │ • 自动遍历字段，生成满足契约的代码│
+    │ • 决定类型【能不能】传入泛型算法                           │ • 解决开发者【不想手写】大量样板 │
+    └───────────────────────────────────────────────────────┴─────────────────────────────┘
+```
+
+##### 3.6.5 场景 1：如果“只有 Trait，没有宏”会发生什么？
+
+假设标准库有 `trait Clone { fn clone(&_): Self; }`。
+
+为了让 OrderItem 支持克隆，开发者必须手动写出冗长的代码：
+
+```typescript
+    impl Clone for OrderItem {
+        fn clone(&_): OrderItem {
+            return new OrderItem(_.sku, _.price, _.quantity); // 繁琐，字段一多极易漏写
+        }
+    }
+```
+
+痛点：类型系统很严谨，但开发者的体验非常痛苦，充斥着无意义的手工样板代码。
+
+##### 3.6.6 场景 2：如果“只有宏，没有 Trait”会发生什么？
+
+宏虽然自动帮 OrderItem 生成了 `clone()` 方法，你也可以写 `item.clone()`。
+痛点：但是当你写一个通用函数时：
+
+```typescript
+    fn duplicate<T>(item: &T): T {
+        return item.clone(); // ❌ 编译报错！编译器不知道泛型 T 到底有没有 clone 方法！
+    }
+```
+
+因为没有 Trait 作为公认的契约签名，泛型系统就无法在编译期进行类型约束。
+
+##### 3.6.7 场景 3：Trait 与 宏 珠联璧合（CP 的终极设计）
+
+- Trait 负责立宪立约：标准库定义 `trait Clone`、`trait Hash`、`trait Comparable`，供泛型算法（如 `sort<T: Comparable>`、`Map<K: Hash, V>`）作为类型边界；
+- 宏负责自动干脏活：开发者打上 `@derive(Clone, Comparable, Hash)` 或 `@[Clone, Comparable, Hash]` 后，编译器在后台全自动合成了对应的方法实现！
+
+---
+
+##### 3.6.8 编译后在底层实际替开发者写了什么代码？
+
+当编译器看到 `@[Clone, Comparable, Hash, ToString, Json]` 时，在 Phase 2 内部等价于为 `OrderItem` 自动合成了以下完整实现：
+
+```typescript
+    // 1. @Clone 替你生成的：
+    fn clone(_): OrderItem {
+        return new OrderItem(_.sku, _.price, _.quantity);
+    }
+
+    // 2. @ToString 替你生成的：
+    fn toString(_): string {
+        return `OrderItem(sku=${_.sku}, price=${_.price}, quantity=${_.quantity})`;
+    }
+
+    // 3. @Comparable 替你生成的：
+    fn eq(_, other: &OrderItem): bool {
+        if (_.sku != other.sku) return false;
+        if (_.price != other.price) return false;
+        if (_.quantity != other.quantity) return false;
+        return true;
+    }
+
+    fn cmp(_, other: &OrderItem): i32 {
+        if (_.sku < other.sku) return -1;
+        if (_.sku > other.sku) return 1;
+        if (_.price < other.price) return -1;
+        if (_.price > other.price) return 1;
+        if (_.quantity < other.quantity) return -1;
+        if (_.quantity > other.quantity) return 1;
+        return 0;
+    }
+
+    // 4. @Hash 替你生成的：
+    fn hash(_): usize {
+        return @hash(_.sku, _.price, _.quantity);
+    }
+
+    // 5. @Json 替你生成的：
+    fn toJson(_): string {
+        return "{\"sku\":\"" + _.sku + "\",\"price\":" + _.price + ",\"quantity\":" + _.quantity + "}";
+    }
+```
+
+##### 3.6.9 总结
+
+• `OrderItem` 是干净的数据；
+• Trait 是标准能力接口契约；
+• `@[...]` 是全自动实现这些契约的强劲发动机。
 
 ---
 
@@ -1891,11 +2312,11 @@ class UserService {
    - 包含 `reflect` -> 编译期为该类生成原生运行时单例反射表；
 4. **语法容错**：容器内支持任意排列，末尾逗号可选，可写无参（`Singleton`）、位置实参（`Column("user_pwd")`）或命名实参（`meta(version: "1.0")`）。
 
-1. **统一整洁**：单个 `@[...]` 收拢替代多行分散的 `@Tag`，代码结构更加紧凑；
-2. **多态混排**：在同一个 `@[...]` 内，编译器智能自动识别：
+5. **统一整洁**：单个 `@[...]` 收拢替代多行分散的 `@Tag`，代码结构更加紧凑；
+6. **多态混排**：在同一个 `@[...]` 内，编译器智能自动识别：
    - 匹配 `dec` 声明的标识符 -> 编译期织入洋葱切面逻辑（AOP Wrapper）；
    - 匹配 `meta` 或即席声明的标识符 -> 编译期零开销录入反射字典；
-3. **参数语法自由**：方括号内的标签可无参（`Singleton`）、位置实参（`Column("user_pwd")`）或命名实参（`meta(version: "1.0")`），末尾逗号可选容错。
+7. **参数语法自由**：方括号内的标签可无参（`Singleton`）、位置实参（`Column("user_pwd")`）或命名实参（`meta(version: "1.0")`），末尾逗号可选容错。
 
 ---
 

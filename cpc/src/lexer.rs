@@ -119,7 +119,7 @@ pub enum Token {
     String,
 
     // --- Literals ---
-    #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
+    #[regex(r"(\$\{?[a-zA-Z0-9_]+\}?|[a-zA-Z_])(\$\{?[a-zA-Z0-9_]+\}?|[a-zA-Z0-9_])*", |lex| lex.slice().to_string())]
     Ident(String),
     #[regex(r"[0-9]+", |lex| lex.slice().parse::<i64>().ok())]
     IntLiteral(i64),
@@ -205,6 +205,8 @@ pub enum Token {
     At,
     #[token("&")]
     Ampersand,
+    #[token("$")]
+    Dollar,
     #[token("|>")]
     Pipeline,
     #[token("|")]
