@@ -1747,6 +1747,23 @@ AI 智能体正经历从“单体聊天机器人（Single Agent / ChatBot）”�
 3. 执行既有核心套件（`test_switch_binding_pass.cp`、`test_traits_enums.cp`、`test_for_pass.cp`），零回归破损；
 4. 同步更新规范文档 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md) 第 11.1 节。
 
+---
+
+## 2026-11-01: Comptime 语法精炼收敛与正交性加固
+
+### 1. 语法收敛考量与决策
+用户指出双重同义语法带来的代码割裂隐患：
+1. **形参自动单态化推导**：`auto` vs `anytype`。彻底废除 `anytype`（`anytype` 为底层 Zig 实现细节），CP 语法唯一标准统一为 `val: auto`；
+2. **编译期参数约束**：`@comptime` vs `comptime`。绝对不需要两个，坚决贯彻 CP 基石铁律 **“带 @ 为编译期，不带为运行期”**，彻底废除 bare `comptime`，唯一标准统一为 `@comptime val: usize`。
+
+### 2. 编译器改造
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs)：
+  - `parse_params` 中移除 bare `comptime` 标识符分支，仅保留 `@comptime` 元注解解析；
+  - `parse_base_type` 中移除 `anytype` 分支，仅保留 `auto` 映射为 `Type::Auto`。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)：
+  - 同步清理第 11.1 节中的 `anytype` 与 bare `comptime` 描述，保持文档绝对纯粹统一。
+- 执行 `./cap/bin/cap cap/test/test_comptime.cp`，全量验证通过。
+
 
 
 

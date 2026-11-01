@@ -3923,6 +3923,24 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 2. 顺利执行 Git 提交：`d971b38 feat(comptime): implement comptime blocks, comptime calls, @if/@for control flow, auto params, and intrinsics`；
 3. 工作区完全干净（working tree clean），测试全量通过。
 
+---
+
+## 2026-11-01 (Session Update - Syntax Unification & Refinement)
+
+### 用户指令
+> 函数形参声明为 `auto`（或 `anytype`）, 不建议 保留 anytype, 避免代码不统一
+> 编译期参数约束（`@comptime` / `comptime`）, 需要两个吗?
+
+### 执行结果汇报
+1. **决策与语法收敛**：
+   - 彻底废除 `anytype`：不将底层 Zig 实现细节暴露给开发者，编译期自动推导形参唯一定义为 `val: auto`；
+   - 彻底废除 bare `comptime`：坚决维护 CP **“带 @ 为编译期，不带为运行期”** 的铁律，绝对不引入语法冗余，编译期形参约束唯一定义为 `@comptime val: usize`。
+2. **编译器与规范同步**：
+   - [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs)：移除了 `anytype` 类型推导分支与形参 bare `comptime` 标识符分支；
+   - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)：全面修订第 11.1 节，消除任何别名冗余；
+   - 重新执行增量构建并运行 [`cap/test/test_comptime.cp`](file:///data/dev/cp/cap/test/test_comptime.cp)，全量测试 100% 绿灯通过；
+   - 按铁律更新 [`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md) 与 [`SESSION.md`](file:///data/dev/cp/SESSION.md)。
+
 
 
 

@@ -571,11 +571,7 @@ impl<'a> Parser<'a> {
             let meta = self.parse_meta_list()?;
             let mut is_mut = false;
             let mut is_move = false;
-            let mut is_comptime = meta.iter().any(|m| m.name.sym == "comptime");
-            if matches!(self.peek(), Some(Token::Ident(id)) if id == "comptime") {
-                self.bump()?;
-                is_comptime = true;
-            }
+            let is_comptime = meta.iter().any(|m| m.name.sym == "comptime");
 
             if self.peek() == Some(&Token::Mut) {
                 self.bump()?;
@@ -994,7 +990,7 @@ impl<'a> Parser<'a> {
             Token::Ident(sym) => {
                 if sym == "pid" {
                     Type::PID
-                } else if sym == "auto" || sym == "anytype" {
+                } else if sym == "auto" {
                     Type::Auto
                 } else if sym == "Shared" && self.peek() == Some(&Token::Less) {
                     self.bump()?;

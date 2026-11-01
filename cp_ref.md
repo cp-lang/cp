@@ -1477,9 +1477,9 @@ fn add(a: i32, b: i32): i32 {
 const SUM = @add(30, 70);
 ```
 
-#### 1.3 编译期参数约束（`@comptime` / `comptime`）
+#### 1.3 编译期参数约束（`@comptime`）
 
-函数形参标注 `@comptime`（或 `comptime`），强制要求调用方传入的值必须在编译期已知：
+函数形参标注 `@comptime`，强制要求调用方传入的值必须在编译期已知：
 
 ```typescript
 fn create_buffer(@comptime size: usize): [u8] {
@@ -1489,9 +1489,9 @@ fn create_buffer(@comptime size: usize): [u8] {
 const buf = create_buffer(1024); // ✔️ 合法，1024 为编译期常量
 ```
 
-#### 1.4 编译期自动推导参数（`val: auto` / `anytype`）
+#### 1.4 编译期自动推导参数（`val: auto`）
 
-函数形参声明为 `auto`（或 `anytype`），代表该参数为编译期类型泛型化参数。编译器根据传入实参的具体类型自动单态化（Monomorphization）生成专门版本，无需手动书写泛型 `<T>`：
+函数形参声明为 `auto`，代表该参数为编译期类型自动推导参数。编译器根据传入实参的具体类型自动单态化（Monomorphization）生成专门版本，无需手动书写泛型 `<T>`：
 
 ```typescript
 fn get_type_size(val: auto): usize {

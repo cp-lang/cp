@@ -924,8 +924,8 @@
 - [`cpc/src/lexer.rs`](file:///data/dev/cp/cpc/src/lexer.rs):
   - 新增 `Token::Auto` 关键字词元。
 - [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
-  - `parse_params`：解析 `@comptime param: Type` 与 `comptime param: Type`，将形参标记为 `is_comptime = true`；
-  - `parse_base_type`：将 `auto` 与 `anytype` 解析为 `Type::Auto`；
+  - `parse_params`：收敛形参约束语法，仅保留统一规范的 `@comptime param: Type`（严格契合“带 @ 为编译期”铁律），切除 bare `comptime`；
+  - `parse_base_type`：收敛自动推导语法，仅保留统一规范的 `auto`，彻底切除冗余的 `anytype`；
   - `parse_stmt`：识别 `@{ ... }` 与 `!{ ... }` 产生 `Stmt::ComptimeBlock`；识别 `@if` 与 `@for` 并置 `is_comptime = true`；
   - `parse_primary_expr`：支持 `@{ ... }` 产生 `Expr::Comptime`；将非内置宏指令的 `@fn(...)` 统一解析为 `Expr::Call { is_comptime: true, ... }` 编译期函数显式调用；将 `@test`、`@expect_eq` 以及其他标准库宏指令纳入内置宏保护清单。
 - [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
