@@ -994,6 +994,27 @@ impl Codegen {
                     }
                 }
             }
+            if let ModuleItem::Stmt(Stmt::Expr(Expr::Zig(z))) = item {
+                for line in z.code.lines() {
+                    let trimmed = line.trim();
+                    let stripped = if let Some(s) = trimmed.strip_prefix("pub ") {
+                        s.trim_start()
+                    } else {
+                        trimmed
+                    };
+                    if let Some(rest) = stripped.strip_prefix("const ") {
+                        let mut parts = rest.split(&[' ', ':', '='][..]);
+                        if let Some(name) = parts.next() {
+                            let name = name.trim();
+                            if !name.is_empty()
+                                && (rest.contains("@This()") || rest.contains("struct"))
+                            {
+                                self.ref_classes.insert(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
             if let ModuleItem::Decl(Decl::Class(c)) = item {
                 self.globals.insert(c.ident.sym.clone());
                 if c.is_ref {
@@ -2086,8 +2107,8 @@ impl Codegen {
         const Child = @typeInfo(T).pointer.child;
         if (Child == u8) return .{ .string = v };
         if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) {
-            const slice: []const u8 = v;
-            return .{ .string = slice };
+            const cp_str_slice: []const u8 = v;
+            return .{ .string = cp_str_slice };
         }
         return .{ .any = @ptrCast(@constCast(v)) };
     }",
@@ -2098,7 +2119,7 @@ impl Codegen {
 
         if features.needs_string_helpers {
             self.writeln("fn is_string_like(comptime T: type) bool { if (T == []const u8 or T == []u8) return true; if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }");
-            self.writeln("fn to_string_slice(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime (T == []const u8 or T == []u8)) { return v; } else { const slice: []const u8 = v; return slice; } }");
+            self.writeln("fn to_string_slice(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime (T == []const u8 or T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }");
             self.writeln("fn CpValType(comptime T: type) type { if (is_string_like(T)) return []const u8; if (T == comptime_int) return i32; if (T == comptime_float) return f32; return T; }");
             self.writeln("fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == comptime_int) { return @as(i32, v); } else if (comptime T == comptime_float) { return @as(f32, v); } else { return v; } }");
         }
@@ -2204,8 +2225,8 @@ impl Codegen {
         if features.needs_iter_helpers {
             self.writeln("fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const T = @TypeOf(val); switch (@typeInfo(T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }");
             self.writeln("fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError(\"Cannot mutably iterate over non-collection\"), else => @compileError(\"Cannot mutably iterate over non-collection\"), }, else => @compileError(\"Cannot mutably iterate over non-collection\"), }, else => @compileError(\"Cannot mutably iterate over non-collection\"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }");
-            self.writeln("fn cp_index_of(container: anytype, needle: anytype) i32 { const slice = cp_iter_slice(container); const SliceT = @TypeOf(slice); if (comptime is_string_like(SliceT) and is_string_like(@TypeOf(needle))) { if (std.mem.indexOf(u8, to_string_slice(slice), to_string_slice(needle))) |i| return @intCast(i); return -1; } for (slice, 0..) |item, idx| { if (cp_eq(item, needle)) return @intCast(idx); } return -1; }");
-            self.writeln("fn cp_last_index_of(container: anytype, needle: anytype) i32 { const slice = cp_iter_slice(container); const SliceT = @TypeOf(slice); if (comptime is_string_like(SliceT) and is_string_like(@TypeOf(needle))) { if (std.mem.lastIndexOf(u8, to_string_slice(slice), to_string_slice(needle))) |i| return @intCast(i); return -1; } var i: usize = slice.len; while (i > 0) { i -= 1; if (cp_eq(slice[i], needle)) return @intCast(i); } return -1; }");
+            self.writeln("fn cp_index_of(container: anytype, needle: anytype) i32 { const cp_slice = cp_iter_slice(container); const SliceT = @TypeOf(cp_slice); if (comptime is_string_like(SliceT) and is_string_like(@TypeOf(needle))) { if (std.mem.indexOf(u8, to_string_slice(cp_slice), to_string_slice(needle))) |i| return @intCast(i); return -1; } for (cp_slice, 0..) |item, idx| { if (cp_eq(item, needle)) return @intCast(idx); } return -1; }");
+            self.writeln("fn cp_last_index_of(container: anytype, needle: anytype) i32 { const cp_slice = cp_iter_slice(container); const SliceT = @TypeOf(cp_slice); if (comptime is_string_like(SliceT) and is_string_like(@TypeOf(needle))) { if (std.mem.lastIndexOf(u8, to_string_slice(cp_slice), to_string_slice(needle))) |i| return @intCast(i); return -1; } var i: usize = cp_slice.len; while (i > 0) { i -= 1; if (cp_eq(cp_slice[i], needle)) return @intCast(i); } return -1; }");
             self.writeln("fn cp_includes(container: anytype, needle: anytype) bool { return cp_index_of(container, needle) != -1; }");
         }
         if features.needs_actors {
@@ -2425,6 +2446,27 @@ impl Codegen {
             }
         }
         for item in &module.body {
+            if let ModuleItem::Stmt(Stmt::Expr(Expr::Zig(z))) = item {
+                for line in z.code.lines() {
+                    let trimmed = line.trim();
+                    let stripped = if let Some(s) = trimmed.strip_prefix("pub ") {
+                        s.trim_start()
+                    } else {
+                        trimmed
+                    };
+                    if let Some(rest) = stripped.strip_prefix("const ") {
+                        let mut parts = rest.split(&[' ', ':', '='][..]);
+                        if let Some(name) = parts.next() {
+                            let name = name.trim();
+                            if !name.is_empty()
+                                && (rest.contains("@This()") || rest.contains("struct"))
+                            {
+                                self.ref_classes.insert(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
             if let ModuleItem::Decl(Decl::Class(c)) = item {
                 if c.ident.sym == "PID" || c.ident.sym == "Message" || c.ident.sym == "Agent" {
                     continue;

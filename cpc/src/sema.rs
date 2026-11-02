@@ -427,6 +427,12 @@ impl Analyzer {
         }
 
         for item in &module.body {
+            if let ModuleItem::Stmt(stmt) = item {
+                self.extract_zig_code_symbols(stmt);
+            }
+        }
+
+        for item in &module.body {
             match item {
                 ModuleItem::Decl(Decl::Meta(m)) => {
                     self.register_meta_def(m)?;
@@ -485,6 +491,17 @@ impl Analyzer {
                     self.symbol_map
                         .insert(e.ident.span, SymbolKind::Enum(e.clone()));
                 }
+                ModuleItem::Decl(Decl::Func(f)) => {
+                    let params = f.params.iter().map(|p| p.ty.clone()).collect();
+                    let kind = SymbolKind::Func {
+                        params,
+                        ret: f.return_type.clone(),
+                        is_async: f.is_async,
+                        is_unsafe: f.is_unsafe,
+                    };
+                    self.define(f.ident.sym.clone(), kind.clone(), f.ident.span)?;
+                    self.symbol_map.insert(f.ident.span, kind);
+                }
                 _ => {}
             }
         }
@@ -505,6 +522,12 @@ impl Analyzer {
         }
 
         // Pass 3: Full Semantic Analysis & Type Checking
+        for item in &module.body {
+            if let ModuleItem::Stmt(stmt) = item {
+                self.extract_zig_code_symbols(stmt);
+            }
+        }
+
         for item in &module.body {
             match item {
                 ModuleItem::Decl(decl) => self.analyze_decl(decl)?,
@@ -1450,6 +1473,50 @@ impl Analyzer {
             },
         );
         Ok(())
+    }
+
+    fn extract_zig_code_symbols(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::Expr(Expr::Zig(z)) => self.register_zig_block_symbols(&z.code),
+            Stmt::Block(b) | Stmt::UnsafeBlock(b) => {
+                for s in &b.body {
+                    self.extract_zig_code_symbols(s);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn register_zig_block_symbols(&mut self, code: &str) {
+        for line in code.lines() {
+            let trimmed = line.trim();
+            let stripped = if let Some(s) = trimmed.strip_prefix("pub ") {
+                s.trim_start()
+            } else {
+                trimmed
+            };
+            let ident_opt = if let Some(rest) = stripped.strip_prefix("const ") {
+                rest.split(&[' ', ':', '='][..]).next()
+            } else if let Some(rest) = stripped.strip_prefix("var ") {
+                rest.split(&[' ', ':', '='][..]).next()
+            } else if let Some(rest) = stripped.strip_prefix("fn ") {
+                rest.split(&[' ', '(', '<'][..]).next()
+            } else {
+                None
+            };
+            if let Some(ident) = ident_opt {
+                let id = ident.trim();
+                if !id.is_empty() && id.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    self.scopes[0].insert(
+                        id.to_string(),
+                        SymbolKind::Var {
+                            ty: Type::Any,
+                            kind: VarDeclKind::Const,
+                        },
+                    );
+                }
+            }
+        }
     }
 
     fn validate_meta_items(&self, items: &[MetaItem], target: &str) -> SemaResult<()> {

@@ -3386,6 +3386,24 @@ pub fn escapeRegExp(input: string, writer: *std.Io.Writer): void ! std.Io.Writer
 ```
 编译器自动将其对齐为 Zig 原生错误联合 `std.Io.Writer.Error!void`，并对 `void` 结果发射干净的 `return;`，消除多余的结构体包装开销。
 
+#### 11.7.6 顶层函数前向引用与声明顺序解耦 (Top-Level Function Forward References)
+
+在 CP 模块中，顶层函数支持声明顺序无关的前向引用调用（Forward References）：
+- **多阶段语义扫描（Multi-Pass Sema）**：语义分析器在 Pass 1 预注册当前模块所有顶层函数的签名（`Decl::Func`）至符号表；
+- **自然调用顺序**：允许顶层函数自由调用在文件下方声明的私有或辅助函数（如 `encode` 自由调用下方定义的 `encodeSlowPath`），消除传统 C 语言的前向声明负担；
+- **相互递归友好**：天然支持顶层函数之间的相互递归与循环依赖调用。
+
+#### 11.7.7 原生逃逸舱符号预扫与双向无缝集成 (Native Escape Hatch Symbol Pre-Scanning)
+
+为了让 CP 逻辑与外部 Zig 上下文实现零成本互操作：
+- **符号预检与作用域注入**：编译器在语义分析阶段自动预扫描模块顶层 `zig { ... }` 块内声明的符号（`const`, `var`, `fn`），并将标识符自动注入 CP 根作用域（`scopes[0]`）；
+- **查找表与常量无感复用**：CP 原生算法可直接按名访问 `zig { ... }` 中声明的编译期查找表（如 `@setEvalBranchQuota` 构建的 `vlq_lookup_table` 或 `base64_lut`），无需重复映射或通过繁琐的外部包装访问。
+
+#### 11.7.8 根结构体（Root Struct `@This()`）与运行时标识符隔离
+
+- **根结构体语义对接**：当在原生逃逸舱中声明 `pub const Self = @This();` 并定义根字段时，编译器自动将其识别为紧凑值类型并注册到 `ref_classes`，确保跨模块引用时按值直接返回与传递，杜绝非预期的指针分配；
+- **Prelude 运行时标识符隔离**：转译器内置的运行时辅助例程（Prelude helpers）内部变量命名统一采用专有前缀（如 `cp_str_slice`、`cp_slice`），严密隔离与用户公开方法（如 `pub inline fn slice(...)`）的标识符碰撞，杜绝 Zig 局部作用域遮蔽（Identifier Shadowing）报错。
+
 ---
 
 ## 十二、标准库索引与生态路线图
