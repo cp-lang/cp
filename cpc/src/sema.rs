@@ -2519,8 +2519,8 @@ impl Analyzer {
 
         // Layer 1.1: Literal fitting
         if let Some(expr) = init_expr {
-            if let Expr::Lit(lit) = expr {
-                match lit {
+            match expr {
+                Expr::Lit(lit) => match lit {
                     Lit::Int(val) => {
                         if Self::int_fits_in_type(*val, target) {
                             return true;
@@ -2537,7 +2537,16 @@ impl Analyzer {
                         }
                     }
                     _ => {}
+                },
+                Expr::NullCoalesce { right, .. }
+                | Expr::QuestionFallback {
+                    fallback: right, ..
+                } => {
+                    if self.can_coerce(target, src, Some(right)) {
+                        return true;
+                    }
                 }
+                _ => {}
             }
         }
 
@@ -3027,8 +3036,6 @@ impl Analyzer {
                     return Ok(Type::Optional(Box::new(Type::Unknown)));
                 }
                 if ident.sym.starts_with('@')
-                    || ident.sym == "this"
-                    || ident.sym == "_"
                     || ident.sym == "super"
                     || ident.sym == "Box"
                     || ident.sym == "Err"
@@ -3046,7 +3053,13 @@ impl Analyzer {
                     Some(SymbolKind::Class(c)) => Ok(Type::Ref(c.ident.clone())),
                     Some(SymbolKind::Trait(t)) => Ok(Type::Ref(t.ident.clone())),
                     Some(SymbolKind::Enum(e)) => Ok(Type::Ref(e.ident.clone())),
-                    _ => Err(SemaError::UndefinedSymbol(ident.sym.clone(), ident.span)),
+                    _ => {
+                        if ident.sym == "this" || ident.sym == "_" {
+                            Ok(Type::Any)
+                        } else {
+                            Err(SemaError::UndefinedSymbol(ident.sym.clone(), ident.span))
+                        }
+                    }
                 }
             }
             Expr::Bin(bin) => {
@@ -3407,6 +3420,34 @@ impl Analyzer {
                 if let Expr::Ident(id) = &*mem.obj {
                     if let Some(SymbolKind::Enum(_)) = self.resolve(&id.sym) {
                         return Ok(Type::Ref(id.clone()));
+                    }
+                }
+                if let Ok(obj_ty) = self.infer_type(&mem.obj) {
+                    let base_ty = match &obj_ty {
+                        Type::BorrowType { inner, .. } | Type::RawPtr { inner, .. } => {
+                            inner.as_ref()
+                        }
+                        other => other,
+                    };
+                    if let Type::Ref(id) = base_ty {
+                        let mut cur_cls_name = Some(id.sym.clone());
+                        while let Some(cls_name) = cur_cls_name {
+                            if let Some(cls) = self.classes.get(&cls_name) {
+                                if let Some(field) =
+                                    cls.fields.iter().find(|f| f.ident.sym == mem.prop.sym)
+                                {
+                                    return Ok(field.ty.clone());
+                                }
+                                cur_cls_name = cls.extends.as_ref().map(|e| e.sym.clone());
+                            } else {
+                                break;
+                            }
+                        }
+                    } else if (*base_ty == Type::String
+                        || matches!(base_ty, Type::Array(_) | Type::FixedArray(_, _)))
+                        && (mem.prop.sym == "len" || mem.prop.sym == "length")
+                    {
+                        return Ok(Type::USize);
                     }
                 }
                 Ok(Type::Any)

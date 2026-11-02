@@ -3599,6 +3599,9 @@ impl Codegen {
                     if let Type::ResultType { ok, .. } = inner_ty {
                         return Some(*ok);
                     }
+                    if let Type::ErrorUnion(t) = inner_ty {
+                        return Some(*t);
+                    }
                     return Some(inner_ty);
                 }
                 None
@@ -8219,10 +8222,20 @@ impl Codegen {
                     }
                 }
 
+                let target_payload_ty = match &inner_ty {
+                    Some(Type::ErrorUnion(t)) => Some(self.map_type(t)),
+                    Some(Type::ResultType { ok, .. }) => Some(self.map_type(ok)),
+                    _ => None,
+                };
+
                 let catch_arm_body = match &**body {
                     Stmt::Expr(e) => {
                         let ec = self.generate_expr(e);
-                        format!("break :{} cp_val({});", blk_label, ec)
+                        if let Some(ty_str) = &target_payload_ty {
+                            format!("break :{} @as({}, {});", blk_label, ty_str, ec)
+                        } else {
+                            format!("break :{} cp_val({});", blk_label, ec)
+                        }
                     }
                     Stmt::Return(_) => {
                         let saved = self.current_case_content.clone();
@@ -8240,10 +8253,17 @@ impl Codegen {
                             if idx + 1 == len {
                                 if let Stmt::Expr(e) = s {
                                     let ec = self.generate_expr(e);
-                                    self.write_to_case(&format!(
-                                        "break :{} cp_val({});",
-                                        blk_label, ec
-                                    ));
+                                    if let Some(ty_str) = &target_payload_ty {
+                                        self.write_to_case(&format!(
+                                            "break :{} @as({}, {});",
+                                            blk_label, ty_str, ec
+                                        ));
+                                    } else {
+                                        self.write_to_case(&format!(
+                                            "break :{} cp_val({});",
+                                            blk_label, ec
+                                        ));
+                                    }
                                 } else {
                                     self.generate_stmt(s);
                                 }
@@ -8267,6 +8287,12 @@ impl Codegen {
 
                 self.var_cp_types = old_vars;
                 self.locals = old_locals;
+
+                if matches!(inner_ty, Some(Type::ErrorUnion(_))) {
+                    return format!(
+                        "({blk_label}: {{ break :{blk_label} ({exp}) catch |{err_bind}| {{ _ = &{err_bind}; {catch_arm_body} }}; }})"
+                    );
+                }
 
                 format!(
                     "({blk_label}: {{ const __r_{id} = {exp}; switch (__r_{id}) {{ .ok => |__v_{id}| break :{blk_label} __v_{id}, .err => |{err_bind}| {{ _ = &{err_bind}; {catch_arm_body} }} }} }})"

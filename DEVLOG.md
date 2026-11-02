@@ -2054,6 +2054,91 @@ Bun AGY 遵循在 [`BUN-GEMINI.md`](file:///data/dev/cp/BUN-GEMINI.md) 中建立
    - 新增 [`cap/test/test_bun_features.cp`](file:///data/dev/cp/cap/test/test_bun_features.cp) 测试用例，全面覆盖循环跳转控制与定长数组重复初始化，经 `cap` 编译运行 100% 成功；
    - 现有全套类型转换与集合测试套件 100% 绿灯无回归。
 
+---
+
+## 2026-11-03: `calcSizeForSlice` 场景语义分析、字面量按需收敛与错误联合 Catch 深度优化
+
+### 1. 任务背景与核心问题剖析
+用户提出一段典型的 Base64 算法切片尺寸计算代码：
+```typescript
+fn calcSizeForSlice(this, source: string): !usize {
+    let source_len: usize = source.len;
+    let mut result: usize = this.calcSizeUpperBound(source_len)?;
+    if (this.pad_char != null) {
+        let pad: u8 = this.pad_char ?? (0 as u8);
+        if (source_len >= 1 && source[source_len - 1] == pad) {
+            result = result - 1;
+        }
+        if (source_len >= 2 && source[source_len - 2] == pad) {
+            result = result - 1;
+        }
+    }
+    return result;
+}
+```
+并提出了四个关键设计与语法疑问：
+1. 函数返回的 `!usize` 是什么意思？
+2. `this` 作为只读借用能否省略，或使用 `_` 代替？
+3. `0 as u8` 是否冗余？
+4. `if (this.pad_char != null)` 能否像 TS 一样写为 `if (this.pad_char)`？
+
+### 2. 核心原理与编译器修复
+
+1. **`!usize` 推导错误联合**：
+   - `!usize` 对应底层 Zig 的 `anyerror!usize`；
+   - 因第 3 行使用了错误传递传播符 `?`（`this.calcSizeUpperBound(source_len)?`），外层函数必须声明错误联合返回类型。
+2. **接收者 `_` 与实例方法标定**：
+   - `_` 是 CP 的规范专有接收者标识符，全面取代冗余的 `this`；
+   - 参数签名中的 `_` 不可完全缺省，CP 依赖其首位出现来区分“实例方法”与“关联静态函数”。
+3. **字面量按需收敛与字段成员类型推导**：
+   - 原代码写出 `(0 as u8)` 的根本根因在于此前 `cpc/src/sema.rs` 在分析 `Expr::Member` 时回退到了 `Type::Any`，导致 `_.pad_char ?? 0` 的整体类型被推导为 `0` 的类型 `I32`；
+   - 本次在 `cpc/src/sema.rs` 中实现了：
+     - `_` / `this` 接收者正常参与符号解析；
+     - `Expr::Member` 遍历结构体与类继承树，精确获取字段声明类型（如 `pad_char: u8?`）；
+     - `can_coerce`（Layer 1.1）递归适配 `??` 与 `? default` 的 fallback 字面量收敛；
+   - 现在代码可直接写为 `let pad = _.pad_char ?? 0;`，无需任何 `as u8`。
+4. **拒绝 JS 隐式真假值（Implicit Truthiness）**：
+   - 在二进制/字符处理中，`pad_char` 为 `0`（`0x00` NUL 字节）是完全合法的填充字节；
+   - 若引入 JS 的 `if (pad_char)`，`0` 将被隐式误判为 `false`，导致填充剥离逻辑被静默跳过，产生严重的数据损坏；
+   - CP 坚决要求条件分支为严格 `bool`，强制推荐保持 `if (_.pad_char != null)`。
+5. **错误联合 `catch` 原生代码生成**：
+   - 在 `cpc/src/codegen.rs` 中完善 `Expr::Catch`：
+     - `infer_cp_type` 中对 `Type::ErrorUnion(t)` 正确解包为 `*t` 载荷类型；
+     - 代码生成区分 `CPResult` 与 `anyerror!T`，生成 Zig 原生 `({exp}) catch |err| { ... }` 结构。
+
+### 3. 测试与验证
+- 创建并跑通长期回归测试 [`cap/test/test_slice_calc.cp`](file:///data/dev/cp/cap/test/test_slice_calc.cp)，编译并运行输出预期值。
+- 全套测试套件验证无回归。
+
+---
+
+## 2026-11-03: `let` 默认可变性、`T ! E` 错误联合与类方法只读借用省略哲学订正
+
+### 1. 深度对齐 CP 语言规范与用户疑问
+1. **`let mut` 冗余性**：
+   - 根据 `cp_ref.md` 第 3.3 节，CP **全面废除了 `let mut`**；
+   - 变量声明采用 TypeScript 直觉：`let` 声明的变量**默认可变**，`const` 声明的变量深度不可变；
+   - `*` 是专用于**可变借用**（Mutable Borrow）的类型标记与运算符（如 `*data`、`*T`），不用于本地变量绑定关键字；
+   - 因此 `let result = ...;` 即可直接执行 `result -= 1;`，绝不需要写 `let mut`。
+2. **`!usize` vs `usize ! Error`（错误联合语义订正）**：
+   - `!usize` 是此前从底层 Zig 遗留下来的推导错误联合语法（Zig 的 `anyerror!usize`）；
+   - 从 CP 规范语法 `T ! E` 审视，`T` 为正常返回值，`E` 为异常错误集，`!usize` 容易产生“usize 是错误”的心智误解；
+   - CP 的标准规范写法是 **`usize ! Error`**（或带明确错误集合 `usize ! { OutOfBounds, InvalidPad }`）；
+   - 在 `cpc/src/codegen.rs` 中为 `Expr::Catch` 补充对 `Type::ResultType`（`T ! E`）的 payload 类型提取与 `@as(Target, ...)` 强类型收敛支持。
+3. **类/结构体方法中只读借用 `_` 的省略规则与成员无前缀直接访问**：
+   - 在结构体/类中，未被标记为 `static` 的函数，编译器**默认且自动视其实例方法（注入 `*const Self` 只读借用）**；
+   - 静态函数必须显式冠以 `static` 关键字（如 `static fn helper()`），二者正交隔离，绝不混淆；
+   - 因此，**对于常规只读方法，参数列表中的 `_` 完全可以缺省省略**！
+   - 方法体内部的属性与方法同样**支持无前缀直接访问**（直接写 `pad_char` 与 `calcSizeUpperBound(...)`）。只有在遇到形参/局部变量发生作用域遮蔽（Shadowing）时，才需使用 `_.field` 进行精确指代；
+4. **`!T` 极简推导错误联合双轨定位**：
+   - `!T`（前缀感叹号）：**极简推导错误联合**，代表成功返回 `T`，失败抛出系统缺省根错误 `Error`（Zig 全局 `anyerror`），适合 90% 的日常计算与业务函数；
+   - `T ! ErrorSet`（中缀感叹号）：**显式强类型错误联合**，用于限定特定错误枚举的白名单场景；
+5. **标量类型值拷贝与本地可变性**：
+   - `usize`（以及所有的整数、浮点数、布尔）在 CP 中都是标量值类型（Copy Types）；
+   - 函数返回给 `let result` 是物理栈值拷贝，当前本地栈帧拥有完整独占所有权，不属于对外借用，因此直接原地修改（`result -= 1`）完全合法且零开销；
+6. **测试验证**：
+   - 完善 [`cap/test/test_slice_calc.cp`](file:///data/dev/cp/cap/test/test_slice_calc.cp) 为省略形参 `_`、成员直接无前缀访问、采用 `!usize` 极简签名、`let result`（无 `mut`）与 `static` 函数并存的现代代码，编译运行 100% 绿灯通过。
+
 
 
 

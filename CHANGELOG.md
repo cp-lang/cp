@@ -1146,6 +1146,26 @@
 - [`cap/test/test_bun_features.cp`](file:///data/dev/cp/cap/test/test_bun_features.cp):
   - 验证 `while` 循环中的 `break` / `continue` 跳转控制，以及定长数组 `[val; count]` 重复初始化的编译与运行。
 
+---
+
+## 2026-11-03 (编译器字段推导、空值合并字面量收敛与错误联合 Catch 增强)
+
+### 修改文件 (Modified)
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 增强 `can_coerce` 字面量按需收敛（Layer 1.1）：支持在 `Expr::NullCoalesce`（`??`）与 `Expr::QuestionFallback` 表达式中递归对 fallback 分支进行字面量收敛推导；
+  - 修正 `infer_type` 对 `Expr::Ident` 中接收者标识符 `_` 与 `this` 的处理，使其优先通过符号表作用域解析出具体类类型 `Type::Ref`；
+  - 增强 `Expr::Member` 结构体/类成员类型推断：通过遍历类字段与其继承链，精准获取访问字段的声明类型；同时对字符串与数组的 `.len` / `.length` 推导为 `Type::USize`。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 修正 `Expr::Catch` 在 `infer_cp_type` 中的解包逻辑：当被捕获表达式返回 `Type::ErrorUnion(t)` 时，正确解包为载荷类型 `*t`，杜绝变量局部推断类型残留 `anyerror!T`；
+  - 增强 `Expr::Catch` 的 Zig 代码生成：识别原生 `anyerror!T` 错误联合与 `T ! E` 结果类型，生成 Zig 原生 `({exp}) catch |err| { ... }` 语法，并为 fallback 表达式注入 `@as(TargetType, val)` 显式类型收敛保护。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 标量类型表补充 `isize` 说明；
+  - 完善第 5.3 节与 5.4 节：明确类方法中只读接收者 `_` 的缺省规则、方法体内直接访问属性/兄弟方法的无前缀语法规则（命名遮蔽时使用 `_.` 消除歧义）、以及 `!T`（极简推导错误联合，缺省 `Error`）与 `T ! ErrorSet`（强类型显式错误联合）的双轨制规范。
+
+### 新增文件 (Added)
+- [`cap/test/test_slice_calc.cp`](file:///data/dev/cp/cap/test/test_slice_calc.cp):
+  - 针对 `calcSizeForSlice` 场景的长期测试用例，覆盖实例接收者省略（默认只读借用）、类方法内成员直接无前缀访问、极简 `!usize` 错误联合签名、字面量按需收敛 `pad_char ?? 0`、默认可变 `let result`（无需 mut）、可选类型安全判空 `!= null` 以及错误捕获 `catch 0`。
+
 
 
 
