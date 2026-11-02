@@ -1929,6 +1929,36 @@ CP 语言此前已经实现了基础的连续数组（`[T]` / `Vec<T>`）以及�
    - 负向测试验证编译期对违规只读修改与循环中修改的静态拦截；
    - 同步更新规范文档 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)。
 
+---
+
+## 2026-11-02: 编译器工具链进化（默认编译指令、--lib 模块模式与 zig {} 原生逃逸舱实装）
+
+### 1. 任务背景与核心考量
+为了将 CP 语言推向生产级成熟度，我们规划在 Bun.js 1.3.14（Zig 终版）项目中通过迁移部分文件进行实战演练，借助 CP 的借用检查、所有权转移（`move`）与 Comptime RAII 自动析构彻底解决 Zig 现存的内存泄漏与悬垂指针痛点。
+
+在为迁移任务设计工具链使用规范时，明确了两个关键设计决策：
+1. **`zig {}` vs `unsafe {}` 职责正交化**：
+   - 彻底废除丑陋且带有 C 宏黑魔法印记的 `__zig__`，升格为优雅清爽的 `zig { ... }` 原生逃逸舱；
+   - 明确 `unsafe {}` 负责“CP 内部的特权操作（裸指针解引用/算术、越过借用检查）”，而 `zig {}` 负责“纯粹原生 Zig 源码透传（模块顶层宿主 `@import`、底层 Comptime 宏调用）”；
+2. **`cpc` 默认编译哲学**：
+   - 对标 `rustc`、`gcc`、`zig`、`tsc`，编译器自身的默认行为就是“编译”，废除强制写 `cpc compile` 的多余心智负担；
+   - 支持 `cpc input.cp -o output.zig [--lib]` 直接输出；
+   - 引入 `--lib` 模块模式：跳过 `pub fn main` 入口和事件循环，并将用户定义的 `class`、`enum`、`trait`、`error set` 全部以 `pub const` 导出，确保生成的 Zig 源码能被宿主（如 Bun.js 原生代码）无缝通过 `@import` 直接调用。
+
+### 2. 方案落地与关键突破
+1. **词法与语法升级**：
+   - `cpc/src/lexer.rs`：新增 `Token::ZigEscape` 对 `zig` 关键字的识别，保持对 `__zig__` 的向后兼容；
+   - `cpc/src/parser.rs`：在 `parse_ident` 中允许 `zig` 作为上下文标识符，兼顾变量名使用与块级逃逸舱；
+2. **代码生成器模块级与跨文件导出增强**：
+   - `cpc/src/codegen.rs`：新增 `pub is_lib_mode: bool`；在 `--lib` 或文件未定义 `fn main()` 时，不生成 `pub fn main(init: std.process.Init)` 与运行时轮询循环；
+   - 将类（`pub const {} = struct {`）、枚举（`pub const {} = union(enum) {`）、错误集合（`pub const {} = union(enum) {`）与 Trait（`pub const {} = struct {`）改为 `pub const`，完全消除 Zig 导入时的私有成员访问限制；
+3. **CLI 解析器重构**：
+   - `cpc/src/main.rs`：重构 `clap` 命令结构，支持直接执行 `cpc <INPUT> [-o <OUTPUT>] [--lib]` 默认编译，同时兼容原有 `cpc compile ...`、`cpc check ...` 与 `cpc emit-types ...` 子命令。
+4. **验证结果**：
+   - 在 `temp/` 中编写 `test_bun_scenario.cp` 包含顶层 `zig { ... }` 导入、类与枚举定义，通过 `cpc` 编译为 `test_bun_scenario.zig`；
+   - 编写原生 Zig 消费者程序引入并实例化调用，`zig run` 执行 100% 成功；
+   - 回归测试全套标准库测试用例，100% 绿灯全通。
+
 
 
 

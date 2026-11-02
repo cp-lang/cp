@@ -4167,6 +4167,59 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 6. **四线文档完备性保证**：
    - 同步更新 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md) 与 [`SESSION.md`](file:///data/dev/cp/SESSION.md)。
 
+---
+
+## 2026-11-02 (Session Update - Bun.js 迁移战略规划与工具链指令/语法进化)
+
+### 用户指令
+> 我们的cp语言基本功能已经完善，现在需要再实际项目中测试、磨练，加快稳定、成熟，达到生产级别。
+> 我的计划是，对Bun.js 1.3.14 版本部分文件进行修改后，本地编译、测试，目的是将Bun.js 1.3.14 这个版本 迁移到我们的CP语言，Bun.js 1.3.14为zig的最后一个版本，后面发布的1.4.0为rust版本，CP本身是先编译为zig，再进行zig编译，因此Bun.js 从Zig迁移到CP会非常平滑。
+> CP 大量借鉴了Rust的内存安全，参照Bun.js的Rust版本，CP版本的Bun.js同样会极大改善其内存安全，解决其长期存在的内存泄露问题。
+> 通个这种部分zig文件迁移到cp，参照rust版本通过cp改进内存安全，再转译为更安全的zig，执行其现有的测试文件进行测试，不仅可以提供类似rust安全的cp版本的bun.js，同时通过这种几十万代码来实操验证cp语言及其编译期、依赖安装包，让cp语言及其生态，快速成熟，达到生产可用级别。
+> 这个任务，要通过另外的agy来完成，需要你生成一个cap/cpc的使用说明，告知这个agy来使用你生成的cap/cpc，将从zig修改为cp的文件，通过cap、cpc来编译为zig后，通过bun.js自有的编译、测试流程来测试。
+> 另外，我会将cp_ref.md 文件拷贝到bun.js 项目目录，供bun项目中的agy来将zig转换为cp代码。
+> 其他，你需要告知bun项目的agy，一并提供。
+> 你需要思考下，为了方便bun项目中的agy转换zig、编译cp代码，你还可以提供哪些功能、指令。
+
+> __zig__{} 还是 zig {}, 我们已经有 unsafe {},
+> cpc 默认就是 编译,还需要 cpc compile 吗?
+
+> 好
+
+### 执行结果汇报
+1. **工具链极简架构与 CLI 进化**：
+   - [`cpc/src/main.rs`](file:///data/dev/cp/cpc/src/main.rs)：将编译动作确立为 `cpc` 的默认行为，支持直接运行 `cpc <INPUT> [-o <OUTPUT>] [--lib]`，废除强制写 `cpc compile` 的多余层级（同时保留 `compile` 作为兼容别名）；
+2. **`zig {}` 原生逃逸舱实装**：
+   - [`cpc/src/lexer.rs`](file:///data/dev/cp/cpc/src/lexer.rs) & [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs)：全面拥抱 `zig { ... }` 语法，废除旧版 `__zig__` 的拼凑感（同时保持向后兼容）；明确 `unsafe {}` 处理 CP 代码特权操作，`zig {}` 处理纯 Zig 源码穿透；
+3. **`--lib` 模块级转译与符号导出优化**：
+   - [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs)：
+     - 新增 `pub is_lib_mode: bool`，在 `--lib` 或文件无 `main()` 时自动跳过 `pub fn main` 入口及运行时事件循环；
+     - 将所有声明（`class`、`enum`、`error set`、`trait`）均编译为 `pub const`，支持外部 Zig 源码（如 Bun.js 核心）通过 `@import` 直接无缝访问；
+4. **编译与功能验证**：
+   - `cpc` 成功编译为 release 二进制并更新至 [`~/.cap/bin/cpc`](file:///root/.cap/bin/cpc)；
+   - 编写 `temp/test_bun_scenario.cp` 验证顶层 `zig { ... }` 导入及类定义，生成的 Zig 代码被外部 Zig 程序成功引入并执行；
+   - 标准测试套件回归验证 100% 绿灯全通；
+5. **四线文档同步**：
+   - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md) 新增 11.6 节与 13.1 节规范；
+   - [`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md) 与 [`SESSION.md`](file:///data/dev/cp/SESSION.md) 全部同步完毕。
+
+---
+
+## 2026-11-02 (Session Update - Git 提交：实装 cpc 默认编译、--lib 模块模式与 zig {} 原生逃逸舱)
+
+### 用户指令
+> git 提交
+
+### 本次提交范围 (Commit Scope)
+1. **CLI 架构与编译指令重构**：
+   - [`cpc/src/main.rs`](file:///data/dev/cp/cpc/src/main.rs)：将直接编译作为 `cpc` 默认动作（`cpc <INPUT> [-o <OUTPUT>] [--lib]`），无需强制写 `compile` 子命令，同时保留 `compile` 作为兼容别名。
+2. **`--lib` 模块化模式与跨文件导出**：
+   - [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs)：支持 `--lib` 标志与无 `main()` 函数时自动剔除 `pub fn main` 入口及运行时事件循环；类、枚举、错误集、Trait 均以 `pub const` 导出供 Zig 原生 `@import`。
+3. **`zig { ... }` 原生逃逸舱实装**：
+   - [`cpc/src/lexer.rs`](file:///data/dev/cp/cpc/src/lexer.rs) & [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs)：支持模块顶层与函数体内优雅的 `zig { ... }` 逃逸舱，与 `unsafe { ... }` 实现正交分离，保持对 `__zig__` 向后兼容。
+4. **四线文档完备性保证**：
+   - 同步更新 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md) 与 [`SESSION.md`](file:///data/dev/cp/SESSION.md)。
+
 
 
 

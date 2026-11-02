@@ -214,6 +214,7 @@ pub enum Token {
 
     // --- Zig Escape Hatch ---
     #[token("__zig__")]
+    #[token("zig")]
     ZigEscape,
 
     // Error handling

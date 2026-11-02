@@ -13,6 +13,7 @@ pub enum ReceiverMode {
 
 pub struct Codegen {
     pub is_beam_mode: bool,
+    pub is_lib_mode: bool,
     pub agent_classes: Vec<crate::ast::Class>,
     output: String,
     cases: Vec<String>,
@@ -73,6 +74,7 @@ impl Codegen {
     pub fn new() -> Self {
         Self {
             is_beam_mode: false,
+            is_lib_mode: false,
             agent_classes: Vec::new(),
             output: String::new(),
             cases: Vec::new(),
@@ -1580,7 +1582,7 @@ impl Codegen {
                 self.generate_enum(e);
             }
             if let ModuleItem::Decl(Decl::ErrorSet(es)) = item {
-                self.writeln(&format!("const {} = union(enum) {{", es.ident.sym));
+                self.writeln(&format!("pub const {} = union(enum) {{", es.ident.sym));
                 self.indent();
                 for v in &es.variants {
                     self.writeln(&format!("{},", v.sym));
@@ -1592,7 +1594,7 @@ impl Codegen {
         // Emit synthesized AnonSet and Union error sets
         let anon_sets = self.anon_err_sets.clone();
         for (zig_name, variants) in &anon_sets {
-            self.writeln(&format!("const {} = union(enum) {{", zig_name));
+            self.writeln(&format!("pub const {} = union(enum) {{", zig_name));
             self.indent();
             for v in variants {
                 self.writeln(&format!("{},", v));
@@ -1617,7 +1619,7 @@ impl Codegen {
         }
         let union_sets = self.union_err_sets.clone();
         for (zig_name, sub_names) in &union_sets {
-            self.writeln(&format!("const {} = union(enum) {{", zig_name));
+            self.writeln(&format!("pub const {} = union(enum) {{", zig_name));
             self.indent();
             let mut seen_variants = HashSet::new();
             let mut variant_list = Vec::new();
@@ -1717,7 +1719,7 @@ impl Codegen {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         for (name, body) in anon_objs {
-            self.writeln(&format!("const {} = {};", name, body));
+            self.writeln(&format!("pub const {} = {};", name, body));
         }
 
         self.generate_reflection_tables();
@@ -1761,10 +1763,13 @@ impl Codegen {
             self.writeln("pub var __cap_test_total: usize = 0;");
             self.writeln("pub var __cap_test_passed: usize = 0;");
             self.writeln("pub var __cap_test_failed: usize = 0;");
-            self.writeln("pub fn main(init: std.process.Init) !void {");
-            self.indent();
-            self.writeln("global_io = init.io;");
-            self.writeln("var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator); defer arena.deinit();");
+
+            let has_main = self.fn_sigs.contains_key("main");
+            if !self.is_lib_mode && has_main {
+                self.writeln("pub fn main(init: std.process.Init) !void {");
+                self.indent();
+                self.writeln("global_io = init.io;");
+                self.writeln("var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator); defer arena.deinit();");
             if self.is_parallel_runtime {
                 let wc_expr = if self.parallel_worker_count > 0 {
                     format!("{}", self.parallel_worker_count)
@@ -1833,6 +1838,7 @@ impl Codegen {
 
             self.dedent();
             self.writeln("}"); // Close main
+            }
         }
         self.output.clone()
     }
@@ -1840,7 +1846,7 @@ impl Codegen {
     fn generate_trait(&mut self, t: &TraitDecl) {
         writeln!(
             self.output,
-            "const {} = struct {{ ptr: *anyopaque, vtable: *const VTable, pub const VTable = struct {{",
+            "pub const {} = struct {{ ptr: *anyopaque, vtable: *const VTable, pub const VTable = struct {{",
             t.ident.sym
         )
         .unwrap();
@@ -1908,7 +1914,7 @@ impl Codegen {
         } else {
             "enum"
         };
-        self.writeln(&format!("const {} = union({}) {{", e.ident.sym, enum_type));
+        self.writeln(&format!("pub const {} = union({}) {{", e.ident.sym, enum_type));
         self.indent();
         for v in &e.variants {
             let mut line = v.ident.sym.clone();
@@ -1993,7 +1999,7 @@ impl Codegen {
             return;
         }
         let type_id = Self::fnv1a_type_id(&class.ident.sym);
-        writeln!(self.output, "const {} = struct {{", class.ident.sym).unwrap();
+        writeln!(self.output, "pub const {} = struct {{", class.ident.sym).unwrap();
         self.indent();
         self.writeln(&format!("pub const __TYPE_ID: u64 = 0x{:016x};", type_id));
         if class.implements.iter().any(|i| i.sym == "Agent") {

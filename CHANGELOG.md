@@ -1049,6 +1049,24 @@
   - 更新 12.1 节已实装标准库索引表，增补 `cap:collections`；
   - 新增 12.2 节《完备标准容器矩阵（cap:collections）与借用/所有权安全体系》，详尽规范时间复杂度、内存布局与生产级代码示例。
 
+---
+
+## 2026-11-02 (编译器工具链进化：默认编译指令、--lib 模块模式与 zig {} 原生逃逸舱)
+
+### 修改文件 (Modified)
+- [`cpc/src/lexer.rs`](file:///data/dev/cp/cpc/src/lexer.rs):
+  - 词法解析器新增 `Token::ZigEscape` 对 `zig` 关键字的支持，与 `__zig__` 双轨并存；
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - 在 `parse_ident` 中允许 `Token::ZigEscape` 作为上下文标识符，兼顾变量名使用与块级逃逸舱；
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 新增 `pub is_lib_mode: bool`；在 `--lib` 模式或无 `main()` 函数时，跳过 `pub fn main` 入口与事件循环的生成；
+  - 将所有用户定义的 `class`、`enum`、`error set`、`trait`、匿名对象等以 `pub const` 导出，确保外部 Zig 模块（如 Bun.js 原生模块）可以通过 `@import` 无缝直接访问；
+- [`cpc/src/main.rs`](file:///data/dev/cp/cpc/src/main.rs):
+  - 重构 CLI 解析架构：支持直接 `cpc <INPUT> [-o <OUTPUT>] [--lib]` 执行默认编译动作，废除强制写 `compile` 的冗余心智负担，同时保留 `compile` 作为向后兼容别名；
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 新增 11.6 节《Native Zig 逃逸舱（`zig { ... }`）》；
+  - 新增 13.1 节《`cpc` 独立编译器前端》CLI 指令规范。
+
 
 
 

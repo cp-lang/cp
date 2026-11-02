@@ -2588,7 +2588,7 @@ defer if (!__t_moved) {
 
 ### 11.5 底层控制与 `unsafe` 安全边界
 
-CP 拥有直通硬件底层的裸指针与内存控制能力，所有非安全操作严格受限于 `unsafe` 隔离块：
+CP 拥有直通硬件底层的裸指针与内存控制能力，所有非安全操作严格受限于 `unsafe` 隔离块（内部依然使用 CP 语法）：
 
 ```typescript
 unsafe {
@@ -2602,6 +2602,36 @@ unsafe {
 
 pub unsafe fn direct_io_write(port: u16, val: u8) {
     // 裸硬件端口操作
+}
+```
+
+### 11.6 Native Zig 逃逸舱（`zig { ... }`）
+
+当需要与底层转译目标（Zig）原生交互、引入宿主项目外部命名空间或调用 Comptime 机制时，CP 提供无阻碍的 `zig { ... }` 逃逸舱：
+- **顶层使用**：直接导入宿主全局命名空间（如 Bun.js 内部的 `@import("root").bun`）；
+- **函数体内使用**：直接嵌入 Zig 原生高性能代码块，编译器原样 verbatim 透传；
+- **兼容性**：保留对旧版 `__zig__ { ... }` 的兼容。
+
+```typescript
+// 1. 顶层穿透引入宿主头文件与定义
+zig {
+    const bun = @import("root").bun;
+    const std = @import("std");
+    const Allocator = std.mem.Allocator;
+}
+
+export class NativeBuffer {
+    ptr: any,
+    len: usize,
+
+    fn init(*this, size: usize): void {
+        this.len = size;
+        // 2. 函数体内嵌入原生 Zig 操作
+        zig {
+            const buf = std.heap.page_allocator.alloc(u8, @intCast(size)) catch unreachable;
+            self.ptr = @ptrCast(buf.ptr);
+        }
+    }
 }
 ```
 
@@ -2789,6 +2819,30 @@ timeline
     Milestone 2 : 编译器前端强化 (In Progress) : 泛型多重 Trait 约束强化 : 管道运算符 * 语法糖增强
     Milestone 3 : Nest 容器原生融合 (Next) : 动态 .so NIF 热加载 : 分布式智能体跨节点信箱路由 : SharedTensor 跨 Agent 零拷贝直通
     Milestone 4 : 工业级生态成熟 (Future) : 完整异步网络驱动 : 宏展开卫生性校验 (Hygienic Macros) : 包管理中心 Registry
+```
+
+---
+
+---
+
+## 十三、编译器工具链与 CLI 指令规范（`cpc` & `cap`）
+
+### 13.1 `cpc` 独立编译器前端
+
+`cpc`（CP Compiler）作为原生静态编译器前端，默认执行编译动作，无需多余的子命令：
+
+```bash
+# 1. 默认编译为 Zig 源码（直接指定输出）
+cpc src/url.cp -o src/url.zig
+
+# 2. 编译为 Zig 独立模块/库（省略 main 入口，所有 export 自动赋予 pub）
+cpc src/url.cp -o src/url.zig --lib
+
+# 3. 极速语法与借用安全检查（5ms 静态拦截，不生成中间文件）
+cpc check src/url.cp
+
+# 4. 生成 .d.cp 类型声明契约文件
+cpc emit-types src/url.cp -o src/url.d.cp
 ```
 
 ---

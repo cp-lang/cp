@@ -3528,6 +3528,7 @@ impl<'a> Parser<'a> {
             Token::Ident(s) => s,
 
             Token::Match => "match".to_string(),
+            Token::ZigEscape => "zig".to_string(),
             Token::Switch => "switch".to_string(),
             Token::Try => "try".to_string(),
             Token::Catch => "catch".to_string(),
