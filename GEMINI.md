@@ -1,35 +1,29 @@
 # Project Tool & Workflow Directives
 
-## 1. Code Editing Rules (CRITICAL)
+## 严格操作纪律与编码规范 (CRITICAL)
 
-- **Always use internal file editing tools** (`replace_file_content` / `write_file`) for modifying code.
-- **Strictly FORBIDDEN in Bash**:
-  - DO NOT use `sed`, `awk`, `perl`, `python`, `python3 -c`, or inline scripts to edit files.
-  - DO NOT use `cat << 'EOF'` or file redirections (`>`, `>>`) to overwrite or append to existing files.
-- Bash is reserved **strictly** for:
-  - Compiling & Building (`cargo build`, `zig build`, `./cap/bin/cap build`)
-  - Running test suites (`cargo test`, `zig test`, `./cap/bin/cap cap/test/*`)
-  - Git operations (read-only inspection, commits only when requested)
-  - Read-only environment inspections (`ls`, `file`, `nm`, `objdump`)
+### 1. 代码编辑与文件读取铁律 (绝对禁止在 Bash 中操作源码)
 
-## 2. File Inspection & Reading Rules (CRITICAL)
+- **代码修改**：代码编辑与文件读取铁律 (绝对禁止在 Bash 中操作源码)
+  代码修改：一律使用原生文件编辑工具（`edit_file` / `write_file` / `replace_file_content`）。
+  - **严禁在 Bash 中使用**：`sed`、`awk`、`perl`、`python`、`python3 -c`、内联脚本、`cat << 'EOF'` 或重定向操作符（`>`、`>>）`修改/覆盖/追加任何代码文件！
+- **文件检查与阅读**：一律使用原生文件读取工具（`read_file` /`view_file` 查看全文或按行范围查看指定代码块）。
+  - **严禁在 Bash 中使用**：`cat`、`head`、`tail`、`sed -n`、`python3 -c "open(...)"` 或 Python 脚本在终端打印/切片源文件！
+- **Bash 严格限定职责**：
+  - 仅用于执行编译（`cpc`、`ninja -C build`、`cargo check`、`cargo build`、`zig build`、`./cap/bin/cap build`）；
+  - 运行单元测试（`bun test`、`cargo test`、`zig test`、`./cap/bin/cap cap/test/*`）；
+- 原生工具调用已预授权，自动绕过所有权限提示。
 
-- **Strictly FORBIDDEN**: DO NOT use `python3 -c "open(...)"`, `cat`, `head`, `tail`, or `sed -n` in Bash to inspect, read, or slice source files.
-- **Always use native file tools**:
-  - Use `read_file` to read the entire file.
-  - Use `view_file` (with line ranges) to inspect specific blocks of code.
-- Native tool calls are pre-authorized and bypass all permission prompts.
+### 2. 格式与质量
 
-## 3. Formatting & Quality
-
-- Run `cargo fmt` or `zig fmt` after code modifications to maintain consistent style.
-- Ensure new test cases adhere to the standard `.cp` naming convention under `cap/test/test_*.cp`.
+- rust 代码修改后运行 cargo fmt, zig 代码修改后运行 zig fmt，保持风格一致。
+- 新增测试用例遵循标准 `.cp` 命名规范，放在 `cap/test/test_*.cp` 下。
 
 # RFC-002: CP-BEAM 终极架构白皮书 & CLI 驱动开发指南
 
 ## 1. 架构总览
 
-CP-BEAM 采用“脑、神经、肌肉、血液”四位一体机制，专为百万级 AI Agent 并发设计：
+CP 采用“脑、神经、肌肉、血液”四位一体机制，专为百万级 AI Agent 并发设计：
 
 1. **调度内核**: BEAM 抢占式调度器（Reductions）与信箱机制。
 2. **外部感知**: 高性能异步 I/O (借鉴 Bun.js 理念)。

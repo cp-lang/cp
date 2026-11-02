@@ -950,6 +950,22 @@ impl<'a> Parser<'a> {
             });
         }
         if self.peek() == Some(&Token::LBracket) {
+            let checkpoint = self.lexer.clone();
+            let p1 = self.peeked.clone();
+            let p2 = self.peeked2.clone();
+            self.bump()?;
+            if let Some(Token::IntLiteral(n)) = self.peek() {
+                let size = *n as usize;
+                self.bump()?;
+                if self.peek() == Some(&Token::RBracket) {
+                    self.bump()?;
+                    let elem_ty = self.parse_base_type()?;
+                    return Ok(Type::FixedArray(Box::new(elem_ty), size));
+                }
+            }
+            self.lexer = checkpoint;
+            self.peeked = p1;
+            self.peeked2 = p2;
             self.bump()?;
             let mut elements = Vec::new();
             while self.peek() != Some(&Token::RBracket) {
@@ -989,12 +1005,18 @@ impl<'a> Parser<'a> {
         };
         let (token, span) = self.bump()?;
         let mut ty = match token {
+            Token::U8 => Type::U8,
+            Token::I8 => Type::I8,
+            Token::U16 => Type::U16,
+            Token::I16 => Type::I16,
             Token::I32 => Type::I32,
             Token::U32 => Type::U32,
+            Token::I64 => Type::I64,
             Token::U64 => Type::U64,
+            Token::ISize => Type::ISize,
+            Token::USize => Type::USize,
             Token::F32 => Type::F32,
             Token::F64 => Type::F64,
-            Token::USize => Type::USize,
             Token::String => Type::String,
             Token::Void => Type::Void,
             Token::Any => Type::Any,
@@ -1022,7 +1044,9 @@ impl<'a> Parser<'a> {
                     let tr = self.parse_ident()?;
                     self.expect(Token::Greater)?;
                     Type::BoxDyn(tr)
-                } else if (sym == "Map" || sym == "Dict" || sym == "HashMap" || sym == "BTreeMap") && self.peek() == Some(&Token::Less) {
+                } else if (sym == "Map" || sym == "Dict" || sym == "HashMap" || sym == "BTreeMap")
+                    && self.peek() == Some(&Token::Less)
+                {
                     self.bump()?;
                     let k = self.parse_type()?;
                     self.expect(Token::Comma)?;
@@ -1033,7 +1057,9 @@ impl<'a> Parser<'a> {
                     } else {
                         Type::Map(Box::new(k), Box::new(v))
                     }
-                } else if (sym == "Set" || sym == "HashSet" || sym == "BTreeSet") && self.peek() == Some(&Token::Less) {
+                } else if (sym == "Set" || sym == "HashSet" || sym == "BTreeSet")
+                    && self.peek() == Some(&Token::Less)
+                {
                     self.bump()?;
                     let elem = self.parse_type()?;
                     self.expect(Token::Greater)?;
@@ -1065,8 +1091,18 @@ impl<'a> Parser<'a> {
                 ty = Type::Optional(Box::new(ty));
             } else if self.peek() == Some(&Token::LBracket) {
                 self.bump()?;
-                self.expect(Token::RBracket)?;
-                ty = Type::Array(Box::new(ty));
+                if self.peek() == Some(&Token::RBracket) {
+                    self.bump()?;
+                    ty = Type::Array(Box::new(ty));
+                } else if let Some(Token::IntLiteral(n)) = self.peek() {
+                    let size = *n as usize;
+                    self.bump()?;
+                    self.expect(Token::RBracket)?;
+                    ty = Type::FixedArray(Box::new(ty), size);
+                } else {
+                    self.expect(Token::RBracket)?;
+                    ty = Type::Array(Box::new(ty));
+                }
             } else {
                 break;
             }
@@ -2488,6 +2524,41 @@ impl<'a> Parser<'a> {
             }
         }
         while self.peek().is_some() {
+            let compound_op = match self.peek() {
+                Some(Token::PlusAssign) => Some(BinaryOp::Add),
+                Some(Token::MinusAssign) => Some(BinaryOp::Sub),
+                Some(Token::StarAssign) => Some(BinaryOp::Mul),
+                Some(Token::SlashAssign) => Some(BinaryOp::Div),
+                Some(Token::PercentAssign) => Some(BinaryOp::Mod),
+                Some(Token::AmpAssign) => Some(BinaryOp::BitAnd),
+                Some(Token::PipeAssign) => Some(BinaryOp::BitOr),
+                Some(Token::CaretAssign) => Some(BinaryOp::BitXor),
+                Some(Token::ShlAssign) => Some(BinaryOp::Shl),
+                Some(Token::ShrAssign) => Some(BinaryOp::Shr),
+                _ => None,
+            };
+            if let Some(inner_op) = compound_op {
+                if 1 < min_prec {
+                    break;
+                }
+                self.bump()?;
+                let right = self.parse_bin_expr(1)?;
+                let start = left_span(&left).start;
+                let end = right_span(&right).end;
+                let desugared_rhs = Expr::Bin(BinExpr {
+                    span: Span { start, end },
+                    op: inner_op,
+                    left: Box::new(left.clone()),
+                    right: Box::new(right),
+                });
+                left = Expr::Bin(BinExpr {
+                    span: Span { start, end },
+                    op: BinaryOp::Assign,
+                    left: Box::new(left),
+                    right: Box::new(desugared_rhs),
+                });
+                continue;
+            }
             let op = match self.peek_op() {
                 Some(op) => op,
                 None => break,
@@ -2999,6 +3070,10 @@ impl<'a> Parser<'a> {
                     name: "@not".to_string(),
                     args: vec![inner],
                 }))
+            }
+            Token::Tilde => {
+                let inner = self.parse_primary_expr()?;
+                Ok(Expr::BitNot(Box::new(inner)))
             }
             Token::Ident(sym) => {
                 if sym == "Err" && self.peek() == Some(&Token::LParen) {
@@ -3554,11 +3629,17 @@ impl<'a> Parser<'a> {
             Token::Void => "void".to_string(),
             Token::String => "string".to_string(),
             Token::Bool => "bool".to_string(),
+            Token::U8 => "u8".to_string(),
+            Token::I8 => "i8".to_string(),
+            Token::U16 => "u16".to_string(),
+            Token::I16 => "i16".to_string(),
             Token::I32 => "i32".to_string(),
             Token::U32 => "u32".to_string(),
+            Token::I64 => "i64".to_string(),
             Token::U64 => "u64".to_string(),
             Token::F32 => "f32".to_string(),
             Token::F64 => "f64".to_string(),
+            Token::ISize => "isize".to_string(),
             Token::USize => "usize".to_string(),
             Token::New => "new".to_string(),
             Token::From => "from".to_string(),
@@ -3584,6 +3665,14 @@ impl<'a> Parser<'a> {
             Some(Token::Minus) => Some(BinaryOp::Sub),
             Some(Token::Star) => Some(BinaryOp::Mul),
             Some(Token::Slash) => Some(BinaryOp::Div),
+            Some(Token::Percent) => Some(BinaryOp::Mod),
+            Some(Token::Ampersand) => Some(BinaryOp::BitAnd),
+            Some(Token::Pipe) => Some(BinaryOp::BitOr),
+            Some(Token::Caret) => Some(BinaryOp::BitXor),
+            Some(Token::Shl) => Some(BinaryOp::Shl),
+            Some(Token::Shr) => Some(BinaryOp::Shr),
+            Some(Token::AmpAmp) => Some(BinaryOp::LogicalAnd),
+            Some(Token::PipePipe) => Some(BinaryOp::LogicalOr),
             Some(Token::Assign) => Some(BinaryOp::Assign),
             Some(Token::Eq) => Some(BinaryOp::Eq),
             Some(Token::NotEq) => Some(BinaryOp::NotEq),
@@ -3599,11 +3688,17 @@ impl<'a> Parser<'a> {
     fn op_precedence(&self, op: &BinaryOp) -> u8 {
         match op {
             BinaryOp::Assign => 1,
-            BinaryOp::Eq | BinaryOp::NotEq => 2,
-            BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq => 2,
-            BinaryOp::Pipe => 3,
-            BinaryOp::Add | BinaryOp::Sub => 4,
-            BinaryOp::Mul | BinaryOp::Div => 5,
+            BinaryOp::LogicalOr => 2,
+            BinaryOp::LogicalAnd => 3,
+            BinaryOp::BitOr => 4,
+            BinaryOp::BitXor => 5,
+            BinaryOp::BitAnd => 6,
+            BinaryOp::Eq | BinaryOp::NotEq => 7,
+            BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq => 8,
+            BinaryOp::Pipe => 9,
+            BinaryOp::Shl | BinaryOp::Shr => 10,
+            BinaryOp::Add | BinaryOp::Sub => 11,
+            BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => 12,
         }
     }
 }
@@ -3639,6 +3734,7 @@ fn left_span(expr: &Expr) -> Span {
         Expr::Range { span, .. } => *span,
         Expr::Cast { span, .. } => *span,
         Expr::Deref(d) => left_span(d),
+        Expr::BitNot(d) => left_span(d),
         Expr::Unsafe(b) | Expr::Comptime(b) => b.span,
     }
 }
@@ -3678,6 +3774,7 @@ fn right_span(expr: &Expr) -> Span {
         Expr::Range { span, .. } => *span,
         Expr::Cast { span, .. } => *span,
         Expr::Deref(d) => right_span(d),
+        Expr::BitNot(d) => right_span(d),
         Expr::Unsafe(b) | Expr::Comptime(b) => b.span,
     }
 }

@@ -1959,6 +1959,66 @@ CP 语言此前已经实现了基础的连续数组（`[T]` / `Vec<T>`）以及�
    - 编写原生 Zig 消费者程序引入并实例化调用，`zig run` 执行 100% 成功；
    - 回归测试全套标准库测试用例，100% 绿灯全通。
 
+---
+
+## 2026-11-02: Bun 迁移工作流指南与编译器修改直通授权（BUN-GEMINI.md 构建）
+
+### 1. 任务背景与核心考量
+在将 Bun.js 1.3.14 迁移到 CP 语言的工程化推进中，任务交由专门负责 Bun 项目的独立 AGY 执行。
+该 AGY 面临跨工程联动的复杂场景：在 Bun 项目（`/data/dev/bun`）中工作时，若遇到 CP 语言不支持的语法、编译器类型推导缺陷或代码生成边界 Bug，绝不能停滞等待，必须具备“就地修改上游编译器源码、原地热重构与重编译”的自愈能力。
+
+### 2. 方案落地与规范确立
+1. **构建 [`BUN-GEMINI.md`](file:///data/dev/cp/BUN-GEMINI.md)**：
+   - 将当前项目的核心代码编辑/读取纪律（严禁在 Bash 中使用 sed/cat 编辑查看文件，必须使用 native tool calls）与 Bun 迁移实战指引深度结合；
+   - 明确标注上游 CP 编译器仓库路径 [`/data/dev/cp`](file:///data/dev/cp)，并全权开放读取与修改权限；
+   - 确立清晰的编译器自愈热更新流水线与软链接映射：
+     系统已建立 `/root/.cap/bin/cpc -> /data/dev/cp/cap/bin/cpc` 软链接；
+     日常高频重构采用 Debug 模式：`cargo check` -> `cargo build` -> `cp /data/dev/cp/cpc/target/debug/cpc /data/dev/cp/cap/bin/cpc`（1~2 秒极速热更新且保留 panic 堆栈）；阶段性成果才需跑 `cargo build --release`；且默认仅针对当前系统架构单目标构建，零交叉编译浪费；
+   - 详尽整理 Zig → CP 语法与内存安全映射字典，重点阐述 `*this` / `this` 接收者借用、`move` 所有权转移、`release()` Comptime Auto-Drop 机制；
+   - 强调 `zig { ... }` 原生逃逸舱（模块顶层宿主导入）与 `unsafe { ... }`（CP 特权代码）的正交职责分离；
+   - 提供科学的四阶段迁移路线图与排错指引。
+
+---
+
+## 2026-11-03: 四层类型转换系统架构落地与静态推导/代码生成全链路实现
+
+### 1. 任务背景与核心权衡
+在系统级编程语言设计中，类型转换机制直接决定了语言的人机工效与内存安全边界：
+- **C/C++**：过度的隐式转换（整型提升、有符号/无符号隐式比较、指针隐式互转）是无数内存安全漏洞与逻辑 Bug 的根源；
+- **Rust**：虽然安全，但极端严苛，完全废除数值隐式拓宽（如 `u8` 转 `u64` 也必须强制写 `as`），在系统编程中产生大量冗余视觉噪音；
+- **Zig**：支持编译期整型安全拓宽（`Coercion`），但对运行期截断 `@truncate` 限制严格（必须符号一致且无符号互转受限），`@intCast` 则在溢出时直接运行时 Panic；
+- **TypeScript**：断言 `as` 被大量滥用于伪装数据结构，缺乏物理内存层面的安全语义。
+
+CP 语言基于现代编译原理与“脑-神经-肌肉-血液”架构愿景，建立了清晰优美的**四层类型转换体系（Four-Tier Type Conversion System）**：
+1. **第一层：无损自然流转（Zero-Cost Coercion，禁止写 as，自动适配）**：凡是数学绝对无损、内存单向安全的场景（字面量范围适配、小范围向大范围无损拓宽、安全结构可选/联合包装、借用收紧、面向对象多态与 Trait 指针），编译器自动向上提升；
+2. **第二层：有损/重新解释转换（Explicit Cast，强制必须写 as）**：高位截断（Narrowing）、符号位重新解释、浮点整数互转、枚举与数值互转，强制显式 `as` 表明已知晓潜在风险；
+3. **第三层：底层裸指针与物理地址转换（强制在 `unsafe { }` 内 + `as`）**：裸指针类型转换、裸指针与物理地址 `usize` 互转，不仅必须显式 `as`，更强制置于 `unsafe` 特权块内，阻止野指针蔓延；
+4. **第四层：高阶语义转换（禁止使用 `as`，走语义化方法与 Trait）**：严禁通过 `as` 强转字符串与数值，强制走标准受检解析函数（如 `i32.parse(s)?`）或 `.to_string()` 方法。
+
+---
+
+### 2. 核心实现与技术细节
+
+1. **静态分析与类型推导 (`cpc/src/sema.rs`)**：
+   - 增加 `can_coerce(target: &Type, src: &Type, init_expr: Option<&Expr>) -> bool` 核心方法；
+   - 字面量自适应推导：`int_fits_in_type` 精确校验常量数值在目标类型范围（如 `let a: u64 = 100;` 适配成功，`let b: u8 = 1000;` 静态拦截报错）；
+   - 数值无损拓宽：`is_safe_widening` 实现 `u8 -> u16 -> u32 -> u64 -> usize`、`i8 -> i16 -> i32 -> i64 -> isize` 以及小整数/浮点向 `f64` 的安全流转；
+   - 结构包装与借用权限：`T -> T?`、`T -> ?T`、`*T -> &T` 自动放行；
+   - 符号名同构对比：在 `can_coerce` 中对比 `Ident.sym`，彻底消除了不同作用域生成的 `Ident.span` 差异引发的伪类型不匹配；
+   - 裸指针双向安全拦截：在 `Expr::Cast` 中全面检测 `src_ty` 与 `target_ty`，若任一方为裸指针且不在 `unsafe` 作用域内，统一报错 `Raw pointer casting is only allowed inside unsafe block`；
+   - 高阶解析拦截：对 `string as i32` 与 `i32 as string` 产生精准友好的指引错误。
+2. **底层 Zig 运行时无损截断辅助函数 (`cpc/src/codegen.rs`)**：
+   - 注入 `cp_cast_int(comptime Dest: type, val: anytype) Dest`：
+     - 同符号位整型调用 `@truncate`；
+     - 跨符号位整型先拓宽至 `i64/u64`，通过 `@bitCast` 重新解释位模式，再调用 `@truncate`；
+     - 针对 `comptime_int` 直接进行编译期安全截断。
+     彻底消除了 Zig 原生 `@intCast` 运行期溢出 panic 的缺陷。
+   - 完善 `Expr::Cast` 代码生成：打通整型截断、浮点互转、裸指针与 `usize` 互转（`@intFromPtr` / `@ptrFromInt`）以及枚举与标量互转（`@enumFromInt` / `@intFromEnum`）。
+3. **全套正反向测试验证**：
+   - 新增 [`cap/test/test_type_conversion.cp`](file:///data/dev/cp/cap/test/test_type_conversion.cp) 覆盖四层体系；
+   - 验证反向拦截用例（有损未加 as、裸指针逃出 unsafe、字符串强转数字）100% 精准拦截；
+   - `./cap/bin/cap cap/test/test_unsafe_pass.cp` 与全套集合矩阵测试 100% 绿灯通过。
+
 
 
 

@@ -222,12 +222,18 @@ impl DcpEmitter {
 
     fn format_type(&self, ty: &Type) -> String {
         match ty {
+            Type::U8 => "u8".to_string(),
+            Type::I8 => "i8".to_string(),
+            Type::U16 => "u16".to_string(),
+            Type::I16 => "i16".to_string(),
             Type::I32 => "i32".to_string(),
             Type::U32 => "u32".to_string(),
+            Type::I64 => "i64".to_string(),
             Type::U64 => "u64".to_string(),
+            Type::ISize => "isize".to_string(),
+            Type::USize => "usize".to_string(),
             Type::F32 => "f32".to_string(),
             Type::F64 => "f64".to_string(),
-            Type::USize => "usize".to_string(),
             Type::Bool => "bool".to_string(),
             Type::String => "string".to_string(),
             Type::Void => "void".to_string(),
@@ -236,6 +242,7 @@ impl DcpEmitter {
             Type::PID => "PID".to_string(),
             Type::Unknown => "unknown".to_string(),
             Type::Array(inner) => format!("[]{}", self.format_type(inner)),
+            Type::FixedArray(inner, size) => format!("{}[{}]", self.format_type(inner), size),
             Type::Map(k, v) => format!("Map<{}, {}>", self.format_type(k), self.format_type(v)),
             Type::Dict(k, v) => format!("Dict<{}, {}>", self.format_type(k), self.format_type(v)),
             Type::Set(t) => format!("Set<{}>", self.format_type(t)),

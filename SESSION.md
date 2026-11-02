@@ -4220,6 +4220,123 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 4. **四线文档完备性保证**：
    - 同步更新 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md) 与 [`SESSION.md`](file:///data/dev/cp/SESSION.md)。
 
+---
+
+## 2026-11-02 (Session Update - Bun 迁移指令白皮书 BUN-GEMINI.md 构建与编译器直通授权)
+
+### 用户指令
+> 很好
+> 将你写给bun agy的上述内容, 结合当前项目的 GEMINI.md, 生成一个 BUN-GEMINI.md,提供给 bun的 agy 使用
+> 内容中, 包含当前项目的目录, 开放给 bun 的 agy 读取 修改, 在遇到 cp 编译问题时,能直接 修改 cpc 中的源代码, 重新生成 新的 cpc, 完成 bun 的迁移任务.
+> cpc 已经加入到path,可直接调用
+
+### 执行结果汇报
+1. **生成官方指令白皮书**：
+   - 在项目根目录成功创建 [`BUN-GEMINI.md`](file:///data/dev/cp/BUN-GEMINI.md)；
+2. **全权开放上游编译器读写权限**：
+   - 在文档中明确定义双工作区拓扑（宿主 `/data/dev/bun` 与上游特区 `/data/dev/cp`），授权 Bun AGY 遇到编译期问题直接修改 [`/data/dev/cp/cpc/`](file:///data/dev/cp/cpc/) 源代码并热更新 `cpc`；
+3. **集成严格操作纪律与提速规范**：
+   - 继承 native tools 文件编辑/读取铁律，杜绝 Bash 破坏性脚本；
+   - 明确软链接 `/root/.cap/bin/cpc -> /data/dev/cp/cap/bin/cpc`，规范编译产物直接覆盖至 `/data/dev/cp/cap/bin/cpc`；
+   - 确立单架构构建与“日常迭代首选 Debug（1~2秒快速热更新且保留堆栈）、阶段性收尾可选 Release”的性能提速工作流；
+4. **完备迁移实操字典与路线图**：
+   - 提供 Zig → CP 语法与内存安全映射字典，重点指导 `*this` / `this`、`move`、Comptime RAII 自动析构与 `zig { ... }` 原生逃逸舱使用；
+5. **四线文档同步**：
+   - [`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md) 与 [`SESSION.md`](file:///data/dev/cp/SESSION.md) 全部同步完毕。
+
+---
+
+## 2026-11-02 (Session Update - 编译产物软链接路径校准与 Debug 模式提速决策)
+
+### 用户指令
+> 已经做了链接: /root/.cap/bin/cpc -> /data/dev/cp/cap/bin/cpc
+> 当前项目, rust 编译生成的 cpc 在 /data/dev/cp/cap/bin/cpc 目录, 你写的 BUN-GEMINI.md 需要 cp /data/dev/cp/cpc/target/release/cpc ~/.cap/bin/cpc 对吗?
+> 另外, 为了加快 编译, 我们只需 生成 当前操作系统的 cpc 版本,不需要生成其他操作系统版本
+> 其中, debug 与 release 哪个版本 编译更快,我们应该使用 debug 版本还是 release 版本
+
+### 执行结果汇报
+1. **软链接与部署路径校准**：
+   - 确认系统软链接 `/root/.cap/bin/cpc -> /data/dev/cp/cap/bin/cpc`；
+   - 将 [`BUN-GEMINI.md`](file:///data/dev/cp/BUN-GEMINI.md) 中所有部署指令校准为直接写入实体文件：
+     `cp /data/dev/cp/cpc/target/debug/cpc /data/dev/cp/cap/bin/cpc`，由软链接自动保证全局生效；
+2. **Debug vs Release 深度分析与工程决策**：
+   - **编译本身耗时**：Debug 模式（`cargo build`）仅需 **1~2 秒**；Release 模式（`cargo build --release`）需 **25~35 秒**；
+   - **单文件转译耗时**：Debug 版 `cpc` 耗时约 15ms，Release 版约 5ms，在 Bun 整体编译流水线中 10ms 差异完全无感；
+   - **错误排查优势**：Debug 版具备完整的 panic 调用栈与断言输出；
+   - **决策**：**日常高频迁移重构强烈推荐使用 Debug 版本**，阶段性成果测试或发布才跑 Release；
+   - **单架构构建**：确认 `cargo build` 默认仅构建当前宿主操作系统（Linux x86_64），无交叉编译负担；
+3. **规范文档同步校准**：
+   - [`BUN-GEMINI.md`](file:///data/dev/cp/BUN-GEMINI.md) 已同步校准部署路径与 Debug 优先工作流；
+   - [`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md) 与 [`SESSION.md`](file:///data/dev/cp/SESSION.md) 同步更新。
+
+---
+
+## 2026-11-03 (Session Update - 四层类型转换体系全链路落地与静态验证)
+
+### 用户指令
+> ### 类型转换规则
+> - 安全转换必须显式使用 `as`；**没有隐式自动强转**
+> - 借用、裸指针之间的转换必须在 `unsafe` 内显式转换
+> - 基础数字类型之间也必须 `as`
+> cp 的类型转换 必须 as 吗?
+> Typescript zig 与 Rust 中的类型转换是如何实现
+> cp的类型转换应该如何设计?
+
+> 很好, 按这个实现, cp_ref.md 中已更新
+
+### 执行结果汇报
+1. **类型体系推导与约束落地 (`cpc/src/sema.rs`)**：
+   - 彻底告别一刀切的全部 `as`，严格落实 `cp_ref.md` 规范的“四层类型转换体系”：
+     - **第一层（无损自然流转，无需 as）**：
+       - 字面量自适应推导：常量整数未超出目标类型范围时自动适配（如 `let a: u64 = 100;` 成功，`let b: u8 = 1000;` 静态拦截）；
+       - 数值无损安全拓宽：无符号 `u8 -> u16 -> u32 -> u64 -> usize`、有符号 `i8 -> i16 -> i32 -> i64 -> isize` 以及整数向 `f64` 安全流转无需 `as`；
+       - 安全结构与借用流转：支持具体值向 `T?` 与 `?T` 自动包装、`*T` 向 `&T` 自动收紧权限、子类向基类多态流转以及实现 Trait 的借用向 `&dyn Trait` 自动适配；
+     - **第二层（有损/重新解释转换，必须显式 as）**：
+       - 高位截断（Narrowing）、符号位重解释、浮点整数互转、枚举与标量互转必须强制写 `as`；
+     - **第三层（裸指针物理强转，必须 as + unsafe）**：
+       - 在 `analyze_expr` 的 `Expr::Cast` 中，全面检测源或目标类型是否包含裸指针，普通作用域试图强转直接静态拦截并报错：`Raw pointer casting is only allowed inside unsafe block`；
+     - **第四层（高阶语义转换，严禁 as）**：
+       - 静态拦截 `string as i32` 与 `i32 as string`，给出清晰友好的提示（引导使用 `i32.parse(s)?` 或 `.to_string()`）；
+   - 在变量声明 `Stmt::Var` 与赋值语句 `BinaryOp::Assign` 中深度接入 `can_coerce`，杜绝非法隐式类型渗透。
+2. **底层 Zig 运行时无损截断机制 (`cpc/src/codegen.rs`)**：
+   - 运行时前导代码注入 `cp_cast_int(comptime Dest: type, val: anytype) Dest`，优雅解决 Zig `@intCast` 运行期溢出 panic 及跨符号位 `@truncate` 限制，结合 `@bitCast` 达成零运行时开销的位截断与符号位重新解释；
+   - 完善代码生成：精准支持整型截断、浮点互转、裸指针与 `usize` 互转（`@intFromPtr` / `@ptrFromInt`）以及枚举与整型互转（`@intFromEnum` / `@enumFromInt`）。
+3. **测试验证与标准套件建设**：
+   - 新增长期回归测试套件 [`cap/test/test_type_conversion.cp`](file:///data/dev/cp/cap/test/test_type_conversion.cp)，涵盖四层转换全景，执行 100% 成功；
+   - 验证负向拦截用例（有损截断未加 as、裸指针强转在 unsafe 外、字符串强转数字）100% 精准拦截；
+   - 现有测试用例 [`cap/test/test_unsafe_pass.cp`](file:///data/dev/cp/cap/test/test_unsafe_pass.cp) 与全套集合矩阵测试 100% 绿灯无回归通过。
+4. **四线文档同步**：
+   - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)（用户已同步规范）、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md) 与 [`SESSION.md`](file:///data/dev/cp/SESSION.md) 全部同步完毕。
+
+---
+
+## 2026-11-03 (Session Update - Git 提交)
+
+### 用户指令
+> git 提交
+
+### 本次提交范围 (Commit Scope)
+1. **编译器前端类型系统全面升级 (`cpc/src/sema.rs`)**：
+   - 落地四层类型转换体系（Four-Tier Type Conversion System）；
+   - 实现第一层无损自然流转（Zero-Cost Coercion，无需 `as`）：字面量自适应推导（`int_fits_in_type`）、数值无损安全拓宽（`is_safe_widening`）、具体值到可选/错误联合自动包装（`T -> T?`, `T -> ?T`）、借用收紧（`*T -> &T`）、子类到基类与 Trait 多态，并在 `Stmt::Var` 和 `BinaryOp::Assign` 接入静态校验；
+   - 修正标识符 Span 对类型同构匹配的干扰（`Ident.sym`）；
+   - 实现第三层裸指针物理强转安全拦截：普通作用域试图强转裸指针报 `Raw pointer casting is only allowed inside unsafe block`；
+   - 实现第四层高阶语义转换拦截：禁止通过 `as` 在 `string` 与数字间互转，友好引导使用 `.parse(...) ?` 或 `.to_string()`；
+   - 增加错误变体 `SemaError::InvalidCast`。
+2. **底层 Zig 运行时无损截断与类型转换代码生成 (`cpc/src/codegen.rs`)**：
+   - 运行时前导代码注入 `cp_cast_int`，通过 `@truncate` 与 `@bitCast` 彻底消除 Zig `@intCast` 运行期溢出 panic；
+   - 完善 `Expr::Cast` 代码生成：支持整型截断、符号位重新解释、浮点整数互转、裸指针与 `usize` 互转（`@intFromPtr` / `@ptrFromInt`）以及枚举与标量互转。
+3. **格式化与代码清理**：
+   - `cpc` 全模块运行 `cargo fmt` 保持代码风格统一。
+4. **测试套件与验证产物**：
+   - 新建四层类型转换长期回归测试套件 [`cap/test/test_type_conversion.cp`](file:///data/dev/cp/cap/test/test_type_conversion.cp)；
+   - 验证负向拦截用例与正向测试用例 100% 绿灯；
+   - 验证 [`cap/test/test_unsafe_pass.cp`](file:///data/dev/cp/cap/test/test_unsafe_pass.cp) 与全套集合矩阵测试 100% 绿灯。
+5. **Bun 迁移指南与工作流规范建立**：
+   - 新增 [`BUN-GEMINI.md`](file:///data/dev/cp/BUN-GEMINI.md) 提供给负责 Bun.js 1.3.14 迁移任务的 AGY。
+6. **四线文档同步**：
+   - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)、[`SESSION.md`](file:///data/dev/cp/SESSION.md)、[`TASK.md`](file:///data/dev/cp/TASK.md)、[`GEMINI.md`](file:///data/dev/cp/GEMINI.md)。
+
 
 
 

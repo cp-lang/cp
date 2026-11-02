@@ -51,9 +51,7 @@ enum Commands {
         lib: bool,
     },
     /// Perform static syntax and borrow-checker check
-    Check {
-        input: PathBuf,
-    },
+    Check { input: PathBuf },
     /// Emit .d.cp type declarations
     EmitTypes {
         input: PathBuf,

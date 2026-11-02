@@ -750,6 +750,25 @@ impl Codegen {
             "    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }",
         );
         self.writeln("}");
+        self.writeln("fn cp_cast_int(comptime Dest: type, val: anytype) Dest {");
+        self.writeln("    const Src = @TypeOf(val);");
+        self.writeln("    if (comptime Src == Dest) return val;");
+        self.writeln("    if (comptime Src == comptime_int) { return @as(Dest, @truncate(val)); }");
+        self.writeln(
+            "    if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) {",
+        );
+        self.writeln("        return @truncate(val);");
+        self.writeln("    }");
+        self.writeln("    if (comptime @typeInfo(Src).int.signedness == .signed) {");
+        self.writeln("        const s: i64 = @as(i64, @truncate(val));");
+        self.writeln("        const u: u64 = @bitCast(s);");
+        self.writeln("        return @truncate(u);");
+        self.writeln("    } else {");
+        self.writeln("        const u: u64 = @as(u64, @truncate(val));");
+        self.writeln("        const s: i64 = @bitCast(u);");
+        self.writeln("        return @truncate(s);");
+        self.writeln("    }");
+        self.writeln("}");
         self.writeln("");
 
         // --- Top-Level C-FFI / Zig Escapes ---
@@ -1038,7 +1057,9 @@ impl Codegen {
         self.writeln("    fn ensure_capacity(self: *VecDeque) void {");
         self.writeln("        if (self.count == self.capacity) {");
         self.writeln("            const new_cap = self.capacity * 2;");
-        self.writeln("            const new_buf = self.allocator.alloc(Message, new_cap) catch unreachable;");
+        self.writeln(
+            "            const new_buf = self.allocator.alloc(Message, new_cap) catch unreachable;",
+        );
         self.writeln("            var i: usize = 0;");
         self.writeln("            while (i < self.count) : (i += 1) {");
         self.writeln("                new_buf[i] = self.buf[(self.head + i) % self.capacity];");
@@ -1058,7 +1079,9 @@ impl Codegen {
         self.writeln("    }");
         self.writeln("    pub fn push_front(self: *VecDeque, val: anytype) void {");
         self.writeln("        self.ensure_capacity();");
-        self.writeln("        self.head = if (self.head == 0) self.capacity - 1 else self.head - 1;");
+        self.writeln(
+            "        self.head = if (self.head == 0) self.capacity - 1 else self.head - 1;",
+        );
         self.writeln("        self.buf[self.head] = cp_message_from(val);");
         self.writeln("        self.count += 1;");
         self.writeln("    }");
@@ -1071,7 +1094,9 @@ impl Codegen {
         self.writeln("    }");
         self.writeln("    pub fn pop_back(self: *VecDeque) ?Message {");
         self.writeln("        if (self.count == 0) return null;");
-        self.writeln("        self.tail = if (self.tail == 0) self.capacity - 1 else self.tail - 1;");
+        self.writeln(
+            "        self.tail = if (self.tail == 0) self.capacity - 1 else self.tail - 1;",
+        );
         self.writeln("        const val = self.buf[self.tail];");
         self.writeln("        self.count -= 1;");
         self.writeln("        return val;");
@@ -1082,7 +1107,9 @@ impl Codegen {
         self.writeln("    }");
         self.writeln("    pub fn peek_back(self: *VecDeque) ?Message {");
         self.writeln("        if (self.count == 0) return null;");
-        self.writeln("        const idx = if (self.tail == 0) self.capacity - 1 else self.tail - 1;");
+        self.writeln(
+            "        const idx = if (self.tail == 0) self.capacity - 1 else self.tail - 1;",
+        );
         self.writeln("        return self.buf[idx];");
         self.writeln("    }");
         self.writeln("    pub fn get(self: *VecDeque, index: anytype) ?Message {");
@@ -1118,7 +1145,9 @@ impl Codegen {
         self.writeln("        var idx = self.items.items.len - 1;");
         self.writeln("        while (idx > 0) {");
         self.writeln("            const parent = (idx - 1) / 2;");
-        self.writeln("            if (cp_msg_cmp(self.items.items[idx], self.items.items[parent]) > 0) {");
+        self.writeln(
+            "            if (cp_msg_cmp(self.items.items[idx], self.items.items[parent]) > 0) {",
+        );
         self.writeln("                const tmp = self.items.items[idx];");
         self.writeln("                self.items.items[idx] = self.items.items[parent];");
         self.writeln("                self.items.items[parent] = tmp;");
@@ -1155,9 +1184,15 @@ impl Codegen {
         self.writeln("        return self.items.items[0];");
         self.writeln("    }");
         self.writeln("    pub fn len(self: *BinaryHeap) usize { return self.items.items.len; }");
-        self.writeln("    pub fn size(self: *BinaryHeap) i32 { return @intCast(self.items.items.len); }");
-        self.writeln("    pub fn is_empty(self: *BinaryHeap) bool { return self.items.items.len == 0; }");
-        self.writeln("    pub fn clear(self: *BinaryHeap) void { self.items.clearRetainingCapacity(); }");
+        self.writeln(
+            "    pub fn size(self: *BinaryHeap) i32 { return @intCast(self.items.items.len); }",
+        );
+        self.writeln(
+            "    pub fn is_empty(self: *BinaryHeap) bool { return self.items.items.len == 0; }",
+        );
+        self.writeln(
+            "    pub fn clear(self: *BinaryHeap) void { self.items.clearRetainingCapacity(); }",
+        );
         self.writeln("    pub fn next(self: *BinaryHeap) ?Message { return self.pop(); }");
         self.writeln("};");
         self.writeln("");
@@ -1233,9 +1268,15 @@ impl Codegen {
         self.writeln("        return self.entries.items[self.entries.items.len - 1].key;");
         self.writeln("    }");
         self.writeln("    pub fn len(self: *BTreeMap) usize { return self.entries.items.len; }");
-        self.writeln("    pub fn size(self: *BTreeMap) i32 { return @intCast(self.entries.items.len); }");
-        self.writeln("    pub fn is_empty(self: *BTreeMap) bool { return self.entries.items.len == 0; }");
-        self.writeln("    pub fn clear(self: *BTreeMap) void { self.entries.clearRetainingCapacity(); }");
+        self.writeln(
+            "    pub fn size(self: *BTreeMap) i32 { return @intCast(self.entries.items.len); }",
+        );
+        self.writeln(
+            "    pub fn is_empty(self: *BTreeMap) bool { return self.entries.items.len == 0; }",
+        );
+        self.writeln(
+            "    pub fn clear(self: *BTreeMap) void { self.entries.clearRetainingCapacity(); }",
+        );
         self.writeln("    pub fn keys(self: *BTreeMap) []Message {");
         self.writeln("        const list = self.allocator.alloc(Message, self.entries.items.len) catch unreachable;");
         self.writeln("        for (self.entries.items, 0..) |entry, i| { list[i] = entry.key; }");
@@ -1770,74 +1811,84 @@ impl Codegen {
                 self.indent();
                 self.writeln("global_io = init.io;");
                 self.writeln("var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator); defer arena.deinit();");
-            if self.is_parallel_runtime {
-                let wc_expr = if self.parallel_worker_count > 0 {
-                    format!("{}", self.parallel_worker_count)
-                } else {
-                    "@min(@max(std.Thread.getCpuCount() catch 4, 2), 16)".to_string()
-                };
-                self.writeln(&format!("const __worker_count: usize = {};", wc_expr));
+                if self.is_parallel_runtime {
+                    let wc_expr = if self.parallel_worker_count > 0 {
+                        format!("{}", self.parallel_worker_count)
+                    } else {
+                        "@min(@max(std.Thread.getCpuCount() catch 4, 2), 16)".to_string()
+                    };
+                    self.writeln(&format!("const __worker_count: usize = {};", wc_expr));
+                    self.writeln(
+                        "var __workers = try arena.allocator().alloc(std.Thread, __worker_count);",
+                    );
+                    self.writeln("for (0..__worker_count) |wi| { __workers[wi] = try std.Thread.spawn(.{}, _WorkerPoolRunner.run, .{}); }");
+                    self.writeln("defer { global_runtime_shutdown.store(true, .release); for (__workers) |wt| { wt.join(); } }");
+                }
+                self.writeln("var ctx: cp_main_Context = undefined; ctx.pc = 0; ctx._self = PID{ .node_id = 0, .local_id = 1 }; next_local_id = 2; ctx.arena = &arena; ctx._parent = null; ctx._parent_fn = null; ctx.received_msg = null; ctx.received_sender = null;");
+                self.writeln("try cp_main(&ctx);");
+                self.writeln("while (true) {");
+                self.indent();
+                self.writeln("drain_cross_thread_mailbox();");
+                self.writeln("while (global_task_queue.pop()) |task| { _ = global_running_workers.fetchAdd(1, .acquire); try task.run(task.ctx); _ = global_running_workers.fetchSub(1, .release); }");
+                self.writeln("while (queue_len > 0) { const task = task_queue[0]; for (task_queue[1..queue_len], 0..) |t, j| { task_queue[j] = t; } queue_len -= 1; try task.run(task.ctx); }");
+                self.writeln("drain_cross_thread_mailbox();");
+                self.writeln("if (active_fds == 0 and queue_len == 0 and global_task_queue.len() == 0 and waiting_count == 0 and global_active_tasks.load(.acquire) == 0 and global_running_workers.load(.acquire) == 0) break;");
+                self.writeln("if (queue_len == 0 and global_task_queue.len() == 0 and (waiting_count > 0 or global_active_tasks.load(.acquire) > 0 or global_running_workers.load(.acquire) > 0) and active_fds == 0) { const ts = std.os.linux.timespec{ .sec = 0, .nsec = 500_000 }; _ = std.os.linux.nanosleep(&ts, null); }");
+                self.writeln("if (active_fds > 0) {");
+                self.indent();
                 self.writeln(
-                    "var __workers = try arena.allocator().alloc(std.Thread, __worker_count);",
+                    "const ready_count = try std.posix.poll(poll_fds[0..active_fds], 10);",
                 );
-                self.writeln("for (0..__worker_count) |wi| { __workers[wi] = try std.Thread.spawn(.{}, _WorkerPoolRunner.run, .{}); }");
-                self.writeln("defer { global_runtime_shutdown.store(true, .release); for (__workers) |wt| { wt.join(); } }");
-            }
-            self.writeln("var ctx: cp_main_Context = undefined; ctx.pc = 0; ctx._self = PID{ .node_id = 0, .local_id = 1 }; next_local_id = 2; ctx.arena = &arena; ctx._parent = null; ctx._parent_fn = null; ctx.received_msg = null; ctx.received_sender = null;");
-            self.writeln("try cp_main(&ctx);");
-            self.writeln("while (true) {");
-            self.indent();
-            self.writeln("drain_cross_thread_mailbox();");
-            self.writeln("while (global_task_queue.pop()) |task| { _ = global_running_workers.fetchAdd(1, .acquire); try task.run(task.ctx); _ = global_running_workers.fetchSub(1, .release); }");
-            self.writeln("while (queue_len > 0) { const task = task_queue[0]; for (task_queue[1..queue_len], 0..) |t, j| { task_queue[j] = t; } queue_len -= 1; try task.run(task.ctx); }");
-            self.writeln("drain_cross_thread_mailbox();");
-            self.writeln("if (active_fds == 0 and queue_len == 0 and global_task_queue.len() == 0 and waiting_count == 0 and global_active_tasks.load(.acquire) == 0 and global_running_workers.load(.acquire) == 0) break;");
-            self.writeln("if (queue_len == 0 and global_task_queue.len() == 0 and (waiting_count > 0 or global_active_tasks.load(.acquire) > 0 or global_running_workers.load(.acquire) > 0) and active_fds == 0) { const ts = std.os.linux.timespec{ .sec = 0, .nsec = 500_000 }; _ = std.os.linux.nanosleep(&ts, null); }");
-            self.writeln("if (active_fds > 0) {");
-            self.indent();
-            self.writeln("const ready_count = try std.posix.poll(poll_fds[0..active_fds], 10);");
-            self.writeln("if (ready_count > 0) {");
-            self.indent();
-            self.writeln("var i: usize = 0;");
-            self.writeln("while (i < active_fds) {");
-            self.indent();
-            self.writeln("if (poll_fds[i].revents != 0) {");
-            self.indent();
-            self.writeln("schedule(fd_to_run[i], fd_to_ctx[i]);");
-            self.writeln("poll_fds[i] = poll_fds[active_fds - 1];");
-            self.writeln("fd_to_ctx[i] = fd_to_ctx[active_fds - 1];");
-            self.writeln("fd_to_run[i] = fd_to_run[active_fds - 1];");
-            self.writeln("active_fds -= 1;");
-            self.dedent();
-            self.writeln("} else { i += 1; }");
-            self.dedent();
-            self.writeln("}");
-            self.dedent();
-            self.writeln("}");
-            self.dedent();
-            self.writeln("}");
-            self.dedent();
-            self.writeln("}"); // Close while (true)
+                self.writeln("if (ready_count > 0) {");
+                self.indent();
+                self.writeln("var i: usize = 0;");
+                self.writeln("while (i < active_fds) {");
+                self.indent();
+                self.writeln("if (poll_fds[i].revents != 0) {");
+                self.indent();
+                self.writeln("schedule(fd_to_run[i], fd_to_ctx[i]);");
+                self.writeln("poll_fds[i] = poll_fds[active_fds - 1];");
+                self.writeln("fd_to_ctx[i] = fd_to_ctx[active_fds - 1];");
+                self.writeln("fd_to_run[i] = fd_to_run[active_fds - 1];");
+                self.writeln("active_fds -= 1;");
+                self.dedent();
+                self.writeln("} else { i += 1; }");
+                self.dedent();
+                self.writeln("}");
+                self.dedent();
+                self.writeln("}");
+                self.dedent();
+                self.writeln("}");
+                self.dedent();
+                self.writeln("}"); // Close while (true)
 
-            self.writeln("if (__cap_test_total > 0) {");
-            self.indent();
-            self.writeln(
-                "@import(\"std\").debug.print(\"\\n===========================\\n\", .{});",
-            );
-            self.writeln("@import(\"std\").debug.print(\"    cap:test Summary\\n\", .{});");
-            self.writeln("@import(\"std\").debug.print(\"===========================\\n\", .{});");
-            self.writeln("@import(\"std\").debug.print(\"Total:  {d}\\n\", .{__cap_test_total});");
-            self.writeln("@import(\"std\").debug.print(\"Passed: {d}\\n\", .{__cap_test_passed});");
-            self.writeln("@import(\"std\").debug.print(\"Failed: {d}\\n\", .{__cap_test_failed});");
-            self.writeln(
+                self.writeln("if (__cap_test_total > 0) {");
+                self.indent();
+                self.writeln(
+                    "@import(\"std\").debug.print(\"\\n===========================\\n\", .{});",
+                );
+                self.writeln("@import(\"std\").debug.print(\"    cap:test Summary\\n\", .{});");
+                self.writeln(
+                    "@import(\"std\").debug.print(\"===========================\\n\", .{});",
+                );
+                self.writeln(
+                    "@import(\"std\").debug.print(\"Total:  {d}\\n\", .{__cap_test_total});",
+                );
+                self.writeln(
+                    "@import(\"std\").debug.print(\"Passed: {d}\\n\", .{__cap_test_passed});",
+                );
+                self.writeln(
+                    "@import(\"std\").debug.print(\"Failed: {d}\\n\", .{__cap_test_failed});",
+                );
+                self.writeln(
                 "@import(\"std\").debug.print(\"Coverage: 100% (Native CP Evaluated)\\n\", .{});",
             );
-            self.writeln("if (__cap_test_failed > 0) @import(\"std\").process.exit(1);");
-            self.dedent();
-            self.writeln("}");
+                self.writeln("if (__cap_test_failed > 0) @import(\"std\").process.exit(1);");
+                self.dedent();
+                self.writeln("}");
 
-            self.dedent();
-            self.writeln("}"); // Close main
+                self.dedent();
+                self.writeln("}"); // Close main
             }
         }
         self.output.clone()
@@ -1914,7 +1965,10 @@ impl Codegen {
         } else {
             "enum"
         };
-        self.writeln(&format!("pub const {} = union({}) {{", e.ident.sym, enum_type));
+        self.writeln(&format!(
+            "pub const {} = union({}) {{",
+            e.ident.sym, enum_type
+        ));
         self.indent();
         for v in &e.variants {
             let mut line = v.ident.sym.clone();
@@ -3053,6 +3107,7 @@ impl Codegen {
                     other => Some(other),
                 }
             }
+            Expr::BitNot(inner) => self.infer_cp_type_with_mock(inner, mock_types),
             Expr::Move(inner) => self.infer_cp_type_with_mock(inner, mock_types),
             Expr::Borrow(inner, is_mut) => {
                 let inner_ty = self.infer_cp_type_with_mock(inner, mock_types)?;
@@ -3527,6 +3582,8 @@ impl Codegen {
                         | BinaryOp::Gt
                         | BinaryOp::LtEq
                         | BinaryOp::GtEq
+                        | BinaryOp::LogicalAnd
+                        | BinaryOp::LogicalOr
                 ) {
                     return Some(Type::Bool);
                 }
@@ -3622,6 +3679,8 @@ impl Codegen {
                 match obj_ty {
                     Some(Type::Dict(_, v)) | Some(Type::Map(_, v)) => Some(Type::Optional(v)),
                     Some(Type::Array(inner)) => Some(*inner),
+                    Some(Type::FixedArray(inner, _)) => Some(*inner),
+                    Some(Type::String) => Some(Type::U8),
                     Some(Type::Ref(id)) if id.sym == "Dict" || id.sym == "Map" => {
                         Some(Type::Optional(Box::new(Type::Ref(Ident {
                             span: Span { start: 0, end: 0 },
@@ -4974,8 +5033,13 @@ impl Codegen {
             self.moved_vars.clear();
             if let Some(c) = class_name {
                 if self.current_receiver_mode != ReceiverMode::Static {
-                    self.locals.insert("self".to_string(), format!("*{}", c));
-                    params_str.push_str(&format!("self: *{}", c));
+                    let ptr_type = if self.current_receiver_mode == ReceiverMode::ReadOnly {
+                        format!("*const {}", c)
+                    } else {
+                        format!("*{}", c)
+                    };
+                    self.locals.insert("self".to_string(), ptr_type.clone());
+                    params_str.push_str(&format!("self: {}", ptr_type));
                 }
             }
             for p in &func.params {
@@ -6987,6 +7051,15 @@ impl Codegen {
                     BinaryOp::Gt => format!("cp_gt({}, {})", l, r),
                     BinaryOp::LtEq => format!("cp_lte({}, {})", l, r),
                     BinaryOp::GtEq => format!("cp_gte({}, {})", l, r),
+                    BinaryOp::Mod => format!("({} % {})", l, r),
+                    BinaryOp::BitAnd => format!("({} & {})", l, r),
+                    BinaryOp::BitOr => format!("({} | {})", l, r),
+                    BinaryOp::BitXor => format!("({} ^ {})", l, r),
+                    BinaryOp::Shl => format!("({} << {})", l, r),
+                    BinaryOp::Shr => format!("({} >> {})", l, r),
+                    BinaryOp::LogicalAnd => format!("({} and {})", l, r),
+                    BinaryOp::LogicalOr => format!("({} or {})", l, r),
+                    BinaryOp::Assign => format!("{} = {}", l, r),
                     _ => {
                         let op = match bin.op {
                             BinaryOp::Sub => "-",
@@ -9240,19 +9313,65 @@ impl Codegen {
                         let is_src_float = matches!(src_ty, Some(Type::F32 | Type::F64));
                         let is_src_int = matches!(
                             src_ty,
-                            Some(Type::I32 | Type::U32 | Type::U64 | Type::USize)
+                            Some(
+                                Type::U8
+                                    | Type::I8
+                                    | Type::U16
+                                    | Type::I16
+                                    | Type::I32
+                                    | Type::U32
+                                    | Type::I64
+                                    | Type::U64
+                                    | Type::ISize
+                                    | Type::USize
+                            )
                         );
+                        let is_src_ptr = matches!(src_ty, Some(Type::RawPtr { .. }));
                         let is_target_int = matches!(
                             resolved_ty,
-                            Type::I32 | Type::U32 | Type::U64 | Type::USize
+                            Type::U8
+                                | Type::I8
+                                | Type::U16
+                                | Type::I16
+                                | Type::I32
+                                | Type::U32
+                                | Type::I64
+                                | Type::U64
+                                | Type::ISize
+                                | Type::USize
                         );
                         let is_target_float = matches!(resolved_ty, Type::F32 | Type::F64);
+                        let is_target_ptr = matches!(resolved_ty, Type::RawPtr { .. });
+                        let is_src_enum = if let Some(Type::Ref(id)) = &src_ty {
+                            self.enum_defs.contains_key(&id.sym)
+                        } else {
+                            false
+                        };
+                        let is_target_enum = if let Type::Ref(id) = &resolved_ty {
+                            self.enum_defs.contains_key(&id.sym)
+                        } else {
+                            false
+                        };
 
                         if is_target_int {
                             if is_src_float {
                                 format!("@as({}, @intFromFloat({}))", target_zig_ty, inner_code)
+                            } else if is_src_ptr {
+                                if target_zig_ty == "usize" {
+                                    format!("@intFromPtr({})", inner_code)
+                                } else {
+                                    format!(
+                                        "cp_cast_int({}, @intFromPtr({}))",
+                                        target_zig_ty, inner_code
+                                    )
+                                }
+                            } else if is_src_enum {
+                                format!(
+                                    "cp_cast_int({}, @intFromEnum({}))",
+                                    target_zig_ty, inner_code
+                                )
                             } else {
-                                format!("@as({}, @intCast({}))", target_zig_ty, inner_code)
+                                format!("cp_cast_int({}, {})", target_zig_ty, inner_code)
                             }
                         } else if is_target_float {
                             if is_src_int {
@@ -9260,7 +9379,21 @@ impl Codegen {
                             } else {
                                 format!("@as({}, @floatCast({}))", target_zig_ty, inner_code)
                             }
-                        } else if matches!(resolved_ty, Type::RawPtr { .. } | Type::Any) {
+                        } else if is_target_ptr {
+                            if is_src_int {
+                                format!(
+                                    "@as({}, @ptrFromInt(@as(usize, @truncate({}))))",
+                                    target_zig_ty, inner_code
+                                )
+                            } else {
+                                format!(
+                                    "@as({}, @ptrCast(@alignCast({})))",
+                                    target_zig_ty, inner_code
+                                )
+                            }
+                        } else if is_target_enum {
+                            format!("@as({}, @enumFromInt({}))", target_zig_ty, inner_code)
+                        } else if matches!(resolved_ty, Type::Any) {
                             format!(
                                 "@as({}, @ptrCast(@alignCast({})))",
                                 target_zig_ty, inner_code
@@ -9270,6 +9403,10 @@ impl Codegen {
                         }
                     }
                 }
+            }
+            Expr::BitNot(inner) => {
+                let inner_code = self.generate_expr(inner);
+                format!("(~{})", inner_code)
             }
             Expr::Deref(inner) => {
                 let inner_code = self.generate_expr(inner);
@@ -10310,12 +10447,18 @@ impl Codegen {
 
     fn map_type(&self, ty: &Type) -> String {
         match ty {
+            Type::U8 => "u8".to_string(),
+            Type::I8 => "i8".to_string(),
+            Type::U16 => "u16".to_string(),
+            Type::I16 => "i16".to_string(),
             Type::I32 => "i32".to_string(),
             Type::U32 => "u32".to_string(),
+            Type::I64 => "i64".to_string(),
             Type::U64 => "u64".to_string(),
+            Type::ISize => "isize".to_string(),
+            Type::USize => "usize".to_string(),
             Type::F32 => "f32".to_string(),
             Type::F64 => "f64".to_string(),
-            Type::USize => "usize".to_string(),
             Type::Bool => "bool".to_string(),
             Type::String => "[]const u8".to_string(),
             Type::PID => "PID".to_string(),
@@ -10323,6 +10466,7 @@ impl Codegen {
             Type::Any => "*anyopaque".to_string(),
             Type::Auto => "anytype".to_string(),
             Type::Array(inner) => format!("[]const {}", self.map_type(inner)),
+            Type::FixedArray(inner, size) => format!("[{}]{}", size, self.map_type(inner)),
             Type::Map(_, _) => "*Map".to_string(),
             Type::Dict(_, _) => "*Dict".to_string(),
             Type::Set(_) => "*Set".to_string(),
@@ -10336,6 +10480,7 @@ impl Codegen {
                 if ident.sym == "PID"
                     || ident.sym == "Message"
                     || ident.sym == "Error"
+                    || ident.sym == "anytype"
                     || ident.sym.starts_with("__AnonErr_")
                     || ident.sym.starts_with("__UnionErr_")
                     || self.ref_classes.contains(&ident.sym)
@@ -10347,7 +10492,15 @@ impl Codegen {
                 }
                 format!("*{}", ident.sym)
             }
-            Type::BorrowType { inner, .. } => {
+            Type::BorrowType { inner, is_mut, .. } => {
+                if *is_mut {
+                    if let Type::Array(elem) = &**inner {
+                        return format!("[]{}", self.map_type(elem));
+                    }
+                    if let Type::String = &**inner {
+                        return "[]u8".to_string();
+                    }
+                }
                 let inner_zig = self.map_type(inner);
                 let is_trait = if let Type::Ref(id) = &**inner {
                     self.trait_defs.contains_key(&id.sym)
@@ -10411,12 +10564,18 @@ impl Codegen {
 
     fn map_raw_ptr_base(&self, ty: &Type) -> String {
         match ty {
+            Type::U8 => "u8".to_string(),
+            Type::I8 => "i8".to_string(),
+            Type::U16 => "u16".to_string(),
+            Type::I16 => "i16".to_string(),
             Type::I32 => "i32".to_string(),
             Type::U32 => "u32".to_string(),
+            Type::I64 => "i64".to_string(),
             Type::U64 => "u64".to_string(),
+            Type::ISize => "isize".to_string(),
+            Type::USize => "usize".to_string(),
             Type::F32 => "f32".to_string(),
             Type::F64 => "f64".to_string(),
-            Type::USize => "usize".to_string(),
             Type::Bool => "bool".to_string(),
             Type::String => "[]const u8".to_string(),
             Type::Void | Type::Any => "anyopaque".to_string(),
@@ -10447,18 +10606,25 @@ impl Codegen {
 
 fn type_to_display_string(ty: &Type) -> String {
     match ty {
+        Type::U8 => "u8".to_string(),
+        Type::I8 => "i8".to_string(),
+        Type::U16 => "u16".to_string(),
+        Type::I16 => "i16".to_string(),
         Type::I32 => "i32".to_string(),
         Type::U32 => "u32".to_string(),
+        Type::I64 => "i64".to_string(),
         Type::U64 => "u64".to_string(),
+        Type::ISize => "isize".to_string(),
+        Type::USize => "usize".to_string(),
         Type::F32 => "f32".to_string(),
         Type::F64 => "f64".to_string(),
-        Type::USize => "usize".to_string(),
         Type::Bool => "bool".to_string(),
         Type::String => "string".to_string(),
         Type::Void => "void".to_string(),
         Type::Any => "any".to_string(),
         Type::PID => "PID".to_string(),
         Type::Array(inner) => format!("Array<{}>", type_to_display_string(inner)),
+        Type::FixedArray(inner, size) => format!("{}[{}]", type_to_display_string(inner), size),
         Type::Ref(id) => id.sym.clone(),
         Type::Optional(inner) => format!("?{}", type_to_display_string(inner)),
         Type::ResultType { ok, .. } => type_to_display_string(ok),

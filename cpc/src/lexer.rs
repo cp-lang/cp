@@ -50,6 +50,7 @@ pub enum Token {
     Macro,
 
     #[token("export")]
+    #[token("pub")]
     Export,
     #[token("undefined")]
     Undefined,
@@ -98,19 +99,32 @@ pub enum Token {
     #[token("any")]
     Any,
     #[token("auto")]
+    #[token("anytype")]
     Auto,
 
     // --- Types (RFC-001 4.1) ---
+    #[token("u8")]
+    U8,
+    #[token("i8")]
+    I8,
+    #[token("u16")]
+    U16,
+    #[token("i16")]
+    I16,
     #[token("i32")]
     I32,
     #[token("u32")]
     U32,
+    #[token("i64")]
+    I64,
     #[token("u64")]
     U64,
     #[token("f32")]
     F32,
     #[token("f64")]
     F64,
+    #[token("isize")]
+    ISize,
     #[token("usize")]
     USize,
     #[token("bool")]
@@ -121,7 +135,28 @@ pub enum Token {
     // --- Literals ---
     #[regex(r"(\$\{?[a-zA-Z0-9_]+\}?|[a-zA-Z_])(\$\{?[a-zA-Z0-9_]+\}?|[a-zA-Z0-9_])*", |lex| lex.slice().to_string())]
     Ident(String),
+    #[regex(r"0x[0-9a-fA-F]+", |lex| i64::from_str_radix(&lex.slice()[2..], 16).ok())]
+    #[regex(r"0b[01]+", |lex| i64::from_str_radix(&lex.slice()[2..], 2).ok())]
+    #[regex(r"0o[0-7]+", |lex| i64::from_str_radix(&lex.slice()[2..], 8).ok())]
     #[regex(r"[0-9]+", |lex| lex.slice().parse::<i64>().ok())]
+    #[regex(r"'([^'\\]|\\.)'", |lex| {
+        let s = lex.slice();
+        let content = &s[1..s.len()-1];
+        if content.starts_with('\\') {
+            match content {
+                "\\n" => Some(b'\n' as i64),
+                "\\r" => Some(b'\r' as i64),
+                "\\t" => Some(b'\t' as i64),
+                "\\0" => Some(0),
+                "\\\\" => Some(b'\\' as i64),
+                "\\'" => Some(b'\'' as i64),
+                _ if content.len() == 2 => Some(content.as_bytes()[1] as i64),
+                _ => None,
+            }
+        } else {
+            content.chars().next().map(|c| c as i64)
+        }
+    })]
     IntLiteral(i64),
     #[regex(r"[0-9]*\.[0-9]+", |lex| lex.slice().parse::<f64>().ok())]
     FloatLiteral(f64),
@@ -139,6 +174,40 @@ pub enum Token {
     // --- Operators & Punctuation ---
     #[token("=")]
     Assign,
+    #[token("+=")]
+    PlusAssign,
+    #[token("-=")]
+    MinusAssign,
+    #[token("*=")]
+    StarAssign,
+    #[token("/=")]
+    SlashAssign,
+    #[token("%=")]
+    PercentAssign,
+    #[token("&=")]
+    AmpAssign,
+    #[token("|=")]
+    PipeAssign,
+    #[token("^=")]
+    CaretAssign,
+    #[token("<<=")]
+    ShlAssign,
+    #[token(">>=")]
+    ShrAssign,
+    #[token("<<")]
+    Shl,
+    #[token(">>")]
+    Shr,
+    #[token("&&")]
+    AmpAmp,
+    #[token("||")]
+    PipePipe,
+    #[token("%")]
+    Percent,
+    #[token("^")]
+    Caret,
+    #[token("~")]
+    Tilde,
     #[token("+")]
     Plus,
     #[token("-")]

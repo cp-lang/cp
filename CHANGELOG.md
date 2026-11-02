@@ -1067,6 +1067,53 @@
   - 新增 11.6 节《Native Zig 逃逸舱（`zig { ... }`）》；
   - 新增 13.1 节《`cpc` 独立编译器前端》CLI 指令规范。
 
+---
+
+## 2026-11-02 (Bun 迁移工作流指南规范发布：创建 BUN-GEMINI.md 与编译器直通授权)
+
+### 新增文件 (Added)
+- [`BUN-GEMINI.md`](file:///data/dev/cp/BUN-GEMINI.md):
+  - 针对负责 Bun.js 1.3.14 迁移任务的 AGY 定制的全局指令规范与架构白皮书；
+  - 开放 `/data/dev/cp` 编译器上游源码的读取与修改权限，制定遇编译问题直接修改 `cpc` 源码并热更新的自愈工作流；
+  - 明确软链接路径映射（`/root/.cap/bin/cpc -> /data/dev/cp/cap/bin/cpc`），将可执行文件覆盖路径规范为 `/data/dev/cp/cap/bin/cpc`；
+  - 明确单系统构建无需交叉编译，确立“日常高频迁移首选 Debug 模式（1~2秒快速热更新且带调用栈）、阶段性收尾可选 Release”的高效提速工作流；
+  - 提供完整 Zig → CP 语法与内存安全映射字典、`zig { ... }` 原生逃逸舱范式及四阶段迁移路线图。
+
+---
+
+## 2026-11-03 (四层类型转换系统实现：无损隐式流转、显式 as 截断、裸指针 unsafe 隔离与高阶方法解析)
+
+### 修改文件 (Modified)
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 在 `SemaError` 中新增 `InvalidCast(String, Span)` 错误变体；
+  - 新增 `can_coerce`、`int_fits_in_type`、`is_safe_widening`、`is_subclass`、`type_repr`、`is_numeric_type` 等静态类型流转与判定方法；
+  - 落地第一层无损自然流转（Zero-Cost Coercion）：
+    - 字面量自适应推导（Literal Fitting）：字面量数值在目标类型范围内自动适配（如 `let a: u64 = 100;`），超出范围静态拦截；
+    - 数值无损拓宽（Safe Widening）：无符号小转大（`u8 -> u16 -> u32 -> u64 -> usize`）、有符号小转大（`i8 -> i16 -> i32 -> i64 -> isize`）、小整数/浮点转大浮点（`i32 -> f64`, `f32 -> f64`）自动流转，严禁要求 `as`；
+    - 安全结构向上包装：具体值自动包装进可选类型 `T -> T?`、错误联合 `T -> ?T`；
+    - 借用权限收紧：独占可变借用 `*T` 自动流转为只读借用 `&T`；
+    - 面向对象与 Trait 多态：子类自动流转为基类，实现 Trait 的结构体借用自动流转为 `&dyn Trait`；
+    - 符号跨作用域同名匹配：消除 `Ident.span` 差异对类型名相等性判定的干扰；
+  - 落地第三层裸指针安全隔离：
+    - `Expr::Cast` 全面检查源类型与目标类型，若任一方为裸指针且不在 `unsafe` 作用域内，静态报错 `Raw pointer casting is only allowed inside unsafe block`；
+  - 落地第四层高阶语义转换约束：
+    - 静态拦截 `string` 与数字之间的 `as` 强转，输出友好引导信息（提示使用 `.parse(...) ?` 或 `.to_string()`）；
+  - 在变量声明 `Stmt::Var` 与赋值表达式 `BinaryOp::Assign` 中深度接入 `can_coerce` 静态校验。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 在 Zig 运行时前导代码中注入 `cp_cast_int(comptime Dest: type, val: anytype) Dest` 辅助函数，完美解决 Zig `@intCast` 运行期溢出 panic 及跨符号位 `@truncate` 限制，实现底层零开销位截断与符号位重新解释；
+  - 在 `generate_expr` 的 `Expr::Cast` 中：
+    - 目标为整数时：浮点源使用 `@intFromFloat`，裸指针源使用 `@intFromPtr`，枚举源使用 `@intFromEnum`，其余整数使用 `cp_cast_int`；
+    - 目标为浮点数时：整数源使用 `@floatFromInt`，浮点源使用 `@floatCast`；
+    - 目标为裸指针时：整数源使用 `@ptrFromInt(@as(usize, @truncate(...)))`，指针源使用 `@ptrCast(@alignCast(...))`；
+    - 目标为枚举时：使用 `@enumFromInt(...)`。
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs), [`cpc/src/ast_visitor.rs`](file:///data/dev/cp/cpc/src/ast_visitor.rs), [`cpc/src/dcp.rs`](file:///data/dev/cp/cpc/src/dcp.rs), [`cpc/src/lexer.rs`](file:///data/dev/cp/cpc/src/lexer.rs), [`cpc/src/main.rs`](file:///data/dev/cp/cpc/src/main.rs), [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - 运行 `cargo fmt` 保持代码风格完全一致。
+
+### 新增文件 (Added)
+- [`cap/test/test_type_conversion.cp`](file:///data/dev/cp/cap/test/test_type_conversion.cp):
+  - 四层类型转换系统长期回归测试套件，全面覆盖字面量适配、无损拓宽、可选包装、有损截断、符号位反转、浮点整型互转、枚举互转与裸指针在 unsafe 内外的行为验证。
+
+
 
 
 

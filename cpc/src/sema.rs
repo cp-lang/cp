@@ -57,6 +57,8 @@ pub enum SemaError {
     MutateWhileBorrowedInFor(String, Span),
     #[error("Compile Error: {0} at {1:?}")]
     UnsafeRequired(String, Span),
+    #[error("Compile Error: {0} at {1:?}")]
+    InvalidCast(String, Span),
     #[error("Compile Error: Cannot redeclare block-scoped variable '{0}' at {1:?}")]
     DuplicateVarDecl(String, Span),
     #[error(
@@ -1920,6 +1922,17 @@ impl Analyzer {
                     inferred_ty = self.infer_type(init)?;
                     self.analyze_expr(init)?;
                 }
+                if let Some(ref target_ty) = var.ty {
+                    if let Some(init) = &var.init {
+                        if !self.can_coerce(target_ty, &inferred_ty, Some(init)) {
+                            return Err(SemaError::TypeMismatch(
+                                target_ty.clone(),
+                                inferred_ty,
+                                var.span,
+                            ));
+                        }
+                    }
+                }
                 let ty = var.ty.clone().unwrap_or(inferred_ty);
                 self.analyze_pattern(&var.pat, ty, &var.kind)?;
             }
@@ -2292,10 +2305,35 @@ impl Analyzer {
                 span,
             } => {
                 self.analyze_expr(expr)?;
-                if matches!(target_ty, Type::RawPtr { .. }) && !self.is_in_unsafe() {
+                let src_ty = self.infer_type(expr).unwrap_or(Type::Unknown);
+
+                // Layer 3: Raw pointer casting is only allowed inside unsafe block
+                let is_src_ptr = matches!(src_ty, Type::RawPtr { .. });
+                let is_target_ptr = matches!(target_ty, Type::RawPtr { .. });
+                if (is_src_ptr || is_target_ptr) && !self.is_in_unsafe() {
                     return Err(SemaError::UnsafeRequired(
-                        "Cast to raw pointer requires an unsafe block or unsafe function"
-                            .to_string(),
+                        "Raw pointer casting is only allowed inside unsafe block".to_string(),
+                        *span,
+                    ));
+                }
+
+                // Layer 4: Semantic conversions forbidden via `as`
+                if src_ty == Type::String && Self::is_numeric_type(target_ty) {
+                    return Err(SemaError::InvalidCast(
+                        format!(
+                            "Cannot cast 'string' to numeric type '{}' via 'as'; use '{}.parse(...) ?' instead",
+                            Self::type_repr(target_ty),
+                            Self::type_repr(target_ty)
+                        ),
+                        *span,
+                    ));
+                }
+                if Self::is_numeric_type(&src_ty) && *target_ty == Type::String {
+                    return Err(SemaError::InvalidCast(
+                        format!(
+                            "Cannot cast numeric type '{}' to 'string' via 'as'; use '.to_string()' instead",
+                            Self::type_repr(&src_ty)
+                        ),
                         *span,
                     ));
                 }
@@ -2353,6 +2391,258 @@ impl Analyzer {
         None
     }
 
+    fn is_int_type(t: &Type) -> bool {
+        matches!(
+            t,
+            Type::U8
+                | Type::I8
+                | Type::U16
+                | Type::I16
+                | Type::I32
+                | Type::U32
+                | Type::I64
+                | Type::U64
+                | Type::ISize
+                | Type::USize
+        )
+    }
+
+    fn is_float_type(t: &Type) -> bool {
+        matches!(t, Type::F32 | Type::F64)
+    }
+
+    fn is_numeric_type(t: &Type) -> bool {
+        Self::is_int_type(t) || Self::is_float_type(t)
+    }
+
+    fn type_repr(t: &Type) -> String {
+        match t {
+            Type::U8 => "u8".to_string(),
+            Type::I8 => "i8".to_string(),
+            Type::U16 => "u16".to_string(),
+            Type::I16 => "i16".to_string(),
+            Type::U32 => "u32".to_string(),
+            Type::I32 => "i32".to_string(),
+            Type::U64 => "u64".to_string(),
+            Type::I64 => "i64".to_string(),
+            Type::USize => "usize".to_string(),
+            Type::ISize => "isize".to_string(),
+            Type::F32 => "f32".to_string(),
+            Type::F64 => "f64".to_string(),
+            Type::Bool => "bool".to_string(),
+            Type::String => "string".to_string(),
+            Type::Void => "void".to_string(),
+            Type::Any => "any".to_string(),
+            Type::Ref(id) => id.sym.clone(),
+            _ => format!("{:?}", t),
+        }
+    }
+
+    fn int_fits_in_type(val: i64, target: &Type) -> bool {
+        match target {
+            Type::U8 => (0..=255).contains(&val),
+            Type::I8 => (-128..=127).contains(&val),
+            Type::U16 => (0..=65535).contains(&val),
+            Type::I16 => (-32768..=32767).contains(&val),
+            Type::U32 => val >= 0 && val <= u32::MAX as i64,
+            Type::I32 => val >= i32::MIN as i64 && val <= i32::MAX as i64,
+            Type::U64 | Type::USize => val >= 0,
+            Type::I64 | Type::ISize => true,
+            Type::F32 | Type::F64 => true,
+            _ => false,
+        }
+    }
+
+    fn is_safe_widening(target: &Type, src: &Type) -> bool {
+        if target == src {
+            return true;
+        }
+        // Small unsigned -> larger unsigned
+        match (src, target) {
+            (Type::U8, Type::U16 | Type::U32 | Type::U64 | Type::USize) => true,
+            (Type::U16, Type::U32 | Type::U64 | Type::USize) => true,
+            (Type::U32, Type::U64 | Type::USize) => true,
+            (Type::U64, Type::USize) | (Type::USize, Type::U64) => true,
+
+            // Small signed -> larger signed
+            (Type::I8, Type::I16 | Type::I32 | Type::I64 | Type::ISize) => true,
+            (Type::I16, Type::I32 | Type::I64 | Type::ISize) => true,
+            (Type::I32, Type::I64 | Type::ISize) => true,
+            (Type::I64, Type::ISize) | (Type::ISize, Type::I64) => true,
+
+            // Int / Float to larger Float
+            (Type::I32, Type::F64) => true,
+            (Type::F32, Type::F64) => true,
+            (Type::I8 | Type::U8 | Type::I16 | Type::U16, Type::F32 | Type::F64) => true,
+
+            _ => false,
+        }
+    }
+
+    fn is_subclass(&self, derived: &str, base: &str) -> bool {
+        let mut curr = derived;
+        while let Some(cls) = self.classes.get(curr) {
+            if let Some(ref ext) = cls.extends {
+                if ext.sym == base {
+                    return true;
+                }
+                curr = &ext.sym;
+            } else {
+                break;
+            }
+        }
+        false
+    }
+
+    pub fn can_coerce(&self, target: &Type, src: &Type, init_expr: Option<&Expr>) -> bool {
+        if target == src {
+            return true;
+        }
+        if *target == Type::Any
+            || *src == Type::Any
+            || *target == Type::Unknown
+            || *src == Type::Unknown
+        {
+            return true;
+        }
+
+        // Layer 1.1: Literal fitting
+        if let Some(expr) = init_expr {
+            if let Expr::Lit(lit) = expr {
+                match lit {
+                    Lit::Int(val) => {
+                        if Self::int_fits_in_type(*val, target) {
+                            return true;
+                        }
+                    }
+                    Lit::Float(_) => {
+                        if matches!(target, Type::F32 | Type::F64) {
+                            return true;
+                        }
+                    }
+                    Lit::Null => {
+                        if matches!(target, Type::Optional(_)) {
+                            return true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Layer 1.2: Numeric safe widening
+        if Self::is_safe_widening(target, src) {
+            return true;
+        }
+
+        // Layer 1.3: Structural wrapping (Optional, ErrorUnion, ResultType)
+        match target {
+            Type::Optional(t_inner) => {
+                if src == &Type::Optional(Box::new(Type::Unknown)) {
+                    return true;
+                }
+                if let Type::Optional(s_inner) = src {
+                    return self.can_coerce(t_inner, s_inner, None);
+                }
+                return self.can_coerce(t_inner, src, init_expr);
+            }
+            Type::ErrorUnion(t_inner) => {
+                if let Type::ErrorUnion(s_inner) = src {
+                    return self.can_coerce(t_inner, s_inner, None);
+                }
+                return self.can_coerce(t_inner, src, init_expr);
+            }
+            Type::ResultType { ok: t_ok, .. } => {
+                if let Type::ResultType { ok: s_ok, .. } = src {
+                    return self.can_coerce(t_ok, s_ok, None);
+                }
+                return self.can_coerce(t_ok, src, init_expr);
+            }
+            _ => {}
+        }
+
+        // Layer 1.4: Borrow tightening (*T -> &T) or same mutability
+        if let (
+            Type::BorrowType {
+                inner: t_inner,
+                is_mut: t_mut,
+                ..
+            },
+            Type::BorrowType {
+                inner: s_inner,
+                is_mut: s_mut,
+                ..
+            },
+        ) = (target, src)
+        {
+            if (*t_mut == *s_mut || (!*t_mut && *s_mut)) && self.can_coerce(t_inner, s_inner, None)
+            {
+                return true;
+            }
+        }
+
+        // Layer 1.5: Subclass to base class or matching type ref
+        if let (Type::Ref(base), Type::Ref(derived)) = (target, src) {
+            if base.sym == derived.sym || self.is_subclass(&derived.sym, &base.sym) {
+                return true;
+            }
+        }
+
+        // Raw pointers (same depth and coerceable inner)
+        if let (
+            Type::RawPtr {
+                inner: t_inner,
+                depth: t_d,
+            },
+            Type::RawPtr {
+                inner: s_inner,
+                depth: s_d,
+            },
+        ) = (target, src)
+        {
+            if t_d == s_d && self.can_coerce(t_inner, s_inner, None) {
+                return true;
+            }
+        }
+
+        // Layer 1.6: Struct to Trait (&dyn Trait)
+        if let Type::BoxDyn(t) | Type::BareDyn(t) = target {
+            if let Type::Ref(s) = src {
+                if let Some(cls) = self.classes.get(&s.sym) {
+                    if cls.implements.iter().any(|i| i.sym == t.sym) {
+                        return true;
+                    }
+                }
+            }
+            if let Type::BorrowType { inner, .. } = src {
+                if let Type::Ref(s) = &**inner {
+                    if let Some(cls) = self.classes.get(&s.sym) {
+                        if cls.implements.iter().any(|i| i.sym == t.sym) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Containers
+        match (target, src) {
+            (Type::Array(t_inner), Type::Array(s_inner)) => self.can_coerce(t_inner, s_inner, None),
+            (Type::FixedArray(t_elem, t_len), Type::FixedArray(s_elem, s_len)) => {
+                t_len == s_len && self.can_coerce(t_elem, s_elem, None)
+            }
+            (Type::FixedArray(elem, _), Type::Array(t2))
+            | (Type::Array(t2), Type::FixedArray(elem, _)) => self.can_coerce(elem, t2, None),
+            (Type::Tuple(t1), Type::Tuple(t2)) => {
+                if t1.len() != t2.len() {
+                    return false;
+                }
+                t1.iter().zip(t2).all(|(a, b)| self.can_coerce(a, b, None))
+            }
+            _ => false,
+        }
+    }
+
     fn types_eq(&self, a: &Type, b: &Type) -> bool {
         if a == b {
             return true;
@@ -2360,7 +2650,10 @@ impl Analyzer {
         if *a == Type::Any || *b == Type::Any || *a == Type::Unknown || *b == Type::Unknown {
             return true;
         }
-        if (*a == Type::I32 && *b == Type::U32) || (*a == Type::U32 && *b == Type::I32) {
+        if Self::is_int_type(a) && Self::is_int_type(b) {
+            return true;
+        }
+        if matches!(a, Type::F32 | Type::F64) && matches!(b, Type::F32 | Type::F64) {
             return true;
         }
         match (a, b) {
@@ -2384,6 +2677,11 @@ impl Analyzer {
                 self.types_eq(o1, other)
             }
             (Type::Array(t1), Type::Array(t2)) => self.types_eq(t1, t2),
+            (Type::FixedArray(t1, s1), Type::FixedArray(t2, s2)) => {
+                s1 == s2 && self.types_eq(t1, t2)
+            }
+            (Type::FixedArray(elem, _), Type::Array(t2))
+            | (Type::Array(t2), Type::FixedArray(elem, _)) => self.types_eq(elem, t2),
             (Type::Array(elem), Type::Tuple(tys)) | (Type::Tuple(tys), Type::Array(elem)) => {
                 tys.iter().all(|t| self.types_eq(elem, t))
             }
@@ -2726,7 +3024,7 @@ impl Analyzer {
                             return Err(SemaError::ConstAssignment(ident.sym.clone(), bin.span));
                         }
                     }
-                    if !self.types_eq(&left, &right) {
+                    if !self.can_coerce(&left, &right, Some(&*bin.right)) {
                         return Err(SemaError::TypeMismatch(left, right, bin.span));
                     }
                     Ok(left)
@@ -3051,6 +3349,14 @@ impl Analyzer {
                     };
                     if arm_ty != Type::Any && arm_ty != Type::Unknown && arm_ty != Type::Void {
                         return Ok(arm_ty);
+                    }
+                }
+                Ok(Type::Any)
+            }
+            Expr::Member(mem) => {
+                if let Expr::Ident(id) = &*mem.obj {
+                    if let Some(SymbolKind::Enum(_)) = self.resolve(&id.sym) {
+                        return Ok(Type::Ref(id.clone()));
                     }
                 }
                 Ok(Type::Any)
