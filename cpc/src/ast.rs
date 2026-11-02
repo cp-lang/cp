@@ -177,6 +177,8 @@ pub enum Stmt {
     Expr(Expr),
     Var(VarDecl),
     Return(ReturnStmt),
+    Break,
+    Continue,
     If(IfStmt),
     While(WhileStmt),
     For(ForStmt),
@@ -343,6 +345,7 @@ pub enum Expr {
         is_mut: bool,
     },
     Array(Vec<Expr>),
+    ArrayRepeat(Box<Expr>, Box<Expr>),
     Object(Vec<ObjectField>),
     Dict(Vec<ObjectField>),
     Index {
@@ -655,6 +658,7 @@ pub fn has_pipe_placeholder(expr: &Expr) -> bool {
         }
         Expr::Catch { expr, .. } => has_pipe_placeholder(expr),
         Expr::Array(elements) => elements.iter().any(has_pipe_placeholder),
+        Expr::ArrayRepeat(val, count) => has_pipe_placeholder(val) || has_pipe_placeholder(count),
         Expr::Object(fields) | Expr::Dict(fields) => {
             fields.iter().any(|f| has_pipe_placeholder(&f.val))
         }
@@ -734,6 +738,10 @@ pub fn substitute_pipe_placeholder(expr: &Expr, pipe_var: &str) -> Expr {
                 .iter()
                 .map(|e| substitute_pipe_placeholder(e, pipe_var))
                 .collect(),
+        ),
+        Expr::ArrayRepeat(val, count) => Expr::ArrayRepeat(
+            Box::new(substitute_pipe_placeholder(val, pipe_var)),
+            Box::new(substitute_pipe_placeholder(count, pipe_var)),
         ),
         Expr::Builtin(b) => Expr::Builtin(BuiltinCall {
             span: b.span,

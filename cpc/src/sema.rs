@@ -1287,6 +1287,7 @@ impl Analyzer {
                     Self::substitute_expr(arg, subst);
                 }
             }
+            Stmt::Break | Stmt::Continue => {}
             Stmt::If(i) => {
                 Self::substitute_expr(&mut i.test, subst);
                 Self::substitute_stmt(&mut i.cons, subst);
@@ -1388,6 +1389,10 @@ impl Analyzer {
                     Self::substitute_expr(item, subst);
                 }
             }
+            Expr::ArrayRepeat(val, count) => {
+                Self::substitute_expr(val, subst);
+                Self::substitute_expr(count, subst);
+            }
             _ => {}
         }
     }
@@ -1397,6 +1402,7 @@ impl Analyzer {
             Expr::Lit(_) => true,
             Expr::Ident(_) => true,
             Expr::Array(elements) => elements.iter().all(Self::is_const_expr),
+            Expr::ArrayRepeat(val, count) => Self::is_const_expr(val) && Self::is_const_expr(count),
             Expr::Object(fields) => fields.iter().all(|f| Self::is_const_expr(&f.val)),
             Expr::Dict(fields) => fields.iter().all(|f| Self::is_const_expr(&f.val)),
             _ => false,
@@ -2021,6 +2027,7 @@ impl Analyzer {
                     self.analyze_expr(arg)?;
                 }
             }
+            Stmt::Break | Stmt::Continue => {}
             Stmt::Match(m) => {
                 self.infer_type(&m.disc)?;
                 self.analyze_expr(&m.disc)?;
@@ -2191,6 +2198,10 @@ impl Analyzer {
                 for el in elements {
                     self.analyze_expr(el)?;
                 }
+            }
+            Expr::ArrayRepeat(val, count) => {
+                self.analyze_expr(val)?;
+                self.analyze_expr(count)?;
             }
             Expr::Object(fields) | Expr::Dict(fields) => {
                 for f in fields {
@@ -2627,12 +2638,43 @@ impl Analyzer {
 
         // Containers
         match (target, src) {
-            (Type::Array(t_inner), Type::Array(s_inner)) => self.can_coerce(t_inner, s_inner, None),
+            (Type::Array(t_inner), Type::Array(s_inner)) => {
+                if let Some(Expr::Array(elements)) = init_expr {
+                    elements
+                        .iter()
+                        .all(|el| self.can_coerce(t_inner, s_inner, Some(el)))
+                } else if let Some(Expr::ArrayRepeat(val, _)) = init_expr {
+                    self.can_coerce(t_inner, s_inner, Some(val))
+                } else {
+                    self.can_coerce(t_inner, s_inner, None)
+                }
+            }
             (Type::FixedArray(t_elem, t_len), Type::FixedArray(s_elem, s_len)) => {
-                t_len == s_len && self.can_coerce(t_elem, s_elem, None)
+                if t_len != s_len {
+                    return false;
+                }
+                if let Some(Expr::Array(elements)) = init_expr {
+                    elements
+                        .iter()
+                        .all(|el| self.can_coerce(t_elem, s_elem, Some(el)))
+                } else if let Some(Expr::ArrayRepeat(val, _)) = init_expr {
+                    self.can_coerce(t_elem, s_elem, Some(val))
+                } else {
+                    self.can_coerce(t_elem, s_elem, None)
+                }
             }
             (Type::FixedArray(elem, _), Type::Array(t2))
-            | (Type::Array(t2), Type::FixedArray(elem, _)) => self.can_coerce(elem, t2, None),
+            | (Type::Array(t2), Type::FixedArray(elem, _)) => {
+                if let Some(Expr::Array(elements)) = init_expr {
+                    elements
+                        .iter()
+                        .all(|el| self.can_coerce(elem, t2, Some(el)))
+                } else if let Some(Expr::ArrayRepeat(val, _)) = init_expr {
+                    self.can_coerce(elem, t2, Some(val))
+                } else {
+                    self.can_coerce(elem, t2, None)
+                }
+            }
             (Type::Tuple(t1), Type::Tuple(t2)) => {
                 if t1.len() != t2.len() {
                     return false;
@@ -3205,6 +3247,14 @@ impl Analyzer {
                     tys.push(self.infer_type(el)?);
                 }
                 Ok(Type::Tuple(tys))
+            }
+            Expr::ArrayRepeat(val, count) => {
+                let val_ty = self.infer_type(val)?;
+                if let Expr::Lit(Lit::Int(n)) = &**count {
+                    Ok(Type::FixedArray(Box::new(val_ty), *n as usize))
+                } else {
+                    Ok(Type::Array(Box::new(val_ty)))
+                }
             }
             Expr::Template(t) => {
                 for e in &t.expressions {

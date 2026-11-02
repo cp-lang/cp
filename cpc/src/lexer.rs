@@ -28,6 +28,10 @@ pub enum Token {
     While,
     #[token("return")]
     Return,
+    #[token("break")]
+    Break,
+    #[token("continue")]
+    Continue,
     #[token("mut")]
     Mut,
     #[token("move")]

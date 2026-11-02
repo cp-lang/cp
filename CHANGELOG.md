@@ -1113,6 +1113,40 @@
 - [`cap/test/test_type_conversion.cp`](file:///data/dev/cp/cap/test/test_type_conversion.cp):
   - 四层类型转换系统长期回归测试套件，全面覆盖字面量适配、无损拓宽、可选包装、有损截断、符号位反转、浮点整型互转、枚举互转与裸指针在 unsafe 内外的行为验证。
 
+---
+
+## 2026-11-03 (Bun 迁移赋能：循环控制 break/continue、定长数组重复初始化与类型流转增强)
+
+### 修改文件 (Modified)
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 新增 9.3.1 节《循环控制与跳转语句 (`while`, `break`, `continue`)》；
+  - 在第 8 章与第 9 章规范中新增定长数组类型 `[T; N]` / `[N]T` 与重复初始化语法 `[val; count]`（如 `let zero_buf: [u8; 256] = [0; 256];`）。
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs):
+  - `Stmt` 枚举中新增 `Break` 与 `Continue` 语句变体；
+  - `Expr` 枚举中新增 `ArrayRepeat(Box<Expr>, Box<Expr>)` 表达式；
+  - 适配管道操作符占位符检测与代换。
+- [`cpc/src/ast_visitor.rs`](file:///data/dev/cp/cpc/src/ast_visitor.rs):
+  - 在变量引用遍历中适配 `Stmt::Break`、`Stmt::Continue` 与 `Expr::ArrayRepeat`。
+- [`cpc/src/lexer.rs`](file:///data/dev/cp/cpc/src/lexer.rs):
+  - 词法解析器注册 `break` (`Token::Break`) 与 `continue` (`Token::Continue`) 关键字。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - 支持解析 `break;` 与 `continue;` 语句；
+  - 支持解析定长数组类型声明 `[T; N]`；
+  - 支持在方括号中解析重复初始化表达式 `[val; count]`。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 在 AST 代换、语义分析及类型推导中全面支持 `Stmt::Break`、`Stmt::Continue` 与 `Expr::ArrayRepeat`；
+  - `Expr::ArrayRepeat` 推导为 `Type::FixedArray`（count 为整型字面量时）或 `Type::Array`；
+  - 在 `can_coerce` 中增强对定长数组 `Type::FixedArray` 及动态数组 `Type::Array` 的递归推导支持（元素字面量自适应与重复初始化支持）。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 增强 `cp_cast_int`：完善 `comptime_int` 负数向无符号类型的底层位解释截断；
+  - 为 `Stmt::Break` 生成 `break;`，为 `Stmt::Continue` 生成 `continue;`；
+  - 新增 `expected_array_elem_type` 上下文推导，在 `Expr::ArrayRepeat` 中生成与 Zig 0.17 完美兼容的高性能定长广播 `@as([{count}]{elem_ty}, @splat(@as({elem_ty}, {val})))`。
+
+### 新增文件 (Added)
+- [`cap/test/test_bun_features.cp`](file:///data/dev/cp/cap/test/test_bun_features.cp):
+  - 验证 `while` 循环中的 `break` / `continue` 跳转控制，以及定长数组 `[val; count]` 重复初始化的编译与运行。
+
+
 
 
 

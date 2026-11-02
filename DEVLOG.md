@@ -2019,6 +2019,42 @@ CP 语言基于现代编译原理与“脑-神经-肌肉-血液”架构愿景�
    - 验证反向拦截用例（有损未加 as、裸指针逃出 unsafe、字符串强转数字）100% 精准拦截；
    - `./cap/bin/cap cap/test/test_unsafe_pass.cp` 与全套集合矩阵测试 100% 绿灯通过。
 
+---
+
+## 2026-11-03: Bun 迁移推进：循环控制跳转 (break/continue) 与定长数组重复初始化 ([val; count]) 架构拓展
+
+### 1. 任务背景与核心原理
+负责 Bun.js 1.3.14 迁移任务的 AGY 在解析底层系统组件（例如文件、网络、缓冲区等核心模块）时，遇到高频使用的两类底层基础语言特性：
+1. **循环跳转控制 (`break` / `continue`)**：在字节流遍历、协议状态机解析中，需要精准跳过当前循环或提前退出循环；
+2. **定长缓冲区初始化 (`[val; count]`)**：在系统级 I/O 中，需要为哈希查找表、零缓冲区（Zero Buffer）快速分配指定大小的定长数组并填充初始值（如 `let zero_buf: [u8; 256] = [0; 256];`）。
+
+Bun AGY 遵循在 [`BUN-GEMINI.md`](file:///data/dev/cp/BUN-GEMINI.md) 中建立的自愈工作流，对上游 `cpc` 编译器前端及 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md) 语言设计规范进行了针对性扩展。
+
+---
+
+### 2. 核心架构与实现细节
+
+1. **AST 与语法解析扩充 (`cpc/src/ast.rs`, `cpc/src/lexer.rs`, `cpc/src/parser.rs`)**：
+   - 词法解析器引入 `Token::Break` 与 `Token::Continue`；
+   - AST 中新增 `Stmt::Break`、`Stmt::Continue` 与 `Expr::ArrayRepeat(Box<Expr>, Box<Expr>)`；
+   - 解析器支持：
+     - `break;` 与 `continue;` 语句；
+     - 定长数组类型声明 `[T; N]`；
+     - 数组字面量方括号内识别 `[val; count]` 语法结构。
+2. **语义推导与类型适配 (`cpc/src/sema.rs`)**：
+   - 语义分析放行 `break` 与 `continue`；
+   - `Expr::ArrayRepeat` 在 count 为整型常量时推导为 `Type::FixedArray(val_ty, count)`；
+   - 在 `can_coerce` 中增强对定长数组的递归推导，当初始化表达式为 `Expr::ArrayRepeat(val, _)` 或 `Expr::Array(elements)` 时，元素字面量自适应规则递归生效（如 `0` 自适应为 `u8`）。
+3. **Zig 0.17 高性能代码生成适配 (`cpc/src/codegen.rs`)**：
+   - 语句生成：`Stmt::Break` 生成 `break;`，`Stmt::Continue` 生成 `continue;`；
+   - 针对 Zig 0.17 废除旧版 `[_]T{val} ** count` 语法并引入 `@splat` 的新变化，代码生成器引入 `expected_array_elem_type` 上下文推导，精准生成现代化 Zig 代码：
+     `@as([{count}]{elem_ty}, @splat(@as({elem_ty}, {val})))`；
+   - 在 `cp_cast_int` 中完善 `comptime_int` 负数向无符号类型的位截断安全处理。
+4. **验证与回归测试**：
+   - 新增 [`cap/test/test_bun_features.cp`](file:///data/dev/cp/cap/test/test_bun_features.cp) 测试用例，全面覆盖循环跳转控制与定长数组重复初始化，经 `cap` 编译运行 100% 成功；
+   - 现有全套类型转换与集合测试套件 100% 绿灯无回归。
+
+
 
 
 

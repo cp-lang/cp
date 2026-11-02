@@ -4337,6 +4337,37 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 6. **四线文档同步**：
    - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)、[`SESSION.md`](file:///data/dev/cp/SESSION.md)、[`TASK.md`](file:///data/dev/cp/TASK.md)、[`GEMINI.md`](file:///data/dev/cp/GEMINI.md)。
 
+---
+
+## 2026-11-03 (Session Update - Bun AGY 编译器特性拓展与 Git 提交)
+
+### 用户指令
+> bun agy 修改了cpc 编译器 和 cp_ref.md, git 提交
+
+### 本次提交范围 (Commit Scope)
+1. **语法解析与 AST 增强 (`cpc/src/ast.rs`, `cpc/src/lexer.rs`, `cpc/src/parser.rs`, `cpc/src/ast_visitor.rs`)**：
+   - 词法解析器注册 `break` (`Token::Break`) 与 `continue` (`Token::Continue`) 关键字；
+   - AST 中新增 `Stmt::Break`、`Stmt::Continue` 与 `Expr::ArrayRepeat(Box<Expr>, Box<Expr>)`；
+   - 支持解析 `break;` 与 `continue;` 循环跳转语句；
+   - 支持解析定长数组类型 `[T; N]` 以及重复数组初始化语法 `[val; count]`（如 `[0; 256]`）；
+   - 适配管道占位符与 AST 变量遍历。
+2. **语义推导与类型自适应增强 (`cpc/src/sema.rs`)**：
+   - 放行 `Stmt::Break` 与 `Stmt::Continue` 语句；
+   - `Expr::ArrayRepeat` 推导为 `Type::FixedArray` 或 `Type::Array`；
+   - 增强 `can_coerce`：支持定长数组字面量自适应（`[0; 8]` 自适应为 `[u8; 8]`）。
+3. **Zig 0.17 代码生成与运行时增强 (`cpc/src/codegen.rs`)**：
+   - 语句生成支持 `break;` 与 `continue;`；
+   - 增强 `cp_cast_int`：完善 `comptime_int` 负数向无符号类型的底层位解释截断；
+   - 注入 `expected_array_elem_type` 上下文推导，在 `Expr::ArrayRepeat` 中生成与 Zig 0.17 兼容的高性能定长广播 `@as([{count}]{elem_ty}, @splat(@as({elem_ty}, {val})))`。
+4. **语言设计规范同步 (`cp_ref.md`)**：
+   - 新增 9.3.1 节《循环控制与跳转语句 (`while`, `break`, `continue`)》；
+   - 在第 8 章与第 9 章新增定长数组类型 `[T; N]` / `[N]T` 与 `[val; count]` 重复初始化规范与示例。
+5. **测试套件与验证产物**：
+   - 新增测试用例 [`cap/test/test_bun_features.cp`](file:///data/dev/cp/cap/test/test_bun_features.cp)，验证循环跳转与定长数组初始化，编译执行 100% 成功；
+   - 全套类型转换与集合测试套件 100% 绿灯无回归。
+6. **四线文档同步**：
+   - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)、[`SESSION.md`](file:///data/dev/cp/SESSION.md)。
+
 
 
 

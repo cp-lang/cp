@@ -78,6 +78,10 @@ pub fn find_referenced_vars_in_expr(expr: &Expr, vars: &mut HashSet<String>) {
                 find_referenced_vars_in_expr(a, vars);
             }
         }
+        Expr::ArrayRepeat(val, count) => {
+            find_referenced_vars_in_expr(val, vars);
+            find_referenced_vars_in_expr(count, vars);
+        }
         Expr::Object(obj) | Expr::Dict(obj) => {
             for f in obj {
                 find_referenced_vars_in_expr(&f.val, vars);
@@ -160,6 +164,7 @@ pub fn find_referenced_vars_in_stmt(stmt: &Stmt, vars: &mut HashSet<String>) {
                 find_referenced_vars_in_expr(arg, vars);
             }
         }
+        Stmt::Break | Stmt::Continue => {}
         Stmt::Match(m) => {
             find_referenced_vars_in_expr(&m.disc, vars);
             for arm in &m.arms {

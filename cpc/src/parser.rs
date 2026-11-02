@@ -967,11 +967,28 @@ impl<'a> Parser<'a> {
             self.peeked = p1;
             self.peeked2 = p2;
             self.bump()?;
-            let mut elements = Vec::new();
-            while self.peek() != Some(&Token::RBracket) {
-                elements.push(self.parse_type()?);
-                if self.peek() == Some(&Token::Comma) {
+            if self.peek() == Some(&Token::RBracket) {
+                self.bump()?;
+                return Ok(Type::Tuple(Vec::new()));
+            }
+            let first = self.parse_type()?;
+            if self.peek() == Some(&Token::Semicolon) {
+                self.bump()?;
+                if let Some(Token::IntLiteral(n)) = self.peek() {
+                    let size = *n as usize;
                     self.bump()?;
+                    self.expect(Token::RBracket)?;
+                    return Ok(Type::FixedArray(Box::new(first), size));
+                }
+            }
+            let mut elements = vec![first];
+            if self.peek() == Some(&Token::Comma) {
+                self.bump()?;
+                while self.peek() != Some(&Token::RBracket) {
+                    elements.push(self.parse_type()?);
+                    if self.peek() == Some(&Token::Comma) {
+                        self.bump()?;
+                    }
                 }
             }
             self.expect(Token::RBracket)?;
@@ -1133,6 +1150,20 @@ impl<'a> Parser<'a> {
             Some(Token::For) => Ok(Stmt::For(self.parse_for_stmt()?)),
             Some(Token::If) => Ok(Stmt::If(self.parse_if_stmt()?)),
             Some(Token::Return) => Ok(Stmt::Return(self.parse_return_stmt()?)),
+            Some(Token::Break) => {
+                self.bump()?;
+                if self.peek() == Some(&Token::Semicolon) {
+                    self.bump()?;
+                }
+                Ok(Stmt::Break)
+            }
+            Some(Token::Continue) => {
+                self.bump()?;
+                if self.peek() == Some(&Token::Semicolon) {
+                    self.bump()?;
+                }
+                Ok(Stmt::Continue)
+            }
             Some(Token::Try) => {
                 let start = self.expect(Token::Try)?.start;
                 let try_block = self.parse_block_stmt()?;
@@ -3518,11 +3549,25 @@ impl<'a> Parser<'a> {
             }
 
             Token::LBracket => {
-                let mut elements = Vec::new();
-                while self.peek() != Some(&Token::RBracket) {
-                    elements.push(self.parse_expr()?);
-                    if self.peek() == Some(&Token::Comma) {
-                        self.bump()?;
+                if self.peek() == Some(&Token::RBracket) {
+                    self.bump()?;
+                    return Ok(Expr::Array(Vec::new()));
+                }
+                let first = self.parse_expr()?;
+                if self.peek() == Some(&Token::Semicolon) {
+                    self.bump()?;
+                    let count = self.parse_expr()?;
+                    self.expect(Token::RBracket)?;
+                    return Ok(Expr::ArrayRepeat(Box::new(first), Box::new(count)));
+                }
+                let mut elements = vec![first];
+                if self.peek() == Some(&Token::Comma) {
+                    self.bump()?;
+                    while self.peek() != Some(&Token::RBracket) {
+                        elements.push(self.parse_expr()?);
+                        if self.peek() == Some(&Token::Comma) {
+                            self.bump()?;
+                        }
                     }
                 }
                 let _end = self.expect(Token::RBracket)?.end;
@@ -3720,6 +3765,7 @@ fn left_span(expr: &Expr) -> Span {
         Expr::NullCoalesce { left, .. } => left_span(left),
         Expr::Downcast { obj, .. } => left_span(obj),
         Expr::Array(_) => Span { start: 0, end: 0 },
+        Expr::ArrayRepeat(val, _) => left_span(val),
         Expr::Object(_) | Expr::Dict(_) => Span { start: 0, end: 0 },
         Expr::Index { obj, .. } => left_span(obj),
         Expr::Arrow(a) => a.span,
@@ -3760,6 +3806,7 @@ fn right_span(expr: &Expr) -> Span {
         Expr::Catch { expr, .. } => right_span(expr),
         Expr::Downcast { target_ty, .. } => target_ty.span,
         Expr::Array(_) => Span { start: 0, end: 0 },
+        Expr::ArrayRepeat(_, count) => right_span(count),
         Expr::Object(_) | Expr::Dict(_) => Span { start: 0, end: 0 },
         Expr::Index { index, .. } => right_span(index),
         Expr::Arrow(a) => a.span,

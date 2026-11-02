@@ -46,6 +46,7 @@ pub struct Codegen {
     pub in_try_region: bool,
     pub try_catch_target: Option<(String, String, String, ErrorType)>,
     pub expected_box_trait: Option<String>,
+    pub expected_array_elem_type: Option<Type>,
     pub current_class_name: Option<String>,
     pub current_receiver_mode: ReceiverMode,
     pub mutable_fn_params: HashSet<String>,
@@ -107,6 +108,7 @@ impl Codegen {
             in_try_region: false,
             try_catch_target: None,
             expected_box_trait: None,
+            expected_array_elem_type: None,
             current_class_name: None,
             current_receiver_mode: ReceiverMode::Static,
             mutable_fn_params: HashSet::new(),
@@ -753,20 +755,46 @@ impl Codegen {
         self.writeln("fn cp_cast_int(comptime Dest: type, val: anytype) Dest {");
         self.writeln("    const Src = @TypeOf(val);");
         self.writeln("    if (comptime Src == Dest) return val;");
-        self.writeln("    if (comptime Src == comptime_int) { return @as(Dest, @truncate(val)); }");
+        self.writeln("    if (comptime Src == comptime_int) {");
+        self.writeln(
+            "        if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) {",
+        );
+        self.writeln("            return @as(Dest, @truncate(@as(u64, @bitCast(@as(i64, val)))));");
+        self.writeln("        } else {");
+        self.writeln("            return @as(Dest, @truncate(val));");
+        self.writeln("        }");
+        self.writeln("    }");
+        self.writeln("    const src_bits = @typeInfo(Src).int.bits;");
+        self.writeln("    const dest_bits = @typeInfo(Dest).int.bits;");
         self.writeln(
             "    if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) {",
         );
-        self.writeln("        return @truncate(val);");
+        self.writeln("        if (comptime dest_bits >= src_bits) {");
+        self.writeln("            return @as(Dest, val);");
+        self.writeln("        } else {");
+        self.writeln("            return @truncate(val);");
+        self.writeln("        }");
         self.writeln("    }");
         self.writeln("    if (comptime @typeInfo(Src).int.signedness == .signed) {");
-        self.writeln("        const s: i64 = @as(i64, @truncate(val));");
+        self.writeln(
+            "        const s: i64 = if (comptime 64 >= src_bits) @as(i64, val) else @truncate(val);",
+        );
         self.writeln("        const u: u64 = @bitCast(s);");
-        self.writeln("        return @truncate(u);");
+        self.writeln("        if (comptime dest_bits >= 64) {");
+        self.writeln("            return @as(Dest, u);");
+        self.writeln("        } else {");
+        self.writeln("            return @truncate(u);");
+        self.writeln("        }");
         self.writeln("    } else {");
-        self.writeln("        const u: u64 = @as(u64, @truncate(val));");
+        self.writeln(
+            "        const u: u64 = if (comptime 64 >= src_bits) @as(u64, val) else @truncate(val);",
+        );
         self.writeln("        const s: i64 = @bitCast(u);");
-        self.writeln("        return @truncate(s);");
+        self.writeln("        if (comptime dest_bits >= 64) {");
+        self.writeln("            return @as(Dest, s);");
+        self.writeln("        } else {");
+        self.writeln("            return @truncate(s);");
+        self.writeln("        }");
         self.writeln("    }");
         self.writeln("}");
         self.writeln("");
@@ -1557,6 +1585,24 @@ impl Codegen {
         self.writeln("        fd_to_run[active_fds] = run;");
         self.writeln("        active_fds += 1;");
         self.writeln("    }");
+        self.writeln("}");
+        self.writeln("fn cp_shl(val: anytype, shift: anytype) @TypeOf(val) {");
+        self.writeln("    const T = @TypeOf(val);");
+        self.writeln("    if (comptime @typeInfo(T) == .comptime_int) return val << shift;");
+        self.writeln("    if (comptime @typeInfo(T) == .int) {");
+        self.writeln("        const ShiftType = std.math.Log2Int(T);");
+        self.writeln("        return val << @as(ShiftType, @truncate(shift));");
+        self.writeln("    }");
+        self.writeln("    return val << shift;");
+        self.writeln("}");
+        self.writeln("fn cp_shr(val: anytype, shift: anytype) @TypeOf(val) {");
+        self.writeln("    const T = @TypeOf(val);");
+        self.writeln("    if (comptime @typeInfo(T) == .comptime_int) return val >> shift;");
+        self.writeln("    if (comptime @typeInfo(T) == .int) {");
+        self.writeln("        const ShiftType = std.math.Log2Int(T);");
+        self.writeln("        return val >> @as(ShiftType, @truncate(shift));");
+        self.writeln("    }");
+        self.writeln("    return val >> shift;");
         self.writeln("}");
         self.writeln("");
         self.writeln("// --- Scheduler ---");
@@ -2424,6 +2470,7 @@ impl Codegen {
                     self.last_use_map.insert(r, idx);
                 }
             }
+            Stmt::Break | Stmt::Continue => {}
             Stmt::Block(b) | Stmt::UnsafeBlock(b) => self.compute_last_uses_block(b, counter),
             Stmt::If(i) => {
                 crate::ast_visitor::find_referenced_vars_in_expr(&i.test, &mut refs);
@@ -3667,6 +3714,17 @@ impl Codegen {
                 }
                 None
             }
+            Expr::ArrayRepeat(val, count) => {
+                let val_ty = self
+                    .infer_cp_type_with_mock(val, mock_types)
+                    .unwrap_or(Type::U8);
+                if let Expr::Lit(Lit::Int(n)) = &**count {
+                    Some(Type::FixedArray(Box::new(val_ty), *n as usize))
+                } else {
+                    Some(Type::Array(Box::new(val_ty)))
+                }
+            }
+            Expr::Slice(s) => self.infer_cp_type_with_mock(&s.obj, mock_types),
             Expr::Dict(_) => Some(Type::Ref(Ident {
                 span: Span { start: 0, end: 0 },
                 sym: "Dict".to_string(),
@@ -5303,6 +5361,7 @@ impl Codegen {
                     self.collect_expr_error_types(a, out);
                 }
             }
+            Stmt::Break | Stmt::Continue => {}
             Stmt::Block(b) | Stmt::UnsafeBlock(b) => {
                 for s in &b.body {
                     self.collect_stmt_error_types(s, out);
@@ -5400,6 +5459,10 @@ impl Codegen {
                     let (borrow_sources, is_mut_borrow, is_ref_st) =
                         self.extract_expr_borrow_info(init);
                     let old_box_trait = self.expected_box_trait.clone();
+                    let old_array_elem = self.expected_array_elem_type.clone();
+                    if let Some(Type::FixedArray(elem, _) | Type::Array(elem)) = &var.ty {
+                        self.expected_array_elem_type = Some((**elem).clone());
+                    }
                     match &var.ty {
                         Some(Type::BoxDyn(tr_id)) => {
                             self.expected_box_trait = Some(tr_id.sym.clone());
@@ -5455,6 +5518,7 @@ impl Codegen {
                                 self.var_cp_types.insert(ident.sym.clone(), inferred_ty);
                             }
                             self.expected_box_trait = old_box_trait;
+                            self.expected_array_elem_type = old_array_elem;
                             let mut is_var_borrow = !borrow_sources.is_empty();
                             if let Some(Type::BorrowType { .. }) = &var.ty {
                                 is_var_borrow = true;
@@ -5930,12 +5994,22 @@ impl Codegen {
                         }
                     }
                     if let Expr::Index { obj, index } = &*bin.left {
+                        let obj_ty = self.infer_cp_type(obj);
+                        let is_map_or_dict =
+                            matches!(obj_ty, Some(Type::Map(_, _)) | Some(Type::Dict(_, _)));
                         let obj_code = self.generate_expr(obj);
                         let idx_code = self.generate_expr(index);
-                        self.write_to_case(&format!(
-                            "_ = cp_index_assign({}, {}, {});",
-                            obj_code, idx_code, r
-                        ));
+                        if is_map_or_dict {
+                            self.write_to_case(&format!(
+                                "_ = cp_index_assign(&{}, {}, {});",
+                                obj_code, idx_code, r
+                            ));
+                        } else {
+                            self.write_to_case(&format!(
+                                "{}[cp_cast_int(usize, {})] = {};",
+                                obj_code, idx_code, r
+                            ));
+                        }
                     } else {
                         let l = self.generate_expr(&bin.left);
                         self.write_to_case(&format!("{} = {};", l, r));
@@ -6727,6 +6801,12 @@ impl Codegen {
                     }
                 }
             }
+            Stmt::Break => {
+                self.write_to_case("break;");
+            }
+            Stmt::Continue => {
+                self.write_to_case("continue;");
+            }
             Stmt::Match(m) => {
                 let sw_code = self.generate_switch(m, false);
                 self.write_to_case(&sw_code);
@@ -7055,8 +7135,8 @@ impl Codegen {
                     BinaryOp::BitAnd => format!("({} & {})", l, r),
                     BinaryOp::BitOr => format!("({} | {})", l, r),
                     BinaryOp::BitXor => format!("({} ^ {})", l, r),
-                    BinaryOp::Shl => format!("({} << {})", l, r),
-                    BinaryOp::Shr => format!("({} >> {})", l, r),
+                    BinaryOp::Shl => format!("cp_shl({}, {})", l, r),
+                    BinaryOp::Shr => format!("cp_shr({}, {})", l, r),
                     BinaryOp::LogicalAnd => format!("({} and {})", l, r),
                     BinaryOp::LogicalOr => format!("({} or {})", l, r),
                     BinaryOp::Assign => format!("{} = {}", l, r),
@@ -9234,6 +9314,31 @@ impl Codegen {
                     format!("cp_array_lit({}, {})", elem_zig_ty, s)
                 } else {
                     s
+                }
+            },
+            Expr::ArrayRepeat(val, count) => {
+                let val_code = self.generate_expr(val);
+                let count_code = self.generate_expr(count);
+                let elem_zig_ty = self
+                    .expected_array_elem_type
+                    .clone()
+                    .or_else(|| self.infer_cp_type(val))
+                    .map(|t| self.map_type(&t))
+                    .unwrap_or_else(|| "u8".to_string());
+                format!("@as([{}]{}, @splat(@as({}, {})))", count_code, elem_zig_ty, elem_zig_ty, val_code)
+            },
+            Expr::Slice(s) => {
+                let obj_code = self.generate_expr(&s.obj);
+                let start_code = s
+                    .start
+                    .as_ref()
+                    .map(|e| self.generate_expr(e))
+                    .unwrap_or_else(|| "0".to_string());
+                if let Some(end_expr) = &s.end {
+                    let end_code = self.generate_expr(end_expr);
+                    format!("{}[{}..{}]", obj_code, start_code, end_code)
+                } else {
+                    format!("{}[{}..]", obj_code, start_code)
                 }
             },
             Expr::ReflectType { target_ty, .. } => {

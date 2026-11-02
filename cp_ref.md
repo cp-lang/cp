@@ -896,14 +896,19 @@ CP 是一门严格无 GC 的静态类型编译型语言，禁止任何隐式类�
 let nums: [i32] = [10, 20, 30];
 let slice: [i32] = nums[1..3];
 
-// 2. 静态定长元组：[T1, T2, ...]
+// 2. 静态定长数组与重复初始化：[T; N] / [N]T 与 [val; count]
+let fixed_arr: [u8; 4] = [1, 2, 3, 4];
+let zero_buf: [u8; 256] = [0; 256];      // 编译期生成 ([_]u8{ 0 } ** 256)
+let lookup_table: [u8; 256] = [0xFF; 256];
+
+// 3. 静态定长元组：[T1, T2, ...]
 let pair: [string, i32] = ["alpha", 100];
 
-// 3. 字典哈希表：Dict<K, V> 或 Map<K, V>
+// 4. 字典哈希表：Dict<K, V> 或 Map<K, V>
 let scoreTable: Dict<string, i32> = Dict();
 scoreTable.set("Alice", 98);
 
-// 4. 哈希集合：Set<T>
+// 5. 哈希集合：Set<T>
 let visited: Set<i32> = Set();
 visited.add(42);
 ```
@@ -1893,6 +1898,32 @@ for i of 0..=10 {   // 闭区间：0 到 10
 
 // 数组高速切片视图
 let head_part = numbers[0..2];
+let tail_part = numbers[2..];
+```
+
+---
+
+### 9.3.1 循环控制与跳转语句 (`while`, `break`, `continue`)
+
+```typescript
+let idx: usize = 0;
+const len = buf.len;
+
+while idx < len {
+    // continue: 跳过当前循环，进入下一轮迭代
+    if buf[idx] == 0x20 {
+        idx = idx + 1;
+        continue;
+    }
+
+    // break: 立即跳出当前循环体
+    if buf[idx] == 0x00 {
+        break;
+    }
+
+    process_byte(buf[idx]);
+    idx = idx + 1;
+}
 ```
 
 ---
