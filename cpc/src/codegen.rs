@@ -11,6 +11,407 @@ pub enum ReceiverMode {
     Static,
 }
 
+#[derive(Default, Debug)]
+pub struct ModuleFeatures {
+    pub needs_regex: bool,
+    pub needs_collections: bool,
+    pub needs_actors: bool,
+    pub needs_reflection: bool,
+    pub needs_unpack: bool,
+    pub needs_result_error: bool,
+    pub needs_opt_chaining: bool,
+    pub needs_null_coalesce: bool,
+    pub needs_fmt: bool,
+    pub needs_math_random: bool,
+    pub needs_equality: bool,
+    pub needs_comparison: bool,
+    pub needs_hash: bool,
+    pub needs_array_helpers: bool,
+    pub needs_iter_helpers: bool,
+    pub needs_string_helpers: bool,
+    pub needs_add: bool,
+    pub needs_not: bool,
+    pub needs_index_helpers: bool,
+}
+
+impl ModuleFeatures {
+    pub fn scan(module: &Module) -> Self {
+        let mut f = Self::default();
+        for item in &module.body {
+            match item {
+                ModuleItem::Decl(d) => f.scan_decl(d),
+                ModuleItem::Stmt(s) => f.scan_stmt(s),
+                _ => {}
+            }
+        }
+        if f.needs_collections || f.needs_actors {
+            f.needs_string_helpers = true;
+            f.needs_equality = true;
+            f.needs_comparison = true;
+            f.needs_add = true;
+            f.needs_index_helpers = true;
+            f.needs_iter_helpers = true;
+            f.needs_fmt = true;
+        }
+        if f.needs_iter_helpers {
+            f.needs_string_helpers = true;
+            f.needs_equality = true;
+        }
+        if f.needs_array_helpers
+            || f.needs_hash
+            || f.needs_fmt
+            || f.needs_null_coalesce
+            || f.needs_equality
+            || f.needs_comparison
+            || f.needs_add
+            || f.needs_not
+        {
+            f.needs_string_helpers = true;
+        }
+        f
+    }
+
+    fn scan_decl(&mut self, d: &Decl) {
+        match d {
+            Decl::Func(func) => {
+                if func.ident.sym == "main" {
+                    self.needs_actors = true;
+                }
+                if let Some(ret) = &func.return_type {
+                    self.scan_type(ret);
+                }
+                for p in &func.params {
+                    self.scan_type(&p.ty);
+                }
+                self.scan_block(&func.body);
+            }
+            Decl::Class(c) => {
+                if c.implements.iter().any(|i| i.sym == "Agent") {
+                    self.needs_actors = true;
+                }
+                for f in &c.fields {
+                    self.scan_type(&f.ty);
+                }
+                for m in &c.methods {
+                    if let Some(ret) = &m.return_type {
+                        self.scan_type(ret);
+                    }
+                    for p in &m.params {
+                        self.scan_type(&p.ty);
+                    }
+                    self.scan_block(&m.body);
+                }
+            }
+            Decl::Trait(t) => {
+                for m in &t.methods {
+                    if let Some(ret) = &m.return_type {
+                        self.scan_type(ret);
+                    }
+                    for p in &m.params {
+                        self.scan_type(&p.ty);
+                    }
+                }
+            }
+            Decl::Impl(i) => {
+                for m in &i.methods {
+                    if let Some(ret) = &m.return_type {
+                        self.scan_type(ret);
+                    }
+                    for p in &m.params {
+                        self.scan_type(&p.ty);
+                    }
+                    self.scan_block(&m.body);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn scan_stmt(&mut self, s: &Stmt) {
+        match s {
+            Stmt::Var(v) => {
+                if let Some(t) = &v.ty {
+                    self.scan_type(t);
+                }
+                if let Some(init) = &v.init {
+                    self.scan_expr(init);
+                }
+                self.scan_pat(&v.pat);
+            }
+            Stmt::Expr(e) => self.scan_expr(e),
+            Stmt::Block(b) | Stmt::UnsafeBlock(b) => self.scan_block(b),
+            Stmt::If(i) => {
+                self.scan_expr(&i.test);
+                self.scan_stmt(&i.cons);
+                if let Some(alt) = &i.alt {
+                    self.scan_stmt(alt);
+                }
+            }
+            Stmt::While(w) => {
+                self.scan_expr(&w.test);
+                self.scan_stmt(&w.body);
+            }
+            Stmt::For(for_stmt) => {
+                self.needs_iter_helpers = true;
+                self.scan_expr(&for_stmt.expr);
+                self.scan_stmt(&for_stmt.body);
+            }
+            Stmt::Match(m) => {
+                self.scan_expr(&m.disc);
+                for arm in &m.arms {
+                    self.scan_pat(&arm.pat);
+                    if let Some(g) = &arm.guard {
+                        self.scan_expr(g);
+                    }
+                    self.scan_stmt(&arm.body);
+                }
+            }
+            Stmt::TryCatch {
+                try_block,
+                catch_body,
+                ..
+            } => {
+                self.needs_result_error = true;
+                self.scan_block(try_block);
+                if let Some(cb) = catch_body {
+                    self.scan_stmt(cb);
+                }
+            }
+            Stmt::Return(r) => {
+                if let Some(a) = &r.arg {
+                    self.scan_expr(a);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn scan_block(&mut self, b: &BlockStmt) {
+        for s in &b.body {
+            self.scan_stmt(s);
+        }
+    }
+
+    fn scan_pat(&mut self, p: &Pattern) {
+        match p {
+            Pattern::Rest(_) => self.needs_unpack = true,
+            Pattern::Tuple(items) => {
+                for item in items {
+                    self.scan_pat(item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn scan_type(&mut self, t: &Type) {
+        match t {
+            Type::ResultType { .. } | Type::ErrorUnion(_) => self.needs_result_error = true,
+            Type::Dict(_, _) | Type::Map(_, _) | Type::Set(_) => self.needs_collections = true,
+            Type::PID => self.needs_actors = true,
+            Type::Ref(id) => {
+                if id.sym == "RegExp" {
+                    self.needs_regex = true;
+                } else if id.sym == "Map" || id.sym == "Dict" || id.sym == "Set" {
+                    self.needs_collections = true;
+                } else if id.sym == "Task"
+                    || id.sym == "Message"
+                    || id.sym == "PID"
+                    || id.sym == "Agent"
+                {
+                    self.needs_actors = true;
+                } else if id.sym == "Error" || id.sym == "CpResult" {
+                    self.needs_result_error = true;
+                }
+            }
+            Type::Optional(inner) => self.scan_type(inner),
+            Type::Array(inner) | Type::FixedArray(inner, _) => self.scan_type(inner),
+            Type::Tuple(ts) => {
+                for item in ts {
+                    self.scan_type(item);
+                }
+            }
+            Type::Fn(params, ret) => {
+                for p in params {
+                    self.scan_type(p);
+                }
+                self.scan_type(ret);
+            }
+            _ => {}
+        }
+    }
+
+    fn scan_expr(&mut self, e: &Expr) {
+        match e {
+            Expr::Ident(id) => {
+                if id.sym == "RegExp" {
+                    self.needs_regex = true;
+                } else if id.sym == "Map" || id.sym == "Dict" || id.sym == "Set" {
+                    self.needs_collections = true;
+                } else if id.sym == "Task"
+                    || id.sym == "Message"
+                    || id.sym == "PID"
+                    || id.sym == "Agent"
+                {
+                    self.needs_actors = true;
+                } else if id.sym == "reflect"
+                    || id.sym == "TypeInfo"
+                    || id.sym == "FieldInfo"
+                    || id.sym == "MethodInfo"
+                {
+                    self.needs_reflection = true;
+                } else if id.sym == "Error" || id.sym == "CpResult" {
+                    self.needs_result_error = true;
+                }
+            }
+            Expr::Dict(_) => self.needs_collections = true,
+            Expr::Spawn(_) | Expr::Receive(_) => self.needs_actors = true,
+            Expr::ReflectType { .. } | Expr::ReflectOf { .. } => self.needs_reflection = true,
+            Expr::QuestionFallback { .. } => {
+                self.needs_null_coalesce = true;
+            }
+            Expr::NullCoalesce { left, right } => {
+                self.needs_null_coalesce = true;
+                self.scan_expr(left);
+                self.scan_expr(right);
+            }
+            Expr::Question(_) | Expr::Catch { .. } | Expr::ErrWrap(_) => {
+                self.needs_result_error = true;
+            }
+            Expr::Template(_) => {
+                self.needs_fmt = true;
+            }
+            Expr::Bin(b) => {
+                match b.op {
+                    BinaryOp::Eq | BinaryOp::NotEq => {
+                        let is_lit_num =
+                            matches!(&*b.left, Expr::Lit(Lit::Int(_)) | Expr::Lit(Lit::Float(_)))
+                                && matches!(
+                                    &*b.right,
+                                    Expr::Lit(Lit::Int(_)) | Expr::Lit(Lit::Float(_))
+                                );
+                        if !is_lit_num {
+                            if matches!(&*b.left, Expr::Lit(Lit::Str(_)) | Expr::Lit(Lit::Null))
+                                || matches!(
+                                    &*b.right,
+                                    Expr::Lit(Lit::Str(_)) | Expr::Lit(Lit::Null)
+                                )
+                            {
+                                self.needs_equality = true;
+                            }
+                        }
+                    }
+                    BinaryOp::Add => {
+                        if matches!(&*b.left, Expr::Lit(Lit::Str(_)))
+                            || matches!(&*b.right, Expr::Lit(Lit::Str(_)))
+                        {
+                            self.needs_add = true;
+                        }
+                    }
+                    _ => {}
+                }
+                self.scan_expr(&b.left);
+                self.scan_expr(&b.right);
+            }
+            Expr::Call(c) | Expr::New(c) => {
+                if let Expr::Ident(id) = &*c.callee {
+                    if id.sym == "@not" {
+                        self.needs_not = true;
+                    }
+                }
+                if let Expr::Member(m) = &*c.callee {
+                    if let Expr::Ident(id) = &*m.obj {
+                        if id.sym == "Math" && m.prop.sym == "random" {
+                            self.needs_math_random = true;
+                        }
+                    }
+                    match m.prop.sym.as_str() {
+                        "push" | "pop" => self.needs_array_helpers = true,
+                        "indexOf" | "lastIndexOf" | "includes" => self.needs_iter_helpers = true,
+                        _ => {}
+                    }
+                }
+                self.scan_expr(&c.callee);
+                for a in &c.args {
+                    self.scan_expr(a);
+                }
+            }
+            Expr::Builtin(b) => {
+                if b.name == "@hash" {
+                    self.needs_hash = true;
+                } else if b.name == "@not" {
+                    self.needs_not = true;
+                }
+                for a in &b.args {
+                    self.scan_expr(a);
+                }
+            }
+            Expr::OptCall(c) => {
+                self.needs_opt_chaining = true;
+                self.scan_expr(&c.callee);
+                for a in &c.args {
+                    self.scan_expr(a);
+                }
+            }
+            Expr::Member(m) => self.scan_expr(&m.obj),
+            Expr::OptMember(m) => {
+                self.needs_opt_chaining = true;
+                self.scan_expr(&m.obj);
+            }
+            Expr::Slice(s) => {
+                self.scan_expr(&s.obj);
+                if let Some(st) = &s.start {
+                    self.scan_expr(st);
+                }
+                if let Some(en) = &s.end {
+                    self.scan_expr(en);
+                }
+            }
+            Expr::Index { obj, index } => {
+                self.scan_expr(obj);
+                self.scan_expr(index);
+            }
+            Expr::Array(items) => {
+                for item in items {
+                    self.scan_expr(item);
+                }
+            }
+            Expr::ArrayRepeat(val, count) => {
+                self.scan_expr(val);
+                self.scan_expr(count);
+            }
+            Expr::Object(fields) => {
+                for f in fields {
+                    self.scan_expr(&f.val);
+                }
+            }
+            Expr::Match(m) => {
+                self.scan_expr(&m.disc);
+                for arm in &m.arms {
+                    self.scan_pat(&arm.pat);
+                    if let Some(g) = &arm.guard {
+                        self.scan_expr(g);
+                    }
+                    self.scan_stmt(&arm.body);
+                }
+            }
+            Expr::Cast {
+                expr, target_ty, ..
+            } => {
+                self.scan_expr(expr);
+                self.scan_type(target_ty);
+            }
+            Expr::Borrow(inner, _)
+            | Expr::Move(inner)
+            | Expr::Await(inner)
+            | Expr::BoxNew(inner) => {
+                self.scan_expr(inner);
+            }
+            _ => {}
+        }
+    }
+}
+
 pub struct Codegen {
     pub is_beam_mode: bool,
     pub is_lib_mode: bool,
@@ -142,6 +543,118 @@ impl Codegen {
             hash = hash.wrapping_mul(0x100000001b3);
         }
         hash
+    }
+
+    pub fn is_numeric_type(ty: &Type) -> bool {
+        matches!(
+            ty,
+            Type::I8
+                | Type::U8
+                | Type::I16
+                | Type::U16
+                | Type::I32
+                | Type::U32
+                | Type::I64
+                | Type::U64
+                | Type::I128
+                | Type::U128
+                | Type::ISize
+                | Type::USize
+                | Type::F32
+                | Type::F64
+        )
+    }
+
+    pub fn is_scalar_or_primitive_type(ty: &Type) -> bool {
+        match ty {
+            Type::I8
+            | Type::U8
+            | Type::I16
+            | Type::U16
+            | Type::I32
+            | Type::U32
+            | Type::I64
+            | Type::U64
+            | Type::I128
+            | Type::U128
+            | Type::ISize
+            | Type::USize
+            | Type::F32
+            | Type::F64
+            | Type::Bool
+            | Type::Void
+            | Type::String
+            | Type::RawPtr { .. } => true,
+            Type::BorrowType { .. } => true,
+            Type::FixedArray(inner, _) | Type::Array(inner) => {
+                Self::is_scalar_or_primitive_type(inner)
+            }
+            Type::Optional(inner) => Self::is_scalar_or_primitive_type(inner),
+            _ => false,
+        }
+    }
+
+    pub fn type_has_release(&self, ty: Option<&Type>) -> bool {
+        let Some(mut t) = ty else {
+            return false;
+        };
+        while let Type::BorrowType { inner, .. } = t {
+            t = inner;
+        }
+        while let Type::RawPtr { inner, .. } = t {
+            t = inner;
+        }
+        while let Type::Optional(inner) = t {
+            t = inner;
+        }
+        if Self::is_scalar_or_primitive_type(t) {
+            return false;
+        }
+        match t {
+            Type::Ref(id) => {
+                if let Some(cls) = self.class_defs.get(&id.sym) {
+                    cls.methods.iter().any(|m| m.ident.sym == "release")
+                } else {
+                    matches!(
+                        id.sym.as_str(),
+                        "Map"
+                            | "Dict"
+                            | "Set"
+                            | "HashMap"
+                            | "HashSet"
+                            | "VecDeque"
+                            | "BinaryHeap"
+                            | "BTreeMap"
+                            | "BTreeSet"
+                            | "RegExp"
+                    )
+                }
+            }
+            Type::BoxDyn(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_simple_literal_switch(m: &MatchExpr) -> bool {
+        if m.arms.is_empty() {
+            return false;
+        }
+        for arm in &m.arms {
+            if arm.guard.is_some() {
+                return false;
+            }
+            match &arm.pat {
+                Pattern::Lit(_) | Pattern::Wildcard | Pattern::Range { .. } => {}
+                Pattern::Ident(id) if id.sym == "_" || id.sym == "else" => {}
+                Pattern::Or(pats) => {
+                    if !pats.iter().all(|p| matches!(p, Pattern::Lit(_))) {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
+        true
     }
 
     pub fn map_error_type(&self, err: &ErrorType) -> String {
@@ -396,12 +909,17 @@ impl Codegen {
     }
 
     pub fn resolve_var_type_name(&self, var_name: &str) -> Option<String> {
-        if var_name == "this" || var_name == "_" {
+        if var_name == "this" || var_name == "_" || var_name == "self" {
             return self.current_class_name.clone();
         }
         if let Some(ty) = self.var_cp_types.get(var_name) {
             match ty {
                 Type::Ref(id) | Type::BoxDyn(id) => return Some(id.sym.clone()),
+                Type::RawPtr { inner, .. } => {
+                    if let Type::Ref(id) | Type::BoxDyn(id) = &**inner {
+                        return Some(id.sym.clone());
+                    }
+                }
                 Type::BorrowType { inner, .. } => {
                     if let Type::Ref(id) | Type::BoxDyn(id) = &**inner {
                         return Some(id.sym.clone());
@@ -409,6 +927,11 @@ impl Codegen {
                 }
                 Type::Optional(inner) => match &**inner {
                     Type::Ref(id) | Type::BoxDyn(id) => return Some(id.sym.clone()),
+                    Type::RawPtr { inner: r_in, .. } => {
+                        if let Type::Ref(id) | Type::BoxDyn(id) = &**r_in {
+                            return Some(id.sym.clone());
+                        }
+                    }
                     Type::BorrowType { inner: b_in, .. } => {
                         if let Type::Ref(id) | Type::BoxDyn(id) = &**b_in {
                             return Some(id.sym.clone());
@@ -436,7 +959,12 @@ impl Codegen {
         None
     }
 
+    pub fn scan_features_in_module(module: &Module) -> ModuleFeatures {
+        ModuleFeatures::scan(module)
+    }
+
     pub fn generate_module(&mut self, module: &Module) -> String {
+        let features = ModuleFeatures::scan(module);
         let mut class_order = Vec::new();
         let mut impl_decls = Vec::new();
         let mut has_single_thread_meta = false;
@@ -495,6 +1023,14 @@ impl Codegen {
             }
             if let ModuleItem::Decl(Decl::Dec(d)) = item {
                 self.dec_defs.insert(d.ident.sym.clone(), d.clone());
+            }
+            if let ModuleItem::Stmt(Stmt::Var(v)) = item {
+                if let Pattern::Ident(id) = &v.pat {
+                    self.globals.insert(id.sym.clone());
+                    if let Some(t) = &v.ty {
+                        self.var_cp_types.insert(id.sym.clone(), t.clone());
+                    }
+                }
             }
         }
 
@@ -720,38 +1256,46 @@ impl Codegen {
         self.writeln("");
 
         // --- Tri-State Result, Built-in Error, String Concat & Pattern Helpers ---
-        self.writeln("pub fn CpResult(comptime T: type, comptime E: type) type {");
-        self.writeln("    return union(enum) { ok: T, err: E, pub const __IS_CP_RESULT = true; };");
-        self.writeln("}");
-        self.writeln("pub const Error = struct {");
-        self.writeln("    code: i32 = 0,");
-        self.writeln("    msg: []const u8 = \"\",");
-        self.writeln("    cause: ?*const anyopaque = null,");
-        self.writeln("    pub const __TYPE_ID: u64 = 0xEE00_0000_0000_0001;");
-        self.writeln("    pub fn init(code: i32, msg: []const u8) Error { return Error{ .code = code, .msg = msg }; }");
-        self.writeln("};");
-        self.writeln("fn is_cp_result(comptime T: type) bool {");
-        self.writeln("    return @typeInfo(T) == .@\"union\" and @hasDecl(T, \"__IS_CP_RESULT\");");
-        self.writeln("}");
-        self.writeln("fn CpOptType(comptime T: type) type {");
-        self.writeln("    if (@typeInfo(T) == .optional) return T;");
-        self.writeln("    return ?T;");
-        self.writeln("}");
-        self.writeln("fn CpUnwrapOpt(comptime T: type) type {");
-        self.writeln("    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;");
-        self.writeln("    return T;");
-        self.writeln("}");
-        self.writeln("fn cp_opt_is_null(v: anytype) bool {");
-        self.writeln("    const T = @TypeOf(v);");
-        self.writeln("    if (comptime @typeInfo(T) == .optional) return v == null;");
-        self.writeln("    return false;");
-        self.writeln("}");
-        self.writeln("fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {");
-        self.writeln("    const T = @TypeOf(v);");
-        self.writeln(
-            "    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }",
-        );
-        self.writeln("}");
+        if features.needs_result_error {
+            self.writeln("pub fn CpResult(comptime T: type, comptime E: type) type {");
+            self.writeln(
+                "    return union(enum) { ok: T, err: E, pub const __IS_CP_RESULT = true; };",
+            );
+            self.writeln("}");
+            self.writeln("pub const Error = struct {");
+            self.writeln("    code: i32 = 0,");
+            self.writeln("    msg: []const u8 = \"\",");
+            self.writeln("    cause: ?*const anyopaque = null,");
+            self.writeln("    pub const __TYPE_ID: u64 = 0xEE00_0000_0000_0001;");
+            self.writeln("    pub fn init(code: i32, msg: []const u8) Error { return Error{ .code = code, .msg = msg }; }");
+            self.writeln("};");
+            self.writeln("fn is_cp_result(comptime T: type) bool {");
+            self.writeln(
+                "    return @typeInfo(T) == .@\"union\" and @hasDecl(T, \"__IS_CP_RESULT\");",
+            );
+            self.writeln("}");
+        }
+        if features.needs_opt_chaining {
+            self.writeln("fn CpOptType(comptime T: type) type {");
+            self.writeln("    if (@typeInfo(T) == .optional) return T;");
+            self.writeln("    return ?T;");
+            self.writeln("}");
+            self.writeln("fn CpUnwrapOpt(comptime T: type) type {");
+            self.writeln("    if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child;");
+            self.writeln("    return T;");
+            self.writeln("}");
+            self.writeln("fn cp_opt_is_null(v: anytype) bool {");
+            self.writeln("    const T = @TypeOf(v);");
+            self.writeln("    if (comptime @typeInfo(T) == .optional) return v == null;");
+            self.writeln("    return false;");
+            self.writeln("}");
+            self.writeln("fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) {");
+            self.writeln("    const T = @TypeOf(v);");
+            self.writeln(
+                "    if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; }",
+            );
+            self.writeln("}");
+        }
         self.writeln("fn cp_cast_int(comptime Dest: type, val: anytype) Dest {");
         self.writeln("    const Src = @TypeOf(val);");
         self.writeln("    if (comptime Src == Dest) return val;");
@@ -759,7 +1303,9 @@ impl Codegen {
         self.writeln(
             "        if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) {",
         );
-        self.writeln("            return @as(Dest, @truncate(@as(u64, @bitCast(@as(i64, val)))));");
+        self.writeln(
+            "            return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val)))));",
+        );
         self.writeln("        } else {");
         self.writeln("            return @as(Dest, @truncate(val));");
         self.writeln("        }");
@@ -777,20 +1323,20 @@ impl Codegen {
         self.writeln("    }");
         self.writeln("    if (comptime @typeInfo(Src).int.signedness == .signed) {");
         self.writeln(
-            "        const s: i64 = if (comptime 64 >= src_bits) @as(i64, val) else @truncate(val);",
+            "        const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val);",
         );
-        self.writeln("        const u: u64 = @bitCast(s);");
-        self.writeln("        if (comptime dest_bits >= 64) {");
+        self.writeln("        const u: u128 = @bitCast(s);");
+        self.writeln("        if (comptime dest_bits >= 128) {");
         self.writeln("            return @as(Dest, u);");
         self.writeln("        } else {");
         self.writeln("            return @truncate(u);");
         self.writeln("        }");
         self.writeln("    } else {");
         self.writeln(
-            "        const u: u64 = if (comptime 64 >= src_bits) @as(u64, val) else @truncate(val);",
+            "        const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val);",
         );
-        self.writeln("        const s: i64 = @bitCast(u);");
-        self.writeln("        if (comptime dest_bits >= 64) {");
+        self.writeln("        const s: i128 = @bitCast(u);");
+        self.writeln("        if (comptime dest_bits >= 128) {");
         self.writeln("            return @as(Dest, s);");
         self.writeln("        } else {");
         self.writeln("            return @truncate(s);");
@@ -806,672 +1352,736 @@ impl Codegen {
             }
         }
 
-        self.writeln("pub const regex_t = extern struct { __space: [64]usize = undefined, };");
-        self.writeln("pub const regmatch_t = extern struct { rm_so: i32, rm_eo: i32, };");
-        self.writeln(
-            "extern \"c\" fn regcomp(preg: *regex_t, regex: [*:0]const u8, cflags: i32) i32;",
-        );
-        self.writeln("extern \"c\" fn regexec(preg: *const regex_t, string: [*:0]const u8, nmatch: usize, pmatch: [*]regmatch_t, eflags: i32) i32;");
-        self.writeln("extern \"c\" fn regfree(preg: *regex_t) void;");
-        self.writeln("pub const RegExp = struct {");
-        self.writeln("    preg: regex_t, source: []const u8,");
-        self.writeln("    pub fn _create(allocator: std.mem.Allocator) !*RegExp { const p = try allocator.create(RegExp); p.* = undefined; return p; }");
-        self.writeln(
-            "    pub fn init(self: *RegExp, pattern: []const u8, flags: []const u8) void {",
-        );
-        self.writeln("        _ = flags; self.source = pattern; const c_pattern = std.heap.page_allocator.allocSentinel(u8, pattern.len, 0) catch unreachable; @import(\"std\").mem.copyForwards(u8, c_pattern, pattern); defer std.heap.page_allocator.free(c_pattern);");
-        self.writeln("        if (regcomp(&self.preg, c_pattern.ptr, 1) != 0) { std.debug.print(\"Regex Compilation Failed\\n\", .{}); @panic(\"Invalid RegExp\"); }");
-        self.writeln("    }");
-        self.writeln("    pub fn @\"test\"(self: *RegExp, str: []const u8) bool {");
-        self.writeln("        const c_str = std.heap.page_allocator.allocSentinel(u8, str.len, 0) catch unreachable; @import(\"std\").mem.copyForwards(u8, c_str, str); defer std.heap.page_allocator.free(c_str);");
-        self.writeln("        var pmatch: [1]regmatch_t = undefined;");
-        self.writeln("        return regexec(&self.preg, c_str.ptr, 1, &pmatch, 0) == 0;");
-        self.writeln("    }");
-        self.writeln("    pub fn exec(self: *RegExp, str: []const u8) []const u8 {");
-        self.writeln("        const c_str = std.heap.page_allocator.allocSentinel(u8, str.len, 0) catch unreachable; @import(\"std\").mem.copyForwards(u8, c_str, str); defer std.heap.page_allocator.free(c_str);");
-        self.writeln("        var pmatch: [1]regmatch_t = undefined;");
-        self.writeln("        if (regexec(&self.preg, c_str.ptr, 1, &pmatch, 0) == 0) { const start: usize = @intCast(pmatch[0].rm_so); const end: usize = @intCast(pmatch[0].rm_eo); return str[start..end]; }");
-        self.writeln("        return \"\";");
-        self.writeln("    }");
-        self.writeln("    pub fn release(self: *RegExp) void { regfree(&self.preg); }");
-        self.writeln("};");
+        // --- Top-Level Constants & Variables ---
+        for item in &module.body {
+            if let ModuleItem::Stmt(Stmt::Var(var)) = item {
+                let ty_str = if let Some(t) = &var.ty {
+                    format!(": {}", self.map_type(t))
+                } else {
+                    String::new()
+                };
+                let kw = if var.kind == VarDeclKind::Const {
+                    "pub const"
+                } else {
+                    "pub var"
+                };
+                let old_array_elem = self.expected_array_elem_type.clone();
+                if let Some(Type::FixedArray(elem, _) | Type::Array(elem)) = &var.ty {
+                    self.expected_array_elem_type = Some((**elem).clone());
+                }
+                match &var.pat {
+                    Pattern::Ident(ident) => {
+                        let init_code = if let Some(init) = &var.init {
+                            self.generate_expr(init)
+                        } else {
+                            "undefined".to_string()
+                        };
+                        self.writeln(&format!("{} {}{} = {};", kw, ident.sym, ty_str, init_code));
+                    }
+                    _ => {}
+                }
+                self.expected_array_elem_type = old_array_elem;
+            }
+        }
 
-        self.writeln("");
-        self.writeln("const MessageContext = struct {");
-        self.writeln("    pub fn hash(self: @This(), m: Message) u64 {");
-        self.writeln("        var hasher = std.hash.Wyhash.init(0);");
-        self.writeln("        switch (m) {");
-        self.writeln("            .int => |i| std.hash.autoHash(&hasher, i),");
-        self.writeln(
-            "            .float => |f| std.hash.autoHash(&hasher, @as(u32, @bitCast(f))),",
-        );
-        self.writeln("            .string => |s| hasher.update(s),");
-        self.writeln("            .boolean => |bl| std.hash.autoHash(&hasher, bl),");
-        self.writeln("            .array => |arr| { for (arr) |item| std.hash.autoHash(&hasher, self.hash(item)); },");
-        self.writeln("            .any => |a| std.hash.autoHash(&hasher, @intFromPtr(a)),");
-        self.writeln("        }");
-        self.writeln("        return hasher.final();");
-        self.writeln("    }");
-        self.writeln("    pub fn eql(self: @This(), a: Message, b: Message) bool {");
-        self.writeln("        const Ta = std.meta.activeTag(a);");
-        self.writeln("        const Tb = std.meta.activeTag(b);");
-        self.writeln("        if (Ta != Tb) return false;");
-        self.writeln("        return switch (a) {");
-        self.writeln("            .int => |i| i == b.int,");
-        self.writeln("            .float => |f| f == b.float,");
-        self.writeln("            .string => |s| std.mem.eql(u8, s, b.string),");
-        self.writeln("            .boolean => |bl| bl == b.boolean,");
-        self.writeln("            .array => |arr| { if (arr.len != b.array.len) return false; for (arr, 0..) |item, idx| { if (!self.eql(item, b.array[idx])) return false; } return true; },");
-        self.writeln("            .any => |ptr| ptr == b.any,");
-        self.writeln("        };");
-        self.writeln("    }");
-        self.writeln("};");
-        self.writeln("");
-        self.writeln("const Message = union(enum) {");
-        self.writeln("    int: i32, float: f32, string: []const u8, boolean: bool, array: []Message, any: *anyopaque,");
-        self.writeln("    pub fn to_string(self: Message) []const u8 { return switch (self) { .string => |s| s, else => \"\", }; }");
-        self.writeln("    pub fn to_int(self: Message) i32 { return switch (self) { .int => |i| i, else => 0, }; }");
-        self.writeln("    pub fn format(self: Message, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {");
-        self.writeln("        switch (self) {");
-        self.writeln("            .int => |i| try writer.print(\"{d}\", .{i}),");
-        self.writeln("            .float => |f| try writer.print(\"{d}\", .{f}),");
-        self.writeln("            .string => |s| try writer.print(\"{s}\", .{s}),");
-        self.writeln("            .boolean => |b| try writer.print(\"{}\", .{b}),");
-        self.writeln("            .array => |arr| { try writer.print(\"[\", .{}); for (arr, 0..) |item, idx| { if (idx > 0) try writer.print(\", \", .{}); try item.format(fmt, options, writer); } try writer.print(\"]\", .{}); },");
-        self.writeln("            .any => |a| try writer.print(\"any@{*}\", .{a}),");
-        self.writeln("        }");
-        self.writeln("    }");
-        self.writeln("};");
-        self.writeln("const MessageEntry = struct { key: Message, value: Message };");
-        self.writeln("");
-        self.writeln("const Map = struct {");
-        self.writeln("    allocator: std.mem.Allocator,");
-        self.writeln("    _map: std.HashMap(Message, Message, MessageContext, std.hash_map.default_max_load_percentage),");
-        self.writeln("    size: i32,");
-        self.writeln("");
-        self.writeln("    pub fn _create(allocator: std.mem.Allocator) !*Map {");
-        self.writeln("        const self = try allocator.create(Map);");
-        self.writeln("        self.* = .{");
-        self.writeln("            .allocator = allocator,");
-        self.writeln("            ._map = std.HashMap(Message, Message, MessageContext, std.hash_map.default_max_load_percentage).init(allocator),");
-        self.writeln("            .size = 0,");
-        self.writeln("        };");
-        self.writeln("        return self;");
-        self.writeln("    }");
-        self.writeln("    ");
-        self.writeln("    pub fn init(self: *Map) void {");
-        self.writeln("        _ = self;");
-        self.writeln("    }");
-        self.writeln("    ");
-        self.writeln("    pub fn release(self: *Map) void {");
-        self.writeln("        self._map.deinit();");
-        self.writeln("        self.allocator.destroy(self);");
-        self.writeln("    }");
-        self.writeln("    ");
-        self.writeln("    pub fn set(self: *Map, key: anytype, value: anytype) *Map {");
-        self.writeln("        self._map.put(cp_message_from(key), cp_message_from(value)) catch unreachable;");
-        self.writeln("        self.size = @intCast(self._map.count());");
-        self.writeln("        return self;");
-        self.writeln("    }");
-        self.writeln("    ");
-        self.writeln("    pub fn get(self: *Map, key: anytype) ?Message {");
-        self.writeln("        return self._map.get(cp_message_from(key));");
-        self.writeln("    }");
-        self.writeln("    ");
-        self.writeln("    pub fn has(self: *Map, key: anytype) bool {");
-        self.writeln("        return self._map.contains(cp_message_from(key));");
-        self.writeln("    }");
-        self.writeln("    ");
-        self.writeln("    pub fn delete(self: *Map, key: anytype) bool {");
-        self.writeln("        const removed = self._map.remove(cp_message_from(key));");
-        self.writeln("        self.size = @intCast(self._map.count());");
-        self.writeln("        return removed;");
-        self.writeln("    }");
-        self.writeln("    ");
-        self.writeln("    pub fn clear(self: *Map) void {");
-        self.writeln("        self._map.clearRetainingCapacity();");
-        self.writeln("        self.size = 0;");
-        self.writeln("    }");
-        self.writeln("    ");
-        self.writeln("    pub fn put_all(self: *Map, other: *Map) void {");
-        self.writeln("        var it = other._map.iterator();");
-        self.writeln("        while (it.next()) |entry| {");
-        self.writeln(
-            "            self._map.put(entry.key_ptr.*, entry.value_ptr.*) catch unreachable;",
-        );
-        self.writeln("        }");
-        self.writeln("        self.size = @intCast(self._map.count());");
-        self.writeln("    }");
-        self.writeln("    ");
-        self.writeln("    pub fn keys(self: *Map) []Message {");
-        self.writeln("        const list = self.allocator.alloc(Message, self._map.count()) catch unreachable;");
-        self.writeln("        var it = self._map.keyIterator();");
-        self.writeln("        var i: usize = 0;");
-        self.writeln("        while (it.next()) |k| {");
-        self.writeln("            list[i] = k.*;");
-        self.writeln("            i += 1;");
-        self.writeln("        }");
-        self.writeln("        return list;");
-        self.writeln("    }");
-        self.writeln("    ");
-        self.writeln("    pub fn values(self: *Map) []Message {");
-        self.writeln("        const list = self.allocator.alloc(Message, self._map.count()) catch unreachable;");
-        self.writeln("        var it = self._map.valueIterator();");
-        self.writeln("        var i: usize = 0;");
-        self.writeln("        while (it.next()) |v| {");
-        self.writeln("            list[i] = v.*;");
-        self.writeln("            i += 1;");
-        self.writeln("        }");
-        self.writeln("        return list;");
-        self.writeln("    }");
-        self.writeln("    ");
-        self.writeln("    pub fn entries(self: *Map) []MessageEntry {");
-        self.writeln("        const list = self.allocator.alloc(MessageEntry, self._map.count()) catch unreachable;");
-        self.writeln("        var it = self._map.iterator();");
-        self.writeln("        var i: usize = 0;");
-        self.writeln("        while (it.next()) |entry| {");
-        self.writeln(
-            "            list[i] = .{ .key = entry.key_ptr.*, .value = entry.value_ptr.* };",
-        );
-        self.writeln("            i += 1;");
-        self.writeln("        }");
-        self.writeln("        return list;");
-        self.writeln("    }");
-        self.writeln("};");
-        self.writeln("");
-        self.writeln("const Dict = Map;");
-        self.writeln("");
-        self.writeln("const Set = struct {");
-        self.writeln("    allocator: std.mem.Allocator,");
-        self.writeln("    _map: std.HashMap(Message, void, MessageContext, std.hash_map.default_max_load_percentage),");
-        self.writeln("    size: i32,");
-        self.writeln("");
-        self.writeln("    pub fn _create(allocator: std.mem.Allocator) !*Set {");
-        self.writeln("        const self = try allocator.create(Set);");
-        self.writeln("        self.* = .{");
-        self.writeln("            .allocator = allocator,");
-        self.writeln("            ._map = std.HashMap(Message, void, MessageContext, std.hash_map.default_max_load_percentage).init(allocator),");
-        self.writeln("            .size = 0,");
-        self.writeln("        };");
-        self.writeln("        return self;");
-        self.writeln("    }");
-        self.writeln("    ");
-        self.writeln("    pub fn init(self: *Set) void {");
-        self.writeln("        _ = self;");
-        self.writeln("    }");
-        self.writeln("    ");
-        self.writeln("    pub fn release(self: *Set) void {");
-        self.writeln("        self._map.deinit();");
-        self.writeln("        self.allocator.destroy(self);");
-        self.writeln("    }");
-        self.writeln("    ");
-        self.writeln("    pub fn add(self: *Set, value: anytype) *Set {");
-        self.writeln("        self._map.put(cp_message_from(value), {}) catch unreachable;");
-        self.writeln("        self.size = @intCast(self._map.count());");
-        self.writeln("        return self;");
-        self.writeln("    }");
-        self.writeln("    ");
-        self.writeln("    pub fn has(self: *Set, value: anytype) bool {");
-        self.writeln("        return self._map.contains(cp_message_from(value));");
-        self.writeln("    }");
-        self.writeln("    ");
-        self.writeln("    pub fn delete(self: *Set, value: anytype) bool {");
-        self.writeln("        const removed = self._map.remove(cp_message_from(value));");
-        self.writeln("        self.size = @intCast(self._map.count());");
-        self.writeln("        return removed;");
-        self.writeln("    }");
-        self.writeln("    ");
-        self.writeln("    pub fn clear(self: *Set) void {");
-        self.writeln("        self._map.clearRetainingCapacity();");
-        self.writeln("        self.size = 0;");
-        self.writeln("    }");
-        self.writeln("    ");
-        self.writeln("    pub fn values(self: *Set) []Message {");
-        self.writeln("        const list = self.allocator.alloc(Message, self._map.count()) catch unreachable;");
-        self.writeln("        var it = self._map.keyIterator();");
-        self.writeln("        var i: usize = 0;");
-        self.writeln("        while (it.next()) |k| {");
-        self.writeln("            list[i] = k.*;");
-        self.writeln("            i += 1;");
-        self.writeln("        }");
-        self.writeln("        return list;");
-        self.writeln("    }");
-        self.writeln("};");
-        self.writeln("");
-        self.writeln("const HashMap = Map;");
-        self.writeln("const HashSet = Set;");
-        self.writeln("");
-        self.writeln("fn cp_msg_cmp(a: Message, b: Message) i32 {");
-        self.writeln("    const tag_a = @intFromEnum(a);");
-        self.writeln("    const tag_b = @intFromEnum(b);");
-        self.writeln("    if (tag_a != tag_b) return if (tag_a < tag_b) -1 else 1;");
-        self.writeln("    switch (a) {");
-        self.writeln("        .int => |ia| { const ib = b.int; if (ia < ib) return -1; if (ia > ib) return 1; return 0; },");
-        self.writeln("        .float => |fa| { const fb = b.float; if (fa < fb) return -1; if (fa > fb) return 1; return 0; },");
-        self.writeln("        .string => |sa| { const sb = b.string; return switch (std.mem.order(u8, sa, sb)) { .lt => -1, .eq => 0, .gt => 1 }; },");
-        self.writeln("        .boolean => |ba| { const bb = b.boolean; if (ba == bb) return 0; return if (!ba and bb) -1 else 1; },");
-        self.writeln("        .array => |aa| { const ab = b.array; if (aa.len < ab.len) return -1; if (aa.len > ab.len) return 1; return 0; },");
-        self.writeln("        .any => |pa| { const pb = b.any; const ia = @intFromPtr(pa); const ib = @intFromPtr(pb); if (ia < ib) return -1; if (ia > ib) return 1; return 0; },");
-        self.writeln("    }");
-        self.writeln("}");
-        self.writeln("");
-        self.writeln("const VecDeque = struct {");
-        self.writeln("    allocator: std.mem.Allocator,");
-        self.writeln("    buf: []Message,");
-        self.writeln("    head: usize,");
-        self.writeln("    tail: usize,");
-        self.writeln("    count: usize,");
-        self.writeln("    capacity: usize,");
-        self.writeln("");
-        self.writeln("    pub fn _create(allocator: std.mem.Allocator) !*VecDeque {");
-        self.writeln("        const self = try allocator.create(VecDeque);");
-        self.writeln("        const init_cap: usize = 8;");
-        self.writeln("        const b = try allocator.alloc(Message, init_cap);");
-        self.writeln("        self.* = .{");
-        self.writeln("            .allocator = allocator,");
-        self.writeln("            .buf = b,");
-        self.writeln("            .head = 0,");
-        self.writeln("            .tail = 0,");
-        self.writeln("            .count = 0,");
-        self.writeln("            .capacity = init_cap,");
-        self.writeln("        };");
-        self.writeln("        return self;");
-        self.writeln("    }");
-        self.writeln("    pub fn init(self: *VecDeque) void { _ = self; }");
-        self.writeln("    pub fn release(self: *VecDeque) void {");
-        self.writeln("        self.allocator.free(self.buf);");
-        self.writeln("        self.allocator.destroy(self);");
-        self.writeln("    }");
-        self.writeln("    fn ensure_capacity(self: *VecDeque) void {");
-        self.writeln("        if (self.count == self.capacity) {");
-        self.writeln("            const new_cap = self.capacity * 2;");
-        self.writeln(
+        if features.needs_regex {
+            self.writeln("pub const regex_t = extern struct { __space: [64]usize = undefined, };");
+            self.writeln("pub const regmatch_t = extern struct { rm_so: i32, rm_eo: i32, };");
+            self.writeln(
+                "extern \"c\" fn regcomp(preg: *regex_t, regex: [*:0]const u8, cflags: i32) i32;",
+            );
+            self.writeln("extern \"c\" fn regexec(preg: *const regex_t, string: [*:0]const u8, nmatch: usize, pmatch: [*]regmatch_t, eflags: i32) i32;");
+            self.writeln("extern \"c\" fn regfree(preg: *regex_t) void;");
+            self.writeln("pub const RegExp = struct {");
+            self.writeln("    preg: regex_t, source: []const u8,");
+            self.writeln("    pub fn _create(allocator: std.mem.Allocator) !*RegExp { const p = try allocator.create(RegExp); p.* = undefined; return p; }");
+            self.writeln(
+                "    pub fn init(self: *RegExp, pattern: []const u8, flags: []const u8) void {",
+            );
+            self.writeln("        _ = flags; self.source = pattern; const c_pattern = std.heap.page_allocator.allocSentinel(u8, pattern.len, 0) catch unreachable; @import(\"std\").mem.copyForwards(u8, c_pattern, pattern); defer std.heap.page_allocator.free(c_pattern);");
+            self.writeln("        if (regcomp(&self.preg, c_pattern.ptr, 1) != 0) { std.debug.print(\"Regex Compilation Failed\\n\", .{}); @panic(\"Invalid RegExp\"); }");
+            self.writeln("    }");
+            self.writeln("    pub fn @\"test\"(self: *RegExp, str: []const u8) bool {");
+            self.writeln("        const c_str = std.heap.page_allocator.allocSentinel(u8, str.len, 0) catch unreachable; @import(\"std\").mem.copyForwards(u8, c_str, str); defer std.heap.page_allocator.free(c_str);");
+            self.writeln("        var pmatch: [1]regmatch_t = undefined;");
+            self.writeln("        return regexec(&self.preg, c_str.ptr, 1, &pmatch, 0) == 0;");
+            self.writeln("    }");
+            self.writeln("    pub fn exec(self: *RegExp, str: []const u8) []const u8 {");
+            self.writeln("        const c_str = std.heap.page_allocator.allocSentinel(u8, str.len, 0) catch unreachable; @import(\"std\").mem.copyForwards(u8, c_str, str); defer std.heap.page_allocator.free(c_str);");
+            self.writeln("        var pmatch: [1]regmatch_t = undefined;");
+            self.writeln("        if (regexec(&self.preg, c_str.ptr, 1, &pmatch, 0) == 0) { const start: usize = @intCast(pmatch[0].rm_so); const end: usize = @intCast(pmatch[0].rm_eo); return str[start..end]; }");
+            self.writeln("        return \"\";");
+            self.writeln("    }");
+            self.writeln("    pub fn release(self: *RegExp) void { regfree(&self.preg); }");
+            self.writeln("};");
+        }
+
+        if features.needs_collections || features.needs_actors {
+            self.writeln("");
+            self.writeln("const MessageContext = struct {");
+            self.writeln("    pub fn hash(self: @This(), m: Message) u64 {");
+            self.writeln("        var hasher = std.hash.Wyhash.init(0);");
+            self.writeln("        switch (m) {");
+            self.writeln("            .int => |i| std.hash.autoHash(&hasher, i),");
+            self.writeln(
+                "            .float => |f| std.hash.autoHash(&hasher, @as(u32, @bitCast(f))),",
+            );
+            self.writeln("            .string => |s| hasher.update(s),");
+            self.writeln("            .boolean => |bl| std.hash.autoHash(&hasher, bl),");
+            self.writeln("            .array => |arr| { for (arr) |item| std.hash.autoHash(&hasher, self.hash(item)); },");
+            self.writeln("            .any => |a| std.hash.autoHash(&hasher, @intFromPtr(a)),");
+            self.writeln("        }");
+            self.writeln("        return hasher.final();");
+            self.writeln("    }");
+            self.writeln("    pub fn eql(self: @This(), a: Message, b: Message) bool {");
+            self.writeln("        const Ta = std.meta.activeTag(a);");
+            self.writeln("        const Tb = std.meta.activeTag(b);");
+            self.writeln("        if (Ta != Tb) return false;");
+            self.writeln("        return switch (a) {");
+            self.writeln("            .int => |i| i == b.int,");
+            self.writeln("            .float => |f| f == b.float,");
+            self.writeln("            .string => |s| std.mem.eql(u8, s, b.string),");
+            self.writeln("            .boolean => |bl| bl == b.boolean,");
+            self.writeln("            .array => |arr| { if (arr.len != b.array.len) return false; for (arr, 0..) |item, idx| { if (!self.eql(item, b.array[idx])) return false; } return true; },");
+            self.writeln("            .any => |ptr| ptr == b.any,");
+            self.writeln("        };");
+            self.writeln("    }");
+            self.writeln("};");
+            self.writeln("");
+            self.writeln("const Message = union(enum) {");
+            self.writeln("    int: i32, float: f32, string: []const u8, boolean: bool, array: []Message, any: *anyopaque,");
+            self.writeln("    pub fn to_string(self: Message) []const u8 { return switch (self) { .string => |s| s, else => \"\", }; }");
+            self.writeln("    pub fn to_int(self: Message) i32 { return switch (self) { .int => |i| i, else => 0, }; }");
+            self.writeln("    pub fn format(self: Message, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {");
+            self.writeln("        switch (self) {");
+            self.writeln("            .int => |i| try writer.print(\"{d}\", .{i}),");
+            self.writeln("            .float => |f| try writer.print(\"{d}\", .{f}),");
+            self.writeln("            .string => |s| try writer.print(\"{s}\", .{s}),");
+            self.writeln("            .boolean => |b| try writer.print(\"{}\", .{b}),");
+            self.writeln("            .array => |arr| { try writer.print(\"[\", .{}); for (arr, 0..) |item, idx| { if (idx > 0) try writer.print(\", \", .{}); try item.format(fmt, options, writer); } try writer.print(\"]\", .{}); },");
+            self.writeln("            .any => |a| try writer.print(\"any@{*}\", .{a}),");
+            self.writeln("        }");
+            self.writeln("    }");
+            self.writeln("};");
+            self.writeln("const MessageEntry = struct { key: Message, value: Message };");
+            self.writeln("");
+            self.writeln("const Map = struct {");
+            self.writeln("    allocator: std.mem.Allocator,");
+            self.writeln("    _map: std.HashMap(Message, Message, MessageContext, std.hash_map.default_max_load_percentage),");
+            self.writeln("    size: i32,");
+            self.writeln("");
+            self.writeln("    pub fn _create(allocator: std.mem.Allocator) !*Map {");
+            self.writeln("        const self = try allocator.create(Map);");
+            self.writeln("        self.* = .{");
+            self.writeln("            .allocator = allocator,");
+            self.writeln("            ._map = std.HashMap(Message, Message, MessageContext, std.hash_map.default_max_load_percentage).init(allocator),");
+            self.writeln("            .size = 0,");
+            self.writeln("        };");
+            self.writeln("        return self;");
+            self.writeln("    }");
+            self.writeln("    ");
+            self.writeln("    pub fn init(self: *Map) void {");
+            self.writeln("        _ = self;");
+            self.writeln("    }");
+            self.writeln("    ");
+            self.writeln("    pub fn release(self: *Map) void {");
+            self.writeln("        self._map.deinit();");
+            self.writeln("        self.allocator.destroy(self);");
+            self.writeln("    }");
+            self.writeln("    ");
+            self.writeln("    pub fn set(self: *Map, key: anytype, value: anytype) *Map {");
+            self.writeln("        self._map.put(cp_message_from(key), cp_message_from(value)) catch unreachable;");
+            self.writeln("        self.size = @intCast(self._map.count());");
+            self.writeln("        return self;");
+            self.writeln("    }");
+            self.writeln("    ");
+            self.writeln("    pub fn get(self: *Map, key: anytype) ?Message {");
+            self.writeln("        return self._map.get(cp_message_from(key));");
+            self.writeln("    }");
+            self.writeln("    ");
+            self.writeln("    pub fn has(self: *Map, key: anytype) bool {");
+            self.writeln("        return self._map.contains(cp_message_from(key));");
+            self.writeln("    }");
+            self.writeln("    ");
+            self.writeln("    pub fn delete(self: *Map, key: anytype) bool {");
+            self.writeln("        const removed = self._map.remove(cp_message_from(key));");
+            self.writeln("        self.size = @intCast(self._map.count());");
+            self.writeln("        return removed;");
+            self.writeln("    }");
+            self.writeln("    ");
+            self.writeln("    pub fn clear(self: *Map) void {");
+            self.writeln("        self._map.clearRetainingCapacity();");
+            self.writeln("        self.size = 0;");
+            self.writeln("    }");
+            self.writeln("    ");
+            self.writeln("    pub fn put_all(self: *Map, other: *Map) void {");
+            self.writeln("        var it = other._map.iterator();");
+            self.writeln("        while (it.next()) |entry| {");
+            self.writeln(
+                "            self._map.put(entry.key_ptr.*, entry.value_ptr.*) catch unreachable;",
+            );
+            self.writeln("        }");
+            self.writeln("        self.size = @intCast(self._map.count());");
+            self.writeln("    }");
+            self.writeln("    ");
+            self.writeln("    pub fn keys(self: *Map) []Message {");
+            self.writeln("        const list = self.allocator.alloc(Message, self._map.count()) catch unreachable;");
+            self.writeln("        var it = self._map.keyIterator();");
+            self.writeln("        var i: usize = 0;");
+            self.writeln("        while (it.next()) |k| {");
+            self.writeln("            list[i] = k.*;");
+            self.writeln("            i += 1;");
+            self.writeln("        }");
+            self.writeln("        return list;");
+            self.writeln("    }");
+            self.writeln("    ");
+            self.writeln("    pub fn values(self: *Map) []Message {");
+            self.writeln("        const list = self.allocator.alloc(Message, self._map.count()) catch unreachable;");
+            self.writeln("        var it = self._map.valueIterator();");
+            self.writeln("        var i: usize = 0;");
+            self.writeln("        while (it.next()) |v| {");
+            self.writeln("            list[i] = v.*;");
+            self.writeln("            i += 1;");
+            self.writeln("        }");
+            self.writeln("        return list;");
+            self.writeln("    }");
+            self.writeln("    ");
+            self.writeln("    pub fn entries(self: *Map) []MessageEntry {");
+            self.writeln("        const list = self.allocator.alloc(MessageEntry, self._map.count()) catch unreachable;");
+            self.writeln("        var it = self._map.iterator();");
+            self.writeln("        var i: usize = 0;");
+            self.writeln("        while (it.next()) |entry| {");
+            self.writeln(
+                "            list[i] = .{ .key = entry.key_ptr.*, .value = entry.value_ptr.* };",
+            );
+            self.writeln("            i += 1;");
+            self.writeln("        }");
+            self.writeln("        return list;");
+            self.writeln("    }");
+            self.writeln("};");
+            self.writeln("");
+            self.writeln("const Dict = Map;");
+            self.writeln("");
+            self.writeln("const Set = struct {");
+            self.writeln("    allocator: std.mem.Allocator,");
+            self.writeln("    _map: std.HashMap(Message, void, MessageContext, std.hash_map.default_max_load_percentage),");
+            self.writeln("    size: i32,");
+            self.writeln("");
+            self.writeln("    pub fn _create(allocator: std.mem.Allocator) !*Set {");
+            self.writeln("        const self = try allocator.create(Set);");
+            self.writeln("        self.* = .{");
+            self.writeln("            .allocator = allocator,");
+            self.writeln("            ._map = std.HashMap(Message, void, MessageContext, std.hash_map.default_max_load_percentage).init(allocator),");
+            self.writeln("            .size = 0,");
+            self.writeln("        };");
+            self.writeln("        return self;");
+            self.writeln("    }");
+            self.writeln("    ");
+            self.writeln("    pub fn init(self: *Set) void {");
+            self.writeln("        _ = self;");
+            self.writeln("    }");
+            self.writeln("    ");
+            self.writeln("    pub fn release(self: *Set) void {");
+            self.writeln("        self._map.deinit();");
+            self.writeln("        self.allocator.destroy(self);");
+            self.writeln("    }");
+            self.writeln("    ");
+            self.writeln("    pub fn add(self: *Set, value: anytype) *Set {");
+            self.writeln("        self._map.put(cp_message_from(value), {}) catch unreachable;");
+            self.writeln("        self.size = @intCast(self._map.count());");
+            self.writeln("        return self;");
+            self.writeln("    }");
+            self.writeln("    ");
+            self.writeln("    pub fn has(self: *Set, value: anytype) bool {");
+            self.writeln("        return self._map.contains(cp_message_from(value));");
+            self.writeln("    }");
+            self.writeln("    ");
+            self.writeln("    pub fn delete(self: *Set, value: anytype) bool {");
+            self.writeln("        const removed = self._map.remove(cp_message_from(value));");
+            self.writeln("        self.size = @intCast(self._map.count());");
+            self.writeln("        return removed;");
+            self.writeln("    }");
+            self.writeln("    ");
+            self.writeln("    pub fn clear(self: *Set) void {");
+            self.writeln("        self._map.clearRetainingCapacity();");
+            self.writeln("        self.size = 0;");
+            self.writeln("    }");
+            self.writeln("    ");
+            self.writeln("    pub fn values(self: *Set) []Message {");
+            self.writeln("        const list = self.allocator.alloc(Message, self._map.count()) catch unreachable;");
+            self.writeln("        var it = self._map.keyIterator();");
+            self.writeln("        var i: usize = 0;");
+            self.writeln("        while (it.next()) |k| {");
+            self.writeln("            list[i] = k.*;");
+            self.writeln("            i += 1;");
+            self.writeln("        }");
+            self.writeln("        return list;");
+            self.writeln("    }");
+            self.writeln("};");
+            self.writeln("");
+            self.writeln("const HashMap = Map;");
+            self.writeln("const HashSet = Set;");
+            self.writeln("");
+            self.writeln("fn cp_msg_cmp(a: Message, b: Message) i32 {");
+            self.writeln("    const tag_a = @intFromEnum(a);");
+            self.writeln("    const tag_b = @intFromEnum(b);");
+            self.writeln("    if (tag_a != tag_b) return if (tag_a < tag_b) -1 else 1;");
+            self.writeln("    switch (a) {");
+            self.writeln("        .int => |ia| { const ib = b.int; if (ia < ib) return -1; if (ia > ib) return 1; return 0; },");
+            self.writeln("        .float => |fa| { const fb = b.float; if (fa < fb) return -1; if (fa > fb) return 1; return 0; },");
+            self.writeln("        .string => |sa| { const sb = b.string; return switch (std.mem.order(u8, sa, sb)) { .lt => -1, .eq => 0, .gt => 1 }; },");
+            self.writeln("        .boolean => |ba| { const bb = b.boolean; if (ba == bb) return 0; return if (!ba and bb) -1 else 1; },");
+            self.writeln("        .array => |aa| { const ab = b.array; if (aa.len < ab.len) return -1; if (aa.len > ab.len) return 1; return 0; },");
+            self.writeln("        .any => |pa| { const pb = b.any; const ia = @intFromPtr(pa); const ib = @intFromPtr(pb); if (ia < ib) return -1; if (ia > ib) return 1; return 0; },");
+            self.writeln("    }");
+            self.writeln("}");
+            self.writeln("");
+            self.writeln("const VecDeque = struct {");
+            self.writeln("    allocator: std.mem.Allocator,");
+            self.writeln("    buf: []Message,");
+            self.writeln("    head: usize,");
+            self.writeln("    tail: usize,");
+            self.writeln("    count: usize,");
+            self.writeln("    capacity: usize,");
+            self.writeln("");
+            self.writeln("    pub fn _create(allocator: std.mem.Allocator) !*VecDeque {");
+            self.writeln("        const self = try allocator.create(VecDeque);");
+            self.writeln("        const init_cap: usize = 8;");
+            self.writeln("        const b = try allocator.alloc(Message, init_cap);");
+            self.writeln("        self.* = .{");
+            self.writeln("            .allocator = allocator,");
+            self.writeln("            .buf = b,");
+            self.writeln("            .head = 0,");
+            self.writeln("            .tail = 0,");
+            self.writeln("            .count = 0,");
+            self.writeln("            .capacity = init_cap,");
+            self.writeln("        };");
+            self.writeln("        return self;");
+            self.writeln("    }");
+            self.writeln("    pub fn init(self: *VecDeque) void { _ = self; }");
+            self.writeln("    pub fn release(self: *VecDeque) void {");
+            self.writeln("        self.allocator.free(self.buf);");
+            self.writeln("        self.allocator.destroy(self);");
+            self.writeln("    }");
+            self.writeln("    fn ensure_capacity(self: *VecDeque) void {");
+            self.writeln("        if (self.count == self.capacity) {");
+            self.writeln("            const new_cap = self.capacity * 2;");
+            self.writeln(
             "            const new_buf = self.allocator.alloc(Message, new_cap) catch unreachable;",
         );
-        self.writeln("            var i: usize = 0;");
-        self.writeln("            while (i < self.count) : (i += 1) {");
-        self.writeln("                new_buf[i] = self.buf[(self.head + i) % self.capacity];");
-        self.writeln("            }");
-        self.writeln("            self.allocator.free(self.buf);");
-        self.writeln("            self.buf = new_buf;");
-        self.writeln("            self.head = 0;");
-        self.writeln("            self.tail = self.count;");
-        self.writeln("            self.capacity = new_cap;");
-        self.writeln("        }");
-        self.writeln("    }");
-        self.writeln("    pub fn push_back(self: *VecDeque, val: anytype) void {");
-        self.writeln("        self.ensure_capacity();");
-        self.writeln("        self.buf[self.tail] = cp_message_from(val);");
-        self.writeln("        self.tail = (self.tail + 1) % self.capacity;");
-        self.writeln("        self.count += 1;");
-        self.writeln("    }");
-        self.writeln("    pub fn push_front(self: *VecDeque, val: anytype) void {");
-        self.writeln("        self.ensure_capacity();");
-        self.writeln(
-            "        self.head = if (self.head == 0) self.capacity - 1 else self.head - 1;",
-        );
-        self.writeln("        self.buf[self.head] = cp_message_from(val);");
-        self.writeln("        self.count += 1;");
-        self.writeln("    }");
-        self.writeln("    pub fn pop_front(self: *VecDeque) ?Message {");
-        self.writeln("        if (self.count == 0) return null;");
-        self.writeln("        const val = self.buf[self.head];");
-        self.writeln("        self.head = (self.head + 1) % self.capacity;");
-        self.writeln("        self.count -= 1;");
-        self.writeln("        return val;");
-        self.writeln("    }");
-        self.writeln("    pub fn pop_back(self: *VecDeque) ?Message {");
-        self.writeln("        if (self.count == 0) return null;");
-        self.writeln(
-            "        self.tail = if (self.tail == 0) self.capacity - 1 else self.tail - 1;",
-        );
-        self.writeln("        const val = self.buf[self.tail];");
-        self.writeln("        self.count -= 1;");
-        self.writeln("        return val;");
-        self.writeln("    }");
-        self.writeln("    pub fn peek_front(self: *VecDeque) ?Message {");
-        self.writeln("        if (self.count == 0) return null;");
-        self.writeln("        return self.buf[self.head];");
-        self.writeln("    }");
-        self.writeln("    pub fn peek_back(self: *VecDeque) ?Message {");
-        self.writeln("        if (self.count == 0) return null;");
-        self.writeln(
-            "        const idx = if (self.tail == 0) self.capacity - 1 else self.tail - 1;",
-        );
-        self.writeln("        return self.buf[idx];");
-        self.writeln("    }");
-        self.writeln("    pub fn get(self: *VecDeque, index: anytype) ?Message {");
-        self.writeln("        const m = cp_message_from(index);");
-        self.writeln("        const idx_val: usize = switch (m) { .int => |i| if (i >= 0) @intCast(i) else return null, else => return null };");
-        self.writeln("        if (idx_val >= self.count) return null;");
-        self.writeln("        return self.buf[(self.head + idx_val) % self.capacity];");
-        self.writeln("    }");
-        self.writeln("    pub fn len(self: *VecDeque) usize { return self.count; }");
-        self.writeln("    pub fn size(self: *VecDeque) i32 { return @intCast(self.count); }");
-        self.writeln("    pub fn is_empty(self: *VecDeque) bool { return self.count == 0; }");
-        self.writeln("    pub fn clear(self: *VecDeque) void { self.head = 0; self.tail = 0; self.count = 0; }");
-        self.writeln("    pub fn next(self: *VecDeque) ?Message { return self.pop_front(); }");
-        self.writeln("};");
-        self.writeln("");
-        self.writeln("const BinaryHeap = struct {");
-        self.writeln("    allocator: std.mem.Allocator,");
-        self.writeln("    items: std.ArrayList(Message),");
-        self.writeln("");
-        self.writeln("    pub fn _create(allocator: std.mem.Allocator) !*BinaryHeap {");
-        self.writeln("        const self = try allocator.create(BinaryHeap);");
-        self.writeln("        self.* = .{ .allocator = allocator, .items = .empty };");
-        self.writeln("        return self;");
-        self.writeln("    }");
-        self.writeln("    pub fn init(self: *BinaryHeap) void { _ = self; }");
-        self.writeln("    pub fn release(self: *BinaryHeap) void {");
-        self.writeln("        self.items.deinit(self.allocator);");
-        self.writeln("        self.allocator.destroy(self);");
-        self.writeln("    }");
-        self.writeln("    pub fn push(self: *BinaryHeap, val: anytype) void {");
-        self.writeln("        const m = cp_message_from(val);");
-        self.writeln("        self.items.append(self.allocator, m) catch unreachable;");
-        self.writeln("        var idx = self.items.items.len - 1;");
-        self.writeln("        while (idx > 0) {");
-        self.writeln("            const parent = (idx - 1) / 2;");
-        self.writeln(
+            self.writeln("            var i: usize = 0;");
+            self.writeln("            while (i < self.count) : (i += 1) {");
+            self.writeln("                new_buf[i] = self.buf[(self.head + i) % self.capacity];");
+            self.writeln("            }");
+            self.writeln("            self.allocator.free(self.buf);");
+            self.writeln("            self.buf = new_buf;");
+            self.writeln("            self.head = 0;");
+            self.writeln("            self.tail = self.count;");
+            self.writeln("            self.capacity = new_cap;");
+            self.writeln("        }");
+            self.writeln("    }");
+            self.writeln("    pub fn push_back(self: *VecDeque, val: anytype) void {");
+            self.writeln("        self.ensure_capacity();");
+            self.writeln("        self.buf[self.tail] = cp_message_from(val);");
+            self.writeln("        self.tail = (self.tail + 1) % self.capacity;");
+            self.writeln("        self.count += 1;");
+            self.writeln("    }");
+            self.writeln("    pub fn push_front(self: *VecDeque, val: anytype) void {");
+            self.writeln("        self.ensure_capacity();");
+            self.writeln(
+                "        self.head = if (self.head == 0) self.capacity - 1 else self.head - 1;",
+            );
+            self.writeln("        self.buf[self.head] = cp_message_from(val);");
+            self.writeln("        self.count += 1;");
+            self.writeln("    }");
+            self.writeln("    pub fn pop_front(self: *VecDeque) ?Message {");
+            self.writeln("        if (self.count == 0) return null;");
+            self.writeln("        const val = self.buf[self.head];");
+            self.writeln("        self.head = (self.head + 1) % self.capacity;");
+            self.writeln("        self.count -= 1;");
+            self.writeln("        return val;");
+            self.writeln("    }");
+            self.writeln("    pub fn pop_back(self: *VecDeque) ?Message {");
+            self.writeln("        if (self.count == 0) return null;");
+            self.writeln(
+                "        self.tail = if (self.tail == 0) self.capacity - 1 else self.tail - 1;",
+            );
+            self.writeln("        const val = self.buf[self.tail];");
+            self.writeln("        self.count -= 1;");
+            self.writeln("        return val;");
+            self.writeln("    }");
+            self.writeln("    pub fn peek_front(self: *VecDeque) ?Message {");
+            self.writeln("        if (self.count == 0) return null;");
+            self.writeln("        return self.buf[self.head];");
+            self.writeln("    }");
+            self.writeln("    pub fn peek_back(self: *VecDeque) ?Message {");
+            self.writeln("        if (self.count == 0) return null;");
+            self.writeln(
+                "        const idx = if (self.tail == 0) self.capacity - 1 else self.tail - 1;",
+            );
+            self.writeln("        return self.buf[idx];");
+            self.writeln("    }");
+            self.writeln("    pub fn get(self: *VecDeque, index: anytype) ?Message {");
+            self.writeln("        const m = cp_message_from(index);");
+            self.writeln("        const idx_val: usize = switch (m) { .int => |i| if (i >= 0) @intCast(i) else return null, else => return null };");
+            self.writeln("        if (idx_val >= self.count) return null;");
+            self.writeln("        return self.buf[(self.head + idx_val) % self.capacity];");
+            self.writeln("    }");
+            self.writeln("    pub fn len(self: *VecDeque) usize { return self.count; }");
+            self.writeln("    pub fn size(self: *VecDeque) i32 { return @intCast(self.count); }");
+            self.writeln("    pub fn is_empty(self: *VecDeque) bool { return self.count == 0; }");
+            self.writeln("    pub fn clear(self: *VecDeque) void { self.head = 0; self.tail = 0; self.count = 0; }");
+            self.writeln("    pub fn next(self: *VecDeque) ?Message { return self.pop_front(); }");
+            self.writeln("};");
+            self.writeln("");
+            self.writeln("const BinaryHeap = struct {");
+            self.writeln("    allocator: std.mem.Allocator,");
+            self.writeln("    items: std.ArrayList(Message),");
+            self.writeln("");
+            self.writeln("    pub fn _create(allocator: std.mem.Allocator) !*BinaryHeap {");
+            self.writeln("        const self = try allocator.create(BinaryHeap);");
+            self.writeln("        self.* = .{ .allocator = allocator, .items = .empty };");
+            self.writeln("        return self;");
+            self.writeln("    }");
+            self.writeln("    pub fn init(self: *BinaryHeap) void { _ = self; }");
+            self.writeln("    pub fn release(self: *BinaryHeap) void {");
+            self.writeln("        self.items.deinit(self.allocator);");
+            self.writeln("        self.allocator.destroy(self);");
+            self.writeln("    }");
+            self.writeln("    pub fn push(self: *BinaryHeap, val: anytype) void {");
+            self.writeln("        const m = cp_message_from(val);");
+            self.writeln("        self.items.append(self.allocator, m) catch unreachable;");
+            self.writeln("        var idx = self.items.items.len - 1;");
+            self.writeln("        while (idx > 0) {");
+            self.writeln("            const parent = (idx - 1) / 2;");
+            self.writeln(
             "            if (cp_msg_cmp(self.items.items[idx], self.items.items[parent]) > 0) {",
         );
-        self.writeln("                const tmp = self.items.items[idx];");
-        self.writeln("                self.items.items[idx] = self.items.items[parent];");
-        self.writeln("                self.items.items[parent] = tmp;");
-        self.writeln("                idx = parent;");
-        self.writeln("            } else { break; }");
-        self.writeln("        }");
-        self.writeln("    }");
-        self.writeln("    pub fn pop(self: *BinaryHeap) ?Message {");
-        self.writeln("        if (self.items.items.len == 0) return null;");
-        self.writeln("        const top = self.items.items[0];");
-        self.writeln("        const last = self.items.pop();");
-        self.writeln("        if (self.items.items.len > 0) {");
-        self.writeln("            self.items.items[0] = last.?;");
-        self.writeln("            var idx: usize = 0;");
-        self.writeln("            const n = self.items.items.len;");
-        self.writeln("            while (true) {");
-        self.writeln("                var largest = idx;");
-        self.writeln("                const left = 2 * idx + 1;");
-        self.writeln("                const right = 2 * idx + 2;");
-        self.writeln("                if (left < n and cp_msg_cmp(self.items.items[left], self.items.items[largest]) > 0) { largest = left; }");
-        self.writeln("                if (right < n and cp_msg_cmp(self.items.items[right], self.items.items[largest]) > 0) { largest = right; }");
-        self.writeln("                if (largest != idx) {");
-        self.writeln("                    const tmp = self.items.items[idx];");
-        self.writeln("                    self.items.items[idx] = self.items.items[largest];");
-        self.writeln("                    self.items.items[largest] = tmp;");
-        self.writeln("                    idx = largest;");
-        self.writeln("                } else { break; }");
-        self.writeln("            }");
-        self.writeln("        }");
-        self.writeln("        return top;");
-        self.writeln("    }");
-        self.writeln("    pub fn peek(self: *BinaryHeap) ?Message {");
-        self.writeln("        if (self.items.items.len == 0) return null;");
-        self.writeln("        return self.items.items[0];");
-        self.writeln("    }");
-        self.writeln("    pub fn len(self: *BinaryHeap) usize { return self.items.items.len; }");
-        self.writeln(
-            "    pub fn size(self: *BinaryHeap) i32 { return @intCast(self.items.items.len); }",
-        );
-        self.writeln(
-            "    pub fn is_empty(self: *BinaryHeap) bool { return self.items.items.len == 0; }",
-        );
-        self.writeln(
-            "    pub fn clear(self: *BinaryHeap) void { self.items.clearRetainingCapacity(); }",
-        );
-        self.writeln("    pub fn next(self: *BinaryHeap) ?Message { return self.pop(); }");
-        self.writeln("};");
-        self.writeln("");
-        self.writeln("const BTreeMap = struct {");
-        self.writeln("    allocator: std.mem.Allocator,");
-        self.writeln("    entries: std.ArrayList(MessageEntry),");
-        self.writeln("");
-        self.writeln("    pub fn _create(allocator: std.mem.Allocator) !*BTreeMap {");
-        self.writeln("        const self = try allocator.create(BTreeMap);");
-        self.writeln("        self.* = .{ .allocator = allocator, .entries = .empty };");
-        self.writeln("        return self;");
-        self.writeln("    }");
-        self.writeln("    pub fn init(self: *BTreeMap) void { _ = self; }");
-        self.writeln("    pub fn release(self: *BTreeMap) void {");
-        self.writeln("        self.entries.deinit(self.allocator);");
-        self.writeln("        self.allocator.destroy(self);");
-        self.writeln("    }");
-        self.writeln("    fn binary_search(self: *BTreeMap, k: Message) struct { found: bool, index: usize } {");
-        self.writeln("        var low: usize = 0;");
-        self.writeln("        var high: usize = self.entries.items.len;");
-        self.writeln("        while (low < high) {");
-        self.writeln("            const mid = low + (high - low) / 2;");
-        self.writeln("            const c = cp_msg_cmp(self.entries.items[mid].key, k);");
-        self.writeln("            if (c == 0) return .{ .found = true, .index = mid };");
-        self.writeln("            if (c < 0) { low = mid + 1; } else { high = mid; }");
-        self.writeln("        }");
-        self.writeln("        return .{ .found = false, .index = low };");
-        self.writeln("    }");
-        self.writeln("    pub fn insert(self: *BTreeMap, key: anytype, val: anytype) ?Message {");
-        self.writeln("        const k = cp_message_from(key);");
-        self.writeln("        const v = cp_message_from(val);");
-        self.writeln("        const search = self.binary_search(k);");
-        self.writeln("        if (search.found) {");
-        self.writeln("            const old = self.entries.items[search.index].value;");
-        self.writeln("            self.entries.items[search.index].value = v;");
-        self.writeln("            return old;");
-        self.writeln("        } else {");
-        self.writeln("            self.entries.insert(self.allocator, search.index, .{ .key = k, .value = v }) catch unreachable;");
-        self.writeln("            return null;");
-        self.writeln("        }");
-        self.writeln("    }");
-        self.writeln("    pub fn set(self: *BTreeMap, key: anytype, val: anytype) *BTreeMap {");
-        self.writeln("        _ = self.insert(key, val);");
-        self.writeln("        return self;");
-        self.writeln("    }");
-        self.writeln("    pub fn get(self: *BTreeMap, key: anytype) ?Message {");
-        self.writeln("        const k = cp_message_from(key);");
-        self.writeln("        const search = self.binary_search(k);");
-        self.writeln("        if (search.found) return self.entries.items[search.index].value;");
-        self.writeln("        return null;");
-        self.writeln("    }");
-        self.writeln("    pub fn has(self: *BTreeMap, key: anytype) bool {");
-        self.writeln("        const k = cp_message_from(key);");
-        self.writeln("        return self.binary_search(k).found;");
-        self.writeln("    }");
-        self.writeln("    pub fn remove(self: *BTreeMap, key: anytype) ?Message {");
-        self.writeln("        const k = cp_message_from(key);");
-        self.writeln("        const search = self.binary_search(k);");
-        self.writeln("        if (search.found) {");
-        self.writeln("            const old = self.entries.items[search.index].value;");
-        self.writeln("            _ = self.entries.orderedRemove(search.index);");
-        self.writeln("            return old;");
-        self.writeln("        }");
-        self.writeln("        return null;");
-        self.writeln("    }");
-        self.writeln("    pub fn delete(self: *BTreeMap, key: anytype) bool { return self.remove(key) != null; }");
-        self.writeln("    pub fn min_key(self: *BTreeMap) ?Message {");
-        self.writeln("        if (self.entries.items.len == 0) return null;");
-        self.writeln("        return self.entries.items[0].key;");
-        self.writeln("    }");
-        self.writeln("    pub fn max_key(self: *BTreeMap) ?Message {");
-        self.writeln("        if (self.entries.items.len == 0) return null;");
-        self.writeln("        return self.entries.items[self.entries.items.len - 1].key;");
-        self.writeln("    }");
-        self.writeln("    pub fn len(self: *BTreeMap) usize { return self.entries.items.len; }");
-        self.writeln(
-            "    pub fn size(self: *BTreeMap) i32 { return @intCast(self.entries.items.len); }",
-        );
-        self.writeln(
-            "    pub fn is_empty(self: *BTreeMap) bool { return self.entries.items.len == 0; }",
-        );
-        self.writeln(
-            "    pub fn clear(self: *BTreeMap) void { self.entries.clearRetainingCapacity(); }",
-        );
-        self.writeln("    pub fn keys(self: *BTreeMap) []Message {");
-        self.writeln("        const list = self.allocator.alloc(Message, self.entries.items.len) catch unreachable;");
-        self.writeln("        for (self.entries.items, 0..) |entry, i| { list[i] = entry.key; }");
-        self.writeln("        return list;");
-        self.writeln("    }");
-        self.writeln("    pub fn values(self: *BTreeMap) []Message {");
-        self.writeln("        const list = self.allocator.alloc(Message, self.entries.items.len) catch unreachable;");
-        self.writeln("        for (self.entries.items, 0..) |entry, i| { list[i] = entry.value; }");
-        self.writeln("        return list;");
-        self.writeln("    }");
-        self.writeln("    pub fn next(self: *BTreeMap) ?MessageEntry {");
-        self.writeln("        if (self.entries.items.len == 0) return null;");
-        self.writeln("        return self.entries.orderedRemove(0);");
-        self.writeln("    }");
-        self.writeln("};");
-        self.writeln("");
-        self.writeln("const BTreeSet = struct {");
-        self.writeln("    map: *BTreeMap,");
-        self.writeln("");
-        self.writeln("    pub fn _create(allocator: std.mem.Allocator) !*BTreeSet {");
-        self.writeln("        const self = try allocator.create(BTreeSet);");
-        self.writeln("        self.map = try BTreeMap._create(allocator);");
-        self.writeln("        return self;");
-        self.writeln("    }");
-        self.writeln("    pub fn init(self: *BTreeSet) void { _ = self; }");
-        self.writeln("    pub fn release(self: *BTreeSet) void {");
-        self.writeln("        const alloc = self.map.allocator;");
-        self.writeln("        self.map.release();");
-        self.writeln("        alloc.destroy(self);");
-        self.writeln("    }");
-        self.writeln("    pub fn add(self: *BTreeSet, val: anytype) bool {");
-        self.writeln("        return self.map.insert(val, true) == null;");
-        self.writeln("    }");
-        self.writeln("    pub fn has(self: *BTreeSet, val: anytype) bool {");
-        self.writeln("        return self.map.has(val);");
-        self.writeln("    }");
-        self.writeln("    pub fn remove(self: *BTreeSet, val: anytype) ?Message {");
-        self.writeln("        if (self.map.remove(val) != null) return cp_message_from(true);");
-        self.writeln("        return null;");
-        self.writeln("    }");
-        self.writeln("    pub fn delete(self: *BTreeSet, val: anytype) bool { return self.map.delete(val); }");
-        self.writeln("    pub fn min(self: *BTreeSet) ?Message { return self.map.min_key(); }");
-        self.writeln("    pub fn max(self: *BTreeSet) ?Message { return self.map.max_key(); }");
-        self.writeln("    pub fn len(self: *BTreeSet) usize { return self.map.len(); }");
-        self.writeln("    pub fn size(self: *BTreeSet) i32 { return self.map.size(); }");
-        self.writeln("    pub fn is_empty(self: *BTreeSet) bool { return self.map.is_empty(); }");
-        self.writeln("    pub fn clear(self: *BTreeSet) void { self.map.clear(); }");
-        self.writeln("    pub fn values(self: *BTreeSet) []Message { return self.map.keys(); }");
-        self.writeln("    pub fn next(self: *BTreeSet) ?Message {");
-        self.writeln("        if (self.map.next()) |entry| { return entry.key; }");
-        self.writeln("        return null;");
-        self.writeln("    }");
-        self.writeln("};");
-        self.writeln("");
-        self.writeln("pub const FieldInfo = struct {");
-        self.writeln("    name: []const u8,");
-        self.writeln("    typeName: []const u8,");
-        self.writeln("    meta: *Map,");
-        self.writeln("};");
-        self.writeln("");
-        self.writeln("pub const MethodInfo = struct {");
-        self.writeln("    name: []const u8,");
-        self.writeln("    returnTypeName: []const u8,");
-        self.writeln("    paramNames: []const []const u8,");
-        self.writeln("    isAsync: bool,");
-        self.writeln("    isStatic: bool,");
-        self.writeln("    meta: *Map,");
-        self.writeln("};");
-        self.writeln("");
-        self.writeln("pub const TypeInfo = struct {");
-        self.writeln("    name: []const u8,");
-        self.writeln("    isRef: bool,");
-        self.writeln("    fields: []const FieldInfo,");
-        self.writeln("    methods: []const MethodInfo,");
-        self.writeln("    meta: *Map,");
-        self.writeln(
-            "    pub fn getField(self: *const TypeInfo, field_name: []const u8) ?FieldInfo {",
-        );
-        self.writeln("        for (self.fields) |f| {");
-        self.writeln("            if (std.mem.eql(u8, f.name, field_name)) return f;");
-        self.writeln("        }");
-        self.writeln("        return null;");
-        self.writeln("    }");
-        self.writeln(
-            "    pub fn getMethod(self: *const TypeInfo, method_name: []const u8) ?MethodInfo {",
-        );
-        self.writeln("        for (self.methods) |m| {");
-        self.writeln("            if (std.mem.eql(u8, m.name, method_name)) return m;");
-        self.writeln("        }");
-        self.writeln("        return null;");
-        self.writeln("    }");
-        self.writeln("};");
-        self.writeln("");
-        self.writeln("const PID = struct { node_id: u32, local_id: u32 };");
-        self.writeln("fn CpIndexReturnType(comptime T: type) type {");
-        self.writeln("    if (@typeInfo(T) == .pointer) {");
-        self.writeln("        const Child = @typeInfo(T).pointer.child;");
-        self.writeln("        if (@typeInfo(Child) == .@\"struct\" and @hasDecl(Child, \"get\")) return ?Message;");
-        self.writeln(
-            "        if (@typeInfo(Child) == .array) return @typeInfo(Child).array.child;",
-        );
-        self.writeln(
-            "        if (@typeInfo(Child) == .pointer and @typeInfo(Child).pointer.size == .slice) return @typeInfo(Child).pointer.child;",
-        );
-        self.writeln("    }");
-        self.writeln("    if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child;");
-        self.writeln("    if (@typeInfo(T) == .array) return @typeInfo(T).array.child;");
-        self.writeln("    return ?Message;");
-        self.writeln("}");
-        self.writeln("fn cp_index_get(container: anytype, key: anytype) CpIndexReturnType(@TypeOf(container)) {");
-        self.writeln("    const T = @TypeOf(container);");
-        self.writeln("    if (comptime (T == Message or T == ?Message)) {");
-        self.writeln("        const val: ?Message = if (T == ?Message) container else container;");
-        self.writeln("        if (val) |m| {");
-        self.writeln("            switch (m) {");
-        self.writeln("                .array => |arr| {");
-        self.writeln("                    if (comptime (@typeInfo(@TypeOf(key)) == .int or @typeInfo(@TypeOf(key)) == .comptime_int)) {");
-        self.writeln("                        const idx: usize = @intCast(key);");
-        self.writeln("                        if (idx < arr.len) return arr[idx];");
-        self.writeln("                    }");
-        self.writeln("                    return null;");
-        self.writeln("                },");
-        self.writeln("                .any => |ptr| {");
-        self.writeln("                    const map: *Map = @ptrCast(@alignCast(ptr));");
-        self.writeln("                    return map.get(key);");
-        self.writeln("                },");
-        self.writeln("                else => return null,");
-        self.writeln("            }");
-        self.writeln("        } else {");
-        self.writeln("            return null;");
-        self.writeln("        }");
-        self.writeln("    }");
-        self.writeln("    if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@\"struct\" and @hasDecl(@typeInfo(T).pointer.child, \"get\"))) {");
-        self.writeln("        return container.get(key);");
-        self.writeln("    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) {");
-        self.writeln("        return container.*[@as(usize, @intCast(key))];");
-        self.writeln("    } else {");
-        self.writeln("        return container[@as(usize, @intCast(key))];");
-        self.writeln("    }");
-        self.writeln("}");
-        self.writeln("fn cp_index_assign(container: anytype, key: anytype, value: anytype) void {");
-        self.writeln("    const T = @TypeOf(container);");
-        self.writeln("    if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@\"struct\" and @hasDecl(@typeInfo(T).pointer.child, \"set\"))) {");
-        self.writeln("        _ = container.set(key, value);");
-        self.writeln("    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) {");
-        self.writeln("        @constCast(container.*)[@as(usize, @intCast(key))] = value;");
-        self.writeln("    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) {");
-        self.writeln("        @constCast(container)[@as(usize, @intCast(key))] = value;");
-        self.writeln("    } else {");
-        self.writeln("        container[@as(usize, @intCast(key))] = value;");
-        self.writeln("    }");
-        self.writeln("}");
-        self.writeln("fn cp_message_from(v: anytype) Message {");
-        self.writeln("    const T = @TypeOf(v);");
-        self.writeln("    if (T == Message) return v;");
-        self.writeln(
-            "    if (T == []Message or T == []const Message) return .{ .array = @constCast(v) };",
-        );
-        self.writeln(
-            "    if (T == i32 or T == comptime_int) return .{ .int = @intCast(v) };
+            self.writeln("                const tmp = self.items.items[idx];");
+            self.writeln("                self.items.items[idx] = self.items.items[parent];");
+            self.writeln("                self.items.items[parent] = tmp;");
+            self.writeln("                idx = parent;");
+            self.writeln("            } else { break; }");
+            self.writeln("        }");
+            self.writeln("    }");
+            self.writeln("    pub fn pop(self: *BinaryHeap) ?Message {");
+            self.writeln("        if (self.items.items.len == 0) return null;");
+            self.writeln("        const top = self.items.items[0];");
+            self.writeln("        const last = self.items.pop();");
+            self.writeln("        if (self.items.items.len > 0) {");
+            self.writeln("            self.items.items[0] = last.?;");
+            self.writeln("            var idx: usize = 0;");
+            self.writeln("            const n = self.items.items.len;");
+            self.writeln("            while (true) {");
+            self.writeln("                var largest = idx;");
+            self.writeln("                const left = 2 * idx + 1;");
+            self.writeln("                const right = 2 * idx + 2;");
+            self.writeln("                if (left < n and cp_msg_cmp(self.items.items[left], self.items.items[largest]) > 0) { largest = left; }");
+            self.writeln("                if (right < n and cp_msg_cmp(self.items.items[right], self.items.items[largest]) > 0) { largest = right; }");
+            self.writeln("                if (largest != idx) {");
+            self.writeln("                    const tmp = self.items.items[idx];");
+            self.writeln("                    self.items.items[idx] = self.items.items[largest];");
+            self.writeln("                    self.items.items[largest] = tmp;");
+            self.writeln("                    idx = largest;");
+            self.writeln("                } else { break; }");
+            self.writeln("            }");
+            self.writeln("        }");
+            self.writeln("        return top;");
+            self.writeln("    }");
+            self.writeln("    pub fn peek(self: *BinaryHeap) ?Message {");
+            self.writeln("        if (self.items.items.len == 0) return null;");
+            self.writeln("        return self.items.items[0];");
+            self.writeln("    }");
+            self.writeln(
+                "    pub fn len(self: *BinaryHeap) usize { return self.items.items.len; }",
+            );
+            self.writeln(
+                "    pub fn size(self: *BinaryHeap) i32 { return @intCast(self.items.items.len); }",
+            );
+            self.writeln(
+                "    pub fn is_empty(self: *BinaryHeap) bool { return self.items.items.len == 0; }",
+            );
+            self.writeln(
+                "    pub fn clear(self: *BinaryHeap) void { self.items.clearRetainingCapacity(); }",
+            );
+            self.writeln("    pub fn next(self: *BinaryHeap) ?Message { return self.pop(); }");
+            self.writeln("};");
+            self.writeln("");
+            self.writeln("const BTreeMap = struct {");
+            self.writeln("    allocator: std.mem.Allocator,");
+            self.writeln("    entries: std.ArrayList(MessageEntry),");
+            self.writeln("");
+            self.writeln("    pub fn _create(allocator: std.mem.Allocator) !*BTreeMap {");
+            self.writeln("        const self = try allocator.create(BTreeMap);");
+            self.writeln("        self.* = .{ .allocator = allocator, .entries = .empty };");
+            self.writeln("        return self;");
+            self.writeln("    }");
+            self.writeln("    pub fn init(self: *BTreeMap) void { _ = self; }");
+            self.writeln("    pub fn release(self: *BTreeMap) void {");
+            self.writeln("        self.entries.deinit(self.allocator);");
+            self.writeln("        self.allocator.destroy(self);");
+            self.writeln("    }");
+            self.writeln("    fn binary_search(self: *BTreeMap, k: Message) struct { found: bool, index: usize } {");
+            self.writeln("        var low: usize = 0;");
+            self.writeln("        var high: usize = self.entries.items.len;");
+            self.writeln("        while (low < high) {");
+            self.writeln("            const mid = low + (high - low) / 2;");
+            self.writeln("            const c = cp_msg_cmp(self.entries.items[mid].key, k);");
+            self.writeln("            if (c == 0) return .{ .found = true, .index = mid };");
+            self.writeln("            if (c < 0) { low = mid + 1; } else { high = mid; }");
+            self.writeln("        }");
+            self.writeln("        return .{ .found = false, .index = low };");
+            self.writeln("    }");
+            self.writeln(
+                "    pub fn insert(self: *BTreeMap, key: anytype, val: anytype) ?Message {",
+            );
+            self.writeln("        const k = cp_message_from(key);");
+            self.writeln("        const v = cp_message_from(val);");
+            self.writeln("        const search = self.binary_search(k);");
+            self.writeln("        if (search.found) {");
+            self.writeln("            const old = self.entries.items[search.index].value;");
+            self.writeln("            self.entries.items[search.index].value = v;");
+            self.writeln("            return old;");
+            self.writeln("        } else {");
+            self.writeln("            self.entries.insert(self.allocator, search.index, .{ .key = k, .value = v }) catch unreachable;");
+            self.writeln("            return null;");
+            self.writeln("        }");
+            self.writeln("    }");
+            self.writeln("    pub fn set(self: *BTreeMap, key: anytype, val: anytype) *BTreeMap {");
+            self.writeln("        _ = self.insert(key, val);");
+            self.writeln("        return self;");
+            self.writeln("    }");
+            self.writeln("    pub fn get(self: *BTreeMap, key: anytype) ?Message {");
+            self.writeln("        const k = cp_message_from(key);");
+            self.writeln("        const search = self.binary_search(k);");
+            self.writeln(
+                "        if (search.found) return self.entries.items[search.index].value;",
+            );
+            self.writeln("        return null;");
+            self.writeln("    }");
+            self.writeln("    pub fn has(self: *BTreeMap, key: anytype) bool {");
+            self.writeln("        const k = cp_message_from(key);");
+            self.writeln("        return self.binary_search(k).found;");
+            self.writeln("    }");
+            self.writeln("    pub fn remove(self: *BTreeMap, key: anytype) ?Message {");
+            self.writeln("        const k = cp_message_from(key);");
+            self.writeln("        const search = self.binary_search(k);");
+            self.writeln("        if (search.found) {");
+            self.writeln("            const old = self.entries.items[search.index].value;");
+            self.writeln("            _ = self.entries.orderedRemove(search.index);");
+            self.writeln("            return old;");
+            self.writeln("        }");
+            self.writeln("        return null;");
+            self.writeln("    }");
+            self.writeln("    pub fn delete(self: *BTreeMap, key: anytype) bool { return self.remove(key) != null; }");
+            self.writeln("    pub fn min_key(self: *BTreeMap) ?Message {");
+            self.writeln("        if (self.entries.items.len == 0) return null;");
+            self.writeln("        return self.entries.items[0].key;");
+            self.writeln("    }");
+            self.writeln("    pub fn max_key(self: *BTreeMap) ?Message {");
+            self.writeln("        if (self.entries.items.len == 0) return null;");
+            self.writeln("        return self.entries.items[self.entries.items.len - 1].key;");
+            self.writeln("    }");
+            self.writeln(
+                "    pub fn len(self: *BTreeMap) usize { return self.entries.items.len; }",
+            );
+            self.writeln(
+                "    pub fn size(self: *BTreeMap) i32 { return @intCast(self.entries.items.len); }",
+            );
+            self.writeln(
+                "    pub fn is_empty(self: *BTreeMap) bool { return self.entries.items.len == 0; }",
+            );
+            self.writeln(
+                "    pub fn clear(self: *BTreeMap) void { self.entries.clearRetainingCapacity(); }",
+            );
+            self.writeln("    pub fn keys(self: *BTreeMap) []Message {");
+            self.writeln("        const list = self.allocator.alloc(Message, self.entries.items.len) catch unreachable;");
+            self.writeln(
+                "        for (self.entries.items, 0..) |entry, i| { list[i] = entry.key; }",
+            );
+            self.writeln("        return list;");
+            self.writeln("    }");
+            self.writeln("    pub fn values(self: *BTreeMap) []Message {");
+            self.writeln("        const list = self.allocator.alloc(Message, self.entries.items.len) catch unreachable;");
+            self.writeln(
+                "        for (self.entries.items, 0..) |entry, i| { list[i] = entry.value; }",
+            );
+            self.writeln("        return list;");
+            self.writeln("    }");
+            self.writeln("    pub fn next(self: *BTreeMap) ?MessageEntry {");
+            self.writeln("        if (self.entries.items.len == 0) return null;");
+            self.writeln("        return self.entries.orderedRemove(0);");
+            self.writeln("    }");
+            self.writeln("};");
+            self.writeln("");
+            self.writeln("const BTreeSet = struct {");
+            self.writeln("    map: *BTreeMap,");
+            self.writeln("");
+            self.writeln("    pub fn _create(allocator: std.mem.Allocator) !*BTreeSet {");
+            self.writeln("        const self = try allocator.create(BTreeSet);");
+            self.writeln("        self.map = try BTreeMap._create(allocator);");
+            self.writeln("        return self;");
+            self.writeln("    }");
+            self.writeln("    pub fn init(self: *BTreeSet) void { _ = self; }");
+            self.writeln("    pub fn release(self: *BTreeSet) void {");
+            self.writeln("        const alloc = self.map.allocator;");
+            self.writeln("        self.map.release();");
+            self.writeln("        alloc.destroy(self);");
+            self.writeln("    }");
+            self.writeln("    pub fn add(self: *BTreeSet, val: anytype) bool {");
+            self.writeln("        return self.map.insert(val, true) == null;");
+            self.writeln("    }");
+            self.writeln("    pub fn has(self: *BTreeSet, val: anytype) bool {");
+            self.writeln("        return self.map.has(val);");
+            self.writeln("    }");
+            self.writeln("    pub fn remove(self: *BTreeSet, val: anytype) ?Message {");
+            self.writeln("        if (self.map.remove(val) != null) return cp_message_from(true);");
+            self.writeln("        return null;");
+            self.writeln("    }");
+            self.writeln("    pub fn delete(self: *BTreeSet, val: anytype) bool { return self.map.delete(val); }");
+            self.writeln("    pub fn min(self: *BTreeSet) ?Message { return self.map.min_key(); }");
+            self.writeln("    pub fn max(self: *BTreeSet) ?Message { return self.map.max_key(); }");
+            self.writeln("    pub fn len(self: *BTreeSet) usize { return self.map.len(); }");
+            self.writeln("    pub fn size(self: *BTreeSet) i32 { return self.map.size(); }");
+            self.writeln(
+                "    pub fn is_empty(self: *BTreeSet) bool { return self.map.is_empty(); }",
+            );
+            self.writeln("    pub fn clear(self: *BTreeSet) void { self.map.clear(); }");
+            self.writeln(
+                "    pub fn values(self: *BTreeSet) []Message { return self.map.keys(); }",
+            );
+            self.writeln("    pub fn next(self: *BTreeSet) ?Message {");
+            self.writeln("        if (self.map.next()) |entry| { return entry.key; }");
+            self.writeln("        return null;");
+            self.writeln("    }");
+            self.writeln("};");
+            self.writeln("");
+        }
+
+        if features.needs_reflection {
+            self.writeln("pub const FieldInfo = struct {");
+            self.writeln("    name: []const u8,");
+            self.writeln("    typeName: []const u8,");
+            self.writeln("    meta: *Map,");
+            self.writeln("};");
+            self.writeln("");
+            self.writeln("pub const MethodInfo = struct {");
+            self.writeln("    name: []const u8,");
+            self.writeln("    returnTypeName: []const u8,");
+            self.writeln("    paramNames: []const []const u8,");
+            self.writeln("    isAsync: bool,");
+            self.writeln("    isStatic: bool,");
+            self.writeln("    meta: *Map,");
+            self.writeln("};");
+            self.writeln("");
+            self.writeln("pub const TypeInfo = struct {");
+            self.writeln("    name: []const u8,");
+            self.writeln("    isRef: bool,");
+            self.writeln("    fields: []const FieldInfo,");
+            self.writeln("    methods: []const MethodInfo,");
+            self.writeln("    meta: *Map,");
+            self.writeln(
+                "    pub fn getField(self: *const TypeInfo, field_name: []const u8) ?FieldInfo {",
+            );
+            self.writeln("        for (self.fields) |f| {");
+            self.writeln("            if (std.mem.eql(u8, f.name, field_name)) return f;");
+            self.writeln("        }");
+            self.writeln("        return null;");
+            self.writeln("    }");
+            self.writeln(
+                "    pub fn getMethod(self: *const TypeInfo, method_name: []const u8) ?MethodInfo {",
+            );
+            self.writeln("        for (self.methods) |m| {");
+            self.writeln("            if (std.mem.eql(u8, m.name, method_name)) return m;");
+            self.writeln("        }");
+            self.writeln("        return null;");
+            self.writeln("    }");
+            self.writeln("};");
+            self.writeln("");
+        }
+
+        if features.needs_actors {
+            self.writeln("const PID = struct { node_id: u32, local_id: u32 };");
+        }
+
+        if features.needs_collections || features.needs_actors {
+            self.writeln("fn CpIndexReturnType(comptime T: type) type {");
+            self.writeln("    if (@typeInfo(T) == .pointer) {");
+            self.writeln("        const Child = @typeInfo(T).pointer.child;");
+            self.writeln("        if (@typeInfo(Child) == .@\"struct\" and @hasDecl(Child, \"get\")) return ?Message;");
+            self.writeln(
+                "        if (@typeInfo(Child) == .array) return @typeInfo(Child).array.child;",
+            );
+            self.writeln(
+                "        if (@typeInfo(Child) == .pointer and @typeInfo(Child).pointer.size == .slice) return @typeInfo(Child).pointer.child;",
+            );
+            self.writeln("    }");
+            self.writeln("    if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child;");
+            self.writeln("    if (@typeInfo(T) == .array) return @typeInfo(T).array.child;");
+            self.writeln("    return ?Message;");
+            self.writeln("}");
+            self.writeln("fn cp_index_get(container: anytype, key: anytype) CpIndexReturnType(@TypeOf(container)) {");
+            self.writeln("    const T = @TypeOf(container);");
+            self.writeln("    if (comptime (T == Message or T == ?Message)) {");
+            self.writeln(
+                "        const val: ?Message = if (T == ?Message) container else container;",
+            );
+            self.writeln("        if (val) |m| {");
+            self.writeln("            switch (m) {");
+            self.writeln("                .array => |arr| {");
+            self.writeln("                    if (comptime (@typeInfo(@TypeOf(key)) == .int or @typeInfo(@TypeOf(key)) == .comptime_int)) {");
+            self.writeln("                        const idx: usize = @intCast(key);");
+            self.writeln("                        if (idx < arr.len) return arr[idx];");
+            self.writeln("                    }");
+            self.writeln("                    return null;");
+            self.writeln("                },");
+            self.writeln("                .any => |ptr| {");
+            self.writeln("                    const map: *Map = @ptrCast(@alignCast(ptr));");
+            self.writeln("                    return map.get(key);");
+            self.writeln("                },");
+            self.writeln("                else => return null,");
+            self.writeln("            }");
+            self.writeln("        } else {");
+            self.writeln("            return null;");
+            self.writeln("        }");
+            self.writeln("    }");
+            self.writeln("    if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@\"struct\" and @hasDecl(@typeInfo(T).pointer.child, \"get\"))) {");
+            self.writeln("        return container.get(key);");
+            self.writeln("    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) {");
+            self.writeln("        return container.*[@as(usize, @intCast(key))];");
+            self.writeln("    } else {");
+            self.writeln("        return container[@as(usize, @intCast(key))];");
+            self.writeln("    }");
+            self.writeln("}");
+            self.writeln(
+                "fn cp_index_assign(container: anytype, key: anytype, value: anytype) void {",
+            );
+            self.writeln("    const T = @TypeOf(container);");
+            self.writeln("    if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@\"struct\" and @hasDecl(@typeInfo(T).pointer.child, \"set\"))) {");
+            self.writeln("        _ = container.set(key, value);");
+            self.writeln("    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) {");
+            self.writeln("        @constCast(container.*)[@as(usize, @intCast(key))] = value;");
+            self.writeln("    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) {");
+            self.writeln("        @constCast(container)[@as(usize, @intCast(key))] = value;");
+            self.writeln("    } else {");
+            self.writeln("        container[@as(usize, @intCast(key))] = value;");
+            self.writeln("    }");
+            self.writeln("}");
+            self.writeln("fn cp_message_from(v: anytype) Message {");
+            self.writeln("    const T = @TypeOf(v);");
+            self.writeln("    if (T == Message) return v;");
+            self.writeln(
+                "    if (T == []Message or T == []const Message) return .{ .array = @constCast(v) };",
+            );
+            self.writeln(
+                "    if (T == i32 or T == comptime_int) return .{ .int = @intCast(v) };
     if (T == bool) return .{ .boolean = v };",
-        );
-        self.writeln(
-            "    if (T == f32 or T == comptime_float) return .{ .float = @floatCast(v) };",
-        );
-        self.writeln(
-            "    if (T == []const u8 or T == []u8) return .{ .string = v };
+            );
+            self.writeln(
+                "    if (T == f32 or T == comptime_float) return .{ .float = @floatCast(v) };",
+            );
+            self.writeln(
+                "    if (T == []const u8 or T == []u8) return .{ .string = v };
     if (@typeInfo(T) == .pointer) {
         const Child = @typeInfo(T).pointer.child;
         if (Child == u8) return .{ .string = v };
@@ -1481,111 +2091,171 @@ impl Codegen {
         }
         return .{ .any = @ptrCast(@constCast(v)) };
     }",
-        );
-        self.writeln("    return .{ .any = @ptrCast(@constCast(&v)) };");
-        self.writeln("}");
-        self.writeln("");
-        self.writeln("fn is_string_like(comptime T: type) bool { if (T == []const u8 or T == []u8) return true; if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }");
-        self.writeln("fn to_string_slice(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime (T == []const u8 or T == []u8)) { return v; } else { const slice: []const u8 = v; return slice; } }");
-        self.writeln("fn CpValType(comptime T: type) type { if (is_string_like(T)) return []const u8; if (T == comptime_int) return i32; if (T == comptime_float) return f32; return T; }");
-        self.writeln("fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == comptime_int) { return @as(i32, v); } else if (comptime T == comptime_float) { return @as(f32, v); } else { return v; } }");
-        self.writeln("fn CpAddReturn(comptime Ta: type, comptime Tb: type) type { if (Ta == Message and Tb == Message) return i32; if (Ta == Message and @typeInfo(Tb) == .int) return Tb; if (@typeInfo(Ta) == .int and Tb == Message) return Ta; if (is_string_like(Ta) or is_string_like(Tb)) return []const u8; if (Ta == comptime_int and Tb == comptime_int) return i32; if (Ta == comptime_int) return Tb; if (Tb == comptime_int) return Ta; if (Ta == comptime_float and Tb == comptime_float) return f32; if (Ta == comptime_float) return Tb; if (Tb == comptime_float) return Ta; return Ta; }");
-        self.writeln("fn cp_add(a: anytype, b: anytype) CpAddReturn(@TypeOf(a), @TypeOf(b)) { const Ta = @TypeOf(a); const Tb = @TypeOf(b); if (comptime (Ta == Message and Tb == Message)) { return a.to_int() + b.to_int(); } else if (comptime (Ta == Message and @typeInfo(Tb) == .int)) { return @as(Tb, @intCast(a.to_int())) + b; } else if (comptime (@typeInfo(Ta) == .int and Tb == Message)) { return a + @as(Ta, @intCast(b.to_int())); } else if (comptime (is_string_like(Ta) and is_string_like(Tb))) { return std.fmt.allocPrint(std.heap.page_allocator, \"{s}{s}\", .{ to_string_slice(a), to_string_slice(b) }) catch unreachable; } else if (comptime is_string_like(Ta)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{s}{any}\", .{ to_string_slice(a), b }) catch unreachable; } else if (comptime is_string_like(Tb)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{any}{s}\", .{ a, to_string_slice(b) }) catch unreachable; } else if (comptime (@typeInfo(Ta) == .int and @typeInfo(Tb) == .int)) { return a + @as(Ta, @intCast(b)); } else { return a + b; } }");
-        self.writeln("fn CpUnwrapOkType(comptime T: type) type { if (is_cp_result(T)) { const OkT = @FieldType(T, \"ok\"); if (@typeInfo(OkT) == .optional) return @typeInfo(OkT).optional.child; return OkT; } if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child; return T; }");
-        self.writeln("fn cp_has_ok_val(v: anytype) bool { const T = @TypeOf(v); if (comptime is_cp_result(T)) { if (v != .ok) return false; const OkT = @FieldType(T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok != null; } else { return true; } } else if (comptime @typeInfo(T) == .optional) { return v != null; } else { return true; } }");
-        self.writeln("fn cp_unwrap_ok_val(v: anytype) CpUnwrapOkType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_cp_result(T)) { const OkT = @FieldType(T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok.?; } else { return v.ok; } } else if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; } }");
-        self.writeln("fn cp_is_null_val(v: anytype) bool { const T = @TypeOf(v); if (comptime is_cp_result(T)) { if (v != .ok) return false; const OkT = @FieldType(T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok == null; } else { return false; } } else if (comptime @typeInfo(T) == .optional) { return v == null; } else { return false; } }");
-        self.writeln("fn cp_convert_err(comptime TargetErr: type, err_val: anytype) TargetErr { const SrcType = @TypeOf(err_val); if (comptime SrcType == TargetErr) { return err_val; } else if (comptime TargetErr == Error) { if (comptime (@typeInfo(SrcType) == .@\"union\" or @typeInfo(SrcType) == .@\"enum\")) { return Error{ .code = @intCast(@intFromEnum(std.meta.activeTag(err_val))), .msg = @tagName(err_val) }; } else { return Error{ .code = -1, .msg = \"error\" }; } } else if (comptime @typeInfo(TargetErr) == .@\"union\" and @hasDecl(TargetErr, \"__from\")) { return TargetErr.__from(err_val); } else { return err_val; } }");
-        self.writeln("fn cp_not(v: anytype) bool { const T = @TypeOf(v); if (comptime T == bool) { return !v; } else if (comptime @typeInfo(T) == .optional) { return v == null; } else if (comptime is_string_like(T)) { return to_string_slice(v).len == 0; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return v == 0; } else { return false; } }");
-        self.writeln("fn CpNullCoalesceReturn(comptime TOpt: type, comptime TFb: type) type { if (@typeInfo(TOpt) == .optional) { const Child = @typeInfo(TOpt).optional.child; if (Child == Message) return Message; if (is_string_like(Child)) return []const u8; return Child; } return CpValType(TFb); }");
-        self.writeln("fn cp_null_coalesce(opt_val: anytype, fallback: anytype) CpNullCoalesceReturn(@TypeOf(opt_val), @TypeOf(fallback)) { const TOpt = @TypeOf(opt_val); const RType = CpNullCoalesceReturn(TOpt, @TypeOf(fallback)); if (comptime @typeInfo(TOpt) == .optional) { if (opt_val) |v| { if (comptime RType == Message) { return v; } else if (comptime is_string_like(RType)) { return to_string_slice(v); } else { return v; } } else { if (comptime RType == Message) { return cp_message_from(fallback); } else if (comptime is_string_like(RType)) { return to_string_slice(fallback); } else { return fallback; } } } return cp_val(fallback); }");
-        self.writeln("fn cp_fmt(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == bool) { return if (v) \"true\" else \"false\"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{d}\", .{v}) catch unreachable; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{d}\", .{v}) catch unreachable; } else if (comptime T == Message) { return switch (v) { .string => |s| s, .int => |i| std.fmt.allocPrint(std.heap.page_allocator, \"{d}\", .{i}) catch unreachable, .float => |f| std.fmt.allocPrint(std.heap.page_allocator, \"{d}\", .{f}) catch unreachable, .boolean => |b| if (b) \"true\" else \"false\", else => std.fmt.allocPrint(std.heap.page_allocator, \"{any}\", .{v}) catch unreachable, }; } else if (comptime @typeInfo(T) == .optional) { if (v) |unwrapped| { return cp_fmt(unwrapped); } else { return \"null\"; } } else { return std.fmt.allocPrint(std.heap.page_allocator, \"{any}\", .{v}) catch unreachable; } }");
+            );
+            self.writeln("    return .{ .any = @ptrCast(@constCast(&v)) };");
+            self.writeln("}");
+        }
 
-        self.writeln("fn cp_math_random() f32 {");
-        self.writeln("    return 0.5; // Stub");
-        self.writeln("}");
+        if features.needs_string_helpers {
+            self.writeln("fn is_string_like(comptime T: type) bool { if (T == []const u8 or T == []u8) return true; if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }");
+            self.writeln("fn to_string_slice(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime (T == []const u8 or T == []u8)) { return v; } else { const slice: []const u8 = v; return slice; } }");
+            self.writeln("fn CpValType(comptime T: type) type { if (is_string_like(T)) return []const u8; if (T == comptime_int) return i32; if (T == comptime_float) return f32; return T; }");
+            self.writeln("fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == comptime_int) { return @as(i32, v); } else if (comptime T == comptime_float) { return @as(f32, v); } else { return v; } }");
+        }
 
-        self.writeln("fn cp_eq(a: anytype, b: anytype) bool {");
-        self.writeln("    const Ta = @TypeOf(a); const Tb = @TypeOf(b);");
-        self.writeln("    if (comptime @typeInfo(Ta) == .optional and @typeInfo(Ta).optional.child == Message) { if (a) |unwrapped_a| return cp_eq(unwrapped_a, b); return false; }");
-        self.writeln("    if (comptime @typeInfo(Tb) == .optional and @typeInfo(Tb).optional.child == Message) { if (b) |unwrapped_b| return cp_eq(a, unwrapped_b); return false; }");
-        self.writeln("    if (comptime Ta == Message and is_string_like(Tb)) { return switch (a) { .string => |s| std.mem.eql(u8, s, to_string_slice(b)), else => false, }; }");
-        self.writeln("    if (comptime Tb == Message and is_string_like(Ta)) { return switch (b) { .string => |s| std.mem.eql(u8, to_string_slice(a), s), else => false, }; }");
-        self.writeln("    if (comptime Ta == Message and (Tb == i32 or Tb == comptime_int)) { return switch (a) { .int => |i| i == b, else => false, }; }");
-        self.writeln("    if (comptime Tb == Message and (Ta == i32 or Ta == comptime_int)) { return switch (b) { .int => |i| a == i, else => false, }; }");
-        self.writeln("    if (comptime Ta == Message and (Tb == f32 or Tb == comptime_float)) { return switch (a) { .float => |f| f == b, else => false, }; }");
-        self.writeln("    if (comptime Tb == Message and (Ta == f32 or Ta == comptime_float)) { return switch (b) { .float => |f| a == f, else => false, }; }");
-        self.writeln("    if (comptime Ta == Message and Tb == bool) { return switch (a) { .boolean => |bl| bl == b, else => false, }; }");
-        self.writeln("    if (comptime Tb == Message and Ta == bool) { return switch (b) { .boolean => |bl| a == bl, else => false, }; }");
-        self.writeln("    if (comptime Ta == Message and Tb == Message) { return MessageContext.eql(.{}, a, b); }");
-        self.writeln("    if (comptime is_string_like(Ta) and is_string_like(Tb)) { return std.mem.eql(u8, to_string_slice(a), to_string_slice(b)); }");
-        self.writeln("    if (comptime (@typeInfo(Ta) == .int or Ta == comptime_int) and (@typeInfo(Tb) == .int or Tb == comptime_int)) { return a == b; }");
-        self.writeln("    if (comptime (@typeInfo(Ta) == .float or Ta == comptime_float) and (@typeInfo(Tb) == .float or Tb == comptime_float)) { return a == b; }");
-        self.writeln("    if (comptime Ta != Tb) return false;");
-        self.writeln("    return a == b;");
-        self.writeln("}");
-        self.writeln("fn cp_neq(a: anytype, b: anytype) bool { return !cp_eq(a, b); }");
-        self.writeln("fn cp_lt(a: anytype, b: anytype) bool { const Ta = @TypeOf(a); const Tb = @TypeOf(b); if (comptime is_string_like(Ta) and is_string_like(Tb)) { return std.mem.order(u8, to_string_slice(a), to_string_slice(b)) == .lt; } return a < b; }");
-        self.writeln("fn cp_gt(a: anytype, b: anytype) bool { const Ta = @TypeOf(a); const Tb = @TypeOf(b); if (comptime is_string_like(Ta) and is_string_like(Tb)) { return std.mem.order(u8, to_string_slice(a), to_string_slice(b)) == .gt; } return a > b; }");
-        self.writeln("fn cp_lte(a: anytype, b: anytype) bool { const Ta = @TypeOf(a); const Tb = @TypeOf(b); if (comptime is_string_like(Ta) and is_string_like(Tb)) { const ord = std.mem.order(u8, to_string_slice(a), to_string_slice(b)); return ord == .lt or ord == .eq; } return a <= b; }");
-        self.writeln("fn cp_gte(a: anytype, b: anytype) bool { const Ta = @TypeOf(a); const Tb = @TypeOf(b); if (comptime is_string_like(Ta) and is_string_like(Tb)) { const ord = std.mem.order(u8, to_string_slice(a), to_string_slice(b)); return ord == .gt or ord == .eq; } return a >= b; }");
-        self.writeln("fn cp_hash_val(val: anytype) usize { const T = @TypeOf(val); if (comptime is_string_like(T)) { const s = to_string_slice(val); var h: usize = 2166136261; for (s) |byte| { h = (h ^ byte) *% 16777619; } return h; } if (comptime @typeInfo(T) == .int or @typeInfo(T) == .float or @typeInfo(T) == .bool) { var h: usize = 2166136261; const bytes = std.mem.asBytes(&val); for (bytes) |byte| { h = (h ^ byte) *% 16777619; } return h; } if (comptime @typeInfo(T) == .pointer) { if (@hasDecl(@typeInfo(T).pointer.child, \"hash\")) { return val.hash(); } } return 0; }");
-        self.writeln("fn cp_array_lit(comptime Elem: type, init_slice: []const Elem) []const Elem { const buf = std.heap.page_allocator.alloc(Elem, init_slice.len) catch unreachable; if (init_slice.len > 0) @memcpy(buf, init_slice); return buf; }");
-        self.writeln("fn CpArrayElemType(comptime PtrT: type) type { const S0 = @typeInfo(PtrT).pointer.child; const S1 = if (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one) @typeInfo(S0).pointer.child else S0; return @typeInfo(S1).pointer.child; }");
-        self.writeln("fn cp_array_push(arr_ptr: anytype, item: anytype) void { const S0 = @TypeOf(arr_ptr.*); const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) arr_ptr.* else arr_ptr; const SliceT = @TypeOf(target_ptr.*); const Elem = @typeInfo(SliceT).pointer.child; const old_slice = target_ptr.*; const new_slice = std.heap.page_allocator.alloc(Elem, old_slice.len + 1) catch unreachable; if (old_slice.len > 0) @memcpy(new_slice[0..old_slice.len], old_slice); new_slice[old_slice.len] = @as(Elem, cp_val(item)); target_ptr.* = new_slice; }");
-        self.writeln("fn cp_array_pop(arr_ptr: anytype) ?CpArrayElemType(@TypeOf(arr_ptr)) { const S0 = @TypeOf(arr_ptr.*); const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) arr_ptr.* else arr_ptr; const s = target_ptr.*; if (s.len == 0) return null; const last = s[s.len - 1]; target_ptr.* = s[0 .. s.len - 1]; return last; }");
-        self.writeln("fn cp_container_clear(ptr: anytype) void { const S0 = @TypeOf(ptr.*); if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one and @typeInfo(@typeInfo(S0).pointer.child) == .@\"struct\" and @hasDecl(@typeInfo(S0).pointer.child, \"clear\"))) { ptr.*.clear(); } else { const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) ptr.* else ptr; target_ptr.* = target_ptr.*[0..0]; } }");
-        self.writeln("fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const T = @TypeOf(val); switch (@typeInfo(T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }");
-        self.writeln("fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError(\"Cannot mutably iterate over non-collection\"), else => @compileError(\"Cannot mutably iterate over non-collection\"), }, else => @compileError(\"Cannot mutably iterate over non-collection\"), }, else => @compileError(\"Cannot mutably iterate over non-collection\"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }");
-        self.writeln("fn cp_index_of(container: anytype, needle: anytype) i32 { const slice = cp_iter_slice(container); const SliceT = @TypeOf(slice); if (comptime is_string_like(SliceT) and is_string_like(@TypeOf(needle))) { if (std.mem.indexOf(u8, to_string_slice(slice), to_string_slice(needle))) |i| return @intCast(i); return -1; } for (slice, 0..) |item, idx| { if (cp_eq(item, needle)) return @intCast(idx); } return -1; }");
-        self.writeln("fn cp_last_index_of(container: anytype, needle: anytype) i32 { const slice = cp_iter_slice(container); const SliceT = @TypeOf(slice); if (comptime is_string_like(SliceT) and is_string_like(@TypeOf(needle))) { if (std.mem.lastIndexOf(u8, to_string_slice(slice), to_string_slice(needle))) |i| return @intCast(i); return -1; } var i: usize = slice.len; while (i > 0) { i -= 1; if (cp_eq(slice[i], needle)) return @intCast(i); } return -1; }");
-        self.writeln("fn cp_includes(container: anytype, needle: anytype) bool { return cp_index_of(container, needle) != -1; }");
-        self.writeln("");
-        self.writeln("pub const BaseContext = struct { pc: u32 = 0, _self: PID = undefined, _parent: ?*anyopaque = null, _parent_fn: ?*const fn(*anyopaque) anyerror!void = null, arena: ?*std.heap.ArenaAllocator = null, received_msg: ?Message = null, received_sender: ?PID = null, await_result: ?Message = null, };");
+        if features.needs_add {
+            if features.needs_collections || features.needs_actors {
+                self.writeln("fn CpAddReturn(comptime Ta: type, comptime Tb: type) type { if (Ta == Message and Tb == Message) return i32; if (Ta == Message and @typeInfo(Tb) == .int) return Tb; if (@typeInfo(Ta) == .int and Tb == Message) return Ta; if (is_string_like(Ta) or is_string_like(Tb)) return []const u8; if (Ta == comptime_int and Tb == comptime_int) return i32; if (Ta == comptime_int) return Tb; if (Tb == comptime_int) return Ta; if (Ta == comptime_float and Tb == comptime_float) return f32; if (Ta == comptime_float) return Tb; if (Tb == comptime_float) return Ta; return Ta; }");
+                self.writeln("fn cp_add(a: anytype, b: anytype) CpAddReturn(@TypeOf(a), @TypeOf(b)) { const Ta = @TypeOf(a); const Tb = @TypeOf(b); if (comptime (Ta == Message and Tb == Message)) { return a.to_int() + b.to_int(); } else if (comptime (Ta == Message and @typeInfo(Tb) == .int)) { return @as(Tb, @intCast(a.to_int())) + b; } else if (comptime (@typeInfo(Ta) == .int and Tb == Message)) { return a + @as(Ta, @intCast(b.to_int())); } else if (comptime (is_string_like(Ta) and is_string_like(Tb))) { return std.fmt.allocPrint(std.heap.page_allocator, \"{s}{s}\", .{ to_string_slice(a), to_string_slice(b) }) catch unreachable; } else if (comptime is_string_like(Ta)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{s}{any}\", .{ to_string_slice(a), b }) catch unreachable; } else if (comptime is_string_like(Tb)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{any}{s}\", .{ a, to_string_slice(b) }) catch unreachable; } else if (comptime (@typeInfo(Ta) == .int and @typeInfo(Tb) == .int)) { return a + @as(Ta, @intCast(b)); } else { return a + b; } }");
+            } else {
+                self.writeln("fn CpAddReturn(comptime Ta: type, comptime Tb: type) type { if (is_string_like(Ta) or is_string_like(Tb)) return []const u8; if (Ta == comptime_int and Tb == comptime_int) return i32; if (Ta == comptime_int) return Tb; if (Tb == comptime_int) return Ta; if (Ta == comptime_float and Tb == comptime_float) return f32; if (Ta == comptime_float) return Tb; if (Tb == comptime_float) return Ta; return Ta; }");
+                self.writeln("fn cp_add(a: anytype, b: anytype) CpAddReturn(@TypeOf(a), @TypeOf(b)) { const Ta = @TypeOf(a); const Tb = @TypeOf(b); if (comptime (is_string_like(Ta) and is_string_like(Tb))) { return std.fmt.allocPrint(std.heap.page_allocator, \"{s}{s}\", .{ to_string_slice(a), to_string_slice(b) }) catch unreachable; } else if (comptime is_string_like(Ta)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{s}{any}\", .{ to_string_slice(a), b }) catch unreachable; } else if (comptime is_string_like(Tb)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{any}{s}\", .{ a, to_string_slice(b) }) catch unreachable; } else if (comptime (@typeInfo(Ta) == .int and @typeInfo(Tb) == .int)) { return a + @as(Ta, @intCast(b)); } else { return a + b; } }");
+            }
+        }
 
-        self.writeln("");
-        self.writeln("pub const ZigSharedTensor = struct {");
-        self.writeln("    ref_count: std.atomic.Value(u32),");
-        self.writeln("    data: []u8,");
-        self.writeln("    allocator: std.mem.Allocator,");
-        self.writeln(
-            "    pub fn create(allocator: std.mem.Allocator, size: usize) !*ZigSharedTensor {",
-        );
-        self.writeln("        const ptr = try allocator.create(ZigSharedTensor);");
-        self.writeln("        ptr.data = try allocator.alloc(u8, size);");
-        self.writeln("        ptr.ref_count = std.atomic.Value(u32).init(1);");
-        self.writeln("        ptr.allocator = allocator;");
-        self.writeln("        return ptr;");
-        self.writeln("    }");
-        self.writeln("    pub fn retain(self: *ZigSharedTensor) void {");
-        self.writeln("        _ = self.ref_count.fetchAdd(1, .monotonic);");
-        self.writeln("    }");
-        self.writeln("    pub fn release(self: *ZigSharedTensor) void {");
-        self.writeln("        if (self.ref_count.fetchSub(1, .release) == 1) {");
-        self.writeln("            _ = self.ref_count.load(.acquire);");
-        self.writeln("            self.allocator.free(self.data);");
-        self.writeln("            self.allocator.destroy(self);");
-        self.writeln("        }");
-        self.writeln("    }");
-        self.writeln("};");
-        self.writeln("");
-        self.writeln("// --- Native Reactor Registry ---");
-        self.writeln("threadlocal var poll_fds: [1024]std.posix.pollfd = undefined;");
-        self.writeln("threadlocal var fd_to_ctx: [1024]*anyopaque = undefined;");
-        self.writeln(
-            "threadlocal var fd_to_run: [1024]*const fn(*anyopaque) anyerror!void = undefined;",
-        );
-        self.writeln("threadlocal var active_fds: usize = 0;");
-        self.writeln("fn register_fd(fd: i32, run: *const fn(*anyopaque) anyerror!void, ctx: *anyopaque, events: i16) void {");
-        self.writeln("    if (active_fds < 1024) {");
-        self.writeln(
-            "        poll_fds[active_fds] = .{ .fd = fd, .events = events, .revents = 0 };",
-        );
-        self.writeln("        fd_to_ctx[active_fds] = ctx;");
-        self.writeln("        fd_to_run[active_fds] = run;");
-        self.writeln("        active_fds += 1;");
-        self.writeln("    }");
-        self.writeln("}");
+        if features.needs_result_error {
+            self.writeln("fn CpUnwrapOkType(comptime T: type) type { if (is_cp_result(T)) { const OkT = @FieldType(T, \"ok\"); if (@typeInfo(OkT) == .optional) return @typeInfo(OkT).optional.child; return OkT; } if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child; return T; }");
+            self.writeln("fn cp_has_ok_val(v: anytype) bool { const T = @TypeOf(v); if (comptime is_cp_result(T)) { if (v != .ok) return false; const OkT = @FieldType(T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok != null; } else { return true; } } else if (comptime @typeInfo(T) == .optional) { return v != null; } else { return true; } }");
+            self.writeln("fn cp_unwrap_ok_val(v: anytype) CpUnwrapOkType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_cp_result(T)) { const OkT = @FieldType(T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok.?; } else { return v.ok; } } else if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; } }");
+            self.writeln("fn cp_is_null_val(v: anytype) bool { const T = @TypeOf(v); if (comptime is_cp_result(T)) { if (v != .ok) return false; const OkT = @FieldType(T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok == null; } else { return false; } } else if (comptime @typeInfo(T) == .optional) { return v == null; } else { return false; } }");
+            self.writeln("fn cp_convert_err(comptime TargetErr: type, err_val: anytype) TargetErr { const SrcType = @TypeOf(err_val); if (comptime SrcType == TargetErr) { return err_val; } else if (comptime TargetErr == Error) { if (comptime (@typeInfo(SrcType) == .@\"union\" or @typeInfo(SrcType) == .@\"enum\")) { return Error{ .code = @intCast(@intFromEnum(std.meta.activeTag(err_val))), .msg = @tagName(err_val) }; } else { return Error{ .code = -1, .msg = \"error\" }; } } else if (comptime @typeInfo(TargetErr) == .@\"union\" and @hasDecl(TargetErr, \"__from\")) { return TargetErr.__from(err_val); } else { return err_val; } }");
+        }
+
+        if features.needs_not {
+            self.writeln("fn cp_not(v: anytype) bool { const T = @TypeOf(v); if (comptime T == bool) { return !v; } else if (comptime @typeInfo(T) == .optional) { return v == null; } else if (comptime is_string_like(T)) { return to_string_slice(v).len == 0; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return v == 0; } else { return false; } }");
+        }
+
+        if features.needs_null_coalesce {
+            if features.needs_collections || features.needs_actors {
+                self.writeln("fn CpNullCoalesceReturn(comptime TOpt: type, comptime TFb: type) type { if (@typeInfo(TOpt) == .optional) { const Child = @typeInfo(TOpt).optional.child; if (Child == Message) return Message; if (is_string_like(Child)) return []const u8; return Child; } return CpValType(TFb); }");
+                self.writeln("fn cp_null_coalesce(opt_val: anytype, fallback: anytype) CpNullCoalesceReturn(@TypeOf(opt_val), @TypeOf(fallback)) { const TOpt = @TypeOf(opt_val); const RType = CpNullCoalesceReturn(TOpt, @TypeOf(fallback)); if (comptime @typeInfo(TOpt) == .optional) { if (opt_val) |v| { if (comptime RType == Message) { return v; } else if (comptime is_string_like(RType)) { return to_string_slice(v); } else { return v; } } else { if (comptime RType == Message) { return cp_message_from(fallback); } else if (comptime is_string_like(RType)) { return to_string_slice(fallback); } else { return fallback; } } } return cp_val(fallback); }");
+            } else {
+                self.writeln("fn CpNullCoalesceReturn(comptime TOpt: type, comptime TFb: type) type { if (@typeInfo(TOpt) == .optional) { const Child = @typeInfo(TOpt).optional.child; if (is_string_like(Child)) return []const u8; return Child; } return CpValType(TFb); }");
+                self.writeln("fn cp_null_coalesce(opt_val: anytype, fallback: anytype) CpNullCoalesceReturn(@TypeOf(opt_val), @TypeOf(fallback)) { const TOpt = @TypeOf(opt_val); const RType = CpNullCoalesceReturn(TOpt, @TypeOf(fallback)); if (comptime @typeInfo(TOpt) == .optional) { if (opt_val) |v| { if (comptime is_string_like(RType)) { return to_string_slice(v); } else { return v; } } else { if (comptime is_string_like(RType)) { return to_string_slice(fallback); } else { return fallback; } } } return cp_val(fallback); }");
+            }
+        }
+
+        if features.needs_fmt {
+            if features.needs_collections || features.needs_actors {
+                self.writeln("fn cp_fmt(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == bool) { return if (v) \"true\" else \"false\"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{d}\", .{v}) catch unreachable; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{d}\", .{v}) catch unreachable; } else if (comptime T == Message) { return switch (v) { .string => |s| s, .int => |i| std.fmt.allocPrint(std.heap.page_allocator, \"{d}\", .{i}) catch unreachable, .float => |f| std.fmt.allocPrint(std.heap.page_allocator, \"{d}\", .{f}) catch unreachable, .boolean => |b| if (b) \"true\" else \"false\", else => std.fmt.allocPrint(std.heap.page_allocator, \"{any}\", .{v}) catch unreachable, }; } else if (comptime @typeInfo(T) == .optional) { if (v) |unwrapped| { return cp_fmt(unwrapped); } else { return \"null\"; } } else { return std.fmt.allocPrint(std.heap.page_allocator, \"{any}\", .{v}) catch unreachable; } }");
+            } else {
+                self.writeln("fn cp_fmt(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == bool) { return if (v) \"true\" else \"false\"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{d}\", .{v}) catch unreachable; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{d}\", .{v}) catch unreachable; } else if (comptime @typeInfo(T) == .optional) { if (v) |unwrapped| { return cp_fmt(unwrapped); } else { return \"null\"; } } else { return std.fmt.allocPrint(std.heap.page_allocator, \"{any}\", .{v}) catch unreachable; } }");
+            }
+        }
+
+        if features.needs_math_random {
+            self.writeln("fn cp_math_random() f32 {");
+            self.writeln("    return 0.5; // Stub");
+            self.writeln("}");
+        }
+
+        if features.needs_equality {
+            self.writeln("fn cp_eq(a: anytype, b: anytype) bool {");
+            self.writeln("    const Ta = @TypeOf(a); const Tb = @TypeOf(b);");
+            self.writeln(
+                "    if (comptime @typeInfo(Ta) == .null and @typeInfo(Tb) == .null) return true;",
+            );
+            self.writeln("    if (comptime @typeInfo(Ta) == .null) { if (comptime @typeInfo(Tb) == .optional) return b == null; return false; }");
+            self.writeln("    if (comptime @typeInfo(Tb) == .null) { if (comptime @typeInfo(Ta) == .optional) return a == null; return false; }");
+            if features.needs_collections || features.needs_actors {
+                self.writeln("    if (comptime @typeInfo(Ta) == .optional and @typeInfo(Ta).optional.child == Message) { if (a) |unwrapped_a| return cp_eq(unwrapped_a, b); return false; }");
+                self.writeln("    if (comptime @typeInfo(Tb) == .optional and @typeInfo(Tb).optional.child == Message) { if (b) |unwrapped_b| return cp_eq(a, unwrapped_b); return false; }");
+                self.writeln("    if (comptime Ta == Message and is_string_like(Tb)) { return switch (a) { .string => |s| std.mem.eql(u8, s, to_string_slice(b)), else => false, }; }");
+                self.writeln("    if (comptime Tb == Message and is_string_like(Ta)) { return switch (b) { .string => |s| std.mem.eql(u8, to_string_slice(a), s), else => false, }; }");
+                self.writeln("    if (comptime Ta == Message and (Tb == i32 or Tb == comptime_int)) { return switch (a) { .int => |i| i == b, else => false, }; }");
+                self.writeln("    if (comptime Tb == Message and (Ta == i32 or Ta == comptime_int)) { return switch (b) { .int => |i| a == i, else => false, }; }");
+                self.writeln("    if (comptime Ta == Message and (Tb == f32 or Tb == comptime_float)) { return switch (a) { .float => |f| f == b, else => false, }; }");
+                self.writeln("    if (comptime Tb == Message and (Ta == f32 or Ta == comptime_float)) { return switch (b) { .float => |f| a == f, else => false, }; }");
+                self.writeln("    if (comptime Ta == Message and Tb == bool) { return switch (a) { .boolean => |bl| bl == b, else => false, }; }");
+                self.writeln("    if (comptime Tb == Message and Ta == bool) { return switch (b) { .boolean => |bl| a == bl, else => false, }; }");
+                self.writeln("    if (comptime Ta == Message and Tb == Message) { return MessageContext.eql(.{}, a, b); }");
+            }
+            self.writeln("    if (comptime is_string_like(Ta) and is_string_like(Tb)) { return std.mem.eql(u8, to_string_slice(a), to_string_slice(b)); }");
+            self.writeln("    if (comptime (@typeInfo(Ta) == .int or Ta == comptime_int) and (@typeInfo(Tb) == .int or Tb == comptime_int)) { return a == b; }");
+            self.writeln("    if (comptime (@typeInfo(Ta) == .float or Ta == comptime_float) and (@typeInfo(Tb) == .float or Tb == comptime_float)) { return a == b; }");
+            self.writeln("    if (comptime @typeInfo(Ta) == .optional and @typeInfo(Tb) == .optional) { if (a) |va| { if (b) |vb| return cp_eq(va, vb); return false; } else { return b == null; } }");
+            self.writeln("    if (comptime @typeInfo(Ta) == .optional) { if (a) |va| return cp_eq(va, b); return false; }");
+            self.writeln("    if (comptime @typeInfo(Tb) == .optional) { if (b) |vb| return cp_eq(a, vb); return false; }");
+            self.writeln("    if (comptime Ta != Tb) return false;");
+            self.writeln("    return a == b;");
+            self.writeln("}");
+            self.writeln("fn cp_neq(a: anytype, b: anytype) bool { return !cp_eq(a, b); }");
+        }
+
+        if features.needs_comparison {
+            self.writeln("fn cp_lt(a: anytype, b: anytype) bool { const Ta = @TypeOf(a); const Tb = @TypeOf(b); if (comptime is_string_like(Ta) and is_string_like(Tb)) { return std.mem.order(u8, to_string_slice(a), to_string_slice(b)) == .lt; } return a < b; }");
+            self.writeln("fn cp_gt(a: anytype, b: anytype) bool { const Ta = @TypeOf(a); const Tb = @TypeOf(b); if (comptime is_string_like(Ta) and is_string_like(Tb)) { return std.mem.order(u8, to_string_slice(a), to_string_slice(b)) == .gt; } return a > b; }");
+            self.writeln("fn cp_lte(a: anytype, b: anytype) bool { const Ta = @TypeOf(a); const Tb = @TypeOf(b); if (comptime is_string_like(Ta) and is_string_like(Tb)) { const ord = std.mem.order(u8, to_string_slice(a), to_string_slice(b)); return ord == .lt or ord == .eq; } return a <= b; }");
+            self.writeln("fn cp_gte(a: anytype, b: anytype) bool { const Ta = @TypeOf(a); const Tb = @TypeOf(b); if (comptime is_string_like(Ta) and is_string_like(Tb)) { const ord = std.mem.order(u8, to_string_slice(a), to_string_slice(b)); return ord == .gt or ord == .eq; } return a >= b; }");
+        }
+
+        if features.needs_hash {
+            self.writeln("fn cp_hash_val(val: anytype) usize { const T = @TypeOf(val); if (comptime is_string_like(T)) { const s = to_string_slice(val); var h: usize = 2166136261; for (s) |byte| { h = (h ^ byte) *% 16777619; } return h; } if (comptime @typeInfo(T) == .int or @typeInfo(T) == .float or @typeInfo(T) == .bool) { var h: usize = 2166136261; const bytes = std.mem.asBytes(&val); for (bytes) |byte| { h = (h ^ byte) *% 16777619; } return h; } if (comptime @typeInfo(T) == .pointer) { if (@hasDecl(@typeInfo(T).pointer.child, \"hash\")) { return val.hash(); } } return 0; }");
+        }
+
+        if features.needs_array_helpers {
+            self.writeln("fn cp_array_lit(comptime Elem: type, init_slice: []const Elem) []const Elem { const buf = std.heap.page_allocator.alloc(Elem, init_slice.len) catch unreachable; if (init_slice.len > 0) @memcpy(buf, init_slice); return buf; }");
+            self.writeln("fn CpArrayElemType(comptime PtrT: type) type { const S0 = @typeInfo(PtrT).pointer.child; const S1 = if (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one) @typeInfo(S0).pointer.child else S0; return @typeInfo(S1).pointer.child; }");
+            self.writeln("fn cp_array_push(arr_ptr: anytype, item: anytype) void { const S0 = @TypeOf(arr_ptr.*); const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) arr_ptr.* else arr_ptr; const SliceT = @TypeOf(target_ptr.*); const Elem = @typeInfo(SliceT).pointer.child; const old_slice = target_ptr.*; const new_slice = std.heap.page_allocator.alloc(Elem, old_slice.len + 1) catch unreachable; if (old_slice.len > 0) @memcpy(new_slice[0..old_slice.len], old_slice); new_slice[old_slice.len] = @as(Elem, cp_val(item)); target_ptr.* = new_slice; }");
+            self.writeln("fn cp_array_pop(arr_ptr: anytype) ?CpArrayElemType(@TypeOf(arr_ptr)) { const S0 = @TypeOf(arr_ptr.*); const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) arr_ptr.* else arr_ptr; const s = target_ptr.*; if (s.len == 0) return null; const last = s[s.len - 1]; target_ptr.* = s[0 .. s.len - 1]; return last; }");
+            self.writeln("fn cp_container_clear(ptr: anytype) void { const S0 = @TypeOf(ptr.*); if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one and @typeInfo(@typeInfo(S0).pointer.child) == .@\"struct\" and @hasDecl(@typeInfo(S0).pointer.child, \"clear\"))) { ptr.*.clear(); } else { const target_ptr = if (comptime (@typeInfo(S0) == .pointer and @typeInfo(S0).pointer.size == .one)) ptr.* else ptr; target_ptr.* = target_ptr.*[0..0]; } }");
+        }
+
+        if features.needs_iter_helpers {
+            self.writeln("fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const T = @TypeOf(val); switch (@typeInfo(T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }");
+            self.writeln("fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError(\"Cannot mutably iterate over non-collection\"), else => @compileError(\"Cannot mutably iterate over non-collection\"), }, else => @compileError(\"Cannot mutably iterate over non-collection\"), }, else => @compileError(\"Cannot mutably iterate over non-collection\"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }");
+            self.writeln("fn cp_index_of(container: anytype, needle: anytype) i32 { const slice = cp_iter_slice(container); const SliceT = @TypeOf(slice); if (comptime is_string_like(SliceT) and is_string_like(@TypeOf(needle))) { if (std.mem.indexOf(u8, to_string_slice(slice), to_string_slice(needle))) |i| return @intCast(i); return -1; } for (slice, 0..) |item, idx| { if (cp_eq(item, needle)) return @intCast(idx); } return -1; }");
+            self.writeln("fn cp_last_index_of(container: anytype, needle: anytype) i32 { const slice = cp_iter_slice(container); const SliceT = @TypeOf(slice); if (comptime is_string_like(SliceT) and is_string_like(@TypeOf(needle))) { if (std.mem.lastIndexOf(u8, to_string_slice(slice), to_string_slice(needle))) |i| return @intCast(i); return -1; } var i: usize = slice.len; while (i > 0) { i -= 1; if (cp_eq(slice[i], needle)) return @intCast(i); } return -1; }");
+            self.writeln("fn cp_includes(container: anytype, needle: anytype) bool { return cp_index_of(container, needle) != -1; }");
+        }
+        if features.needs_actors {
+            self.writeln("");
+            self.writeln("pub const BaseContext = struct { pc: u32 = 0, _self: PID = undefined, _parent: ?*anyopaque = null, _parent_fn: ?*const fn(*anyopaque) anyerror!void = null, arena: ?*std.heap.ArenaAllocator = null, received_msg: ?Message = null, received_sender: ?PID = null, await_result: ?Message = null, };");
+
+            self.writeln("");
+            self.writeln("pub const ZigSharedTensor = struct {");
+            self.writeln("    ref_count: std.atomic.Value(u32),");
+            self.writeln("    data: []u8,");
+            self.writeln("    allocator: std.mem.Allocator,");
+            self.writeln(
+                "    pub fn create(allocator: std.mem.Allocator, size: usize) !*ZigSharedTensor {",
+            );
+            self.writeln("        const ptr = try allocator.create(ZigSharedTensor);");
+            self.writeln("        ptr.data = try allocator.alloc(u8, size);");
+            self.writeln("        ptr.ref_count = std.atomic.Value(u32).init(1);");
+            self.writeln("        ptr.allocator = allocator;");
+            self.writeln("        return ptr;");
+            self.writeln("    }");
+            self.writeln("    pub fn retain(self: *ZigSharedTensor) void {");
+            self.writeln("        _ = self.ref_count.fetchAdd(1, .monotonic);");
+            self.writeln("    }");
+            self.writeln("    pub fn release(self: *ZigSharedTensor) void {");
+            self.writeln("        if (self.ref_count.fetchSub(1, .release) == 1) {");
+            self.writeln("            _ = self.ref_count.load(.acquire);");
+            self.writeln("            self.allocator.free(self.data);");
+            self.writeln("            self.allocator.destroy(self);");
+            self.writeln("        }");
+            self.writeln("    }");
+            self.writeln("};");
+            self.writeln("");
+            self.writeln("// --- Native Reactor Registry ---");
+            self.writeln("threadlocal var poll_fds: [1024]std.posix.pollfd = undefined;");
+            self.writeln("threadlocal var fd_to_ctx: [1024]*anyopaque = undefined;");
+            self.writeln(
+                "threadlocal var fd_to_run: [1024]*const fn(*anyopaque) anyerror!void = undefined;",
+            );
+            self.writeln("threadlocal var active_fds: usize = 0;");
+            self.writeln("fn register_fd(fd: i32, run: *const fn(*anyopaque) anyerror!void, ctx: *anyopaque, events: i16) void {");
+            self.writeln("    if (active_fds < 1024) {");
+            self.writeln(
+                "        poll_fds[active_fds] = .{ .fd = fd, .events = events, .revents = 0 };",
+            );
+            self.writeln("        fd_to_ctx[active_fds] = ctx;");
+            self.writeln("        fd_to_run[active_fds] = run;");
+            self.writeln("        active_fds += 1;");
+            self.writeln("    }");
+            self.writeln("}");
+        }
         self.writeln("fn cp_shl(val: anytype, shift: anytype) @TypeOf(val) {");
         self.writeln("    const T = @TypeOf(val);");
         self.writeln("    if (comptime @typeInfo(T) == .comptime_int) return val << shift;");
@@ -1604,59 +2274,63 @@ impl Codegen {
         self.writeln("    }");
         self.writeln("    return val >> shift;");
         self.writeln("}");
-        self.writeln("");
-        self.writeln("// --- Scheduler ---");
-        self.writeln(
-            "const _Task = struct { run: *const fn(*anyopaque) anyerror!void, ctx: *anyopaque };",
-        );
-        self.writeln("const Spinlock = struct { state: std.atomic.Value(u32) = std.atomic.Value(u32).init(0), pub fn acquire(self: *Spinlock) void { while (self.state.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) { std.atomic.spinLoopHint(); } } pub fn release(self: *Spinlock) void { self.state.store(0, .release); } };");
-        self.writeln("const GlobalTaskQueue = struct { lock: Spinlock = .{}, buffer: [2048]_Task = undefined, head: usize = 0, tail: usize = 0, count: usize = 0, pub fn push(self: *GlobalTaskQueue, item: _Task) void { self.lock.acquire(); defer self.lock.release(); if (self.count >= 2048) return; self.buffer[self.tail] = item; self.tail = (self.tail + 1) % 2048; self.count += 1; } pub fn pop(self: *GlobalTaskQueue) ?_Task { self.lock.acquire(); defer self.lock.release(); if (self.count == 0) return null; const item = self.buffer[self.head]; self.head = (self.head + 1) % 2048; self.count -= 1; return item; } pub fn len(self: *GlobalTaskQueue) usize { self.lock.acquire(); defer self.lock.release(); return self.count; } };");
-        self.writeln("var global_task_queue: GlobalTaskQueue = .{};");
-        self.writeln("var global_runtime_shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);");
-        self.writeln(
-            "var global_active_tasks: std.atomic.Value(usize) = std.atomic.Value(usize).init(0);",
-        );
-        self.writeln("var global_running_workers: std.atomic.Value(usize) = std.atomic.Value(usize).init(0);");
-        self.writeln("threadlocal var task_queue: [1000]_Task = undefined; threadlocal var queue_len: usize = 0;");
-        self.writeln(
-            "threadlocal var current_node_id: u32 = 0; threadlocal var next_local_id: u32 = 1;",
-        );
-        self.writeln("fn schedule(run: *const fn(*anyopaque) anyerror!void, ctx: *anyopaque) void { if (current_node_id == 0) { global_task_queue.push(.{ .run = run, .ctx = ctx }); } else { if (queue_len < 1000) { task_queue[queue_len] = .{ .run = run, .ctx = ctx }; queue_len += 1; } } }");
-        self.writeln("const _WorkerPoolRunner = struct { pub fn run() void { while (!global_runtime_shutdown.load(.acquire)) { if (global_task_queue.pop()) |task| { _ = global_running_workers.fetchAdd(1, .acquire); task.run(task.ctx) catch {}; _ = global_running_workers.fetchSub(1, .release); } else { const ts = std.os.linux.timespec{ .sec = 0, .nsec = 100_000 }; _ = std.os.linux.nanosleep(&ts, null); } } } };");
-        self.writeln("");
-        self.writeln("// --- Cross-Thread Channels & Mailboxes ---");
-        self.writeln(
-            "const CrossThreadMessage = struct { target: PID, sender: PID, msg: Message };",
-        );
-        self.writeln("const MailboxItem = struct { sender: PID, msg: Message };");
-        self.writeln("const MailboxRingBuffer = struct { lock: Spinlock = .{}, buffer: [256]CrossThreadMessage = undefined, head: usize = 0, tail: usize = 0, count: usize = 0, pub fn push(self: *MailboxRingBuffer, item: CrossThreadMessage) bool { self.lock.acquire(); defer self.lock.release(); if (self.count >= 256) return false; self.buffer[self.tail] = item; self.tail = (self.tail + 1) % 256; self.count += 1; return true; } pub fn pop(self: *MailboxRingBuffer) ?CrossThreadMessage { self.lock.acquire(); defer self.lock.release(); if (self.count == 0) return null; const item = self.buffer[self.head]; self.head = (self.head + 1) % 256; self.count -= 1; return item; } };");
-        self.writeln("var global_worker_mailboxes: [128]MailboxRingBuffer = @splat(.{});");
-        self.writeln(
-            "var global_next_worker_id: std.atomic.Value(u32) = std.atomic.Value(u32).init(1);",
-        );
-        self.writeln("const LocalMailbox = struct { items: [16]MailboxItem = undefined, head: usize = 0, tail: usize = 0, count: usize = 0, pub fn push(self: *LocalMailbox, item: MailboxItem) bool { if (self.count >= 16) return false; self.items[self.tail] = item; self.tail = (self.tail + 1) % 16; self.count += 1; return true; } pub fn pop(self: *LocalMailbox) ?MailboxItem { if (self.count == 0) return null; const item = self.items[self.head]; self.head = (self.head + 1) % 16; self.count -= 1; return item; } };");
-        self.writeln("threadlocal var local_mailboxes: [1024]LocalMailbox = @splat(.{});");
-        self.writeln("threadlocal var waiting_actors: [1024]?*anyopaque = @splat(null);");
-        self.writeln("threadlocal var waiting_actor_fns: [1024]?*const fn(*anyopaque) anyerror!void = @splat(null);");
-        self.writeln("threadlocal var waiting_count: usize = 0;");
-        self.writeln("fn deliver_local(target_local_id: u32, sender_pid: PID, msg: Message) void { const slot = target_local_id % 1024; _ = local_mailboxes[slot].push(.{ .sender = sender_pid, .msg = msg }); if (waiting_actors[slot]) |w_ctx| { const w_fn = waiting_actor_fns[slot].?; waiting_actors[slot] = null; waiting_actor_fns[slot] = null; if (waiting_count > 0) waiting_count -= 1; schedule(w_fn, w_ctx); } }");
-        self.writeln("fn drain_cross_thread_mailbox() void { const slot = current_node_id % 128; while (global_worker_mailboxes[slot].pop()) |item| { deliver_local(item.target.local_id, item.sender, item.msg); } }");
-        self.writeln("fn cp_send(sender_pid: PID, target: PID, msg: Message) bool { if (target.node_id == current_node_id) { deliver_local(target.local_id, sender_pid, msg); return true; } else { const slot = target.node_id % 128; return global_worker_mailboxes[slot].push(.{ .target = target, .sender = sender_pid, .msg = msg }); } }");
-        self.writeln("");
-        self.writeln("pub fn print(v: anytype) void { const T = @TypeOf(v); if (comptime is_string_like(T)) { std.debug.print(\"{s}\\n\", .{ to_string_slice(v) }); } else if (comptime T == Message) { std.debug.print(\"{s}\\n\", .{ cp_fmt(v) }); } else if (comptime T == ?Message) { if (v) |m| { std.debug.print(\"{s}\\n\", .{ cp_fmt(m) }); } else { std.debug.print(\"null\\n\", .{}); } } else { std.debug.print(\"{any}\\n\", .{ v }); } }");
-        self.writeln("pub const CpTask = struct { base: BaseContext = .{}, lock: Spinlock = .{}, state: u8 = 0, waiter_ctx: ?*anyopaque = null, waiter_fn: ?*const fn(*anyopaque) anyerror!void = null, join_barrier: ?*JoinBarrier = null, join_idx: usize = 0, arena: ?*std.heap.ArenaAllocator = null, };");
-        if !self.enum_defs.contains_key("Task") {
-            self.writeln("pub const Task = CpTask;");
+        if features.needs_actors {
+            self.writeln("");
+            self.writeln("// --- Scheduler ---");
+            self.writeln(
+                "const _Task = struct { run: *const fn(*anyopaque) anyerror!void, ctx: *anyopaque };",
+            );
+            self.writeln("const Spinlock = struct { state: std.atomic.Value(u32) = std.atomic.Value(u32).init(0), pub fn acquire(self: *Spinlock) void { while (self.state.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) { std.atomic.spinLoopHint(); } } pub fn release(self: *Spinlock) void { self.state.store(0, .release); } };");
+            self.writeln("const GlobalTaskQueue = struct { lock: Spinlock = .{}, buffer: [2048]_Task = undefined, head: usize = 0, tail: usize = 0, count: usize = 0, pub fn push(self: *GlobalTaskQueue, item: _Task) void { self.lock.acquire(); defer self.lock.release(); if (self.count >= 2048) return; self.buffer[self.tail] = item; self.tail = (self.tail + 1) % 2048; self.count += 1; } pub fn pop(self: *GlobalTaskQueue) ?_Task { self.lock.acquire(); defer self.lock.release(); if (self.count == 0) return null; const item = self.buffer[self.head]; self.head = (self.head + 1) % 2048; self.count -= 1; return item; } pub fn len(self: *GlobalTaskQueue) usize { self.lock.acquire(); defer self.lock.release(); return self.count; } };");
+            self.writeln("var global_task_queue: GlobalTaskQueue = .{};");
+            self.writeln("var global_runtime_shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);");
+            self.writeln(
+                "var global_active_tasks: std.atomic.Value(usize) = std.atomic.Value(usize).init(0);",
+            );
+            self.writeln("var global_running_workers: std.atomic.Value(usize) = std.atomic.Value(usize).init(0);");
+            self.writeln("threadlocal var task_queue: [1000]_Task = undefined; threadlocal var queue_len: usize = 0;");
+            self.writeln(
+                "threadlocal var current_node_id: u32 = 0; threadlocal var next_local_id: u32 = 1;",
+            );
+            self.writeln("fn schedule(run: *const fn(*anyopaque) anyerror!void, ctx: *anyopaque) void { if (current_node_id == 0) { global_task_queue.push(.{ .run = run, .ctx = ctx }); } else { if (queue_len < 1000) { task_queue[queue_len] = .{ .run = run, .ctx = ctx }; queue_len += 1; } } }");
+            self.writeln("const _WorkerPoolRunner = struct { pub fn run() void { while (!global_runtime_shutdown.load(.acquire)) { if (global_task_queue.pop()) |task| { _ = global_running_workers.fetchAdd(1, .acquire); task.run(task.ctx) catch {}; _ = global_running_workers.fetchSub(1, .release); } else { const ts = std.os.linux.timespec{ .sec = 0, .nsec = 100_000 }; _ = std.os.linux.nanosleep(&ts, null); } } } };");
+            self.writeln("");
+            self.writeln("// --- Cross-Thread Channels & Mailboxes ---");
+            self.writeln(
+                "const CrossThreadMessage = struct { target: PID, sender: PID, msg: Message };",
+            );
+            self.writeln("const MailboxItem = struct { sender: PID, msg: Message };");
+            self.writeln("const MailboxRingBuffer = struct { lock: Spinlock = .{}, buffer: [256]CrossThreadMessage = undefined, head: usize = 0, tail: usize = 0, count: usize = 0, pub fn push(self: *MailboxRingBuffer, item: CrossThreadMessage) bool { self.lock.acquire(); defer self.lock.release(); if (self.count >= 256) return false; self.buffer[self.tail] = item; self.tail = (self.tail + 1) % 256; self.count += 1; return true; } pub fn pop(self: *MailboxRingBuffer) ?CrossThreadMessage { self.lock.acquire(); defer self.lock.release(); if (self.count == 0) return null; const item = self.buffer[self.head]; self.head = (self.head + 1) % 256; self.count -= 1; return item; } };");
+            self.writeln("var global_worker_mailboxes: [128]MailboxRingBuffer = @splat(.{});");
+            self.writeln(
+                "var global_next_worker_id: std.atomic.Value(u32) = std.atomic.Value(u32).init(1);",
+            );
+            self.writeln("const LocalMailbox = struct { items: [16]MailboxItem = undefined, head: usize = 0, tail: usize = 0, count: usize = 0, pub fn push(self: *LocalMailbox, item: MailboxItem) bool { if (self.count >= 16) return false; self.items[self.tail] = item; self.tail = (self.tail + 1) % 16; self.count += 1; return true; } pub fn pop(self: *LocalMailbox) ?MailboxItem { if (self.count == 0) return null; const item = self.items[self.head]; self.head = (self.head + 1) % 16; self.count -= 1; return item; } };");
+            self.writeln("threadlocal var local_mailboxes: [1024]LocalMailbox = @splat(.{});");
+            self.writeln("threadlocal var waiting_actors: [1024]?*anyopaque = @splat(null);");
+            self.writeln("threadlocal var waiting_actor_fns: [1024]?*const fn(*anyopaque) anyerror!void = @splat(null);");
+            self.writeln("threadlocal var waiting_count: usize = 0;");
+            self.writeln("fn deliver_local(target_local_id: u32, sender_pid: PID, msg: Message) void { const slot = target_local_id % 1024; _ = local_mailboxes[slot].push(.{ .sender = sender_pid, .msg = msg }); if (waiting_actors[slot]) |w_ctx| { const w_fn = waiting_actor_fns[slot].?; waiting_actors[slot] = null; waiting_actor_fns[slot] = null; if (waiting_count > 0) waiting_count -= 1; schedule(w_fn, w_ctx); } }");
+            self.writeln("fn drain_cross_thread_mailbox() void { const slot = current_node_id % 128; while (global_worker_mailboxes[slot].pop()) |item| { deliver_local(item.target.local_id, item.sender, item.msg); } }");
+            self.writeln("fn cp_send(sender_pid: PID, target: PID, msg: Message) bool { if (target.node_id == current_node_id) { deliver_local(target.local_id, sender_pid, msg); return true; } else { const slot = target.node_id % 128; return global_worker_mailboxes[slot].push(.{ .target = target, .sender = sender_pid, .msg = msg }); } }");
+            self.writeln("");
+            self.writeln("pub fn print(v: anytype) void { const T = @TypeOf(v); if (comptime is_string_like(T)) { std.debug.print(\"{s}\\n\", .{ to_string_slice(v) }); } else if (comptime T == Message) { std.debug.print(\"{s}\\n\", .{ cp_fmt(v) }); } else if (comptime T == ?Message) { if (v) |m| { std.debug.print(\"{s}\\n\", .{ cp_fmt(m) }); } else { std.debug.print(\"null\\n\", .{}); } } else { std.debug.print(\"{any}\\n\", .{ v }); } }");
+            self.writeln("pub const CpTask = struct { base: BaseContext = .{}, lock: Spinlock = .{}, state: u8 = 0, waiter_ctx: ?*anyopaque = null, waiter_fn: ?*const fn(*anyopaque) anyerror!void = null, join_barrier: ?*JoinBarrier = null, join_idx: usize = 0, arena: ?*std.heap.ArenaAllocator = null, };");
+            if !self.enum_defs.contains_key("Task") {
+                self.writeln("pub const Task = CpTask;");
+            }
+            self.writeln("pub const JoinBarrier = struct { lock: Spinlock = .{}, remaining: usize, total: usize, results: []Message, waiter_ctx: ?*anyopaque = null, waiter_fn: ?*const fn(*anyopaque) anyerror!void = null, pub fn init(allocator: std.mem.Allocator, total: usize) !*JoinBarrier { const b = try allocator.create(JoinBarrier); b.* = .{ .remaining = total + 1, .total = total, .results = try allocator.alloc(Message, total), .waiter_ctx = null, .waiter_fn = null }; return b; } pub fn on_task_done(self: *JoinBarrier, idx: usize, msg: Message) void { self.lock.acquire(); self.results[idx] = msg; self.remaining -= 1; const done = (self.remaining == 0); const w_ctx_opt = self.waiter_ctx; const w_fn_opt = self.waiter_fn; if (done and w_ctx_opt != null) { self.waiter_ctx = null; self.waiter_fn = null; } self.lock.release(); if (done) { if (w_ctx_opt) |w_ctx| { const w_fn = w_fn_opt.?; const base_waiter: *BaseContext = @ptrCast(@alignCast(w_ctx)); const arr_res = std.heap.page_allocator.alloc(Message, self.total) catch unreachable; @memcpy(arr_res, self.results); base_waiter.await_result = Message{ .array = arr_res }; schedule(w_fn, w_ctx); } } } pub fn finish_setup_and_should_suspend(self: *JoinBarrier) bool { self.lock.acquire(); self.remaining -= 1; const done = (self.remaining == 0); if (done) { const base_waiter: *BaseContext = @ptrCast(@alignCast(self.waiter_ctx.?)); const arr_res = std.heap.page_allocator.alloc(Message, self.total) catch unreachable; @memcpy(arr_res, self.results); base_waiter.await_result = Message{ .array = arr_res }; self.waiter_ctx = null; self.waiter_fn = null; } self.lock.release(); return !done; } };");
+            self.writeln("pub fn __cp_task_bridge(p: *anyopaque) anyerror!void { const t: *CpTask = @ptrCast(@alignCast(p)); t.lock.acquire(); t.state = 2; const jb = t.join_barrier; const j_idx = t.join_idx; const w_ctx_opt = t.waiter_ctx; const w_fn_opt = t.waiter_fn; t.waiter_ctx = null; t.waiter_fn = null; const res = t.base.await_result; t.lock.release(); if (jb) |b| { b.on_task_done(j_idx, res orelse Message{ .string = \"\" }); } if (w_ctx_opt) |w_ctx| { const w_fn = w_fn_opt.?; const base_waiter: *BaseContext = @ptrCast(@alignCast(w_ctx)); base_waiter.await_result = res; schedule(w_fn, w_ctx); } _ = global_active_tasks.fetchSub(1, .release); }");
+            self.writeln("pub fn cp_msg_to_val(m: Message) []const u8 { return cp_fmt(m); }");
         }
-        self.writeln("pub const JoinBarrier = struct { lock: Spinlock = .{}, remaining: usize, total: usize, results: []Message, waiter_ctx: ?*anyopaque = null, waiter_fn: ?*const fn(*anyopaque) anyerror!void = null, pub fn init(allocator: std.mem.Allocator, total: usize) !*JoinBarrier { const b = try allocator.create(JoinBarrier); b.* = .{ .remaining = total + 1, .total = total, .results = try allocator.alloc(Message, total), .waiter_ctx = null, .waiter_fn = null }; return b; } pub fn on_task_done(self: *JoinBarrier, idx: usize, msg: Message) void { self.lock.acquire(); self.results[idx] = msg; self.remaining -= 1; const done = (self.remaining == 0); const w_ctx_opt = self.waiter_ctx; const w_fn_opt = self.waiter_fn; if (done and w_ctx_opt != null) { self.waiter_ctx = null; self.waiter_fn = null; } self.lock.release(); if (done) { if (w_ctx_opt) |w_ctx| { const w_fn = w_fn_opt.?; const base_waiter: *BaseContext = @ptrCast(@alignCast(w_ctx)); const arr_res = std.heap.page_allocator.alloc(Message, self.total) catch unreachable; @memcpy(arr_res, self.results); base_waiter.await_result = Message{ .array = arr_res }; schedule(w_fn, w_ctx); } } } pub fn finish_setup_and_should_suspend(self: *JoinBarrier) bool { self.lock.acquire(); self.remaining -= 1; const done = (self.remaining == 0); if (done) { const base_waiter: *BaseContext = @ptrCast(@alignCast(self.waiter_ctx.?)); const arr_res = std.heap.page_allocator.alloc(Message, self.total) catch unreachable; @memcpy(arr_res, self.results); base_waiter.await_result = Message{ .array = arr_res }; self.waiter_ctx = null; self.waiter_fn = null; } self.lock.release(); return !done; } };");
-        self.writeln("pub fn __cp_task_bridge(p: *anyopaque) anyerror!void { const t: *CpTask = @ptrCast(@alignCast(p)); t.lock.acquire(); t.state = 2; const jb = t.join_barrier; const j_idx = t.join_idx; const w_ctx_opt = t.waiter_ctx; const w_fn_opt = t.waiter_fn; t.waiter_ctx = null; t.waiter_fn = null; const res = t.base.await_result; t.lock.release(); if (jb) |b| { b.on_task_done(j_idx, res orelse Message{ .string = \"\" }); } if (w_ctx_opt) |w_ctx| { const w_fn = w_fn_opt.?; const base_waiter: *BaseContext = @ptrCast(@alignCast(w_ctx)); base_waiter.await_result = res; schedule(w_fn, w_ctx); } _ = global_active_tasks.fetchSub(1, .release); }");
-        self.writeln("pub fn cp_msg_to_val(m: Message) []const u8 { return cp_fmt(m); }");
-        self.writeln("pub fn CpUnpackElemType(comptime T: type, comptime idx: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; return @FieldType(T, std.fmt.comptimePrint(\"{d}\", .{idx})); }");
-        self.writeln("pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return \"\"; } else if (comptime T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return \"\"; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(T) == .array)) { return v[idx]; } else { return @field(v, std.fmt.comptimePrint(\"{d}\", .{idx})); } }");
-        self.writeln("pub fn CpUnpackTailType(comptime T: type, comptime offset_from_end: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; const n = @typeInfo(T).@\"struct\".fields.len; return @FieldType(T, std.fmt.comptimePrint(\"{d}\", .{n - offset_from_end})); }");
-        self.writeln("pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return \"\"; } else if (comptime T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return \"\"; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .array)) { return v[v.len - offset_from_end]; } else { const n = @typeInfo(T).@\"struct\".fields.len; return @field(v, std.fmt.comptimePrint(\"{d}\", .{n - offset_from_end})); } }");
-        self.writeln("pub fn CpUnpackSliceType(comptime T: type, comptime start: usize) type { if (T == ?Message or T == Message) return []const Message; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return T; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return []const @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return []const @typeInfo(T).array.child; const fields = @typeInfo(T).@\"struct\".fields; if (fields.len == 0) return []const i32; const Elem = if (start < fields.len) fields[start].type else fields[0].type; return []const CpValType(Elem); }");
-        self.writeln("pub fn cp_unpack_slice(v: anytype, comptime start: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start + suffix_len) { return m.array[start .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime T == Message) { if (v == .array and v.array.len >= start + suffix_len) { return v.array[start .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[start .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[start .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[start .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .array)) { return v[start .. v.len - suffix_len]; } else { const fields = @typeInfo(T).@\"struct\".fields; const end = fields.len - suffix_len; const count = if (end > start) end - start else 0; const Elem = if (start < fields.len) CpValType(fields[start].type) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, std.fmt.comptimePrint(\"{d}\", .{f_idx}))); } return buf; } }");
+        if features.needs_unpack {
+            self.writeln("pub fn CpUnpackElemType(comptime T: type, comptime idx: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; return @FieldType(T, std.fmt.comptimePrint(\"{d}\", .{idx})); }");
+            self.writeln("pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return \"\"; } else if (comptime T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return \"\"; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(T) == .array)) { return v[idx]; } else { return @field(v, std.fmt.comptimePrint(\"{d}\", .{idx})); } }");
+            self.writeln("pub fn CpUnpackTailType(comptime T: type, comptime offset_from_end: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; const n = @typeInfo(T).@\"struct\".fields.len; return @FieldType(T, std.fmt.comptimePrint(\"{d}\", .{n - offset_from_end})); }");
+            self.writeln("pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return \"\"; } else if (comptime T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return \"\"; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .array)) { return v[v.len - offset_from_end]; } else { const n = @typeInfo(T).@\"struct\".fields.len; return @field(v, std.fmt.comptimePrint(\"{d}\", .{n - offset_from_end})); } }");
+            self.writeln("pub fn CpUnpackSliceType(comptime T: type, comptime start: usize) type { if (T == ?Message or T == Message) return []const Message; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return T; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return []const @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return []const @typeInfo(T).array.child; const fields = @typeInfo(T).@\"struct\".fields; if (fields.len == 0) return []const i32; const Elem = if (start < fields.len) fields[start].type else fields[0].type; return []const CpValType(Elem); }");
+            self.writeln("pub fn cp_unpack_slice(v: anytype, comptime start: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start + suffix_len) { return m.array[start .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime T == Message) { if (v == .array and v.array.len >= start + suffix_len) { return v.array[start .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[start .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[start .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[start .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .array)) { return v[start .. v.len - suffix_len]; } else { const fields = @typeInfo(T).@\"struct\".fields; const end = fields.len - suffix_len; const count = if (end > start) end - start else 0; const Elem = if (start < fields.len) CpValType(fields[start].type) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, std.fmt.comptimePrint(\"{d}\", .{f_idx}))); } return buf; } }");
+        }
         self.writeln("");
 
         for item in &module.body {
@@ -1809,7 +2483,9 @@ impl Codegen {
             self.writeln(&format!("pub const {} = {};", name, body));
         }
 
-        self.generate_reflection_tables();
+        if features.needs_reflection {
+            self.generate_reflection_tables();
+        }
 
         if self.is_beam_mode {
             self.writeln("");
@@ -2101,18 +2777,24 @@ impl Codegen {
         let type_id = Self::fnv1a_type_id(&class.ident.sym);
         writeln!(self.output, "pub const {} = struct {{", class.ident.sym).unwrap();
         self.indent();
-        self.writeln(&format!("pub const __TYPE_ID: u64 = 0x{:016x};", type_id));
+        let needs_trait_infra =
+            !class.implements.is_empty() || class.meta.iter().any(|m| m.name.sym == "reflect");
+        if needs_trait_infra {
+            self.writeln(&format!("pub const __TYPE_ID: u64 = 0x{:016x};", type_id));
+        }
         if class.implements.iter().any(|i| i.sym == "Agent") {
             self.writeln("id: u32 = 0,");
         }
         for f in &class.fields {
             self.writeln(&format!("{}: {},", f.ident.sym, self.map_type(&f.ty)));
         }
-        self.writeln(&format!("\npub fn _create(allocator: std.mem.Allocator) !*{} {{ const self_ptr = try allocator.create({}); self_ptr.* = undefined; return self_ptr; }}", class.ident.sym, class.ident.sym));
-        self.writeln(&format!(
-            "pub fn __box_drop(ptr: *anyopaque) void {{ const self_ptr: *{0} = @ptrCast(@alignCast(ptr)); if (@hasDecl({0}, \"release\")) {{ const RType = @typeInfo(@TypeOf({0}.release)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _ = self_ptr.release() catch {{}}; }} else {{ self_ptr.release(); }} }} std.heap.page_allocator.destroy(self_ptr); }}",
-            class.ident.sym
-        ));
+        if needs_trait_infra {
+            self.writeln(&format!("\npub fn _create(allocator: std.mem.Allocator) !*{} {{ const self_ptr = try allocator.create({}); self_ptr.* = undefined; return self_ptr; }}", class.ident.sym, class.ident.sym));
+            self.writeln(&format!(
+                "pub fn __box_drop(ptr: *anyopaque) void {{ const self_ptr: *{0} = @ptrCast(@alignCast(ptr)); if (@hasDecl({0}, \"release\")) {{ const RType = @typeInfo(@TypeOf({0}.release)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _ = self_ptr.release() catch {{}}; }} else {{ self_ptr.release(); }} }} std.heap.page_allocator.destroy(self_ptr); }}",
+                class.ident.sym
+            ));
+        }
         for m in &class.methods {
             self.generate_function_decorated(m, Some(&class.ident.sym));
         }
@@ -3074,13 +3756,20 @@ impl Codegen {
                 if id.sym == "true" || id.sym == "false" {
                     return Some(Type::Bool);
                 }
-                if id.sym == "this" || id.sym == "_" {
+                if id.sym == "this" || id.sym == "_" || id.sym == "self" {
                     return self.current_class_name.as_ref().map(|c| {
                         Type::Ref(Ident {
                             span: Span { start: 0, end: 0 },
                             sym: c.clone(),
                         })
                     });
+                }
+                if let Some(c_name) = &self.current_class_name {
+                    if let Some(cls) = self.class_defs.get(c_name) {
+                        if let Some(f) = cls.fields.iter().find(|f| f.ident.sym == id.sym) {
+                            return Some(f.ty.clone());
+                        }
+                    }
                 }
                 self.var_cp_types.get(&id.sym).cloned()
             }
@@ -3309,14 +3998,15 @@ impl Codegen {
                 None
             }
             Expr::Member(mem) => {
+                if mem.prop.sym == "length" || mem.prop.sym == "len" {
+                    return Some(Type::USize);
+                }
                 if let Some(mut obj_ty) = self.infer_cp_type_with_mock(&mem.obj, mock_types) {
                     while let Type::BorrowType { inner, .. } = obj_ty {
                         obj_ty = *inner;
                     }
-                    if (mem.prop.sym == "length" || mem.prop.sym == "len")
-                        && matches!(obj_ty, Type::Array(_) | Type::String)
-                    {
-                        return Some(Type::USize);
+                    while let Type::RawPtr { inner, .. } = obj_ty {
+                        obj_ty = *inner;
                     }
                     if mem.prop.sym == "size"
                         && matches!(obj_ty, Type::Map(_, _) | Type::Dict(_, _) | Type::Set(_))
@@ -4477,9 +5167,123 @@ impl Codegen {
         }
     }
 
+    fn format_simple_pat(pat: &Pattern, has_else: &mut bool) -> String {
+        match pat {
+            Pattern::Lit(Lit::Int(v)) => {
+                if *v >= 32 && *v <= 126 {
+                    let ch = *v as u8;
+                    match ch {
+                        b'\'' => "'\\''".to_string(),
+                        b'\\' => "'\\\\'".to_string(),
+                        _ => format!("'{}'", ch as char),
+                    }
+                } else {
+                    v.to_string()
+                }
+            }
+            Pattern::Lit(Lit::Float(f)) => f.to_string(),
+            Pattern::Lit(Lit::Str(s)) => format!("\"{}\"", Self::escape_zig_string(s)),
+            Pattern::Lit(Lit::Bool(b)) => {
+                if *b {
+                    "true".to_string()
+                } else {
+                    "false".to_string()
+                }
+            }
+            Pattern::Range {
+                start,
+                end,
+                inclusive,
+            } => {
+                if *inclusive {
+                    format!("{}...{}", start, end)
+                } else {
+                    format!("{}...{}", start, end.saturating_sub(1))
+                }
+            }
+            Pattern::Or(pats) => {
+                let parts: Vec<String> = pats
+                    .iter()
+                    .map(|p| Self::format_simple_pat(p, has_else))
+                    .collect();
+                parts.join(", ")
+            }
+            Pattern::Wildcard => {
+                *has_else = true;
+                "else".to_string()
+            }
+            Pattern::Ident(id) if id.sym == "_" || id.sym == "else" => {
+                *has_else = true;
+                "else".to_string()
+            }
+            _ => {
+                *has_else = true;
+                "else".to_string()
+            }
+        }
+    }
+
     fn generate_switch(&mut self, m: &MatchExpr, is_expr: bool) -> String {
         let disc_cp_ty = self.infer_cp_type(&m.disc);
         self.check_switch_exhaustiveness(m, disc_cp_ty.as_ref());
+
+        if Self::is_simple_literal_switch(m) {
+            let disc_code = self.generate_expr(&m.disc);
+            let mut arms_code = String::new();
+            let mut has_else = false;
+            for arm in &m.arms {
+                let pat_str = Self::format_simple_pat(&arm.pat, &mut has_else);
+                let body_str = if is_expr {
+                    match &*arm.body {
+                        Stmt::Expr(e) => self.generate_expr(e),
+                        Stmt::Block(b) if b.body.len() == 1 => {
+                            if let Stmt::Expr(e) = &b.body[0] {
+                                self.generate_expr(e)
+                            } else {
+                                let saved = self.current_case_content.clone();
+                                self.current_case_content.clear();
+                                for s in &b.body {
+                                    self.generate_stmt(s);
+                                }
+                                let s_str = self.current_case_content.trim().to_string();
+                                self.current_case_content = saved;
+                                format!("{{\n{}\n}}", s_str)
+                            }
+                        }
+                        _ => {
+                            let saved = self.current_case_content.clone();
+                            self.current_case_content.clear();
+                            self.generate_stmt(&arm.body);
+                            let s_str = self.current_case_content.trim().to_string();
+                            self.current_case_content = saved;
+                            format!("{{\n{}\n}}", s_str)
+                        }
+                    }
+                } else {
+                    let saved = self.current_case_content.clone();
+                    self.current_case_content.clear();
+                    if let Stmt::Block(b) = &*arm.body {
+                        for s in &b.body {
+                            self.generate_stmt(s);
+                        }
+                    } else {
+                        self.generate_stmt(&arm.body);
+                    }
+                    let s_str = self.current_case_content.trim().to_string();
+                    self.current_case_content = saved;
+                    format!("{{\n{}\n}}", s_str)
+                };
+                arms_code.push_str(&format!("{} => {},\n", pat_str, body_str));
+            }
+            if !has_else {
+                arms_code.push_str("else => unreachable,\n");
+            }
+            if is_expr {
+                return format!("(switch ({}) {{\n{}}})", disc_code, arms_code);
+            } else {
+                return format!("switch ({}) {{\n{}}}", disc_code, arms_code);
+            }
+        }
 
         let sw_id = self.tmp_counter;
         self.tmp_counter += 1;
@@ -5160,8 +5964,16 @@ impl Codegen {
             let body_str = self.current_case_content.clone();
             self.current_case_content.clear();
             self.output.push_str(&body_str);
-            if let Some(Type::ResultType { ok, .. }) = &func.return_type {
-                if **ok == Type::Void && !body_str.trim_end().ends_with("return .{ .ok = {} };") {
+            if let Some(Type::ResultType { ok, err }) = &func.return_type {
+                let err_str = self.map_error_type(err);
+                let is_native_err_union = self.is_lib_mode
+                    || err_str.contains('.')
+                    || err_str == "Error"
+                    || err_str == "anyerror";
+                if !is_native_err_union
+                    && **ok == Type::Void
+                    && !body_str.trim_end().ends_with("return .{ .ok = {} };")
+                {
                     self.writeln("return .{ .ok = {} };");
                 }
             } else if self.is_beam_mode && !body_str.contains("return") {
@@ -5593,7 +6405,31 @@ impl Codegen {
                                     final_expr.clone()
                                 }
                             ));
-                            if !self.is_state_machine && !is_var_borrow {
+                            let needs_drop = if let Some(t) = &var.ty {
+                                self.type_has_release(Some(t))
+                            } else if let Some(t) = self.infer_cp_type(init) {
+                                self.type_has_release(Some(&t))
+                            } else if matches!(
+                                init,
+                                Expr::Lit(_)
+                                    | Expr::Slice(_)
+                                    | Expr::Cast { .. }
+                                    | Expr::Bin(_)
+                                    | Expr::Index { .. }
+                            ) {
+                                false
+                            } else if let Expr::Ident(id) = init {
+                                if let Some(t) = self.var_cp_types.get(&id.sym) {
+                                    self.type_has_release(Some(t))
+                                } else {
+                                    false
+                                }
+                            } else {
+                                self.class_defs
+                                    .values()
+                                    .any(|c| c.methods.iter().any(|m| m.ident.sym == "release"))
+                            };
+                            if !self.is_state_machine && !is_var_borrow && needs_drop {
                                 self.write_to_case(&format!(
                                     "var __{}_moved = false; _ = &__{}_moved;",
                                     ident.sym, ident.sym
@@ -6736,26 +7572,33 @@ impl Codegen {
                         err: fn_err,
                     }) = self.current_fn_ret_ty.clone()
                     {
-                        if let Expr::ErrWrap(err_inner) = arg {
-                            let err_val = self.generate_err_value(err_inner, Some(&fn_err));
-                            self.write_to_case(&format!("return .{{ .err = {} }};", err_val));
-                            return;
-                        } else if is_null_ret {
-                            self.write_to_case("return .{ .ok = null };");
-                            return;
-                        } else {
-                            let old_box = self.expected_box_trait.clone();
-                            if let Type::BoxDyn(tr_id) = &*fn_ok {
-                                self.expected_box_trait = Some(tr_id.sym.clone());
-                            } else if let Type::Optional(opt_in) = &*fn_ok {
-                                if let Type::BoxDyn(tr_id) = &**opt_in {
+                        let err_str = self.map_error_type(&fn_err);
+                        let is_native_err_union = self.is_lib_mode
+                            || err_str.contains('.')
+                            || err_str == "Error"
+                            || err_str == "anyerror";
+                        if !is_native_err_union {
+                            if let Expr::ErrWrap(err_inner) = arg {
+                                let err_val = self.generate_err_value(err_inner, Some(&fn_err));
+                                self.write_to_case(&format!("return .{{ .err = {} }};", err_val));
+                                return;
+                            } else if is_null_ret {
+                                self.write_to_case("return .{ .ok = null };");
+                                return;
+                            } else {
+                                let old_box = self.expected_box_trait.clone();
+                                if let Type::BoxDyn(tr_id) = &*fn_ok {
                                     self.expected_box_trait = Some(tr_id.sym.clone());
+                                } else if let Type::Optional(opt_in) = &*fn_ok {
+                                    if let Type::BoxDyn(tr_id) = &**opt_in {
+                                        self.expected_box_trait = Some(tr_id.sym.clone());
+                                    }
                                 }
+                                let e = self.generate_expr(arg);
+                                self.expected_box_trait = old_box;
+                                self.write_to_case(&format!("return .{{ .ok = {} }};", e));
+                                return;
                             }
-                            let e = self.generate_expr(arg);
-                            self.expected_box_trait = old_box;
-                            self.write_to_case(&format!("return .{{ .ok = {} }};", e));
-                            return;
                         }
                     }
 
@@ -6785,8 +7628,13 @@ impl Codegen {
                         self.write_to_case(&format!("return {};", ret_val));
                     }
                 } else {
-                    if let Some(Type::ResultType { ok, .. }) = &self.current_fn_ret_ty {
-                        if **ok == Type::Void {
+                    if let Some(Type::ResultType { ok, err }) = &self.current_fn_ret_ty {
+                        let err_str = self.map_error_type(err);
+                        let is_native_err_union = self.is_lib_mode
+                            || err_str.contains('.')
+                            || err_str == "Error"
+                            || err_str == "anyerror";
+                        if !is_native_err_union && **ok == Type::Void {
                             self.write_to_case("return .{ .ok = {} };");
                             return;
                         }
@@ -7126,14 +7974,69 @@ impl Codegen {
                 }
                 let l = self.generate_expr(&bin.left);
                 let r = self.generate_expr(&bin.right);
+                let l_ty = self.infer_cp_type(&bin.left);
+                let r_ty = self.infer_cp_type(&bin.right);
+                let are_both_numeric = match (&l_ty, &r_ty) {
+                    (Some(t1), Some(t2)) => Self::is_numeric_type(t1) && Self::is_numeric_type(t2),
+                    _ => {
+                        matches!(&*bin.left, Expr::Lit(Lit::Int(_)) | Expr::Lit(Lit::Float(_)))
+                            && matches!(&*bin.right, Expr::Lit(Lit::Int(_)) | Expr::Lit(Lit::Float(_)))
+                    }
+                };
+                let is_null_cmp = matches!(&*bin.left, Expr::Lit(Lit::Null))
+                    || matches!(&*bin.right, Expr::Lit(Lit::Null))
+                    || matches!(&*bin.left, Expr::Ident(id) if id.sym == "null")
+                    || matches!(&*bin.right, Expr::Ident(id) if id.sym == "null");
                 match bin.op {
-                    BinaryOp::Eq => format!("cp_eq({}, {})", l, r),
-                    BinaryOp::NotEq => format!("cp_neq({}, {})", l, r),
-                    BinaryOp::Add => format!("cp_add({}, {})", l, r),
-                    BinaryOp::Lt => format!("cp_lt({}, {})", l, r),
-                    BinaryOp::Gt => format!("cp_gt({}, {})", l, r),
-                    BinaryOp::LtEq => format!("cp_lte({}, {})", l, r),
-                    BinaryOp::GtEq => format!("cp_gte({}, {})", l, r),
+                    BinaryOp::Eq => {
+                        if are_both_numeric || is_null_cmp {
+                            format!("({} == {})", l, r)
+                        } else {
+                            format!("cp_eq({}, {})", l, r)
+                        }
+                    }
+                    BinaryOp::NotEq => {
+                        if are_both_numeric || is_null_cmp {
+                            format!("({} != {})", l, r)
+                        } else {
+                            format!("cp_neq({}, {})", l, r)
+                        }
+                    }
+                    BinaryOp::Add => {
+                        if are_both_numeric {
+                            format!("({} + {})", l, r)
+                        } else {
+                            format!("cp_add({}, {})", l, r)
+                        }
+                    }
+                    BinaryOp::Lt => {
+                        if are_both_numeric {
+                            format!("({} < {})", l, r)
+                        } else {
+                            format!("cp_lt({}, {})", l, r)
+                        }
+                    }
+                    BinaryOp::Gt => {
+                        if are_both_numeric {
+                            format!("({} > {})", l, r)
+                        } else {
+                            format!("cp_gt({}, {})", l, r)
+                        }
+                    }
+                    BinaryOp::LtEq => {
+                        if are_both_numeric {
+                            format!("({} <= {})", l, r)
+                        } else {
+                            format!("cp_lte({}, {})", l, r)
+                        }
+                    }
+                    BinaryOp::GtEq => {
+                        if are_both_numeric {
+                            format!("({} >= {})", l, r)
+                        } else {
+                            format!("cp_gte({}, {})", l, r)
+                        }
+                    }
                     BinaryOp::Mod => format!("({} % {})", l, r),
                     BinaryOp::BitAnd => format!("({} & {})", l, r),
                     BinaryOp::BitOr => format!("({} | {})", l, r),
@@ -8400,9 +9303,20 @@ impl Codegen {
                 let fields_slice = ei.fields.as_deref().unwrap_or(&[]);
                 let tuple_slice = ei.tuple_args.as_deref().unwrap_or(&[]);
                 if ei.variant_name.sym.is_empty() && !ei.enum_name.sym.is_empty() {
+                    let cls_opt = self.class_defs.get(&ei.enum_name.sym).cloned();
                     let mut s = format!("{}{{ ", ei.enum_name.sym);
                     for (idx, f) in fields_slice.iter().enumerate() {
-                        s.push_str(&format!(".{} = {}", f.key.sym, self.generate_expr(&f.val)));
+                        let old_array_elem = self.expected_array_elem_type.clone();
+                        if let Some(ref cls) = cls_opt {
+                            if let Some(cf) = cls.fields.iter().find(|fl| fl.ident.sym == f.key.sym) {
+                                if let Type::FixedArray(elem, _) | Type::Array(elem) = &cf.ty {
+                                    self.expected_array_elem_type = Some((**elem).clone());
+                                }
+                            }
+                        }
+                        let val_code = self.generate_expr(&f.val);
+                        self.expected_array_elem_type = old_array_elem;
+                        s.push_str(&format!(".{} = {}", f.key.sym, val_code));
                         if idx + 1 < fields_slice.len() {
                             s.push_str(", ");
                         }
@@ -9321,10 +10235,27 @@ impl Codegen {
                 self.check_read_allowed(obj);
                 let obj_code = self.generate_expr(obj);
                 let idx_code = self.generate_expr(index);
-                format!("cp_index_get({}, {})", obj_code, idx_code)
+                let is_collection = match self.infer_cp_type(obj) {
+                    Some(Type::Dict(_, _)) | Some(Type::Map(_, _)) => true,
+                    Some(Type::Ref(id))
+                        if id.sym == "Dict" || id.sym == "Map" || id.sym == "VecDeque" =>
+                    {
+                        true
+                    }
+                    _ => false,
+                };
+                if !is_collection {
+                    if matches!(&**index, Expr::Lit(Lit::Int(_))) {
+                        format!("{}[{}]", obj_code, idx_code)
+                    } else {
+                        format!("{}[@as(usize, @intCast({}))]", obj_code, idx_code)
+                    }
+                } else {
+                    format!("cp_index_get({}, {})", obj_code, idx_code)
+                }
             }
             Expr::Array(items) => {
-                let mut s = String::from("&.{ ");
+                let mut s = String::from(".{ ");
                 for (idx, item) in items.iter().enumerate() {
                     s.push_str(&self.generate_expr(item));
                     if idx < items.len() - 1 {
@@ -9332,12 +10263,14 @@ impl Codegen {
                     }
                 }
                 s.push_str(" }");
-                if !items.is_empty() && !self.is_comptime {
+                if self.expected_array_elem_type.is_some() || self.is_comptime {
+                    s
+                } else if !items.is_empty() {
                     let elem_zig_ty = self
                         .infer_cp_type(&items[0])
                         .map(|t| self.map_type(&t))
                         .unwrap_or_else(|| "i32".to_string());
-                    format!("cp_array_lit({}, {})", elem_zig_ty, s)
+                    format!("cp_array_lit({}, &{})", elem_zig_ty, s)
                 } else {
                     s
                 }
@@ -9453,6 +10386,8 @@ impl Codegen {
                                     | Type::U32
                                     | Type::I64
                                     | Type::U64
+                                    | Type::U128
+                                    | Type::I128
                                     | Type::ISize
                                     | Type::USize
                             )
@@ -9468,6 +10403,8 @@ impl Codegen {
                                 | Type::U32
                                 | Type::I64
                                 | Type::U64
+                                | Type::U128
+                                | Type::I128
                                 | Type::ISize
                                 | Type::USize
                         );
@@ -10586,6 +11523,8 @@ impl Codegen {
             Type::U32 => "u32".to_string(),
             Type::I64 => "i64".to_string(),
             Type::U64 => "u64".to_string(),
+            Type::I128 => "i128".to_string(),
+            Type::U128 => "u128".to_string(),
             Type::ISize => "isize".to_string(),
             Type::USize => "usize".to_string(),
             Type::F32 => "f32".to_string(),
@@ -10648,11 +11587,22 @@ impl Codegen {
             Type::Optional(inner) => format!("?{}", self.map_type(inner)),
             Type::ErrorUnion(inner) => format!("anyerror!{}", self.map_type(inner)),
             Type::ResultType { ok, err } => {
-                format!(
-                    "CpResult({}, {})",
-                    self.map_type(ok),
-                    self.map_error_type(err)
-                )
+                let err_str = self.map_error_type(err);
+                let ok_str = self.map_type(ok);
+                if self.is_lib_mode
+                    || err_str.contains('.')
+                    || err_str == "Error"
+                    || err_str == "anyerror"
+                {
+                    let err_prefix = if err_str == "Error" {
+                        "anyerror"
+                    } else {
+                        &err_str
+                    };
+                    format!("{}!{}", err_prefix, ok_str)
+                } else {
+                    format!("CpResult({}, {})", ok_str, err_str)
+                }
             }
             Type::BoxDyn(id) => id.sym.clone(),
             Type::BareDyn(id) => {
@@ -10703,6 +11653,8 @@ impl Codegen {
             Type::U32 => "u32".to_string(),
             Type::I64 => "i64".to_string(),
             Type::U64 => "u64".to_string(),
+            Type::I128 => "i128".to_string(),
+            Type::U128 => "u128".to_string(),
             Type::ISize => "isize".to_string(),
             Type::USize => "usize".to_string(),
             Type::F32 => "f32".to_string(),
@@ -10745,6 +11697,8 @@ fn type_to_display_string(ty: &Type) -> String {
         Type::U32 => "u32".to_string(),
         Type::I64 => "i64".to_string(),
         Type::U64 => "u64".to_string(),
+        Type::I128 => "i128".to_string(),
+        Type::U128 => "u128".to_string(),
         Type::ISize => "isize".to_string(),
         Type::USize => "usize".to_string(),
         Type::F32 => "f32".to_string(),

@@ -748,7 +748,10 @@ impl<'a> Parser<'a> {
             t,
             Token::I32
                 | Token::U32
+                | Token::I64
                 | Token::U64
+                | Token::I128
+                | Token::U128
                 | Token::F32
                 | Token::F64
                 | Token::USize
@@ -795,7 +798,14 @@ impl<'a> Parser<'a> {
                 }
                 return Ok(ErrorType::Union(list));
             }
-            if first.sym == "Error" || first.sym == "error" {
+            let mut first = first;
+            while self.peek() == Some(&Token::Dot) {
+                self.bump()?;
+                let next = self.parse_ident()?;
+                first.sym.push('.');
+                first.sym.push_str(&next.sym);
+            }
+            if first.sym == "Error" || first.sym == "error" || first.sym == "err" {
                 return Ok(ErrorType::DefaultError);
             }
             return Ok(ErrorType::Named(first));
@@ -843,7 +853,10 @@ impl<'a> Parser<'a> {
                             | Some(Token::String)
                             | Some(Token::I32)
                             | Some(Token::U32)
+                            | Some(Token::I64)
                             | Some(Token::U64)
+                            | Some(Token::I128)
+                            | Some(Token::U128)
                             | Some(Token::F32)
                             | Some(Token::F64)
                             | Some(Token::USize)
@@ -929,7 +942,10 @@ impl<'a> Parser<'a> {
                         | Some(Token::String)
                         | Some(Token::I32)
                         | Some(Token::U32)
+                        | Some(Token::I64)
                         | Some(Token::U64)
+                        | Some(Token::I128)
+                        | Some(Token::U128)
                         | Some(Token::F32)
                         | Some(Token::F64)
                         | Some(Token::USize)
@@ -1030,6 +1046,8 @@ impl<'a> Parser<'a> {
             Token::U32 => Type::U32,
             Token::I64 => Type::I64,
             Token::U64 => Type::U64,
+            Token::I128 => Type::I128,
+            Token::U128 => Type::U128,
             Token::ISize => Type::ISize,
             Token::USize => Type::USize,
             Token::F32 => Type::F32,
@@ -1096,6 +1114,13 @@ impl<'a> Parser<'a> {
                             }
                         }
                         self.expect(Token::Greater)?;
+                    }
+                    let mut sym = sym;
+                    while self.peek() == Some(&Token::Dot) {
+                        self.bump()?;
+                        let next = self.parse_ident()?;
+                        sym.push('.');
+                        sym.push_str(&next.sym);
                     }
                     Type::Ref(Ident { span, sym })
                 }
@@ -1185,7 +1210,7 @@ impl<'a> Parser<'a> {
                             self.bump()?;
                             is_err_mut = true;
                         }
-                        if matches!(self.peek(), Some(Token::Ident(_))) {
+                        if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw)) {
                             err_ident = Some(self.parse_ident()?);
                         }
                         if self.peek() == Some(&Token::FatArrow) {
@@ -1522,7 +1547,10 @@ impl<'a> Parser<'a> {
                 }))
             }
             _ => {
-                if self.peek() == Some(&Token::Star) || self.peek() == Some(&Token::Bang) {
+                if self.peek() == Some(&Token::Star)
+                    || self.peek() == Some(&Token::Bang)
+                    || self.peek() == Some(&Token::Else)
+                {
                     self.bump()?;
                     return Ok(Pattern::Wildcard);
                 }
@@ -2441,7 +2469,7 @@ impl<'a> Parser<'a> {
                             self.bump()?;
                             is_err_mut = true;
                         }
-                        if matches!(self.peek(), Some(Token::Ident(_))) {
+                        if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw)) {
                             err_ident = Some(self.parse_ident()?);
                         }
                         if self.peek() == Some(&Token::FatArrow) {
@@ -3048,10 +3076,20 @@ impl<'a> Parser<'a> {
                 span,
                 sym: "super".to_string(),
             })),
-            Token::ErrorKw => Ok(Expr::Ident(Ident {
-                span,
-                sym: "error".to_string(),
-            })),
+            Token::ErrorKw => {
+                let text = &self.input[span.start..span.end];
+                if self.peek() == Some(&Token::Dot) {
+                    Ok(Expr::Ident(Ident {
+                        span,
+                        sym: "error".to_string(),
+                    }))
+                } else {
+                    Ok(Expr::Ident(Ident {
+                        span,
+                        sym: text.to_string(),
+                    }))
+                }
+            }
             Token::Unsafe => {
                 let block = self.parse_block_stmt()?;
                 Ok(Expr::Unsafe(block))
@@ -3655,7 +3693,10 @@ impl<'a> Parser<'a> {
             Token::Null => "null".to_string(),
             Token::Dyn => "dyn".to_string(),
             Token::Super => "super".to_string(),
-            Token::ErrorKw => "Error".to_string(),
+            Token::ErrorKw => {
+                let text = &self.input[span.start..span.end];
+                text.to_string()
+            }
             Token::Await => "await".to_string(),
             Token::Async => "async".to_string(),
             Token::If => "if".to_string(),
@@ -3682,6 +3723,8 @@ impl<'a> Parser<'a> {
             Token::U32 => "u32".to_string(),
             Token::I64 => "i64".to_string(),
             Token::U64 => "u64".to_string(),
+            Token::I128 => "i128".to_string(),
+            Token::U128 => "u128".to_string(),
             Token::F32 => "f32".to_string(),
             Token::F64 => "f64".to_string(),
             Token::ISize => "isize".to_string(),

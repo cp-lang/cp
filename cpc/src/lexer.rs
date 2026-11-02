@@ -93,6 +93,7 @@ pub enum Token {
     #[token("new")]
     New,
     #[token("error")]
+    #[token("err")]
     ErrorKw,
     #[token("defer")]
     Defer,
@@ -123,6 +124,10 @@ pub enum Token {
     I64,
     #[token("u64")]
     U64,
+    #[token("i128")]
+    I128,
+    #[token("u128")]
+    U128,
     #[token("f32")]
     F32,
     #[token("f64")]
@@ -139,10 +144,10 @@ pub enum Token {
     // --- Literals ---
     #[regex(r"(\$\{?[a-zA-Z0-9_]+\}?|[a-zA-Z_])(\$\{?[a-zA-Z0-9_]+\}?|[a-zA-Z0-9_])*", |lex| lex.slice().to_string())]
     Ident(String),
-    #[regex(r"0x[0-9a-fA-F]+", |lex| i64::from_str_radix(&lex.slice()[2..], 16).ok())]
-    #[regex(r"0b[01]+", |lex| i64::from_str_radix(&lex.slice()[2..], 2).ok())]
-    #[regex(r"0o[0-7]+", |lex| i64::from_str_radix(&lex.slice()[2..], 8).ok())]
-    #[regex(r"[0-9]+", |lex| lex.slice().parse::<i64>().ok())]
+    #[regex(r"0x[0-9a-fA-F]+", |lex| u64::from_str_radix(&lex.slice()[2..], 16).map(|v| v as i64).ok())]
+    #[regex(r"0b[01]+", |lex| u64::from_str_radix(&lex.slice()[2..], 2).map(|v| v as i64).ok())]
+    #[regex(r"0o[0-7]+", |lex| u64::from_str_radix(&lex.slice()[2..], 8).map(|v| v as i64).ok())]
+    #[regex(r"[0-9]+", |lex| lex.slice().parse::<i64>().or_else(|_| lex.slice().parse::<u64>().map(|v| v as i64)).ok())]
     #[regex(r"'([^'\\]|\\.)'", |lex| {
         let s = lex.slice();
         let content = &s[1..s.len()-1];

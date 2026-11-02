@@ -1166,6 +1166,40 @@
 - [`cap/test/test_slice_calc.cp`](file:///data/dev/cp/cap/test/test_slice_calc.cp):
   - 针对 `calcSizeForSlice` 场景的长期测试用例，覆盖实例接收者省略（默认只读借用）、类方法内成员直接无前缀访问、极简 `!usize` 错误联合签名、字面量按需收敛 `pad_char ?? 0`、默认可变 `let result`（无需 mut）、可选类型安全判空 `!= null` 以及错误捕获 `catch 0`。
 
+---
+
+## 2026-11-03 (Bun AGY 极简 `err` 关键字、128 位整型支持与代码生成零成本抽象树摇优化)
+
+### 修改文件 (Modified)
+- [`cpc/src/lexer.rs`](file:///data/dev/cp/cpc/src/lexer.rs):
+  - 词法解析器注册 `err` 关键字（作为 `Token::ErrorKw` 别名），实现 3 字母极简大小写镜像对称哲学（`err` vs `Err` vs `errdefer`）；
+  - 注册 `i128` 与 `u128` 词法标记；
+  - 优化 16 进制、2 进制、8 进制以及大整数字面量解析，防止 64 位整型边界溢出。
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs) & [`cpc/src/dcp.rs`](file:///data/dev/cp/cpc/src/dcp.rs):
+  - 在基础类型枚举 `Type` 中新增 `I128` 与 `U128` 标量变体，适配分布式哈希与超高精度中间计算。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - 错误集声明与返回联合支持 `err` 关键字（如 `err SetName { ... }`、`return err.Tag;`、`Type ! err`）；
+  - 基础类型解析支持 `i128` 与 `u128`；
+  - 模式匹配支持 `else =>` 作为后备通配分支（与 `* =>` 等价）。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 语义分析与类型检查适配 `i128` / `u128`；
+  - 增强 `can_coerce` 与字面量收敛适配超宽整型；
+  - 支持定长数组与动态数组字面量自适应（`FixedArray`/`Array` 与 `Tuple` 解构互转推导）。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 实装模块级精细化摇树按需注入（`ModuleFeatures`）：纯计算模块（如 `wyhash`）彻底消除死代码（生成体积由 2400 行剧降至 250 行）；
+  - 修正入口函数 `main` 与调度器按需注入逻辑：当存在 `main` 时确保调度内核与 `PID`/`schedule`/`cp_fmt` 正常发射；
+  - 标量与无析构类型 Drop Guard 彻底豁免；
+  - 修复整数字面量生成，保持负数正常十进制输出；
+  - 原生 Zig `switch` 模式平铺发射。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 标量类型表增加 `i128` 与 `u128` 规格定义；
+  - 新增 8.2.1 节阐述 3 字母极简哲学（`err` vs `Err` vs `errdefer`）；
+  - 新增 11.7 节《零成本转译抽象：按需摇树注入与原生发射》，详解摇树机制、Drop Guard 豁免与紧凑 Switch 生成。
+
+### 新增文件 (Added)
+- [`cap/test/test_err_features.cp`](file:///data/dev/cp/cap/test/test_err_features.cp):
+  - 长期回归测试用例，覆盖 `err` 关键字声明与返回、`!T` 推导错误联合、`128` 位整型运算、以及 `switch ... else =>` 语法，经 `./cap/bin/cap` 编译执行 100% 成功。
+
 
 
 

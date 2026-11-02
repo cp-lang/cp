@@ -230,6 +230,8 @@ impl DcpEmitter {
             Type::U32 => "u32".to_string(),
             Type::I64 => "i64".to_string(),
             Type::U64 => "u64".to_string(),
+            Type::I128 => "i128".to_string(),
+            Type::U128 => "u128".to_string(),
             Type::ISize => "isize".to_string(),
             Type::USize => "usize".to_string(),
             Type::F32 => "f32".to_string(),

@@ -555,6 +555,8 @@ pub enum Type {
     U32,
     I64,
     U64,
+    I128,
+    U128,
     ISize,
     USize,
     F32,

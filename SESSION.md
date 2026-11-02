@@ -4491,6 +4491,39 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 5. **四线文档维护**：
    - 同步更新 [`SESSION.md`](file:///data/dev/cp/SESSION.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)、[`cp_ref.md`](file:///data/dev/cp/cp_ref.md)。
 
+---
+
+## 2026-11-03 (Session Update - Git 提交：Bun AGY 极简 `err` 关键字、128 位整型支持与零成本抽象摇树优化)
+
+### 用户指令
+> bun agy 更新了 cpc 编译器代码和 cp_ref.md, error 可以使用 err 替代, 提交 git
+
+### 本次提交范围 (Commit Scope)
+1. **词法解析与关键字扩充 (`cpc/src/lexer.rs`)**：
+   - 引入 `err` 作为 `Token::ErrorKw` 官方别名，实现 `err` / `Err` / `errdefer` 3 字母极简大小写镜像对称体系；
+   - 注册 `i128` 与 `u128` 词法标记；
+   - 优化大数字面量解析防止溢出。
+2. **AST 与类型系统增强 (`cpc/src/ast.rs`, `cpc/src/dcp.rs`, `cpc/src/parser.rs`, `cpc/src/sema.rs`)**：
+   - 在 AST `Type` 中加入 `I128` 与 `U128`；
+   - 语法分析全面放行 `err SetName { ... }`、`return err.Tag;` 与 `Type ! err`；
+   - 模式匹配支持 `else =>` 作为后备分支；
+   - 语义分析与 `can_coerce` 支持超宽整型与数组字面量自适应。
+3. **代码生成零成本抽象与树摇优化 (`cpc/src/codegen.rs`)**：
+   - 模块级精细化摇树按需注入（`ModuleFeatures`）：纯计算模块切除数千行死代码；
+   - 修复入口 `main` 存在时的调度器与 `PID`/`schedule`/`cp_fmt` 协同注入；
+   - 彻底豁免标量与无 `release` 的 POD 结构体 Drop Guard 开销；
+   - 修复负数字面量十进制生成；
+   - 原生 Zig `switch` 紧凑发射。
+4. **语言设计规范同步 (`cp_ref.md`)**：
+   - 标量类型表增加 `i128` 与 `u128`；
+   - 新增 8.2.1 节阐述 3 字母极简哲学（`err` vs `Err` vs `errdefer`）；
+   - 新增 11.7 节《零成本转译抽象：按需摇树注入与原生发射》。
+5. **测试套件与验证产物**：
+   - 新增测试用例 [`cap/test/test_err_features.cp`](file:///data/dev/cp/cap/test/test_err_features.cp)，全面验证 `err` 关键字、`128` 位整型与 `else =>` 分支，经 `./cap/bin/cap` 编译执行 100% 成功；
+   - 全套长期测试用例 100% 绿灯无回归。
+6. **四线文档同步**：
+   - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)、[`SESSION.md`](file:///data/dev/cp/SESSION.md)。
+
 
 
 

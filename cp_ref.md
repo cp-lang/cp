@@ -89,6 +89,8 @@
   - [11.3 自定义元注解与类/方法装饰器](#113-自定义元注解与类方法装饰器)
   - [11.4 运行时与编译期反射系统](#114-运行时与编译期反射系统)
   - [11.5 底层控制与 unsafe 安全边界](#115-底层控制与-unsafe-安全边界)
+  - [11.6 Native Zig 逃逸舱（zig { ... }）](#116-native-zig-逃逸舱zig----)
+  - [11.7 零成本转译抽象：按需摇树注入与原生发射](#117-零成本转译抽象按需摇树注入与原生发射)
 - [十二、标准库索引与生态路线图 (Standard Library & Ecosystem Roadmap)](#第十二篇标准库索引与生态路线图)
   - [12.1 已实装官方核心标准库索引（cap:*）](#121-已实装官方核心标准库索引cap)
   - [12.2 生态演进与路线图（Roadmap）](#122-生态演进与路线图roadmap)
@@ -880,6 +882,8 @@ CP 是一门严格无 GC 的静态类型编译型语言，禁止任何隐式类�
 | `u32`    | 32-bit 无符号整型          | 无符号索引、尺寸              |
 | `i64`    | 64-bit 有符号整型          | 高精度时间戳、大计数器        |
 | `u64`    | 64-bit 无符号整型          | 高精度时间戳、大计数器        |
+| `i128`   | 128-bit 有符号整型         | 超大整型计算、高精度中间量    |
+| `u128`   | 128-bit 无符号整型         | 超大整型计算、位运算混淆计算  |
 | `usize`  | 无符号系统字长 (32/64-bit) | 内存偏移量、容器长度          |
 | `isize`  | 与符号系统字长 (32/64-bit) | 内存偏移量、容器长度          |
 | `f32`    | 32-bit 单精度浮点          | 图形计算、Tensor 运算基准     |
@@ -1220,7 +1224,7 @@ switch (result) {
 let info = switch (person) {
     { age, role } if age >= 18 && role == "Admin" => "Adult Superuser",
     { age, ... } if age < 18 => "Minor",
-    * => "Standard User"
+    else => "Standard User" // 支持 `else =>` 或 `* =>` 作为默认后备分支
 };
 ```
 
@@ -1781,8 +1785,92 @@ CP 原生引入**三态原生值类型（3-State Value Type）**，彻底终结�
 
 ### 8.2 错误返回值构建与模式匹配
 
+#### 8.2.1 3 字母极简哲学与大小写镜像对称（`err` vs `Err` vs `errdefer`）
+
+CP 语言在错误处理体系中全面采用 **3 字母极简与大小写镜像对称哲学**：
+- **小写 `err`（定义、关键字与即席命名空间）**：
+  - 声明错误集合：`err Base64Error { DecodingFailed, InvalidPadding }`；
+  - 抛出即席错误标签：`return err.InvalidPadding;`；
+  - 缺省开放错误类型：`fn parse(): string ! err`；
+  - 延迟守卫前缀对齐：`errdefer alloc.free(dest);` 天然契合 `err`；
+  - *向前兼容*：保留 `error` 作为透明别名（`error.Tag` 与 `error Name { ... }`）。
+- **大写 `Err`（构造器与模式匹配解包）**：
+  - 构造错误值：`return Err(.HostUnreachable);` 或 `return Err("Timeout");`；
+  - 模式匹配解包：`switch (res) { Err(e) => ..., data => ... }`。
+
+#### 8.2.2 极简推导错误联合（`!T`）与即席错误字面量（`err.TagName`）
+
+在日常业务逻辑、纯算法与底层计算模块中，CP 推荐使用最精炼的**推导错误联合**：
+- **函数签名**：使用前缀感叹号 `!T`（如 `!usize`, `!u8[]`, `!void`），无需预先定义冗长的错误枚举；
+- **错误抛出**：直接返回即席错误字面量 `return err.TagName;`（`err` 为内置语法关键字，无需任何模块导入）；
+- **底层映射**：在底层转译为 Zig 的推导错误联合 `anyerror!T` 与 `error.TagName`，由编译器在编译期（Comptime）自动收集函数内所有抛出的错误标签。
+
 ```typescript
-error NetworkError {
+// 示例：Base64 纯计算模块中的即席错误返回
+fn calcSizeUpperBound(source_len: usize): !usize {
+    let leftover = source_len % 4;
+    if (leftover % 4 != 0) {
+        return err.InvalidPadding; // 极简 3 字母即写即用错误字面量
+    }
+    return (source_len / 4) * 3;
+}
+
+fn decode(*dest: u8[], source: string): !void {
+    let size = calcSizeUpperBound(source.len)?; // 后缀 ? 自动向上传播错误
+    // ...
+}
+```
+
+#### 8.2.3 强类型显式错误联合（`T ! ErrorSet`）
+
+当需要对公开 API 施加严格契约，限定调用方必须且只能处理特定错误时，使用**显式错误集与中缀联合语法**：
+
+- **声明错误集**：采用 `err SetName { Variant1, Variant2 }` 原生语法声明；
+- **函数类型标注**：遵循 CP 标准**中缀感叹号规范**：`返回值类型 ! 错误集`（正常类型在最前，错误集在后，符合 TypeScript/Rust 现代直觉）；
+- **错误集合并**：通过 `||` 运算符在编译期将多个错误集合并（如 `Base64Error || AllocatorError`）；
+- **编译对齐**：CP 的 `T ! ErrorSet` 在转译到底层原生 Zig 时，自动转换为 Zig 的前缀语法 `ErrorSet!T`。
+
+```typescript
+// 1. 显式声明强类型错误集 (支持 err 与 error)
+err Base64Error {
+    DecodingFailed,
+    InvalidPadding
+}
+
+err AllocatorError {
+    OutOfMemory
+}
+
+// 2. CP 规范函数签名：返回值类型在前，中缀 !，错误集在后
+pub fn decodeAlloc(allocator: Allocator, input: string): u8[] ! Base64Error || AllocatorError {
+    let len = decodeLen(input);
+    let mut dest = allocator.alloc(u8, len)?;
+    errdefer allocator.free(dest);
+
+    let result = decode(dest, input);
+    if (!result.isSuccessful()) {
+        return err.DecodingFailed;
+    }
+    return dest[0..result.count];
+}
+```
+
+#### 8.2.4 带载荷错误与 Err 构造器
+
+```typescript
+err NetworkError {
+    Timeout,
+    ConnectionReset,
+    HostUnreachable
+}
+
+fn ping(host: string): string ! NetworkError {
+    if host == "" {
+        return Err(.HostUnreachable);
+    }
+    return "PONG";
+}
+```
     Timeout,
     ConnectionReset,
     HostUnreachable
@@ -3251,6 +3339,52 @@ export class NativeBuffer {
     }
 }
 ```
+
+---
+
+### 11.7 零成本转译抽象：按需摇树注入与原生发射
+
+为了保证 CP 代码编译为 Zig 时的极致紧凑性与零额外运行时惩罚，CP 编译器在代码生成阶段全面实装了**零成本抽象转译引擎**：
+
+#### 11.7.1 模块级精细化摇树按需注入 (Module Features Tree-Shaking)
+
+编译器对每个 CP 模块进行前置静态 AST 特征扫描（`ModuleFeatures`）：
+- **全域按需注入**：仅当模块显式使用了对应语法或特性时，才发射对应的运行时辅助代码。
+- **纯计算模块零死代码**：若模块未引入 Actor、集合容器、反射元数据或正则，编译器彻底切除全套 `PID`、`Message`、`Map/Dict/Set`、`TypeInfo` 等运行时结构，杜绝数千行死代码膨胀。
+- **示例收益**：如 `wyhash` 纯哈希模块转译代码由初始 2,401 行剧降至 256 行，极度贴近手写原生 Zig。
+
+#### 11.7.2 标量与无析构类型 Drop Guard 彻底豁免
+
+传统所有权语言在生成中间代码时往往会为所有局部变量添加守卫标记（Drop Flag）。CP 编译器通过编译期内省实施严格的豁免规则：
+- **纯标量与原始类型**：`u8`~`u128`、`i8`~`i128`、`f32`/`f64`、`bool`、原生切片 `[]T`、原生裸指针直接声明为标准 Zig 局部变量，零守卫开销；
+- **POD 结构体**：凡未显式声明 `release(*this)` 析构方法的普通结构体（如 `WyhashStateless`），完全免除 `_moved` 标志与 `defer release()` 注入；
+- **独占资源精准守护**：仅对实现了 `release(*this)` 的资源类型、动态容器与胖指针自动生成安全的析构守卫。
+
+#### 11.7.3 原生 Zig Switch 模式发射与多模式联合展开
+
+对于字面量匹配分支及多模式联合（如 `'|' | '\\' | '{' =>`），编译器自动跳过中间嵌套块作用域，直接发射为原生紧凑的 Zig 语句：
+```zig
+switch (c) {
+    '|', '\\', '{' => { ... },
+    '-' => { ... },
+    else => { ... },
+}
+```
+完全避免标签化跳转块（`__sw_blk_*`），显著提升 Zig 编译器的增量构建速度与内联优化效率。
+
+#### 11.7.4 原生空值比较（Null Comparison）与零成本指针/可选类型解包
+
+当比较操作符两端任意一侧为 `null` 字面量时（如 `if (i_opt == null)`），编译器自动生成零开销的原生 Zig 条件判断 `(i_opt == null)`，消除对通用 `cp_eq` 运行时的调用；同时运行时 `cp_eq` 具备对 `@typeInfo(T) == .null` 与 `.optional` 的编译期等价性解包支持，确保多态等价性判断 100% 严谨安全。
+
+#### 11.7.5 点路径显式错误联合与原生返回声明
+
+在对接外部或底层系统（如 Bun 原生 Writer）时，支持声明显式点路径错误类型：
+```typescript
+pub fn escapeRegExp(input: string, writer: *std.Io.Writer): void ! std.Io.Writer.Error {
+    ...
+}
+```
+编译器自动将其对齐为 Zig 原生错误联合 `std.Io.Writer.Error!void`，并对 `void` 结果发射干净的 `return;`，消除多余的结构体包装开销。
 
 ---
 

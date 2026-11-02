@@ -2139,6 +2139,30 @@ fn calcSizeForSlice(this, source: string): !usize {
 6. **测试验证**：
    - 完善 [`cap/test/test_slice_calc.cp`](file:///data/dev/cp/cap/test/test_slice_calc.cp) 为省略形参 `_`、成员直接无前缀访问、采用 `!usize` 极简签名、`let result`（无 `mut`）与 `static` 函数并存的现代代码，编译运行 100% 绿灯通过。
 
+---
+
+## 2026-11-03: Bun AGY 极简 `err` 关键字、128 位整型支持与代码生成零成本抽象树摇优化
+
+### 1. 任务背景与核心哲学
+Bun AGY 在推进 Bun 基础算法库（如 `wyhash`、`base64`）转译过程中，针对 CP 编译器的表达力与生成代码极致体积推进了重要更新：
+1. **3 字母极简大小写镜像对称哲学**：
+   - 传统 `error` 字符冗长，CP 语言确立 `err` 为一等关键字；
+   - 统一对齐 `err`（关键字/即席字面量命名空间）、`Err`（构造器与 switch 解构模式）与 `errdefer`；
+   - 支持 `err SetName { ... }`、`return err.Tag;` 与 `Type ! err`。
+2. **128 位大整数一等支持**：
+   - 引入 `i128` 与 `u128`，打通 AST、词法解析、语义类型推导与底层 Zig 映射，满足分布式哈希（如 Wyhash、Murmur3）的大数计算需要。
+3. **零成本抽象转译引擎与精细化摇树 (Tree-Shaking)**：
+   - 引入 `ModuleFeatures` 预扫描：对纯计算模块彻底剔除 `PID`、`Message`、`Map/Dict/Set` 等数千行死代码；
+   - 对标量类型与无 `release` 的 POD 结构体彻底免除 Drop Guard 守卫注入；
+   - 原生平铺发射 Zig `switch` 分支，杜绝标签化跳转块。
+4. **编译修复与健壮性兜底**：
+   - 修正存在 `main` 函数时调度器与 `PID`/`schedule`/`cp_fmt` 的协同注入；
+   - 修复整数字面量生成，保持负数正常十进制输出，杜绝溢出。
+
+### 2. 测试与验证
+- 创建并跑通长期测试用例 [`cap/test/test_err_features.cp`](file:///data/dev/cp/cap/test/test_err_features.cp)，覆盖 `err` 关键字、`i128`/`u128` 与 `else =>` 分支，经 `cap` 编译执行 100% 成功；
+- 现有测试套件（包括 `test_slice_calc.cp`、`test_bun_features.cp`、`test_type_conversion.cp`）100% 绿灯。
+
 
 
 

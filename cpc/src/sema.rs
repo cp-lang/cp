@@ -1237,7 +1237,10 @@ impl Analyzer {
                     "string" => *ty = Type::String,
                     "i32" => *ty = Type::I32,
                     "u32" => *ty = Type::U32,
+                    "i64" => *ty = Type::I64,
                     "u64" => *ty = Type::U64,
+                    "i128" => *ty = Type::I128,
+                    "u128" => *ty = Type::U128,
                     "f32" => *ty = Type::F32,
                     "f64" => *ty = Type::F64,
                     "usize" => *ty = Type::USize,
@@ -2413,6 +2416,8 @@ impl Analyzer {
                 | Type::U32
                 | Type::I64
                 | Type::U64
+                | Type::U128
+                | Type::I128
                 | Type::ISize
                 | Type::USize
         )
@@ -2436,6 +2441,8 @@ impl Analyzer {
             Type::I32 => "i32".to_string(),
             Type::U64 => "u64".to_string(),
             Type::I64 => "i64".to_string(),
+            Type::U128 => "u128".to_string(),
+            Type::I128 => "i128".to_string(),
             Type::USize => "usize".to_string(),
             Type::ISize => "isize".to_string(),
             Type::F32 => "f32".to_string(),
@@ -2457,8 +2464,8 @@ impl Analyzer {
             Type::I16 => (-32768..=32767).contains(&val),
             Type::U32 => val >= 0 && val <= u32::MAX as i64,
             Type::I32 => val >= i32::MIN as i64 && val <= i32::MAX as i64,
-            Type::U64 | Type::USize => val >= 0,
-            Type::I64 | Type::ISize => true,
+            Type::U64 | Type::U128 | Type::USize => true,
+            Type::I64 | Type::I128 | Type::ISize => true,
             Type::F32 | Type::F64 => true,
             _ => false,
         }
@@ -2470,15 +2477,17 @@ impl Analyzer {
         }
         // Small unsigned -> larger unsigned
         match (src, target) {
-            (Type::U8, Type::U16 | Type::U32 | Type::U64 | Type::USize) => true,
-            (Type::U16, Type::U32 | Type::U64 | Type::USize) => true,
-            (Type::U32, Type::U64 | Type::USize) => true,
+            (Type::U8, Type::U16 | Type::U32 | Type::U64 | Type::U128 | Type::USize) => true,
+            (Type::U16, Type::U32 | Type::U64 | Type::U128 | Type::USize) => true,
+            (Type::U32, Type::U64 | Type::U128 | Type::USize) => true,
+            (Type::U64, Type::U128) => true,
             (Type::U64, Type::USize) | (Type::USize, Type::U64) => true,
 
             // Small signed -> larger signed
-            (Type::I8, Type::I16 | Type::I32 | Type::I64 | Type::ISize) => true,
-            (Type::I16, Type::I32 | Type::I64 | Type::ISize) => true,
-            (Type::I32, Type::I64 | Type::ISize) => true,
+            (Type::I8, Type::I16 | Type::I32 | Type::I64 | Type::I128 | Type::ISize) => true,
+            (Type::I16, Type::I32 | Type::I64 | Type::I128 | Type::ISize) => true,
+            (Type::I32, Type::I64 | Type::I128 | Type::ISize) => true,
+            (Type::I64, Type::I128) => true,
             (Type::I64, Type::ISize) | (Type::ISize, Type::I64) => true,
 
             // Int / Float to larger Float
@@ -2684,6 +2693,29 @@ impl Analyzer {
                     self.can_coerce(elem, t2, None)
                 }
             }
+            (Type::FixedArray(t_elem, t_len), Type::Tuple(s_elems)) => {
+                if *t_len != s_elems.len() {
+                    return false;
+                }
+                if let Some(Expr::Array(elements)) = init_expr {
+                    elements
+                        .iter()
+                        .zip(s_elems)
+                        .all(|(el, s)| self.can_coerce(t_elem, s, Some(el)))
+                } else {
+                    s_elems.iter().all(|s| self.can_coerce(t_elem, s, None))
+                }
+            }
+            (Type::Array(t_elem), Type::Tuple(s_elems)) => {
+                if let Some(Expr::Array(elements)) = init_expr {
+                    elements
+                        .iter()
+                        .zip(s_elems)
+                        .all(|(el, s)| self.can_coerce(t_elem, s, Some(el)))
+                } else {
+                    s_elems.iter().all(|s| self.can_coerce(t_elem, s, None))
+                }
+            }
             (Type::Tuple(t1), Type::Tuple(t2)) => {
                 if t1.len() != t2.len() {
                     return false;
@@ -2735,6 +2767,10 @@ impl Analyzer {
             | (Type::Array(t2), Type::FixedArray(elem, _)) => self.types_eq(elem, t2),
             (Type::Array(elem), Type::Tuple(tys)) | (Type::Tuple(tys), Type::Array(elem)) => {
                 tys.iter().all(|t| self.types_eq(elem, t))
+            }
+            (Type::FixedArray(elem, len), Type::Tuple(tys))
+            | (Type::Tuple(tys), Type::FixedArray(elem, len)) => {
+                *len == tys.len() && tys.iter().all(|t| self.types_eq(elem, t))
             }
             (Type::Tuple(t1), Type::Tuple(t2)) => {
                 if t1.len() != t2.len() {
