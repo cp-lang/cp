@@ -2207,3 +2207,28 @@ Bun AGY 在推进 Bun 基础算法库（如 `wyhash`、`base64`）转译过程�
 - 编写并跑通长期回归测试 [`cap/test/test_bun_enums.cp`](file:///data/dev/cp/cap/test/test_bun_enums.cp) 与 [`cap/test/test_root_inline.cp`](file:///data/dev/cp/cap/test/test_root_inline.cp)；
 - 全套既有测试用例（`test_err_features.cp`、`test_slice_calc.cp`、`test_bun_features.cp`、`test_type_conversion.cp`）全量回归通过；
 - Rust 前端运行 `cargo fmt` 代码格式化，`cargo check` 与 `cargo test` 100% 成功。
+---
+
+## 2026-11-04: 原生逃逸舱类型值传递与函数未使用参数精准抑制
+
+### 1. 业务背景与问题分析
+在 Bun.js 1.3.14 诸多底层网络和数据结构向 CP 语言转译的过程中（例如 `URL`、`Blob`、`Headers`），存在两类突出的编译器痛点：
+1. **外部原生类型被误判为堆分配类**：
+   在 `zig { ... }` 顶层逃逸舱中声明的 Zig 原生结构体（如 `pub const MyConfig = struct { ... };`），CP 编译器前端在之前的逻辑中若没有显式匹配到 `@This()` 等特殊标记，会将未在 CP 侧声明的类型回退视作 class 处理，在参数传递时强制发射 `cfg: *MyConfig` 指针，引发 Zig 的类型失配；
+2. **函数形参无条件取地址与未使用警告**：
+   旧编译器在函数头部无脑发射 `_ = &param;`，不仅对不可变标量/结构体取地址违背 Zig 最佳实践，而且当参数在内嵌 `zig { ... }` 中被引用时仍然写抑制代码，显得十分粗糙。
+
+### 2. 技术方案与实现细节
+1. **类型白名单与值语义收敛**：
+   在 `cpc/src/codegen.rs` 的扫描阶段，彻底放开顶层 `zig { ... }` 声明的符号判定，直接无条件将提取出的名称注入 `self.ref_classes` 和 `self.value_classes`，确保参数类型直接发射为 `cfg: MyConfig`。
+2. **多层块与原生逃逸舱递归嗅探 (`block_contains_ident`)**：
+   实现 `block_contains_ident`，递归穿透扫描 `Stmt::Block`、`Stmt::UnsafeBlock`、`Stmt::ComptimeBlock` 以及 `Stmt::If` 的各分支，检查其中的 `Expr::Zig` 是否包含形参名称。
+3. **精准参数抑制逻辑**：
+   结合 `self.last_use_map`（CP 表达式层级引用）与 `block_contains_ident`（内嵌原生块层级引用）：
+   - 若 `is_used` 为真，则完全不输出抑制语句；
+   - 若 `is_used` 为假，输出标准 Zig 丢弃语句 `_ = param;`。
+
+### 3. 测试与回归验证
+- 编写长期回归测试用例 [`cap/test/test_escape_param_opt.cp`](file:///data/dev/cp/cap/test/test_escape_param_opt.cp)，经 `./cap/bin/cap` 编译执行 100% 成功；
+- 全量既有测试用例（`test_bun_enums.cp`、`test_err_features.cp`、`test_slice_calc.cp`、`test_bun_features.cp`、`test_type_conversion.cp`、`test_root_inline.cp`）全量回归通过；
+- Rust 前端运行 `cargo fmt`、`cargo check` 与 `cargo test` 100% 绿灯。

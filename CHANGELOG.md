@@ -1252,3 +1252,18 @@
 
 
 
+---
+
+## 2026-11-04 (原生逃逸舱类型值传递与函数未使用参数精准抑制)
+
+### 修改文件 (Modified)
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 顶层 `zig { ... }` 块符号扫描时，将所有声明的类型与别名自动加入 `ref_classes` 与 `value_classes` 白名单，确保跨模块引用时按原生值类型传递而非强加堆指针 `*T`；
+  - 新增 `block_contains_ident` 辅助函数，递归扫描函数体内所有内嵌 `zig { ... }` 块是否包含指定形参标识符；
+  - 重构函数形参未使用抑制逻辑：已引用的形参不生成任何抑制代码，真正未使用的形参生成符合 Zig 规范的 `_ = param;`（取代无条件取地址 `_ = &param;`）。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 新增第 13.2 节《原生逃逸舱类型映射与参数引用优化》，详细阐明外部原生类型直接发射与参数引用优化的工程规范。
+
+### 新增文件 (Added)
+- [`cap/test/test_escape_param_opt.cp`](file:///data/dev/cp/cap/test/test_escape_param_opt.cp):
+  - 长期回归测试用例，验证逃逸舱原生结构体纯值传递、内嵌原生块中形参引用感知以及未使用参数抑制，经 `./cap/bin/cap` 编译执行 100% 成功。

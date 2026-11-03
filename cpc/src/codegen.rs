@@ -1052,13 +1052,9 @@ impl Codegen {
                         let mut parts = rest.split(&[' ', ':', '='][..]);
                         if let Some(name) = parts.next() {
                             let name = name.trim();
-                            if !name.is_empty()
-                                && (rest.contains("@This()")
-                                    || rest.contains("struct")
-                                    || rest.contains("enum")
-                                    || rest.contains("@import"))
-                            {
+                            if !name.is_empty() {
                                 self.ref_classes.insert(name.to_string());
+                                self.value_classes.insert(name.to_string());
                             }
                         }
                     }
@@ -2515,13 +2511,9 @@ impl Codegen {
                         let mut parts = rest.split(&[' ', ':', '='][..]);
                         if let Some(name) = parts.next() {
                             let name = name.trim();
-                            if !name.is_empty()
-                                && (rest.contains("@This()")
-                                    || rest.contains("struct")
-                                    || rest.contains("enum")
-                                    || rest.contains("@import"))
-                            {
+                            if !name.is_empty() {
                                 self.ref_classes.insert(name.to_string());
+                                self.value_classes.insert(name.to_string());
                             }
                         }
                     }
@@ -6017,6 +6009,39 @@ impl Codegen {
         self.generate_function_decorated(func, None);
     }
 
+    fn block_contains_ident(block: &BlockStmt, id: &str) -> bool {
+        for s in &block.body {
+            match s {
+                Stmt::Expr(Expr::Zig(z)) => {
+                    if z.code.contains(id) {
+                        return true;
+                    }
+                }
+                Stmt::Block(b) | Stmt::UnsafeBlock(b) | Stmt::ComptimeBlock(b) => {
+                    if Self::block_contains_ident(b, id) {
+                        return true;
+                    }
+                }
+                Stmt::If(i) => {
+                    if let Stmt::Block(b) = &*i.cons {
+                        if Self::block_contains_ident(b, id) {
+                            return true;
+                        }
+                    }
+                    if let Some(eb) = &i.alt {
+                        if let Stmt::Block(b) = &**eb {
+                            if Self::block_contains_ident(b, id) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
     fn generate_function_logic(&mut self, raw_func: &Function, class_name: Option<&String>) {
         if class_name.is_none()
             && (raw_func.ident.sym == "print"
@@ -6179,8 +6204,10 @@ impl Codegen {
             }
             for p in &func.params {
                 if p.ident.sym != "this" && p.ident.sym != "_" && p.ident.sym != "self" {
-                    if !p.is_comptime {
-                        self.writeln(&format!("_ = &{};", p.ident.sym));
+                    let is_used = self.last_use_map.contains_key(&p.ident.sym)
+                        || Self::block_contains_ident(&func.body, &p.ident.sym);
+                    if !p.is_comptime && !is_used {
+                        self.writeln(&format!("_ = {};", p.ident.sym));
                     }
                     if p.is_move {
                         self.writeln(&format!(

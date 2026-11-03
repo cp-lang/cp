@@ -4603,3 +4603,36 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 
 
 
+---
+
+## 2026-11-04 (Session Update - 原生逃逸舱类型映射、未使用参数精准抑制与 Git 提交)
+
+### 用户指令
+> bun 迁移 agy 修改了cp编译器源代码和对应的cp_ref.md, 你仔细审核一下, 准备提交到git
+
+### 审核与执行结果汇报
+在对 Bun 迁移推进的 `cpc/src/codegen.rs` 与 `cp_ref.md` 进行审查与回归验证过程中，确认并落实了以下两项编译器关键升级：
+
+1. **原生逃逸舱类型常量自动白名单化**：
+   - 扫描顶层 `zig { ... }` 块时，对声明的常量与类型别名（`pub const T = ...`），自动同步登记到 `ref_classes` 与 `value_classes`；
+   - 在 CP 代码函数形参或局部变量中使用此类外部原生类型时，编译器将其视作纯值类型（POD），直接发射为 Zig 原生类型 `T`，彻底根除将其当作堆类（Class）而强行生成为堆指针 `*T` 的弊端。
+2. **未使用参数精准抑制与原生块引用感知 (`block_contains_ident`)**：
+   - 废除无条件对所有参数生成取地址 `_ = &param;` 的陈旧逻辑；
+   - 引入 `block_contains_ident` 递归嗅探机制，判定函数体内的内嵌 `zig { ... }` 原生块是否引用了该参数；
+   - 若参数在常规 CP 代码或内嵌原生块中已被引用，编译器**彻底不生成任何多余的抑制语句**；
+   - 仅当参数真正未被任何代码使用（`!is_used`）时，发射符合 Zig 规范的干净抑制语句 `_ = param;`。
+3. **长期回归测试验证**：
+   - 新增测试套件 [`cap/test/test_escape_param_opt.cp`](file:///data/dev/cp/cap/test/test_escape_param_opt.cp)，全量验证外部原生结构体按值传递、内嵌原生块参数引用感知以及真实未使用参数抑制；
+   - 经 `./cap/bin/cap` 编译执行 100% 成功，全套既有长期测试用例 100% 绿灯无回归。
+
+### 本次提交范围 (Commit Scope)
+1. **代码生成与参数优化 (`cpc/src/codegen.rs`)**：
+   - 顶层 `zig { ... }` 符号扫描加入 `value_classes`；
+   - 新增 `block_contains_ident` 检测原生块参数引用；
+   - 优化函数参数生成：参数已使用时不生成冗余抑制，未使用时生成 `_ = param;`。
+2. **设计规范手册同步 (`cp_ref.md`)**：
+   - 新增第 13.2 节《原生逃逸舱类型映射与参数引用优化》。
+3. **长期测试套件补充 (`cap/test/test_escape_param_opt.cp`)**：
+   - 长期回归测试用例，覆盖逃逸舱原生类型按值传递与参数抑制优化。
+4. **四线文档维护**：
+   - 同步更新 [`SESSION.md`](file:///data/dev/cp/SESSION.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)、[`cp_ref.md`](file:///data/dev/cp/cp_ref.md)。
