@@ -152,7 +152,9 @@ impl ModuleFeatures {
                 self.scan_stmt(&w.body);
             }
             Stmt::For(for_stmt) => {
-                self.needs_iter_helpers = true;
+                if !matches!(for_stmt.expr, Expr::Range { .. }) {
+                    self.needs_iter_helpers = true;
+                }
                 self.scan_expr(&for_stmt.expr);
                 self.scan_stmt(&for_stmt.body);
             }
@@ -206,7 +208,8 @@ impl ModuleFeatures {
 
     fn scan_type(&mut self, t: &Type) {
         match t {
-            Type::ResultType { .. } | Type::ErrorUnion(_) => self.needs_result_error = true,
+            Type::ResultType { .. } => self.needs_result_error = true,
+            Type::ErrorUnion(_) => {}
             Type::Dict(_, _) | Type::Map(_, _) | Type::Set(_) => self.needs_collections = true,
             Type::PID => self.needs_actors = true,
             Type::Ref(id) => {
@@ -1017,7 +1020,7 @@ impl Codegen {
             }
             if let ModuleItem::Decl(Decl::Class(c)) = item {
                 self.globals.insert(c.ident.sym.clone());
-                if c.is_ref {
+                if c.is_ref || c.meta.iter().any(|m| m.name.sym == "root") {
                     self.ref_classes.insert(c.ident.sym.clone());
                 }
                 if c.implements.iter().any(|i| i.sym == "Agent") {
@@ -1277,7 +1280,7 @@ impl Codegen {
         self.writeln("");
 
         // --- Tri-State Result, Built-in Error, String Concat & Pattern Helpers ---
-        if features.needs_result_error {
+        if !self.is_lib_mode && features.needs_result_error {
             self.writeln("pub fn CpResult(comptime T: type, comptime E: type) type {");
             self.writeln(
                 "    return union(enum) { ok: T, err: E, pub const __IS_CP_RESULT = true; };",
@@ -2134,7 +2137,7 @@ impl Codegen {
             }
         }
 
-        if features.needs_result_error {
+        if !self.is_lib_mode && features.needs_result_error {
             self.writeln("fn CpUnwrapOkType(comptime T: type) type { if (is_cp_result(T)) { const OkT = @FieldType(T, \"ok\"); if (@typeInfo(OkT) == .optional) return @typeInfo(OkT).optional.child; return OkT; } if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child; return T; }");
             self.writeln("fn cp_has_ok_val(v: anytype) bool { const T = @TypeOf(v); if (comptime is_cp_result(T)) { if (v != .ok) return false; const OkT = @FieldType(T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok != null; } else { return true; } } else if (comptime @typeInfo(T) == .optional) { return v != null; } else { return true; } }");
             self.writeln("fn cp_unwrap_ok_val(v: anytype) CpUnwrapOkType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_cp_result(T)) { const OkT = @FieldType(T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok.?; } else { return v.ok; } } else if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; } }");
@@ -2564,10 +2567,12 @@ impl Codegen {
             self.writeln("export const _nif_entry = beam.defineNifEntry(\"cp_agents_lib\", &[_]beam.NifFunc{ .{ .name = \"native_dispatch\", .arity = 5, .fptr = @ptrCast(&native_dispatch_nif), .flags = 0 } }, null, null, null);");
             self.writeln("export fn nif_init() *beam.NifEntry { return @constCast(&_nif_entry); }");
         } else {
-            self.writeln("\npub var global_io: std.Io = undefined;");
-            self.writeln("pub var __cap_test_total: usize = 0;");
-            self.writeln("pub var __cap_test_passed: usize = 0;");
-            self.writeln("pub var __cap_test_failed: usize = 0;");
+            if !self.is_lib_mode {
+                self.writeln("\npub var global_io: std.Io = undefined;");
+                self.writeln("pub var __cap_test_total: usize = 0;");
+                self.writeln("pub var __cap_test_passed: usize = 0;");
+                self.writeln("pub var __cap_test_failed: usize = 0;");
+            }
 
             let has_main = self.fn_sigs.contains_key("main");
             if !self.is_lib_mode && has_main {
@@ -2814,6 +2819,28 @@ impl Codegen {
             || class.ident.sym == "Set"
             || class.ident.sym == "Box"
         {
+            return;
+        }
+        let is_root = class.meta.iter().any(|m| m.name.sym == "root");
+        if is_root {
+            self.ref_classes.insert(class.ident.sym.clone());
+            writeln!(self.output, "pub const {} = @This();\n", class.ident.sym).unwrap();
+            for f in &class.fields {
+                let default_init = if f.ident.sym == "len" {
+                    " = 0,"
+                } else {
+                    " = undefined,"
+                };
+                self.writeln(&format!(
+                    "{}: {}{}",
+                    f.ident.sym,
+                    self.map_type(&f.ty),
+                    default_init
+                ));
+            }
+            for m in &class.methods {
+                self.generate_function_decorated(m, Some(&class.ident.sym));
+            }
             return;
         }
         let type_id = Self::fnv1a_type_id(&class.ident.sym);
@@ -5969,10 +5996,12 @@ impl Codegen {
                 ));
             }
             self.extract_locals_simple(&func.body);
+            let is_inline = func.meta.iter().any(|m| m.name.sym == "inline");
+            let inline_kw = if is_inline { "inline " } else { "" };
             writeln!(
                 self.output,
-                "\npub fn {}({}) {} {{",
-                zig_name, params_str, zig_ret_ty
+                "\npub {}fn {}({}) {} {{",
+                inline_kw, zig_name, params_str, zig_ret_ty
             )
             .unwrap();
             self.indent();
@@ -11627,7 +11656,13 @@ impl Codegen {
             }
             Type::Shared(inner) => self.map_type(inner),
             Type::Optional(inner) => format!("?{}", self.map_type(inner)),
-            Type::ErrorUnion(inner) => format!("anyerror!{}", self.map_type(inner)),
+            Type::ErrorUnion(inner) => {
+                if self.is_lib_mode {
+                    format!("!{}", self.map_type(inner))
+                } else {
+                    format!("anyerror!{}", self.map_type(inner))
+                }
+            }
             Type::ResultType { ok, err } => {
                 let err_str = self.map_error_type(err);
                 let ok_str = self.map_type(ok);

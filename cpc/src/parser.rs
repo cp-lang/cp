@@ -1952,6 +1952,9 @@ impl<'a> Parser<'a> {
         self.expect(Token::LBrace)?;
         while self.peek() != Some(&Token::RBrace) && self.peek().is_some() {
             let meta_list = self.parse_meta_list()?;
+            if self.peek() == Some(&Token::Export) {
+                self.bump()?;
+            }
             if matches!(
                 self.peek(),
                 Some(Token::Fn) | Some(Token::Async) | Some(Token::Static)
@@ -1965,6 +1968,10 @@ impl<'a> Parser<'a> {
                 let ty = self.parse_type()?;
                 if matches!(ty, Type::BorrowType { .. }) {
                     is_ref = true;
+                }
+                if self.peek() == Some(&Token::Assign) {
+                    self.bump()?;
+                    let _ = self.parse_expr()?;
                 }
                 if self.peek() == Some(&Token::Comma) || self.peek() == Some(&Token::Semicolon) {
                     self.bump()?;
