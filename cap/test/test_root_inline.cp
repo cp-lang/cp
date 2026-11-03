@@ -18,7 +18,7 @@ fn main(): void {
     let buf = BufferHelper{ len: 5 };
     buf.inc(10);
     if (buf.getLen() != 15) {
-        print("Root inline test failed: expected 15, got {d}\n", [buf.getLen()]);
+        print("Root inline test failed\n");
         return;
     }
     print("Root and inline feature tests passed successfully!\n");

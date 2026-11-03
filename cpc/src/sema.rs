@@ -287,6 +287,7 @@ impl Analyzer {
                     },
                     ty: Type::I32,
                     meta: Vec::new(),
+                    default: None,
                 },
                 crate::ast::Field {
                     span: mock_span.clone(),
@@ -296,6 +297,7 @@ impl Analyzer {
                     },
                     ty: Type::String,
                     meta: Vec::new(),
+                    default: None,
                 },
             ],
             methods: vec![],
@@ -607,8 +609,14 @@ impl Analyzer {
                         }
                     }
                 }
-                // Auto-generate memberwise init if not present and fields are non-empty
-                if !cls.methods.iter().any(|m| m.ident.sym == "init") && !cls.fields.is_empty() {
+                // Auto-generate memberwise init if not present and fields are non-empty (exempting @root and @value structs)
+                let is_root = cls.meta.iter().any(|m| m.name.sym == "root");
+                let is_value = cls.meta.iter().any(|m| m.name.sym == "value");
+                if !is_root
+                    && !is_value
+                    && !cls.methods.iter().any(|m| m.ident.sym == "init")
+                    && !cls.fields.is_empty()
+                {
                     let mock_span = Span { start: 0, end: 0 };
                     let mut init_params = Vec::new();
                     let mut init_stmts = Vec::new();
@@ -1792,6 +1800,55 @@ impl Analyzer {
             }
             Decl::Enum(e) => {
                 self.validate_meta_items(&e.meta, "enum")?;
+                for m in &e.methods {
+                    self.validate_meta_items(&m.meta, "method")?;
+                    let old_async = self.current_fn_is_async;
+                    let old_unsafe = self.current_fn_is_unsafe;
+                    self.current_fn_is_async = m.is_async;
+                    self.current_fn_is_unsafe = m.is_unsafe;
+                    self.enter_scope();
+                    let self_ty = Type::Ref(e.ident.clone());
+                    let _ = self.define(
+                        "this".to_string(),
+                        SymbolKind::Var {
+                            ty: self_ty.clone(),
+                            kind: VarDeclKind::Let,
+                        },
+                        e.ident.span,
+                    );
+                    let _ = self.define(
+                        "_".to_string(),
+                        SymbolKind::Var {
+                            ty: self_ty.clone(),
+                            kind: VarDeclKind::Let,
+                        },
+                        e.ident.span,
+                    );
+                    let _ = self.define(
+                        "self".to_string(),
+                        SymbolKind::Var {
+                            ty: self_ty.clone(),
+                            kind: VarDeclKind::Let,
+                        },
+                        e.ident.span,
+                    );
+                    for p in &m.params {
+                        if p.ident.sym != "this" && p.ident.sym != "_" && p.ident.sym != "self" {
+                            let _ = self.define(
+                                p.ident.sym.clone(),
+                                SymbolKind::Var {
+                                    ty: p.ty.clone(),
+                                    kind: VarDeclKind::Let,
+                                },
+                                p.ident.span,
+                            );
+                        }
+                    }
+                    self.analyze_block(&m.body)?;
+                    self.exit_scope();
+                    self.current_fn_is_async = old_async;
+                    self.current_fn_is_unsafe = old_unsafe;
+                }
             }
             _ => {}
         }
@@ -3365,6 +3422,7 @@ impl Analyzer {
                             ident: k.clone(),
                             ty,
                             meta: Vec::new(),
+                            default: None,
                         };
                         if let Some(pos) =
                             fs.iter().position(|existing| existing.ident.sym == k.sym)

@@ -1200,6 +1200,42 @@
 - [`cap/test/test_err_features.cp`](file:///data/dev/cp/cap/test/test_err_features.cp):
   - 长期回归测试用例，覆盖 `err` 关键字声明与返回、`!T` 推导错误联合、`128` 位整型运算、以及 `switch ... else =>` 语法，经 `./cap/bin/cap` 编译执行 100% 成功。
 
+---
+
+## 2026-11-04 (Bun 迁移深水区支持：转义标识符、纯枚举定长整型标签、方法/嵌入逃逸舱与多模式 Switch 匹配)
+
+### 修改文件 (Modified)
+- [`cpc/src/lexer.rs`](file:///data/dev/cp/cpc/src/lexer.rs):
+  - 注册 `Token::Ident` 转义标识符正则 `@"..."`，无缝支持网络协议、HTTP 标头与 Web 标准等带连字符名称（如 `@"same-origin"`、`@"no-cors"`）。
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs):
+  - `EnumDecl` 增添 `methods: Vec<Function>`（实例方法）、`tag_type: Option<Type>`（底层定长整型类型）与 `extra_zig: Vec<String>`（内嵌原生 Zig 逃逸舱）；
+  - `Field` 增添 `default: Option<Expr>`，支持字段默认初值赋值。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - 实现通用 `parse_raw_zig_block`，支持在枚举体内直接内嵌 `zig { ... }` 原生逃逸舱注入编译期常量映射；
+  - 支持无载荷纯枚举定义定长整型底层标签（如 `enum FetchRequestMode: u2 { ... }`）；
+  - 支持在枚举体内定义实例方法与静态方法；
+  - 模式匹配全面支持在 `in_switch_arm` 中以逗号 `,` 分隔多模式合并（如 `case .@"same-origin", .@"no-cors" =>`）；
+  - 彻底修正 `Token::Bang` 与 `Token::Tilde` 一元运算符优先级绑定，调用 `parse_postfix_expr` 优先绑定后置方法与属性访问。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 适配并深度分析枚举内实例方法与静态方法，建立独立局部作用域并注入 `this`、`_`、`self` 接收者；
+  - 修复匿名结构体推导中构造 `ast::Field` 时遗漏的 `default: None`。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 纯枚举直接发射为 Zig 原生 `pub const Name = enum(Tag) { ... };`；
+  - 纯枚举变体带点访问（`Expr::Member` 与 `Expr::EnumInit`）统一生成 `Name.Variant`，杜绝结构体初始化语法报错；
+  - 修正枚举实例方法生成逻辑，以值拷贝而非指针作为接收者（`self: EnumName`），并跳过形参列表中重复的 `self`；
+  - 修复摇树中 `scan_expr` 遗漏 `Expr::Array` 导致 `cp_array_lit` 未定义的问题；
+  - 智能识别纯枚举 Switch 穷尽匹配（`is_exhaustive_enum`），全覆盖时自动剔除不可达通配分支并禁止发射 `else => unreachable`；
+  - 修复匿名结构体推导中构造 `ast::Field` 时遗漏的 `default: None`。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 新增第 3.5.4 节《特殊符号变体、底层标签与嵌套逃逸舱》，规范转义标识符 `@"..."`、定长整型底层标签（`: u2`）、枚举内嵌 `zig { ... }` 块与实例方法规范；
+  - 完善第 4.3 节关于联合多模式匹配（支持 `|` 与 `,` 逗号合并）说明。
+
+### 新增文件 (Added)
+- [`cap/test/test_bun_enums.cp`](file:///data/dev/cp/cap/test/test_bun_enums.cp):
+  - 涵盖转义标识符 `@"same-origin"`、定长整型底层标签 `: u2`、枚举内实例方法调用、枚举内嵌 `zig { ... }` 逃逸舱函数、逗号多模式合并匹配以及穷尽 Switch 校验的长期回归测试用例，经 `./cap/bin/cap` 编译执行 100% 成功。
+- [`cap/test/test_root_inline.cp`](file:///data/dev/cp/cap/test/test_root_inline.cp):
+  - 验证 `@inline` 实例方法调用与数组字面量格式化输出的长期回归测试用例，经 `./cap/bin/cap` 编译执行 100% 成功。
+
 
 
 

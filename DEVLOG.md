@@ -2175,3 +2175,35 @@ Bun AGY 在推进 Bun 基础算法库（如 `wyhash`、`base64`）转译过程�
 
 
 
+---
+
+## 2026-11-04: Bun 迁移深水区编译器特性与审核实录 (转义标识符、纯枚举定长整型标签与关键 Bug 歼灭记)
+
+### 1. 业务背景与架构演进
+随着 Bun.js 1.3.14 核心模块（如 HTTP JSC、Fetch Request、URL 处理等）全面向 CP-BEAM 原生化迁移，我们在编译器内核层面迎来了前所未有的底层语义需求：
+1. **Web 与网络标准特殊符号的无损表达**：
+   HTTP 规范与 Web 标准中包含大量带连字符或语言保留字名称（如 `@"same-origin"`、`@"no-cors"`、`@"user-agent"`）。CP 必须在 Lexer 和 Parser 层面支持 Zig 原生的 `@"identifier"` 逃逸标识符字面量，且不能破坏普通的字符串与注解解析。
+2. **纯枚举（Pure Enum）与定长整型标签（`: u2`）**：
+   在底层内存敏感场景中，无载荷枚举往往被直接紧凑打包至位域或整型字段中（如 4 种请求模式仅需 2 位 `u2`）。CP 编译器必须能够支持显式底层整型标签 `: u2`，并将无载荷枚举直接映射为 Zig 原生的 `enum(u2)`，彻底摆脱带载荷 Tagged Union 的臃肿开销。
+3. **嵌套原生逃逸舱与模块编译期映射**：
+   允许在枚举体内直接嵌套 `zig { ... }` 块，为枚举提供类似 `ComptimeStringMap` 或底层 C 桥接转换函数的零开销静态元数据注入。
+4. **多模式 Switch 逗号合并**：
+   在模式匹配中全面支持标准 Web 开发习惯的逗号分隔模式合并（`case .A, .B =>`）。
+
+### 2. 深度审核与 5 大隐匿缺陷排查剖析
+在对提交的代码进行端到端编译和测试验证时，严谨排查并修复了 5 大致命缺陷：
+1. **结构体初值 AST 构造缺漏修复**：
+   `ast::Field` 引入 `default: Option<Expr>` 后，排查并修复了 `codegen.rs:4538` 与 `sema.rs:3406` 匿名结构体推导中遗漏的 `default: None` 初始化字段，使 Rust 前端编译顺利通过。
+2. **Tree-shaking 数组字面量扫描修复**：
+   在 `codegen.rs` 的 `scan_expr` 中补充 `Expr::Array` 对 `needs_array_helpers = true` 的标记，确保在格式化参数等场景生成数组字面量时，`cp_array_lit` 辅助函数始终被注入，消除 Zig 报 `use of undeclared identifier 'cp_array_lit'`。
+3. **纯枚举带点成员访问语法修复**：
+   在 `codegen.rs` 的 `Expr::Member` 表达式生成逻辑中加入对纯枚举（`!has_payloads`）的识别，生成原生 `Enum.Variant` 而非结构体初始化语法 `Enum{ .Variant = {} }`。
+4. **一元逻辑非操作符结合性颠倒修复**：
+   将 `parser.rs` 中 `Token::Bang` 与 `Token::Tilde` 对 `self.parse_primary_expr()` 的调用重构为 `self.parse_postfix_expr()`，彻底纠正 `!mode.isSameOrigin()` 被错误结合成 `(@not(mode)).isSameOrigin()` 的语法树构建错误。
+5. **穷尽枚举模式匹配不可达通配分支智能剔除**：
+   在 `codegen.rs` 中实现 `is_exhaustive_enum` 穷尽性变体收集推导，当纯枚举所有可能值均已被显式覆盖时，自动忽略不可达通配分支且禁止发射 `else => unreachable`，解决 Zig 严格类型系统报 `unreachable else prong; all cases already handled` 的编译阻断。
+
+### 3. 测试与验证
+- 编写并跑通长期回归测试 [`cap/test/test_bun_enums.cp`](file:///data/dev/cp/cap/test/test_bun_enums.cp) 与 [`cap/test/test_root_inline.cp`](file:///data/dev/cp/cap/test/test_root_inline.cp)；
+- 全套既有测试用例（`test_err_features.cp`、`test_slice_calc.cp`、`test_bun_features.cp`、`test_type_conversion.cp`）全量回归通过；
+- Rust 前端运行 `cargo fmt` 代码格式化，`cargo check` 与 `cargo test` 100% 成功。

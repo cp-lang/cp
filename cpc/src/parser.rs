@@ -1022,6 +1022,7 @@ impl<'a> Parser<'a> {
                     ident: f_ident,
                     ty,
                     meta: Vec::new(),
+                    default: None,
                 });
                 if self.peek() == Some(&Token::Comma) {
                     self.bump()?;
@@ -1279,28 +1280,8 @@ impl<'a> Parser<'a> {
             }
             Some(Token::LBrace) => Ok(Stmt::Block(self.parse_block_stmt()?)),
             Some(Token::ZigEscape) => {
-                let start = self.bump()?.1.start;
-                self.expect(Token::LBrace)?;
-                let code_start = self.peek_span().start;
-                let mut brace_count = 1;
-                let mut code_end = code_start;
-                while brace_count > 0 && self.peek().is_some() {
-                    let (t, span) = self.bump()?;
-                    match t {
-                        Token::LBrace => brace_count += 1,
-                        Token::RBrace => brace_count -= 1,
-                        _ => {}
-                    }
-                    if brace_count == 0 {
-                        code_end = span.start;
-                    }
-                }
-                let end = self.peek_span().end;
-                let raw_code = &self.input[code_start..code_end];
-                Ok(Stmt::Expr(Expr::Zig(ZigEscapeExpr {
-                    span: Span { start, end },
-                    code: raw_code.trim().to_string(),
-                })))
+                let (span, code) = self.parse_raw_zig_block()?;
+                Ok(Stmt::Expr(Expr::Zig(ZigEscapeExpr { span, code })))
             }
             _ => {
                 let expr = self.parse_expr()?;
@@ -1350,9 +1331,13 @@ impl<'a> Parser<'a> {
 
     fn parse_pattern(&mut self) -> ParseResult<Pattern> {
         let first = self.parse_single_pattern()?;
-        if self.peek() == Some(&Token::Pipe) {
+        if self.peek() == Some(&Token::Pipe)
+            || (self.in_switch_arm > 0 && self.peek() == Some(&Token::Comma))
+        {
             let mut pats = vec![first];
-            while self.peek() == Some(&Token::Pipe) {
+            while self.peek() == Some(&Token::Pipe)
+                || (self.in_switch_arm > 0 && self.peek() == Some(&Token::Comma))
+            {
                 self.bump()?;
                 pats.push(self.parse_single_pattern()?);
             }
@@ -1976,10 +1961,12 @@ impl<'a> Parser<'a> {
                 if matches!(ty, Type::BorrowType { .. }) {
                     is_ref = true;
                 }
-                if self.peek() == Some(&Token::Assign) {
+                let default = if self.peek() == Some(&Token::Assign) {
                     self.bump()?;
-                    let _ = self.parse_expr()?;
-                }
+                    Some(self.parse_expr()?)
+                } else {
+                    None
+                };
                 if self.peek() == Some(&Token::Comma) || self.peek() == Some(&Token::Semicolon) {
                     self.bump()?;
                 }
@@ -1988,6 +1975,7 @@ impl<'a> Parser<'a> {
                     ident: f_ident,
                     ty,
                     meta: meta_list,
+                    default,
                 });
             }
         }
@@ -2070,12 +2058,59 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn parse_raw_zig_block(&mut self) -> ParseResult<(Span, String)> {
+        let start = self.bump()?.1.start;
+        self.expect(Token::LBrace)?;
+        let code_start = self.peek_span().start;
+        let mut brace_count = 1;
+        let mut code_end = code_start;
+        while brace_count > 0 && self.peek().is_some() {
+            let (t, span) = self.bump()?;
+            match t {
+                Token::LBrace => brace_count += 1,
+                Token::RBrace => brace_count -= 1,
+                _ => {}
+            }
+            if brace_count == 0 {
+                code_end = span.start;
+            }
+        }
+        let end = self.peek_span().end;
+        let raw_code = self.input[code_start..code_end].trim().to_string();
+        Ok((Span { start, end }, raw_code))
+    }
+
     fn parse_enum(&mut self) -> ParseResult<EnumDecl> {
         let start = self.expect(Token::Enum)?.start;
         let ident = self.parse_ident()?;
+        let mut tag_type = None;
+        if self.peek() == Some(&Token::Colon) {
+            self.bump()?;
+            tag_type = Some(self.parse_type()?);
+        }
         self.expect(Token::LBrace)?;
         let mut variants = Vec::new();
-        while self.peek() != Some(&Token::RBrace) {
+        let mut methods = Vec::new();
+        let mut extra_zig = Vec::new();
+        while self.peek() != Some(&Token::RBrace) && self.peek().is_some() {
+            if self.peek() == Some(&Token::ZigEscape) {
+                let (_, code) = self.parse_raw_zig_block()?;
+                extra_zig.push(code);
+                continue;
+            }
+            let meta_list = self.parse_meta_list()?;
+            if self.peek() == Some(&Token::Export) {
+                self.bump()?;
+            }
+            if matches!(
+                self.peek(),
+                Some(Token::Fn) | Some(Token::Async) | Some(Token::Static)
+            ) {
+                let mut method = self.parse_function()?;
+                method.meta = meta_list;
+                methods.push(method);
+                continue;
+            }
             let v_ident = self.parse_ident()?;
             let mut fields = None;
             let mut tuple_type = None;
@@ -2094,6 +2129,7 @@ impl<'a> Parser<'a> {
                             ident: f_ident,
                             ty,
                             meta: Vec::new(),
+                            default: None,
                         });
                         if self.peek() == Some(&Token::Comma) {
                             self.bump()?;
@@ -2120,6 +2156,7 @@ impl<'a> Parser<'a> {
                         ident: f_ident,
                         ty,
                         meta: Vec::new(),
+                        default: None,
                     });
                     if self.peek() == Some(&Token::Comma) {
                         self.bump()?;
@@ -2145,7 +2182,7 @@ impl<'a> Parser<'a> {
                 tuple_type,
                 from_err,
             });
-            if self.peek() == Some(&Token::Comma) {
+            if self.peek() == Some(&Token::Comma) || self.peek() == Some(&Token::Semicolon) {
                 self.bump()?;
             }
         }
@@ -2155,6 +2192,9 @@ impl<'a> Parser<'a> {
             ident,
             variants,
             meta: Vec::new(),
+            methods,
+            tag_type,
+            extra_zig,
         })
     }
 
@@ -3147,7 +3187,7 @@ impl<'a> Parser<'a> {
                 Ok(Expr::Borrow(Box::new(inner), true))
             }
             Token::Bang => {
-                let inner = self.parse_primary_expr()?;
+                let inner = self.parse_postfix_expr()?;
                 Ok(Expr::Builtin(BuiltinCall {
                     span,
                     name: "@not".to_string(),
@@ -3155,7 +3195,7 @@ impl<'a> Parser<'a> {
                 }))
             }
             Token::Tilde => {
-                let inner = self.parse_primary_expr()?;
+                let inner = self.parse_postfix_expr()?;
                 Ok(Expr::BitNot(Box::new(inner)))
             }
             Token::U8

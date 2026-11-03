@@ -113,6 +113,12 @@ pub struct EnumDecl {
     pub variants: Vec<EnumVariant>,
     #[serde(default)]
     pub meta: Vec<MetaItem>,
+    #[serde(default)]
+    pub methods: Vec<Function>,
+    #[serde(default)]
+    pub tag_type: Option<Type>,
+    #[serde(default)]
+    pub extra_zig: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -620,6 +626,8 @@ pub struct Field {
     pub ty: Type,
     #[serde(default)]
     pub meta: Vec<MetaItem>,
+    #[serde(default)]
+    pub default: Option<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

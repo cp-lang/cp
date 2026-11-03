@@ -4524,6 +4524,72 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 6. **四线文档同步**：
    - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)、[`SESSION.md`](file:///data/dev/cp/SESSION.md)。
 
+---
+
+## 2026-11-04 (Session Update - Bun 迁移深水区审核、5 大编译器致命缺陷排查与综合提交)
+
+### 用户指令
+> 1. bun agy 更新了 cpc 编译器代码和 cp_ref.md, git 提交
+> 2. bun 迁移 agy 修改了cp编译器 cpc 和对应的cp_ref.md, 你审核一下, 准备提交到git
+> 3. cpc 编译很快,应该构建完成了吧
+> 4. 继续
+> 5. 进度
+
+### 审核全景与 5 大核心 Bug 拦截修复记
+在对 Bun 迁移推进的 `cpc` 编译器（ast, codegen, lexer, parser, sema）以及 `cp_ref.md` 进行严格工程化审查时，我们排查并精准歼灭了 5 个深层隐秘的致命 Bug：
+
+1. **Bug 1：`ast::Field` 增添 `default` 初值字段导致的 Rust 编译中断**
+   - **成因**：Bun AGY 为结构体字段引入默认值赋值特性时，在 `ast::Field` 中新增了 `pub default: Option<Expr>`，但遗漏了 `codegen.rs:4538` 和 `sema.rs:3406` 匿名结构体推导处的构造初始化，导致 `rustc` 直接报 `missing field default in initializer of ast::Field` 阻断编译。
+   - **修复**：在两处 `Field` 构造器中补全 `default: None`，秒级恢复通过 `cargo check`。
+
+2. **Bug 2：摇树扫描遗漏 `Expr::Array` 导致 `cp_array_lit` 未定义**
+   - **成因**：`scan_expr` 扫描到数组字面量 `Expr::Array`（如 `print("...", [buf.getLen()])`）时，未将 `needs_array_helpers` 置为 `true`。当代码中无显式 `push/pop` 调用时，摇树逻辑切除了 `cp_array_lit` 的定义，导致 Zig 编译抛出 `error: use of undeclared identifier 'cp_array_lit'`。
+   - **修复**：在 `scan_expr` 的 `Expr::Array` 分支中补充 `self.needs_array_helpers = true;`。
+
+3. **Bug 3：纯枚举（Pure Enum）通过成员带点访问硬编码结构体初始化的语法错误**
+   - **成因**：Bun AGY 在 `Expr::EnumInit` 里增加了对纯枚举（无载荷枚举）直接生成 `Enum.Variant` 的支持，但在 `Expr::Member`（即 `FetchRequestMode.@"same-origin"` 这种带点访问表达式）中遗漏了纯枚举检测，导致 Zig 错误生成为 `FetchRequestMode{ .@"same-origin" = {} }`，引发 Zig 报 `type does not support struct initialization syntax`。
+   - **修复**：在 `cpc/src/codegen.rs` 的 `Expr::Member` 分支中识别 `self.enum_defs` 的纯枚举形态，精准输出 Zig 原生 `Enum.Variant`。
+
+4. **Bug 4：前缀一元逻辑非操作符 `!` 结合性倒置（Critical Precedence Bug）**
+   - **成因**：`parser.rs` 的 `Token::Bang`（以及 `Token::Tilde`）错误地调用了 `self.parse_primary_expr()?` 而非 `parse_postfix_expr()?`。当开发者书写 `!mode.isSameOrigin()` 时，解析器贪婪将 `!mode` 组装为 `@not(mode)` 节点返回给外部二元解析器，进而被当成后置方法调用的接收者，生成了荒谬的 `cp_not(mode).isSameOrigin()`。
+   - **修复**：重构 `Token::Bang` 与 `Token::Tilde` 调用 `self.parse_postfix_expr()?`，彻底解决一元单目运算符与后续属性访问/方法调用的优先级绑定问题。
+
+5. **Bug 5：穷尽纯枚举模式匹配无条件注入 `else =>` 导致 Zig 编译拦截**
+   - **成因**：在 `checkMode` 模式匹配中，当纯枚举的所有变体已被完全穷尽匹配时，编译器无条件在尾部注入 `else => unreachable,\n`，甚至保留用户编写的 `* =>`。Zig 编译器对此执行强制严格检查，直接抛出 `error: unreachable else prong; all cases already handled`。
+   - **修复**：在 `codegen.rs` 中引入 `is_exhaustive_enum` 穷尽性变体收集推导，当所有变体已被覆盖时，自动忽略不可达通配分支且不注入 `else => unreachable`，完美对齐 Zig 原生编译器的严苛语义。
+
+6. **方法形参 `self` 卫生隔离与文档去重**：
+   - 允许方法显式声明 `fn func(self)` 且自动跳过形参重复注入，避免 Zig 生成 `fn func(self: Enum, self: *anyopaque)` 冲突；
+   - 彻底清除 `cp_ref.md` 3.5.4 节被重复粘贴的冗余块，并补充逗号多模式匹配说明。
+
+### 本次提交范围 (Commit Scope)
+1. **词法与转义标识符支持 (`cpc/src/lexer.rs`)**：
+   - 注册 `Token::Ident` 的转义标识符正则 `@"..."`，支持网络标准与连字符名称（如 `@"same-origin"`、`@"no-cors"`）。
+2. **语法树与数据结构扩充 (`cpc/src/ast.rs`)**：
+   - `EnumDecl` 增添 `methods: Vec<Function>`、`tag_type: Option<Type>`（底层定长整数类型，如 `: u2`）、`extra_zig: Vec<String>`（内嵌逃逸舱）；
+   - `Field` 增添 `default: Option<Expr>`。
+3. **语法解析与模式增强 (`cpc/src/parser.rs`)**：
+   - 支持枚举底层整型标签（`: u2`, `: u8` 等任意位宽）；
+   - 支持枚举内嵌入 `zig { ... }` 块和方法定义；
+   - 支持 Switch 模式匹配中以逗号 `,` 分隔的多模式合并分支；
+   - 修复 `Token::Bang` 与 `Token::Tilde` 单目运算符优先级结合性，正确优先绑定后置方法与属性。
+4. **语义分析与作用域守卫 (`cpc/src/sema.rs`)**：
+   - 深度验证并分析枚举内部方法，注入接收者符号；
+   - 修复字段推导与构造缺漏。
+5. **代码生成与模式优化 (`cpc/src/codegen.rs`)**：
+   - 纯枚举直接映射发射为 Zig 原生 `pub const Name = enum(Tag) { ... };`；
+   - 纯枚举变体带点访问生成 `Enum.Variant`；
+   - 修复枚举方法接收者传值而非指针，修复形参 `self` 命名碰撞；
+   - 修复摇树中 `Expr::Array` 引起的 `cp_array_lit` 丢失；
+   - 智能识别纯枚举 Switch 穷尽覆盖，剔除不可达 `else =>`。
+6. **规范文档同步 (`cp_ref.md`)**：
+   - 新增第 3.5.4 节规范特殊符号转义标识符 `@"..."`、定长整型底层标签（`: u2`）、枚举内嵌 `zig { ... }` 逃逸舱与实例方法；
+   - 同步更新第 4.3 节关于多模式联合（`|` 与 `,` 逗号合并）说明。
+7. **自动化测试套件 (`cap/test/test_bun_enums.cp`, `cap/test/test_root_inline.cp`)**：
+   - 新增 `test_bun_enums.cp` 全量验证转义标识符、纯枚举、底层 `u2` 标签、内嵌方法与内嵌 Zig 逃逸舱、多模式分支匹配；
+   - 新增 `test_root_inline.cp` 验证 `@inline` 实例方法与纯正结构体建模；
+   - 经 `./cap/bin/cap` 编译执行 100% 成功通过，全套矩阵无任何回归。
+
 
 
 

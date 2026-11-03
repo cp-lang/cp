@@ -114,6 +114,17 @@ impl ModuleFeatures {
                     }
                 }
             }
+            Decl::Enum(e) => {
+                for m in &e.methods {
+                    if let Some(ret) = &m.return_type {
+                        self.scan_type(ret);
+                    }
+                    for p in &m.params {
+                        self.scan_type(&p.ty);
+                    }
+                    self.scan_block(&m.body);
+                }
+            }
             Decl::Impl(i) => {
                 for m in &i.methods {
                     if let Some(ret) = &m.return_type {
@@ -217,8 +228,6 @@ impl ModuleFeatures {
             Type::Ref(id) => {
                 if id.sym == "RegExp" {
                     self.needs_regex = true;
-                } else if id.sym == "Map" || id.sym == "Dict" || id.sym == "Set" {
-                    self.needs_collections = true;
                 } else if id.sym == "Task"
                     || id.sym == "Message"
                     || id.sym == "PID"
@@ -251,8 +260,6 @@ impl ModuleFeatures {
             Expr::Ident(id) => {
                 if id.sym == "RegExp" {
                     self.needs_regex = true;
-                } else if id.sym == "Map" || id.sym == "Dict" || id.sym == "Set" {
-                    self.needs_collections = true;
                 } else if id.sym == "Task"
                     || id.sym == "Message"
                     || id.sym == "PID"
@@ -289,21 +296,20 @@ impl ModuleFeatures {
             Expr::Bin(b) => {
                 match b.op {
                     BinaryOp::Eq | BinaryOp::NotEq => {
-                        let is_lit_num =
+                        let has_num =
                             matches!(&*b.left, Expr::Lit(Lit::Int(_)) | Expr::Lit(Lit::Float(_)))
-                                && matches!(
+                                || matches!(
                                     &*b.right,
                                     Expr::Lit(Lit::Int(_)) | Expr::Lit(Lit::Float(_))
                                 );
-                        if !is_lit_num {
-                            if matches!(&*b.left, Expr::Lit(Lit::Str(_)) | Expr::Lit(Lit::Null))
-                                || matches!(
-                                    &*b.right,
-                                    Expr::Lit(Lit::Str(_)) | Expr::Lit(Lit::Null)
-                                )
-                            {
-                                self.needs_equality = true;
-                            }
+                        let is_enum = matches!(&*b.left, Expr::EnumInit(_))
+                            || matches!(&*b.right, Expr::EnumInit(_));
+                        let is_null = matches!(&*b.left, Expr::Lit(Lit::Null))
+                            || matches!(&*b.right, Expr::Lit(Lit::Null));
+                        let is_bool = matches!(&*b.left, Expr::Lit(Lit::Bool(_)))
+                            || matches!(&*b.right, Expr::Lit(Lit::Bool(_)));
+                        if !has_num && !is_enum && !is_null && !is_bool {
+                            self.needs_equality = true;
                         }
                     }
                     BinaryOp::Add => {
@@ -326,7 +332,18 @@ impl ModuleFeatures {
                 self.scan_expr(&b.left);
                 self.scan_expr(&b.right);
             }
-            Expr::Call(c) | Expr::New(c) => {
+            Expr::New(c) => {
+                if let Expr::Ident(id) = &*c.callee {
+                    if id.sym == "Map" || id.sym == "Dict" || id.sym == "Set" {
+                        self.needs_collections = true;
+                    }
+                }
+                self.scan_expr(&c.callee);
+                for a in &c.args {
+                    self.scan_expr(a);
+                }
+            }
+            Expr::Call(c) => {
                 if let Expr::Ident(id) = &*c.callee {
                     if id.sym == "@not" {
                         self.needs_not = true;
@@ -452,6 +469,7 @@ pub struct Codegen {
     uninitialized_vars: HashSet<String>,
     pub captured_vars: HashMap<String, Vec<(String, String)>>,
     pub ref_classes: HashSet<String>,
+    pub value_classes: HashSet<String>,
     pub fn_sigs: HashMap<String, Function>,
     pub class_defs: HashMap<String, Class>,
     pub trait_defs: HashMap<String, TraitDecl>,
@@ -514,6 +532,7 @@ impl Codegen {
             uninitialized_vars: HashSet::new(),
             captured_vars: HashMap::new(),
             ref_classes: HashSet::new(),
+            value_classes: HashSet::new(),
             fn_sigs: HashMap::new(),
             class_defs: HashMap::new(),
             trait_defs: HashMap::new(),
@@ -661,8 +680,20 @@ impl Codegen {
             match &arm.pat {
                 Pattern::Lit(_) | Pattern::Wildcard | Pattern::Range { .. } => {}
                 Pattern::Ident(id) if id.sym == "_" || id.sym == "else" => {}
+                Pattern::Enum(ep) if ep.fields.is_none() && ep.tuple_pats.is_none() => {}
                 Pattern::Or(pats) => {
-                    if !pats.iter().all(|p| matches!(p, Pattern::Lit(_))) {
+                    if !pats.iter().all(|p| {
+                        matches!(
+                            p,
+                            Pattern::Lit(_)
+                                | Pattern::Range { .. }
+                                | Pattern::Enum(crate::ast::EnumPattern {
+                                    fields: None,
+                                    tuple_pats: None,
+                                    ..
+                                })
+                        )
+                    }) {
                         return false;
                     }
                 }
@@ -1022,7 +1053,10 @@ impl Codegen {
                         if let Some(name) = parts.next() {
                             let name = name.trim();
                             if !name.is_empty()
-                                && (rest.contains("@This()") || rest.contains("struct"))
+                                && (rest.contains("@This()")
+                                    || rest.contains("struct")
+                                    || rest.contains("enum")
+                                    || rest.contains("@import"))
                             {
                                 self.ref_classes.insert(name.to_string());
                             }
@@ -1034,6 +1068,9 @@ impl Codegen {
                 self.globals.insert(c.ident.sym.clone());
                 if c.is_ref || c.meta.iter().any(|m| m.name.sym == "root") {
                     self.ref_classes.insert(c.ident.sym.clone());
+                }
+                if c.meta.iter().any(|m| m.name.sym == "value") {
+                    self.value_classes.insert(c.ident.sym.clone());
                 }
                 if c.implements.iter().any(|i| i.sym == "Agent") {
                     self.agent_classes.push(c.clone());
@@ -1286,6 +1323,7 @@ impl Codegen {
 
         self.writeln("// Generated by CP Compiler (RFC-002 Production SDK)");
         self.writeln("const std = @import(\"std\");");
+        self.writeln("const string = []const u8;");
         if self.is_beam_mode {
             self.writeln("const beam = @import(\"beam.zig\");");
         }
@@ -2478,7 +2516,10 @@ impl Codegen {
                         if let Some(name) = parts.next() {
                             let name = name.trim();
                             if !name.is_empty()
-                                && (rest.contains("@This()") || rest.contains("struct"))
+                                && (rest.contains("@This()")
+                                    || rest.contains("struct")
+                                    || rest.contains("enum")
+                                    || rest.contains("@import"))
                             {
                                 self.ref_classes.insert(name.to_string());
                             }
@@ -2745,6 +2786,44 @@ impl Codegen {
     }
 
     fn generate_enum(&mut self, e: &EnumDecl) {
+        let has_payloads = e
+            .variants
+            .iter()
+            .any(|v| v.fields.is_some() || v.tuple_type.is_some() || v.from_err.is_some());
+        if !has_payloads {
+            let tag_str = if let Some(tag) = &e.tag_type {
+                format!("({})", self.map_type(tag))
+            } else if e.variants.iter().any(|v| v.value.is_some()) {
+                "(u32)".to_string()
+            } else {
+                "".to_string()
+            };
+            self.writeln(&format!("pub const {} = enum{} {{", e.ident.sym, tag_str));
+            self.indent();
+            for v in &e.variants {
+                let mut line = v.ident.sym.clone();
+                if let Some(val) = &v.value {
+                    line.push_str(" = ");
+                    line.push_str(&self.generate_expr(val));
+                }
+                line.push(',');
+                self.writeln(&line);
+            }
+            if !e.methods.is_empty() {
+                for m in &e.methods {
+                    self.generate_function_decorated(m, Some(&e.ident.sym));
+                }
+            }
+            for code in &e.extra_zig {
+                self.writeln("");
+                for line in code.lines() {
+                    self.writeln(line);
+                }
+            }
+            self.dedent();
+            self.writeln("};\n");
+            return;
+        }
         let enum_type = if e.variants.iter().any(|v| v.value.is_some()) {
             "enum(u32)"
         } else {
@@ -2842,16 +2921,20 @@ impl Codegen {
             self.ref_classes.insert(class.ident.sym.clone());
             writeln!(self.output, "pub const {} = @This();\n", class.ident.sym).unwrap();
             for f in &class.fields {
-                let default_init = if f.ident.sym == "len" {
-                    " = 0,"
+                let default_init = if let Some(def) = &f.default {
+                    format!(" = {},", self.generate_expr(def))
+                } else if f.ident.sym == "len" {
+                    " = 0,".to_string()
                 } else {
-                    " = undefined,"
+                    "".to_string()
                 };
+                let comma = if default_init.is_empty() { "," } else { "" };
                 self.writeln(&format!(
-                    "{}: {}{}",
+                    "{}: {}{}{}",
                     f.ident.sym,
                     self.map_type(&f.ty),
-                    default_init
+                    default_init,
+                    comma
                 ));
             }
             for m in &class.methods {
@@ -2871,7 +2954,17 @@ impl Codegen {
             self.writeln("id: u32 = 0,");
         }
         for f in &class.fields {
-            self.writeln(&format!("{}: {},", f.ident.sym, self.map_type(&f.ty)));
+            let default_init = if let Some(def) = &f.default {
+                format!(" = {},", self.generate_expr(def))
+            } else {
+                ",".to_string()
+            };
+            self.writeln(&format!(
+                "{}: {}{}",
+                f.ident.sym,
+                self.map_type(&f.ty),
+                default_init
+            ));
         }
         if needs_trait_infra {
             self.writeln(&format!("\npub fn _create(allocator: std.mem.Allocator) !*{} {{ const self_ptr = try allocator.create({}); self_ptr.* = undefined; return self_ptr; }}", class.ident.sym, class.ident.sym));
@@ -4472,6 +4565,7 @@ impl Codegen {
                             ident: k.clone(),
                             ty,
                             meta: Vec::new(),
+                            default: None,
                         };
                         if let Some(pos) =
                             fs.iter().position(|existing| existing.ident.sym == k.sym)
@@ -5301,10 +5395,31 @@ impl Codegen {
                 *has_else = true;
                 "else".to_string()
             }
+            Pattern::Enum(ep) if ep.fields.is_none() && ep.tuple_pats.is_none() => {
+                if ep.enum_name.sym.is_empty() {
+                    format!(".{}", ep.variant_name.sym)
+                } else {
+                    format!("{}.{}", ep.enum_name.sym, ep.variant_name.sym)
+                }
+            }
             _ => {
                 *has_else = true;
                 "else".to_string()
             }
+        }
+    }
+
+    fn collect_pat_variants(pat: &Pattern, set: &mut std::collections::HashSet<String>) {
+        match pat {
+            Pattern::Enum(ep) if ep.fields.is_none() && ep.tuple_pats.is_none() => {
+                set.insert(ep.variant_name.sym.clone());
+            }
+            Pattern::Or(pats) => {
+                for p in pats {
+                    Self::collect_pat_variants(p, set);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -5316,7 +5431,37 @@ impl Codegen {
             let disc_code = self.generate_expr(&m.disc);
             let mut arms_code = String::new();
             let mut has_else = false;
+
+            let is_exhaustive_enum = if let Some(Type::Ref(id)) = &disc_cp_ty {
+                if let Some(en) = self.enum_defs.get(&id.sym) {
+                    let is_pure = en.variants.iter().all(|v| {
+                        v.fields.is_none() && v.tuple_type.is_none() && v.from_err.is_none()
+                    });
+                    if is_pure {
+                        let mut covered_variants = std::collections::HashSet::new();
+                        for arm in &m.arms {
+                            Self::collect_pat_variants(&arm.pat, &mut covered_variants);
+                        }
+                        en.variants
+                            .iter()
+                            .all(|v| covered_variants.contains(&v.ident.sym))
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
             for arm in &m.arms {
+                if is_exhaustive_enum
+                    && (matches!(arm.pat, Pattern::Wildcard)
+                        || matches!(&arm.pat, Pattern::Ident(id) if id.sym == "_" || id.sym == "else"))
+                {
+                    continue;
+                }
                 let pat_str = Self::format_simple_pat(&arm.pat, &mut has_else);
                 let body_str = if is_expr {
                     match &*arm.body {
@@ -5360,7 +5505,7 @@ impl Codegen {
                 };
                 arms_code.push_str(&format!("{} => {},\n", pat_str, body_str));
             }
-            if !has_else {
+            if !has_else && !is_exhaustive_enum {
                 arms_code.push_str("else => unreachable,\n");
             }
             if is_expr {
@@ -5983,7 +6128,11 @@ impl Codegen {
             self.moved_vars.clear();
             if let Some(c) = class_name {
                 if self.current_receiver_mode != ReceiverMode::Static {
-                    let ptr_type = if self.current_receiver_mode == ReceiverMode::ReadOnly {
+                    let is_enum = self.enum_defs.contains_key(c);
+                    let is_val = is_enum || self.value_classes.contains(c);
+                    let ptr_type = if is_val {
+                        c.clone()
+                    } else if self.current_receiver_mode == ReceiverMode::ReadOnly {
                         format!("*const {}", c)
                     } else {
                         format!("*{}", c)
@@ -5993,7 +6142,7 @@ impl Codegen {
                 }
             }
             for p in &func.params {
-                if p.ident.sym == "this" || p.ident.sym == "_" {
+                if p.ident.sym == "this" || p.ident.sym == "_" || p.ident.sym == "self" {
                     continue;
                 }
                 let mapped_ty = match &p.ty {
@@ -6029,7 +6178,7 @@ impl Codegen {
                 }
             }
             for p in &func.params {
-                if p.ident.sym != "this" && p.ident.sym != "_" {
+                if p.ident.sym != "this" && p.ident.sym != "_" && p.ident.sym != "self" {
                     if !p.is_comptime {
                         self.writeln(&format!("_ = &{};", p.ident.sym));
                     }
@@ -6120,7 +6269,7 @@ impl Codegen {
                 }
             }
             for p in &func.params {
-                if p.ident.sym == "this" || p.ident.sym == "_" {
+                if p.ident.sym == "this" || p.ident.sym == "_" || p.ident.sym == "self" {
                     continue;
                 }
                 init_params.push_str(&format!(", arg_{}: {}", p.ident.sym, self.map_type(&p.ty)));
@@ -6142,7 +6291,7 @@ impl Codegen {
                 writeln!(self.output, "    ctx.self = self_arg;").unwrap();
             }
             for p in &func.params {
-                if p.ident.sym == "this" || p.ident.sym == "_" {
+                if p.ident.sym == "this" || p.ident.sym == "_" || p.ident.sym == "self" {
                     continue;
                 }
                 writeln!(
@@ -8084,31 +8233,43 @@ impl Codegen {
                             )
                     }
                     _ => {
-                        (matches!(&*bin.left, Expr::Lit(Lit::Int(_)) | Expr::Lit(Lit::Float(_)))
-                            && matches!(
+                        matches!(&*bin.left, Expr::Lit(Lit::Int(_)) | Expr::Lit(Lit::Float(_)))
+                            || matches!(
                                 &*bin.right,
                                 Expr::Lit(Lit::Int(_)) | Expr::Lit(Lit::Float(_))
-                            ))
+                            )
                             || (matches!(&*bin.left, Expr::Index { .. })
-                                && matches!(&*bin.right, Expr::Lit(Lit::Int(_))))
-                            || (matches!(&*bin.right, Expr::Index { .. })
-                                && matches!(&*bin.left, Expr::Lit(Lit::Int(_))))
+                                && matches!(&*bin.right, Expr::Index { .. }))
                     }
                 };
                 let is_null_cmp = matches!(&*bin.left, Expr::Lit(Lit::Null))
                     || matches!(&*bin.right, Expr::Lit(Lit::Null))
                     || matches!(&*bin.left, Expr::Ident(id) if id.sym == "null")
                     || matches!(&*bin.right, Expr::Ident(id) if id.sym == "null");
+                let is_enum_cmp = matches!(&*bin.left, Expr::EnumInit(_))
+                    || matches!(&*bin.right, Expr::EnumInit(_))
+                    || match (&l_ty, &r_ty) {
+                        (Some(Type::Ref(id)), _) if self.enum_defs.contains_key(&id.sym) => true,
+                        (_, Some(Type::Ref(id))) if self.enum_defs.contains_key(&id.sym) => true,
+                        _ => false,
+                    };
+                let is_bool_cmp = match (&l_ty, &r_ty) {
+                    (Some(Type::Bool), _) | (_, Some(Type::Bool)) => true,
+                    _ => {
+                        matches!(&*bin.left, Expr::Lit(Lit::Bool(_)))
+                            || matches!(&*bin.right, Expr::Lit(Lit::Bool(_)))
+                    }
+                };
                 match bin.op {
                     BinaryOp::Eq => {
-                        if are_both_numeric || is_null_cmp {
+                        if are_both_numeric || is_null_cmp || is_enum_cmp || is_bool_cmp {
                             format!("({} == {})", l, r)
                         } else {
                             format!("cp_eq({}, {})", l, r)
                         }
                     }
                     BinaryOp::NotEq => {
-                        if are_both_numeric || is_null_cmp {
+                        if are_both_numeric || is_null_cmp || is_enum_cmp || is_bool_cmp {
                             format!("({} != {})", l, r)
                         } else {
                             format!("cp_neq({}, {})", l, r)
@@ -9488,7 +9649,16 @@ impl Codegen {
                         )
                     }
                 } else if fields_slice.is_empty() {
-                    format!("{}{{ .{} = {{}} }}", ei.enum_name.sym, ei.variant_name.sym)
+                    let is_pure_enum = self.enum_defs.get(&ei.enum_name.sym).map_or(false, |en| {
+                        en.variants.iter().all(|v| {
+                            v.fields.is_none() && v.tuple_type.is_none() && v.from_err.is_none()
+                        })
+                    });
+                    if is_pure_enum {
+                        format!("{}.{}", ei.enum_name.sym, ei.variant_name.sym)
+                    } else {
+                        format!("{}{{ .{} = {{}} }}", ei.enum_name.sym, ei.variant_name.sym)
+                    }
                 } else {
                     let mut f_str = String::new();
                     for (idx, f) in fields_slice.iter().enumerate() {
@@ -9738,8 +9908,17 @@ impl Codegen {
                             return "@import(\"std\").math.e".to_string();
                         }
                     }
-                    if self.enum_defs.contains_key(&id.sym) || self.error_sets.contains_key(&id.sym)
-                    {
+                    if let Some(en) = self.enum_defs.get(&id.sym) {
+                        let is_pure_enum = en.variants.iter().all(|v| {
+                            v.fields.is_none() && v.tuple_type.is_none() && v.from_err.is_none()
+                        });
+                        if is_pure_enum {
+                            return format!("{}.{}", id.sym, member.prop.sym);
+                        } else {
+                            return format!("{}{{ .{} = {{}} }}", id.sym, member.prop.sym);
+                        }
+                    }
+                    if self.error_sets.contains_key(&id.sym) {
                         return format!("{}{{ .{} = {{}} }}", id.sym, member.prop.sym);
                     }
                 }
@@ -11659,6 +11838,12 @@ impl Codegen {
                 if ident.sym == "FieldInfo" || ident.sym == "MethodInfo" {
                     return ident.sym.clone();
                 }
+                let is_custom_int = (ident.sym.starts_with('u') || ident.sym.starts_with('i'))
+                    && ident.sym.len() > 1
+                    && ident.sym[1..].chars().all(|c| c.is_ascii_digit());
+                if is_custom_int {
+                    return ident.sym.clone();
+                }
                 if ident.sym == "PID"
                     || ident.sym == "Message"
                     || ident.sym == "Error"
@@ -11666,6 +11851,7 @@ impl Codegen {
                     || ident.sym.starts_with("__AnonErr_")
                     || ident.sym.starts_with("__UnionErr_")
                     || self.ref_classes.contains(&ident.sym)
+                    || self.value_classes.contains(&ident.sym)
                     || self.enum_defs.contains_key(&ident.sym)
                     || self.error_sets.contains_key(&ident.sym)
                     || self.trait_defs.contains_key(&ident.sym)
