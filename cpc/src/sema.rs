@@ -2035,7 +2035,21 @@ impl Analyzer {
             Stmt::While(w) => {
                 self.infer_type(&w.test)?;
                 self.analyze_expr(&w.test)?;
-                self.analyze_stmt(&w.body)?;
+                if let Some(cap) = &w.capture {
+                    self.enter_scope();
+                    self.define(
+                        cap.sym.clone(),
+                        SymbolKind::Var {
+                            ty: Type::Any,
+                            kind: VarDeclKind::Const,
+                        },
+                        cap.span,
+                    )?;
+                    self.analyze_stmt(&w.body)?;
+                    self.exit_scope();
+                } else {
+                    self.analyze_stmt(&w.body)?;
+                }
             }
             Stmt::For(f) => {
                 let coll_ty = self.infer_type(&f.expr)?;
@@ -3144,6 +3158,25 @@ impl Analyzer {
                     || ident.sym == "Err"
                     || ident.sym == "Error"
                     || ident.sym == "reflect"
+                    || matches!(
+                        ident.sym.as_str(),
+                        "u8" | "i8"
+                            | "u16"
+                            | "i16"
+                            | "u32"
+                            | "i32"
+                            | "u64"
+                            | "i64"
+                            | "u128"
+                            | "i128"
+                            | "usize"
+                            | "isize"
+                            | "f32"
+                            | "f64"
+                            | "bool"
+                            | "void"
+                            | "anytype"
+                    )
                 {
                     return Ok(Type::Any);
                 }

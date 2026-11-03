@@ -286,6 +286,8 @@ pub struct WhileStmt {
     pub span: Span,
     pub test: Expr,
     pub body: Box<Stmt>,
+    #[serde(default)]
+    pub capture: Option<Ident>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -1786,11 +1786,18 @@ impl<'a> Parser<'a> {
         self.expect(Token::LParen)?;
         let test = self.parse_expr()?;
         self.expect(Token::RParen)?;
+        let mut capture = None;
+        if self.peek() == Some(&Token::Pipe) {
+            self.bump()?;
+            capture = Some(self.parse_ident()?);
+            self.expect(Token::Pipe)?;
+        }
         let body = self.parse_stmt()?;
         Ok(WhileStmt {
             span: Span { start, end: 0 },
             test,
             body: Box::new(body),
+            capture,
         })
     }
 
@@ -3150,6 +3157,46 @@ impl<'a> Parser<'a> {
             Token::Tilde => {
                 let inner = self.parse_primary_expr()?;
                 Ok(Expr::BitNot(Box::new(inner)))
+            }
+            Token::U8
+            | Token::I8
+            | Token::U16
+            | Token::I16
+            | Token::U32
+            | Token::I32
+            | Token::U64
+            | Token::I64
+            | Token::U128
+            | Token::I128
+            | Token::USize
+            | Token::ISize
+            | Token::F32
+            | Token::F64
+            | Token::Bool
+            | Token::Void
+            | Token::Any => {
+                let sym = match token {
+                    Token::U8 => "u8",
+                    Token::I8 => "i8",
+                    Token::U16 => "u16",
+                    Token::I16 => "i16",
+                    Token::U32 => "u32",
+                    Token::I32 => "i32",
+                    Token::U64 => "u64",
+                    Token::I64 => "i64",
+                    Token::U128 => "u128",
+                    Token::I128 => "i128",
+                    Token::USize => "usize",
+                    Token::ISize => "isize",
+                    Token::F32 => "f32",
+                    Token::F64 => "f64",
+                    Token::Bool => "bool",
+                    Token::Void => "void",
+                    Token::Any => "anytype",
+                    _ => unreachable!(),
+                }
+                .to_string();
+                Ok(Expr::Ident(Ident { span, sym }))
             }
             Token::Ident(sym) => {
                 if sym == "Err" && self.peek() == Some(&Token::LParen) {

@@ -32,6 +32,8 @@ pub struct ModuleFeatures {
     pub needs_add: bool,
     pub needs_not: bool,
     pub needs_index_helpers: bool,
+    pub needs_shift: bool,
+    pub needs_cast_int: bool,
 }
 
 impl ModuleFeatures {
@@ -311,6 +313,14 @@ impl ModuleFeatures {
                             self.needs_add = true;
                         }
                     }
+                    BinaryOp::Shl | BinaryOp::Shr => {
+                        self.needs_shift = true;
+                    }
+                    BinaryOp::Assign => {
+                        if matches!(&*b.left, Expr::Index { .. }) {
+                            self.needs_cast_int = true;
+                        }
+                    }
                     _ => {}
                 }
                 self.scan_expr(&b.left);
@@ -375,6 +385,7 @@ impl ModuleFeatures {
                 self.scan_expr(index);
             }
             Expr::Array(items) => {
+                self.needs_array_helpers = true;
                 for item in items {
                     self.scan_expr(item);
                 }
@@ -401,6 +412,7 @@ impl ModuleFeatures {
             Expr::Cast {
                 expr, target_ty, ..
             } => {
+                self.needs_cast_int = true;
                 self.scan_expr(expr);
                 self.scan_type(target_ty);
             }
@@ -1320,54 +1332,56 @@ impl Codegen {
             );
             self.writeln("}");
         }
-        self.writeln("fn cp_cast_int(comptime Dest: type, val: anytype) Dest {");
-        self.writeln("    const Src = @TypeOf(val);");
-        self.writeln("    if (comptime Src == Dest) return val;");
-        self.writeln("    if (comptime Src == comptime_int) {");
-        self.writeln(
-            "        if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) {",
-        );
-        self.writeln(
-            "            return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val)))));",
-        );
-        self.writeln("        } else {");
-        self.writeln("            return @as(Dest, @truncate(val));");
-        self.writeln("        }");
-        self.writeln("    }");
-        self.writeln("    const src_bits = @typeInfo(Src).int.bits;");
-        self.writeln("    const dest_bits = @typeInfo(Dest).int.bits;");
-        self.writeln(
-            "    if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) {",
-        );
-        self.writeln("        if (comptime dest_bits >= src_bits) {");
-        self.writeln("            return @as(Dest, val);");
-        self.writeln("        } else {");
-        self.writeln("            return @truncate(val);");
-        self.writeln("        }");
-        self.writeln("    }");
-        self.writeln("    if (comptime @typeInfo(Src).int.signedness == .signed) {");
-        self.writeln(
-            "        const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val);",
-        );
-        self.writeln("        const u: u128 = @bitCast(s);");
-        self.writeln("        if (comptime dest_bits >= 128) {");
-        self.writeln("            return @as(Dest, u);");
-        self.writeln("        } else {");
-        self.writeln("            return @truncate(u);");
-        self.writeln("        }");
-        self.writeln("    } else {");
-        self.writeln(
-            "        const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val);",
-        );
-        self.writeln("        const s: i128 = @bitCast(u);");
-        self.writeln("        if (comptime dest_bits >= 128) {");
-        self.writeln("            return @as(Dest, s);");
-        self.writeln("        } else {");
-        self.writeln("            return @truncate(s);");
-        self.writeln("        }");
-        self.writeln("    }");
-        self.writeln("}");
-        self.writeln("");
+        if features.needs_cast_int {
+            self.writeln("fn cp_cast_int(comptime Dest: type, val: anytype) Dest {");
+            self.writeln("    const Src = @TypeOf(val);");
+            self.writeln("    if (comptime Src == Dest) return val;");
+            self.writeln("    if (comptime Src == comptime_int) {");
+            self.writeln(
+                "        if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) {",
+            );
+            self.writeln(
+                "            return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val)))));",
+            );
+            self.writeln("        } else {");
+            self.writeln("            return @as(Dest, @truncate(val));");
+            self.writeln("        }");
+            self.writeln("    }");
+            self.writeln("    const src_bits = @typeInfo(Src).int.bits;");
+            self.writeln("    const dest_bits = @typeInfo(Dest).int.bits;");
+            self.writeln(
+                "    if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) {",
+            );
+            self.writeln("        if (comptime dest_bits >= src_bits) {");
+            self.writeln("            return @as(Dest, val);");
+            self.writeln("        } else {");
+            self.writeln("            return @truncate(val);");
+            self.writeln("        }");
+            self.writeln("    }");
+            self.writeln("    if (comptime @typeInfo(Src).int.signedness == .signed) {");
+            self.writeln(
+                "        const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val);",
+            );
+            self.writeln("        const u: u128 = @bitCast(s);");
+            self.writeln("        if (comptime dest_bits >= 128) {");
+            self.writeln("            return @as(Dest, u);");
+            self.writeln("        } else {");
+            self.writeln("            return @truncate(u);");
+            self.writeln("        }");
+            self.writeln("    } else {");
+            self.writeln(
+                "        const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val);",
+            );
+            self.writeln("        const s: i128 = @bitCast(u);");
+            self.writeln("        if (comptime dest_bits >= 128) {");
+            self.writeln("            return @as(Dest, s);");
+            self.writeln("        } else {");
+            self.writeln("            return @truncate(s);");
+            self.writeln("        }");
+            self.writeln("    }");
+            self.writeln("}");
+            self.writeln("");
+        }
 
         // --- Top-Level C-FFI / Zig Escapes ---
         for item in &module.body {
@@ -2280,24 +2294,26 @@ impl Codegen {
             self.writeln("    }");
             self.writeln("}");
         }
-        self.writeln("fn cp_shl(val: anytype, shift: anytype) @TypeOf(val) {");
-        self.writeln("    const T = @TypeOf(val);");
-        self.writeln("    if (comptime @typeInfo(T) == .comptime_int) return val << shift;");
-        self.writeln("    if (comptime @typeInfo(T) == .int) {");
-        self.writeln("        const ShiftType = std.math.Log2Int(T);");
-        self.writeln("        return val << @as(ShiftType, @truncate(shift));");
-        self.writeln("    }");
-        self.writeln("    return val << shift;");
-        self.writeln("}");
-        self.writeln("fn cp_shr(val: anytype, shift: anytype) @TypeOf(val) {");
-        self.writeln("    const T = @TypeOf(val);");
-        self.writeln("    if (comptime @typeInfo(T) == .comptime_int) return val >> shift;");
-        self.writeln("    if (comptime @typeInfo(T) == .int) {");
-        self.writeln("        const ShiftType = std.math.Log2Int(T);");
-        self.writeln("        return val >> @as(ShiftType, @truncate(shift));");
-        self.writeln("    }");
-        self.writeln("    return val >> shift;");
-        self.writeln("}");
+        if features.needs_shift {
+            self.writeln("fn cp_shl(val: anytype, shift: anytype) @TypeOf(val) {");
+            self.writeln("    const T = @TypeOf(val);");
+            self.writeln("    if (comptime @typeInfo(T) == .comptime_int) return val << shift;");
+            self.writeln("    if (comptime @typeInfo(T) == .int) {");
+            self.writeln("        const ShiftType = std.math.Log2Int(T);");
+            self.writeln("        return val << @as(ShiftType, @truncate(shift));");
+            self.writeln("    }");
+            self.writeln("    return val << shift;");
+            self.writeln("}");
+            self.writeln("fn cp_shr(val: anytype, shift: anytype) @TypeOf(val) {");
+            self.writeln("    const T = @TypeOf(val);");
+            self.writeln("    if (comptime @typeInfo(T) == .comptime_int) return val >> shift;");
+            self.writeln("    if (comptime @typeInfo(T) == .int) {");
+            self.writeln("        const ShiftType = std.math.Log2Int(T);");
+            self.writeln("        return val >> @as(ShiftType, @truncate(shift));");
+            self.writeln("    }");
+            self.writeln("    return val >> shift;");
+            self.writeln("}");
+        }
         if features.needs_actors {
             self.writeln("");
             self.writeln("// --- Scheduler ---");
@@ -7076,7 +7092,11 @@ impl Codegen {
             Stmt::While(w) => {
                 let test = self.generate_expr(&w.test);
                 let old_uninit = self.uninitialized_vars.clone();
-                self.write_to_case(&format!("while ({}) {{", test));
+                if let Some(cap) = &w.capture {
+                    self.write_to_case(&format!("while ({}) |{}| {{", test, cap.sym));
+                } else {
+                    self.write_to_case(&format!("while ({}) {{", test));
+                }
                 self.indent();
                 self.current_scope_depth += 1;
                 if let Stmt::Block(b) = &*w.body {
@@ -8049,9 +8069,30 @@ impl Codegen {
                 let r_ty = self.infer_cp_type(&bin.right);
                 let are_both_numeric = match (&l_ty, &r_ty) {
                     (Some(t1), Some(t2)) => Self::is_numeric_type(t1) && Self::is_numeric_type(t2),
+                    (Some(t1), None) => {
+                        Self::is_numeric_type(t1)
+                            && matches!(
+                                &*bin.right,
+                                Expr::Lit(Lit::Int(_)) | Expr::Lit(Lit::Float(_)) | Expr::Index { .. }
+                            )
+                    }
+                    (None, Some(t2)) => {
+                        Self::is_numeric_type(t2)
+                            && matches!(
+                                &*bin.left,
+                                Expr::Lit(Lit::Int(_)) | Expr::Lit(Lit::Float(_)) | Expr::Index { .. }
+                            )
+                    }
                     _ => {
-                        matches!(&*bin.left, Expr::Lit(Lit::Int(_)) | Expr::Lit(Lit::Float(_)))
-                            && matches!(&*bin.right, Expr::Lit(Lit::Int(_)) | Expr::Lit(Lit::Float(_)))
+                        (matches!(&*bin.left, Expr::Lit(Lit::Int(_)) | Expr::Lit(Lit::Float(_)))
+                            && matches!(
+                                &*bin.right,
+                                Expr::Lit(Lit::Int(_)) | Expr::Lit(Lit::Float(_))
+                            ))
+                            || (matches!(&*bin.left, Expr::Index { .. })
+                                && matches!(&*bin.right, Expr::Lit(Lit::Int(_))))
+                            || (matches!(&*bin.right, Expr::Index { .. })
+                                && matches!(&*bin.left, Expr::Lit(Lit::Int(_))))
                     }
                 };
                 let is_null_cmp = matches!(&*bin.left, Expr::Lit(Lit::Null))
