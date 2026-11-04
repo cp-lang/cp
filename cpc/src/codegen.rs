@@ -34,11 +34,15 @@ pub struct ModuleFeatures {
     pub needs_index_helpers: bool,
     pub needs_shift: bool,
     pub needs_cast_int: bool,
+    pub is_lib_mode: bool,
 }
 
 impl ModuleFeatures {
-    pub fn scan(module: &Module) -> Self {
-        let mut f = Self::default();
+    pub fn scan(module: &Module, is_lib_mode: bool) -> Self {
+        let mut f = Self {
+            is_lib_mode,
+            ..Self::default()
+        };
         for item in &module.body {
             match item {
                 ModuleItem::Decl(d) => f.scan_decl(d),
@@ -55,9 +59,10 @@ impl ModuleFeatures {
             f.needs_iter_helpers = true;
             f.needs_fmt = true;
         }
-        if f.needs_iter_helpers {
+        if f.needs_index_helpers {
             f.needs_string_helpers = true;
             f.needs_equality = true;
+            f.needs_iter_helpers = true;
         }
         if f.needs_array_helpers
             || f.needs_hash
@@ -166,7 +171,17 @@ impl ModuleFeatures {
             }
             Stmt::For(for_stmt) => {
                 if !matches!(for_stmt.expr, Expr::Range { .. }) {
-                    self.needs_iter_helpers = true;
+                    let is_native_slice = match &for_stmt.expr {
+                        Expr::Member(m) => m.prop.sym == "items",
+                        Expr::Call(c) => match &*c.callee {
+                            Expr::Member(m) => m.prop.sym == "values",
+                            _ => false,
+                        },
+                        _ => false,
+                    };
+                    if !is_native_slice {
+                        self.needs_iter_helpers = true;
+                    }
                 }
                 self.scan_expr(&for_stmt.expr);
                 self.scan_stmt(&for_stmt.body);
@@ -279,11 +294,17 @@ impl ModuleFeatures {
             Expr::Dict(_) => self.needs_collections = true,
             Expr::Spawn(_) | Expr::Receive(_) => self.needs_actors = true,
             Expr::ReflectType { .. } | Expr::ReflectOf { .. } => self.needs_reflection = true,
-            Expr::QuestionFallback { .. } => {
-                self.needs_null_coalesce = true;
+            Expr::QuestionFallback { expr, fallback, .. } => {
+                if !self.is_lib_mode {
+                    self.needs_result_error = true;
+                }
+                self.scan_expr(expr);
+                self.scan_expr(fallback);
             }
             Expr::NullCoalesce { left, right } => {
-                self.needs_null_coalesce = true;
+                if !self.is_lib_mode {
+                    self.needs_null_coalesce = true;
+                }
                 self.scan_expr(left);
                 self.scan_expr(right);
             }
@@ -296,27 +317,33 @@ impl ModuleFeatures {
             Expr::Bin(b) => {
                 match b.op {
                     BinaryOp::Eq | BinaryOp::NotEq => {
-                        let has_num =
-                            matches!(&*b.left, Expr::Lit(Lit::Int(_)) | Expr::Lit(Lit::Float(_)))
-                                || matches!(
-                                    &*b.right,
-                                    Expr::Lit(Lit::Int(_)) | Expr::Lit(Lit::Float(_))
-                                );
-                        let is_enum = matches!(&*b.left, Expr::EnumInit(_))
-                            || matches!(&*b.right, Expr::EnumInit(_));
-                        let is_null = matches!(&*b.left, Expr::Lit(Lit::Null))
-                            || matches!(&*b.right, Expr::Lit(Lit::Null));
-                        let is_bool = matches!(&*b.left, Expr::Lit(Lit::Bool(_)))
-                            || matches!(&*b.right, Expr::Lit(Lit::Bool(_)));
-                        if !has_num && !is_enum && !is_null && !is_bool {
-                            self.needs_equality = true;
+                        if !self.is_lib_mode {
+                            let has_num = matches!(
+                                &*b.left,
+                                Expr::Lit(Lit::Int(_)) | Expr::Lit(Lit::Float(_))
+                            ) || matches!(
+                                &*b.right,
+                                Expr::Lit(Lit::Int(_)) | Expr::Lit(Lit::Float(_))
+                            );
+                            let is_enum = matches!(&*b.left, Expr::EnumInit(_))
+                                || matches!(&*b.right, Expr::EnumInit(_));
+                            let is_null = matches!(&*b.left, Expr::Lit(Lit::Null))
+                                || matches!(&*b.right, Expr::Lit(Lit::Null));
+                            let is_bool = matches!(&*b.left, Expr::Lit(Lit::Bool(_)))
+                                || matches!(&*b.right, Expr::Lit(Lit::Bool(_)));
+                            if !has_num && !is_enum && !is_null && !is_bool {
+                                self.needs_equality = true;
+                            }
                         }
                     }
                     BinaryOp::Add => {
-                        if matches!(&*b.left, Expr::Lit(Lit::Str(_)))
-                            || matches!(&*b.right, Expr::Lit(Lit::Str(_)))
-                        {
+                        if !self.is_lib_mode {
                             self.needs_add = true;
+                        }
+                    }
+                    BinaryOp::Lt | BinaryOp::Gt | BinaryOp::LtEq | BinaryOp::GtEq => {
+                        if !self.is_lib_mode {
+                            self.needs_comparison = true;
                         }
                     }
                     BinaryOp::Shl | BinaryOp::Shr => {
@@ -345,7 +372,7 @@ impl ModuleFeatures {
             }
             Expr::Call(c) => {
                 if let Expr::Ident(id) = &*c.callee {
-                    if id.sym == "@not" {
+                    if id.sym == "@not" && !self.is_lib_mode {
                         self.needs_not = true;
                     }
                 }
@@ -357,7 +384,10 @@ impl ModuleFeatures {
                     }
                     match m.prop.sym.as_str() {
                         "push" | "pop" => self.needs_array_helpers = true,
-                        "indexOf" | "lastIndexOf" | "includes" => self.needs_iter_helpers = true,
+                        "indexOf" | "lastIndexOf" | "includes" => self.needs_index_helpers = true,
+                        "slice" | "substring" if !c.args.is_empty() => {
+                            self.needs_iter_helpers = true
+                        }
                         _ => {}
                     }
                 }
@@ -369,7 +399,7 @@ impl ModuleFeatures {
             Expr::Builtin(b) => {
                 if b.name == "@hash" {
                     self.needs_hash = true;
-                } else if b.name == "@not" {
+                } else if b.name == "@not" && !self.is_lib_mode {
                     self.needs_not = true;
                 }
                 for a in &b.args {
@@ -680,7 +710,12 @@ impl Codegen {
             match &arm.pat {
                 Pattern::Lit(_) | Pattern::Wildcard | Pattern::Range { .. } => {}
                 Pattern::Ident(id) if id.sym == "_" || id.sym == "else" => {}
-                Pattern::Enum(ep) if ep.fields.is_none() && ep.tuple_pats.is_none() => {}
+                Pattern::Enum(ep)
+                    if ep.fields.is_none()
+                        && (ep.tuple_pats.is_none()
+                            || ep.tuple_pats.as_ref().map_or(false, |p| {
+                                p.len() == 1 && matches!(&p[0], Pattern::Ident(_))
+                            })) => {}
                 Pattern::Or(pats) => {
                     if !pats.iter().all(|p| {
                         matches!(
@@ -1006,11 +1041,11 @@ impl Codegen {
     }
 
     pub fn scan_features_in_module(module: &Module) -> ModuleFeatures {
-        ModuleFeatures::scan(module)
+        ModuleFeatures::scan(module, false)
     }
 
     pub fn generate_module(&mut self, module: &Module) -> String {
-        let features = ModuleFeatures::scan(module);
+        let features = ModuleFeatures::scan(module, self.is_lib_mode);
         let mut class_order = Vec::new();
         let mut impl_decls = Vec::new();
         let mut has_single_thread_meta = false;
@@ -1053,8 +1088,32 @@ impl Codegen {
                         if let Some(name) = parts.next() {
                             let name = name.trim();
                             if !name.is_empty() {
-                                self.ref_classes.insert(name.to_string());
                                 self.value_classes.insert(name.to_string());
+                                self.globals.insert(name.to_string());
+                            }
+                        }
+                    } else if let Some(rest) = stripped.strip_prefix("fn ") {
+                        let mut parts = rest.split(&[' ', '(', '<'][..]);
+                        if let Some(name) = parts.next() {
+                            let name = name.trim();
+                            if !name.is_empty() {
+                                self.globals.insert(name.to_string());
+                            }
+                        }
+                    } else if let Some(rest) = stripped.strip_prefix("extern fn ") {
+                        let mut parts = rest.split(&[' ', '(', '<'][..]);
+                        if let Some(name) = parts.next() {
+                            let name = name.trim();
+                            if !name.is_empty() {
+                                self.globals.insert(name.to_string());
+                            }
+                        }
+                    } else if let Some(rest) = stripped.strip_prefix("extern \"c\" fn ") {
+                        let mut parts = rest.split(&[' ', '(', '<'][..]);
+                        if let Some(name) = parts.next() {
+                            let name = name.trim();
+                            if !name.is_empty() {
+                                self.globals.insert(name.to_string());
                             }
                         }
                     }
@@ -1062,7 +1121,9 @@ impl Codegen {
             }
             if let ModuleItem::Decl(Decl::Class(c)) = item {
                 self.globals.insert(c.ident.sym.clone());
-                if c.is_ref || c.meta.iter().any(|m| m.name.sym == "root") {
+                if (c.is_ref || c.meta.iter().any(|m| m.name.sym == "ref"))
+                    && !c.meta.iter().any(|m| m.name.sym == "value")
+                {
                     self.ref_classes.insert(c.ident.sym.clone());
                 }
                 if c.meta.iter().any(|m| m.name.sym == "value") {
@@ -1081,7 +1142,6 @@ impl Codegen {
                             if let Some(name) = parts.next() {
                                 let name = name.trim();
                                 if !name.is_empty() {
-                                    self.ref_classes.insert(name.to_string());
                                     self.value_classes.insert(name.to_string());
                                 }
                             }
@@ -1387,60 +1447,21 @@ impl Codegen {
             self.writeln("}");
         }
         if features.needs_cast_int {
-            self.writeln("fn cp_cast_int(comptime Dest: type, val: anytype) Dest {");
-            self.writeln("    const Src = @TypeOf(val);");
-            self.writeln("    if (comptime Src == Dest) return val;");
-            self.writeln("    if (comptime Src == comptime_int) {");
-            self.writeln(
-                "        if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) {",
-            );
-            self.writeln(
-                "            return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val)))));",
-            );
-            self.writeln("        } else {");
-            self.writeln("            return @as(Dest, @truncate(val));");
-            self.writeln("        }");
-            self.writeln("    }");
-            self.writeln("    const src_bits = @typeInfo(Src).int.bits;");
-            self.writeln("    const dest_bits = @typeInfo(Dest).int.bits;");
-            self.writeln(
-                "    if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) {",
-            );
-            self.writeln("        if (comptime dest_bits >= src_bits) {");
-            self.writeln("            return @as(Dest, val);");
-            self.writeln("        } else {");
-            self.writeln("            return @truncate(val);");
-            self.writeln("        }");
-            self.writeln("    }");
-            self.writeln("    if (comptime @typeInfo(Src).int.signedness == .signed) {");
-            self.writeln(
-                "        const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val);",
-            );
-            self.writeln("        const u: u128 = @bitCast(s);");
-            self.writeln("        if (comptime dest_bits >= 128) {");
-            self.writeln("            return @as(Dest, u);");
-            self.writeln("        } else {");
-            self.writeln("            return @truncate(u);");
-            self.writeln("        }");
-            self.writeln("    } else {");
-            self.writeln(
-                "        const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val);",
-            );
-            self.writeln("        const s: i128 = @bitCast(u);");
-            self.writeln("        if (comptime dest_bits >= 128) {");
-            self.writeln("            return @as(Dest, s);");
-            self.writeln("        } else {");
-            self.writeln("            return @truncate(s);");
-            self.writeln("        }");
-            self.writeln("    }");
-            self.writeln("}");
-            self.writeln("");
+            self.writeln("fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }");
         }
 
         // --- Top-Level C-FFI / Zig Escapes ---
         for item in &module.body {
             if let ModuleItem::Stmt(Stmt::Expr(Expr::Zig(zig))) = item {
-                self.writeln(&zig.code);
+                for line in zig.code.lines() {
+                    let trimmed = line.trim();
+                    if trimmed == "const std = @import(\"std\");"
+                        || trimmed == "pub const std = @import(\"std\");"
+                    {
+                        continue;
+                    }
+                    self.writeln(line);
+                }
             }
         }
 
@@ -2297,6 +2318,8 @@ impl Codegen {
         if features.needs_iter_helpers {
             self.writeln("fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const T = @TypeOf(val); switch (@typeInfo(T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }");
             self.writeln("fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError(\"Cannot mutably iterate over non-collection\"), else => @compileError(\"Cannot mutably iterate over non-collection\"), }, else => @compileError(\"Cannot mutably iterate over non-collection\"), }, else => @compileError(\"Cannot mutably iterate over non-collection\"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }");
+        }
+        if features.needs_index_helpers {
             self.writeln("fn cp_index_of(container: anytype, needle: anytype) i32 { const cp_slice = cp_iter_slice(container); const SliceT = @TypeOf(cp_slice); if (comptime is_string_like(SliceT) and is_string_like(@TypeOf(needle))) { if (std.mem.indexOf(u8, to_string_slice(cp_slice), to_string_slice(needle))) |i| return @intCast(i); return -1; } for (cp_slice, 0..) |item, idx| { if (cp_eq(item, needle)) return @intCast(idx); } return -1; }");
             self.writeln("fn cp_last_index_of(container: anytype, needle: anytype) i32 { const cp_slice = cp_iter_slice(container); const SliceT = @TypeOf(cp_slice); if (comptime is_string_like(SliceT) and is_string_like(@TypeOf(needle))) { if (std.mem.lastIndexOf(u8, to_string_slice(cp_slice), to_string_slice(needle))) |i| return @intCast(i); return -1; } var i: usize = cp_slice.len; while (i > 0) { i -= 1; if (cp_eq(cp_slice[i], needle)) return @intCast(i); } return -1; }");
             self.writeln("fn cp_includes(container: anytype, needle: anytype) bool { return cp_index_of(container, needle) != -1; }");
@@ -2438,7 +2461,11 @@ impl Codegen {
                 self.generate_enum(e);
             }
             if let ModuleItem::Decl(Decl::ErrorSet(es)) = item {
-                self.writeln(&format!("pub const {} = union(enum) {{", es.ident.sym));
+                if self.is_lib_mode {
+                    self.writeln(&format!("pub const {} = error{{", es.ident.sym));
+                } else {
+                    self.writeln(&format!("pub const {} = union(enum) {{", es.ident.sym));
+                }
                 self.indent();
                 for v in &es.variants {
                     self.writeln(&format!("{},", v.sym));
@@ -2533,8 +2560,32 @@ impl Codegen {
                         if let Some(name) = parts.next() {
                             let name = name.trim();
                             if !name.is_empty() {
-                                self.ref_classes.insert(name.to_string());
                                 self.value_classes.insert(name.to_string());
+                                self.globals.insert(name.to_string());
+                            }
+                        }
+                    } else if let Some(rest) = stripped.strip_prefix("fn ") {
+                        let mut parts = rest.split(&[' ', '(', '<'][..]);
+                        if let Some(name) = parts.next() {
+                            let name = name.trim();
+                            if !name.is_empty() {
+                                self.globals.insert(name.to_string());
+                            }
+                        }
+                    } else if let Some(rest) = stripped.strip_prefix("extern fn ") {
+                        let mut parts = rest.split(&[' ', '(', '<'][..]);
+                        if let Some(name) = parts.next() {
+                            let name = name.trim();
+                            if !name.is_empty() {
+                                self.globals.insert(name.to_string());
+                            }
+                        }
+                    } else if let Some(rest) = stripped.strip_prefix("extern \"c\" fn ") {
+                        let mut parts = rest.split(&[' ', '(', '<'][..]);
+                        if let Some(name) = parts.next() {
+                            let name = name.trim();
+                            if !name.is_empty() {
+                                self.globals.insert(name.to_string());
                             }
                         }
                     }
@@ -2889,6 +2940,17 @@ impl Codegen {
             self.dedent();
             self.writeln("}");
         }
+        if !e.methods.is_empty() {
+            for m in &e.methods {
+                self.generate_function_decorated(m, Some(&e.ident.sym));
+            }
+        }
+        for code in &e.extra_zig {
+            self.writeln("");
+            for line in code.lines() {
+                self.writeln(line);
+            }
+        }
         self.dedent();
         self.writeln("};\n");
     }
@@ -2931,11 +2993,27 @@ impl Codegen {
         }
         let is_root = class.meta.iter().any(|m| m.name.sym == "root");
         if is_root {
-            self.ref_classes.insert(class.ident.sym.clone());
+            if (class.is_ref || class.meta.iter().any(|m| m.name.sym == "ref"))
+                && !class.meta.iter().any(|m| m.name.sym == "value")
+            {
+                self.ref_classes.insert(class.ident.sym.clone());
+            }
             writeln!(self.output, "pub const {} = @This();\n", class.ident.sym).unwrap();
             for f in &class.fields {
                 let default_init = if let Some(def) = &f.default {
                     format!(" = {},", self.generate_expr(def))
+                } else if f.ident.sym == "ref_count" {
+                    " = .init(),".to_string()
+                } else if f.ident.sym == "pending"
+                    || f.ident.sym == "waiters"
+                    || f.ident.sym == "header_block"
+                    || f.ident.sym == "body_buffer"
+                    || f.ident.sym == "decoded_bytes"
+                    || f.ident.sym == "decoded_headers"
+                {
+                    " = .{},".to_string()
+                } else if f.ident.sym == "state" {
+                    " = .open,".to_string()
                 } else if f.ident.sym == "len" {
                     " = 0,".to_string()
                 } else {
@@ -2961,7 +3039,29 @@ impl Codegen {
             return;
         }
         let type_id = Self::fnv1a_type_id(&class.ident.sym);
-        writeln!(self.output, "pub const {} = struct {{", class.ident.sym).unwrap();
+        let is_packed = class.meta.iter().find(|m| m.name.sym == "packed");
+        let is_extern = class.meta.iter().any(|m| m.name.sym == "extern");
+        let struct_kind = if let Some(p) = is_packed {
+            if let Some(arg) = p.args.first() {
+                let expr = match arg {
+                    crate::ast::MetaArg::Positional(e) => e,
+                    crate::ast::MetaArg::Named(_, e) => e,
+                };
+                format!("packed struct({})", self.generate_expr(expr))
+            } else {
+                "packed struct".to_string()
+            }
+        } else if is_extern {
+            "extern struct".to_string()
+        } else {
+            "struct".to_string()
+        };
+        writeln!(
+            self.output,
+            "pub const {} = {} {{",
+            class.ident.sym, struct_kind
+        )
+        .unwrap();
         self.indent();
         let needs_trait_infra =
             !class.implements.is_empty() || class.meta.iter().any(|m| m.name.sym == "reflect");
@@ -2984,7 +3084,13 @@ impl Codegen {
                 default_init
             ));
         }
-        self.writeln(&format!("\npub fn _create(allocator: std.mem.Allocator) !*{} {{ const self_ptr = try allocator.create({}); self_ptr.* = undefined; return self_ptr; }}", class.ident.sym, class.ident.sym));
+        if !class
+            .meta
+            .iter()
+            .any(|m| m.name.sym == "value" || m.name.sym == "packed" || m.name.sym == "extern")
+        {
+            self.writeln(&format!("\npub fn _create(allocator: std.mem.Allocator) !*{} {{ const self_ptr = try allocator.create({}); self_ptr.* = undefined; return self_ptr; }}", class.ident.sym, class.ident.sym));
+        }
         if needs_trait_infra {
             self.writeln(&format!(
                 "pub fn __box_drop(ptr: *anyopaque) void {{ const self_ptr: *{0} = @ptrCast(@alignCast(ptr)); if (@hasDecl({0}, \"release\")) {{ const RType = @typeInfo(@TypeOf({0}.release)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _ = self_ptr.release() catch {{}}; }} else {{ self_ptr.release(); }} }} std.heap.page_allocator.destroy(self_ptr); }}",
@@ -5434,7 +5540,7 @@ impl Codegen {
 
     fn collect_pat_variants(pat: &Pattern, set: &mut std::collections::HashSet<String>) {
         match pat {
-            Pattern::Enum(ep) if ep.fields.is_none() && ep.tuple_pats.is_none() => {
+            Pattern::Enum(ep) if ep.fields.is_none() => {
                 set.insert(ep.variant_name.sym.clone());
             }
             Pattern::Or(pats) => {
@@ -5457,9 +5563,10 @@ impl Codegen {
 
             let is_exhaustive_enum = if let Some(Type::Ref(id)) = &disc_cp_ty {
                 if let Some(en) = self.enum_defs.get(&id.sym) {
-                    let is_pure = en.variants.iter().all(|v| {
-                        v.fields.is_none() && v.tuple_type.is_none() && v.from_err.is_none()
-                    });
+                    let is_pure = en
+                        .variants
+                        .iter()
+                        .all(|v| v.fields.is_none() && v.from_err.is_none());
                     if is_pure {
                         let mut covered_variants = std::collections::HashSet::new();
                         for arm in &m.arms {
@@ -5485,7 +5592,39 @@ impl Codegen {
                 {
                     continue;
                 }
-                let pat_str = Self::format_simple_pat(&arm.pat, &mut has_else);
+                let mut bound_ident = None;
+                let pat_arm_str = match &arm.pat {
+                    Pattern::Enum(ep) if ep.fields.is_none() => {
+                        let base = if ep.enum_name.sym.is_empty() {
+                            format!(".{}", ep.variant_name.sym)
+                        } else {
+                            format!("{}.{}", ep.enum_name.sym, ep.variant_name.sym)
+                        };
+                        if let Some(tup) = &ep.tuple_pats {
+                            if tup.len() == 1 {
+                                if let Pattern::Ident(id) = &tup[0] {
+                                    bound_ident = Some(id.sym.clone());
+                                    format!("{} => |{}|", base, id.sym)
+                                } else {
+                                    format!("{} =>", base)
+                                }
+                            } else {
+                                format!("{} =>", base)
+                            }
+                        } else {
+                            format!("{} =>", base)
+                        }
+                    }
+                    other => {
+                        let s = Self::format_simple_pat(other, &mut has_else);
+                        format!("{} =>", s)
+                    }
+                };
+
+                if let Some(b_id) = &bound_ident {
+                    self.locals.insert(b_id.clone(), "anytype".to_string());
+                }
+
                 let body_str = if is_expr {
                     match &*arm.body {
                         Stmt::Expr(e) => self.generate_expr(e),
@@ -5526,7 +5665,12 @@ impl Codegen {
                     self.current_case_content = saved;
                     format!("{{\n{}\n}}", s_str)
                 };
-                arms_code.push_str(&format!("{} => {},\n", pat_str, body_str));
+
+                if let Some(b_id) = &bound_ident {
+                    self.locals.remove(b_id);
+                }
+
+                arms_code.push_str(&format!("{} {},\n", pat_arm_str, body_str));
             }
             if !has_else && !is_exhaustive_enum {
                 arms_code.push_str("else => unreachable,\n");
@@ -6186,7 +6330,8 @@ impl Codegen {
                 if self.current_receiver_mode != ReceiverMode::Static {
                     let is_enum = self.enum_defs.contains_key(c);
                     let is_val = is_enum || self.value_classes.contains(c);
-                    let ptr_type = if is_val {
+                    let ptr_type = if is_val && self.current_receiver_mode == ReceiverMode::ReadOnly
+                    {
                         c.clone()
                     } else if self.current_receiver_mode == ReceiverMode::ReadOnly {
                         format!("*const {}", c)
@@ -6219,15 +6364,45 @@ impl Codegen {
             self.extract_locals_simple(&func.body);
             let is_inline = func.meta.iter().any(|m| m.name.sym == "inline");
             let inline_kw = if is_inline { "inline " } else { "" };
+            let callconv_clause =
+                if let Some(m) = func.meta.iter().find(|m| m.name.sym == "callconv") {
+                    let conv = match m.args.first() {
+                        Some(MetaArg::Positional(Expr::Lit(Lit::Str(s)))) => {
+                            if s.starts_with('.') {
+                                s.clone()
+                            } else {
+                                format!(".{}", s)
+                            }
+                        }
+                        Some(MetaArg::Positional(Expr::Ident(id))) => {
+                            if id.sym.starts_with('.') {
+                                id.sym.clone()
+                            } else {
+                                format!(".{}", id.sym)
+                            }
+                        }
+                        _ => ".c".to_string(),
+                    };
+                    format!("callconv({}) ", conv)
+                } else {
+                    String::new()
+                };
             writeln!(
                 self.output,
-                "\npub {}fn {}({}) {} {{",
-                inline_kw, zig_name, params_str, zig_ret_ty
+                "\npub {}fn {}({}) {}{} {{",
+                inline_kw, zig_name, params_str, callconv_clause, zig_ret_ty
             )
             .unwrap();
             self.indent();
             if self.is_class_method {
-                self.writeln("_ = &self;");
+                let is_self_used = self.last_use_map.contains_key("self")
+                    || self.last_use_map.contains_key("this")
+                    || self.last_use_map.contains_key("_")
+                    || Self::block_contains_ident(&func.body, "self")
+                    || Self::block_contains_ident(&func.body, "this");
+                if !is_self_used {
+                    self.writeln("_ = self;");
+                }
                 if self.current_receiver_mode == ReceiverMode::Move && func.ident.sym != "release" {
                     self.writeln("var __self_moved = false; _ = &__self_moved;");
                     self.writeln("defer if (!__self_moved) { const T = @TypeOf(self); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@\"struct\" and @hasDecl(Child, \"release\")) { const RType = @typeInfo(@TypeOf(Child.release)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) { _ = self.release() catch {}; } else { self.release(); } } } };");
@@ -7040,31 +7215,33 @@ impl Codegen {
                     } else if let Expr::Index { obj, .. } = &*bin.left {
                         self.check_mutation_allowed(obj, "index assignment '[] ='");
                     } else if let Expr::Ident(lhs_id) = &*bin.left {
-                        if self.current_fn_params.contains(&lhs_id.sym)
-                            && !self.mutable_fn_params.contains(&lhs_id.sym)
-                        {
-                            panic!(
-                                "CP Compile Error: Cannot mutate read-only variable or captured outer variable '{}'",
-                                lhs_id.sym
-                            );
-                        }
-                        if self.loop_borrowed_containers.contains(&lhs_id.sym) {
-                            panic!(
-                                "CP Compile Error: Cannot reassign container '{}' while iterating over it",
-                                lhs_id.sym
-                            );
-                        }
-                        if self.is_class_field(&lhs_id.sym) {
-                            if self.current_receiver_mode == ReceiverMode::ReadOnly {
+                        if lhs_id.sym != "_" {
+                            if self.current_fn_params.contains(&lhs_id.sym)
+                                && !self.mutable_fn_params.contains(&lhs_id.sym)
+                            {
                                 panic!(
-                                    "CP Compile Error: Cannot mutate field '{}' in a read-only method (add 'mut _' as first parameter)",
+                                    "CP Compile Error: Cannot mutate read-only variable or captured outer variable '{}'",
                                     lhs_id.sym
                                 );
                             }
-                            self.check_borrow_conflict("this", true);
-                            self.check_borrow_conflict("_", true);
-                        } else {
-                            self.check_borrow_conflict(&lhs_id.sym, true);
+                            if self.loop_borrowed_containers.contains(&lhs_id.sym) {
+                                panic!(
+                                    "CP Compile Error: Cannot reassign container '{}' while iterating over it",
+                                    lhs_id.sym
+                                );
+                            }
+                            if self.is_class_field(&lhs_id.sym) {
+                                if self.current_receiver_mode == ReceiverMode::ReadOnly {
+                                    panic!(
+                                        "CP Compile Error: Cannot mutate field '{}' in a read-only method (add 'mut _' as first parameter)",
+                                        lhs_id.sym
+                                    );
+                                }
+                                self.check_borrow_conflict("this", true);
+                                self.check_borrow_conflict("_", true);
+                            } else {
+                                self.check_borrow_conflict(&lhs_id.sym, true);
+                            }
                         }
                     }
 
@@ -7142,7 +7319,15 @@ impl Codegen {
                             ));
                         }
                     } else {
-                        let l = self.generate_expr(&bin.left);
+                        let l = if let Expr::Ident(lhs_id) = &*bin.left {
+                            if lhs_id.sym == "_" {
+                                "_".to_string()
+                            } else {
+                                self.generate_expr(&bin.left)
+                            }
+                        } else {
+                            self.generate_expr(&bin.left)
+                        };
                         self.write_to_case(&format!("{} = {};", l, r));
                     }
 
@@ -7261,7 +7446,9 @@ impl Codegen {
                     }
                     self.indent();
                     if let Some(cap) = &i.capture {
-                        self.write_to_case(&format!("_ = &{};", cap.sym));
+                        if !self.last_use_map.contains_key(&cap.sym) {
+                            self.write_to_case(&format!("_ = &{};", cap.sym));
+                        }
                     }
                     self.current_scope_depth += 1;
                     if let Stmt::Block(b) = &*i.cons {
@@ -7315,7 +7502,9 @@ impl Codegen {
                 }
                 self.indent();
                 if let Some(cap) = &w.capture {
-                    self.write_to_case(&format!("_ = &{};", cap.sym));
+                    if !self.last_use_map.contains_key(&cap.sym) {
+                        self.write_to_case(&format!("_ = &{};", cap.sym));
+                    }
                 }
                 self.current_scope_depth += 1;
                 if let Stmt::Block(b) = &*w.body {
@@ -7588,9 +7777,17 @@ impl Codegen {
                     }
                 }
 
+                let is_native_slice =
+                    expr_code.ends_with(".items") || expr_code.ends_with(".values()");
                 let (for_target, ptr_star) = match f.mode {
                     IterMode::MutBorrow => (format!("cp_mut_slice(&{})", expr_code), "*"),
-                    IterMode::Borrow => (format!("cp_iter_slice({})", expr_code), ""),
+                    IterMode::Borrow => {
+                        if is_native_slice {
+                            (expr_code.clone(), "")
+                        } else {
+                            (format!("cp_iter_slice({})", expr_code), "")
+                        }
+                    }
                     IterMode::Move => {
                         if let Expr::Ident(coll_id) = &f.expr {
                             self.moved_vars.insert(coll_id.sym.clone());
@@ -7598,7 +7795,11 @@ impl Codegen {
                                 self.write_to_case(&format!("__{}_moved = true;", coll_id.sym));
                             }
                         }
-                        (format!("cp_iter_slice({})", expr_code), "")
+                        if is_native_slice {
+                            (expr_code.clone(), "")
+                        } else {
+                            (format!("cp_iter_slice({})", expr_code), "")
+                        }
                     }
                 };
 
@@ -7786,6 +7987,7 @@ impl Codegen {
                         let allows_null = match &self.current_fn_ret_ty {
                             Some(Type::Optional(_)) => true,
                             Some(Type::ResultType { ok, .. }) => matches!(&**ok, Type::Optional(_)),
+                            Some(Type::ErrorUnion(inner)) => matches!(&**inner, Type::Optional(_)),
                             _ => false,
                         };
                         if !allows_null {
@@ -8162,7 +8364,7 @@ impl Codegen {
                     } else {
                         base
                     }
-                } else if self.is_class_field(&i.sym) {
+                } else if self.is_class_method && self.is_class_field(&i.sym) {
                     if self.moved_vars.contains("this") || self.moved_vars.contains("_") {
                         panic!(
                             "CP Compile Error: Use of moved value '_' when accessing field '{}'",
@@ -8182,6 +8384,7 @@ impl Codegen {
             }
             Expr::Borrow(inner, is_mut) => {
                 if let Expr::Ident(i) = &**inner {
+                    self.uninitialized_vars.remove(&i.sym);
                     if i.sym == "this" || i.sym == "_" || self.is_class_field(&i.sym) {
                         if *is_mut && self.current_receiver_mode == ReceiverMode::ReadOnly {
                             panic!(
@@ -8278,6 +8481,11 @@ impl Codegen {
                 if bin.op == BinaryOp::Pipe {
                     return self.generate_pipeline(&bin.left, &bin.right);
                 }
+                if bin.op == BinaryOp::Assign {
+                    if let Expr::Ident(id) = &*bin.left {
+                        self.uninitialized_vars.remove(&id.sym);
+                    }
+                }
                 let l = self.generate_expr(&bin.left);
                 let r = self.generate_expr(&bin.right);
                 let l_ty = self.infer_cp_type(&bin.left);
@@ -8328,49 +8536,67 @@ impl Codegen {
                 };
                 match bin.op {
                     BinaryOp::Eq => {
-                        if are_both_numeric || is_null_cmp || is_enum_cmp || is_bool_cmp {
+                        let has_num = are_both_numeric
+                            || matches!(&*bin.left, Expr::Lit(Lit::Int(_)) | Expr::Lit(Lit::Float(_)))
+                            || matches!(&*bin.right, Expr::Lit(Lit::Int(_)) | Expr::Lit(Lit::Float(_)));
+                        if self.is_lib_mode || has_num || is_null_cmp || is_enum_cmp || is_bool_cmp {
                             format!("({} == {})", l, r)
                         } else {
                             format!("cp_eq({}, {})", l, r)
                         }
                     }
                     BinaryOp::NotEq => {
-                        if are_both_numeric || is_null_cmp || is_enum_cmp || is_bool_cmp {
+                        let has_num = are_both_numeric
+                            || matches!(&*bin.left, Expr::Lit(Lit::Int(_)) | Expr::Lit(Lit::Float(_)))
+                            || matches!(&*bin.right, Expr::Lit(Lit::Int(_)) | Expr::Lit(Lit::Float(_)));
+                        if self.is_lib_mode || has_num || is_null_cmp || is_enum_cmp || is_bool_cmp {
                             format!("({} != {})", l, r)
                         } else {
                             format!("cp_neq({}, {})", l, r)
                         }
                     }
                     BinaryOp::Add => {
-                        if are_both_numeric {
+                        let is_str_concat = matches!(l_ty, Some(Type::String))
+                            || matches!(r_ty, Some(Type::String))
+                            || matches!(&*bin.left, Expr::Lit(Lit::Str(_)))
+                            || matches!(&*bin.right, Expr::Lit(Lit::Str(_)));
+                        if self.is_lib_mode || !is_str_concat || are_both_numeric {
                             format!("({} + {})", l, r)
                         } else {
                             format!("cp_add({}, {})", l, r)
                         }
                     }
                     BinaryOp::Lt => {
-                        if are_both_numeric {
+                        let is_str_cmp = matches!(l_ty, Some(Type::String))
+                            && matches!(r_ty, Some(Type::String));
+                        if self.is_lib_mode || !is_str_cmp || are_both_numeric {
                             format!("({} < {})", l, r)
                         } else {
                             format!("cp_lt({}, {})", l, r)
                         }
                     }
                     BinaryOp::Gt => {
-                        if are_both_numeric {
+                        let is_str_cmp = matches!(l_ty, Some(Type::String))
+                            && matches!(r_ty, Some(Type::String));
+                        if self.is_lib_mode || !is_str_cmp || are_both_numeric {
                             format!("({} > {})", l, r)
                         } else {
                             format!("cp_gt({}, {})", l, r)
                         }
                     }
                     BinaryOp::LtEq => {
-                        if are_both_numeric {
+                        let is_str_cmp = matches!(l_ty, Some(Type::String))
+                            && matches!(r_ty, Some(Type::String));
+                        if self.is_lib_mode || !is_str_cmp || are_both_numeric {
                             format!("({} <= {})", l, r)
                         } else {
                             format!("cp_lte({}, {})", l, r)
                         }
                     }
                     BinaryOp::GtEq => {
-                        if are_both_numeric {
+                        let is_str_cmp = matches!(l_ty, Some(Type::String))
+                            && matches!(r_ty, Some(Type::String));
+                        if self.is_lib_mode || !is_str_cmp || are_both_numeric {
                             format!("({} >= {})", l, r)
                         } else {
                             format!("cp_gte({}, {})", l, r)
@@ -8384,7 +8610,17 @@ impl Codegen {
                     BinaryOp::Shr => format!("cp_shr({}, {})", l, r),
                     BinaryOp::LogicalAnd => format!("({} and {})", l, r),
                     BinaryOp::LogicalOr => format!("({} or {})", l, r),
-                    BinaryOp::Assign => format!("{} = {}", l, r),
+                    BinaryOp::Assign => {
+                        if let Expr::Ident(id) = &*bin.left {
+                            if id.sym == "_" {
+                                format!("_ = {}", r)
+                            } else {
+                                format!("{} = {}", l, r)
+                            }
+                        } else {
+                            format!("{} = {}", l, r)
+                        }
+                    }
                     _ => {
                         let op = match bin.op {
                             BinaryOp::Sub => "-",
@@ -8466,61 +8702,65 @@ impl Codegen {
                             args_code.push(self.generate_expr(a));
                         }
                         return format!("{}.{}({})", obj, prop, args_code.join(", "));
-                    } else if prop == "indexOf" {
+                    } else if prop == "indexOf" && !call.args.is_empty() {
                         self.check_read_allowed(&mem.obj);
                         let obj = self.generate_expr(&mem.obj);
                         let arg = self.generate_expr(&call.args[0]);
                         return format!("cp_index_of({}, {})", obj, arg);
-                    } else if prop == "lastIndexOf" {
+                    } else if prop == "lastIndexOf" && !call.args.is_empty() {
                         self.check_read_allowed(&mem.obj);
                         let obj = self.generate_expr(&mem.obj);
                         let arg = self.generate_expr(&call.args[0]);
                         return format!("cp_last_index_of({}, {})", obj, arg);
-                    } else if prop == "includes" {
+                    } else if prop == "includes" && !call.args.is_empty() {
                         self.check_read_allowed(&mem.obj);
                         let obj = self.generate_expr(&mem.obj);
                         let arg = self.generate_expr(&call.args[0]);
                         return format!("cp_includes({}, {})", obj, arg);
-                    } else if prop == "startsWith" {
+                    } else if prop == "startsWith" && !call.args.is_empty() {
                         self.check_read_allowed(&mem.obj);
                         let obj = self.generate_expr(&mem.obj);
                         let arg = self.generate_expr(&call.args[0]);
                         return format!("@import(\"std\").mem.startsWith(u8, {}, {})", obj, arg);
-                    } else if prop == "endsWith" {
+                    } else if prop == "endsWith" && !call.args.is_empty() {
                         self.check_read_allowed(&mem.obj);
                         let obj = self.generate_expr(&mem.obj);
                         let arg = self.generate_expr(&call.args[0]);
                         return format!("@import(\"std\").mem.endsWith(u8, {}, {})", obj, arg);
-                    } else if prop == "slice" || prop == "substring" {
+                    } else if (prop == "slice" || prop == "substring") && !call.args.is_empty() {
                         self.check_read_allowed(&mem.obj);
                         let obj = self.generate_expr(&mem.obj);
                         let start = self.generate_expr(&call.args[0]);
-                        let end = self.generate_expr(&call.args[1]);
-                        return format!("cp_iter_slice({})[@intCast({})..@intCast({})]", obj, start, end);
+                        if call.args.len() > 1 {
+                            let end = self.generate_expr(&call.args[1]);
+                            return format!("cp_iter_slice({})[@intCast({})..@intCast({})]", obj, start, end);
+                        } else {
+                            return format!("cp_iter_slice({})[@intCast({})..]", obj, start);
+                        }
                     } else if prop == "toLowerCase" {
                         let obj = self.generate_expr(&mem.obj);
                         return format!("(blk: {{ var out = std.heap.page_allocator.alloc(u8, {}.len) catch unreachable; for ({}, 0..) |c, i| out[i] = @import(\"std\").ascii.toLower(c); break :blk out; }})", obj, obj);
                     } else if prop == "toUpperCase" {
                         let obj = self.generate_expr(&mem.obj);
                         return format!("(blk: {{ var out = std.heap.page_allocator.alloc(u8, {}.len) catch unreachable; for ({}, 0..) |c, i| out[i] = @import(\"std\").ascii.toUpper(c); break :blk out; }})", obj, obj);
-                    } else if prop == "replace" {
+                    } else if prop == "replace" && call.args.len() >= 2 {
                         let obj = self.generate_expr(&mem.obj);
                         let arg = self.generate_expr(&call.args[0]);
                         let replacement = self.generate_expr(&call.args[1]);
                         return format!("@import(\"std\").mem.replaceOwned(u8, std.heap.page_allocator, {}, {}, {}) catch unreachable", obj, arg, replacement);
-                    } else if prop == "charCodeAt" {
+                    } else if prop == "charCodeAt" && !call.args.is_empty() {
                         let obj = self.generate_expr(&mem.obj);
                         let arg = self.generate_expr(&call.args[0]);
                         return format!("@as(i32, @intCast({}[@intCast({})]))", obj, arg);
-                    } else if prop == "match" {
+                    } else if prop == "match" && !call.args.is_empty() {
                         let obj = self.generate_expr(&mem.obj);
                         let arg = self.generate_expr(&call.args[0]);
                         return format!("{}.exec({})", arg, obj);
-                    } else if prop == "test" {
+                    } else if prop == "test" && !call.args.is_empty() {
                         let obj = self.generate_expr(&mem.obj);
                         let arg = self.generate_expr(&call.args[0]);
                         return format!("{}.@\"test\"({})", obj, arg);
-                    } else if prop == "exec" {
+                    } else if prop == "exec" && !call.args.is_empty() {
                         let obj = self.generate_expr(&mem.obj);
                         let arg = self.generate_expr(&call.args[0]);
                         return format!("{}.exec({})", obj, arg);
@@ -9400,21 +9640,34 @@ impl Codegen {
                             format!("return .{{ .ok = {} }};", fb_c)
                         }
                     } else {
-                        if is_null_fb && !matches!(&self.current_fn_ret_ty, Some(Type::Optional(_)))
+                        let allows_null = match &self.current_fn_ret_ty {
+                            Some(Type::Optional(_)) => true,
+                            Some(Type::ErrorUnion(inner)) => matches!(&**inner, Type::Optional(_)),
+                            _ => false,
+                        };
+                        if is_null_fb && !allows_null
                         {
                             panic!("CP Compile Error: Cannot return 'null' from function whose return type is not optional '?T'");
                         }
                         let fb_c = self.generate_expr(fallback);
                         format!("return {};", fb_c)
                     };
-                    format!(
-                        "(blk_qf_{id}: {{ const __r_{id} = {exp}; if (cp_has_ok_val(__r_{id})) break :blk_qf_{id} cp_unwrap_ok_val(__r_{id}); {ret_stmt} }})"
-                    )
+                    if self.is_lib_mode {
+                        format!("(({exp}) orelse {{ {ret_stmt} }})")
+                    } else {
+                        format!(
+                            "(blk_qf_{id}: {{ const __r_{id} = {exp}; if (cp_has_ok_val(__r_{id})) break :blk_qf_{id} cp_unwrap_ok_val(__r_{id}); {ret_stmt} }})"
+                        )
+                    }
                 } else {
                     let fb_c = self.generate_expr(fallback);
-                    format!(
-                        "(blk_qf_{id}: {{ const __r_{id} = {exp}; if (cp_has_ok_val(__r_{id})) break :blk_qf_{id} cp_unwrap_ok_val(__r_{id}); break :blk_qf_{id} cp_val({fb_c}); }})"
-                    )
+                    if self.is_lib_mode {
+                        format!("(({exp}) orelse {fb_c})")
+                    } else {
+                        format!(
+                            "(blk_qf_{id}: {{ const __r_{id} = {exp}; if (cp_has_ok_val(__r_{id})) break :blk_qf_{id} cp_unwrap_ok_val(__r_{id}); break :blk_qf_{id} cp_val({fb_c}); }})"
+                        )
+                    }
                 }
             }
             Expr::NullCoalesce { left, right } => {
@@ -9432,7 +9685,11 @@ impl Codegen {
                 let l_code = self.generate_expr(left);
                 self.in_try_region = old_in_try;
                 let r_code = self.generate_expr(right);
-                format!("cp_null_coalesce({}, {})", l_code, r_code)
+                if self.is_lib_mode {
+                    format!("(({}) orelse ({}))", l_code, r_code)
+                } else {
+                    format!("cp_null_coalesce({}, {})", l_code, r_code)
+                }
             }
             Expr::Catch {
                 expr: inner,
@@ -9472,11 +9729,38 @@ impl Codegen {
 
                 let catch_arm_body = match &**body {
                     Stmt::Expr(e) => {
-                        let ec = self.generate_expr(e);
-                        if let Some(ty_str) = &target_payload_ty {
-                            format!("break :{} @as({}, {});", blk_label, ty_str, ec)
+                        if matches!(e, Expr::Bin(bin) if bin.op == BinaryOp::Assign) {
+                            let saved = self.current_case_content.clone();
+                            self.current_case_content.clear();
+                            self.generate_stmt(body);
+                            let default_val = if let Some(ty_str) = &target_payload_ty {
+                                match ty_str.as_str() {
+                                    "bool" => "false",
+                                    "void" => "{}",
+                                    s if s.starts_with('?') => "null",
+                                    _ => "undefined",
+                                }
+                            } else {
+                                "{}"
+                            };
+                            let brk = if let Some(ty_str) = &target_payload_ty {
+                                format!("break :{} @as({}, {});", blk_label, ty_str, default_val)
+                            } else {
+                                format!("break :{} {};", blk_label, default_val)
+                            };
+                            self.write_to_case(&brk);
+                            let code = self.current_case_content.trim().to_string();
+                            self.current_case_content = saved;
+                            code
                         } else {
-                            format!("break :{} cp_val({});", blk_label, ec)
+                            let ec = self.generate_expr(e);
+                            if let Some(ty_str) = &target_payload_ty {
+                                format!("break :{} @as({}, {});", blk_label, ty_str, ec)
+                            } else if self.is_lib_mode {
+                                format!("break :{} {};", blk_label, ec)
+                            } else {
+                                format!("break :{} cp_val({});", blk_label, ec)
+                            }
                         }
                     }
                     Stmt::Return(_) => {
@@ -9494,11 +9778,36 @@ impl Codegen {
                         for (idx, s) in b.body.iter().enumerate() {
                             if idx + 1 == len {
                                 if let Stmt::Expr(e) = s {
+                                    if matches!(e, Expr::Bin(bin) if bin.op == BinaryOp::Assign) {
+                                        self.generate_stmt(s);
+                                        if let Some(ty_str) = &target_payload_ty {
+                                            let default_val = match ty_str.as_str() {
+                                                "bool" => "false",
+                                                "void" => "{}",
+                                                s if s.starts_with('?') => "null",
+                                                _ => "undefined",
+                                            };
+                                            self.write_to_case(&format!(
+                                                "break :{} @as({}, {});",
+                                                blk_label, ty_str, default_val
+                                            ));
+                                        } else if self.is_lib_mode {
+                                            self.write_to_case(&format!("break :{} {{}};", blk_label));
+                                        } else {
+                                            self.write_to_case(&format!("break :{} cp_val({{}});", blk_label));
+                                        }
+                                        continue;
+                                    }
                                     let ec = self.generate_expr(e);
                                     if let Some(ty_str) = &target_payload_ty {
                                         self.write_to_case(&format!(
                                             "break :{} @as({}, {});",
                                             blk_label, ty_str, ec
+                                        ));
+                                    } else if self.is_lib_mode {
+                                        self.write_to_case(&format!(
+                                            "break :{} {};",
+                                            blk_label, ec
                                         ));
                                     } else {
                                         self.write_to_case(&format!(
@@ -9530,7 +9839,7 @@ impl Codegen {
                 self.var_cp_types = old_vars;
                 self.locals = old_locals;
 
-                if matches!(inner_ty, Some(Type::ErrorUnion(_))) {
+                if matches!(inner_ty, Some(Type::ErrorUnion(_))) || self.is_lib_mode || inner_ty.is_none() {
                     return format!(
                         "({blk_label}: {{ break :{blk_label} ({exp}) catch |{err_bind}| {{ _ = &{err_bind}; {catch_arm_body} }}; }})"
                     );
@@ -10012,10 +10321,16 @@ impl Codegen {
                     );
                 }
                 let obj = self.generate_expr(&member.obj);
-                let prop = match member.prop.sym.as_str() {
-                    "length" => "len",
-                    _ => &member.prop.sym,
+                let is_array_or_string = match self.infer_cp_type(&member.obj) {
+                    Some(Type::String) | Some(Type::Array(_)) | Some(Type::FixedArray(_, _)) => true,
+                    _ => false,
                 };
+                let prop_str = if is_array_or_string && member.prop.sym == "length" {
+                    "len".to_string()
+                } else {
+                    member.prop.sym.clone()
+                };
+                let prop = prop_str.as_str();
                 let obj_ty = self.infer_zig_type(None, Some(&member.obj));
                 if obj_ty.starts_with('?') {
                     format!("cp_opt_unwrap({}).{}", obj, prop)
@@ -10043,7 +10358,11 @@ impl Codegen {
                 }
                 "@not" => {
                     let inner = self.generate_expr(&call.args[0]);
-                    format!("cp_not({})", inner)
+                    if self.is_lib_mode {
+                        format!("(!{})", inner)
+                    } else {
+                        format!("cp_not({})", inner)
+                    }
                 }
                 "@print" => {
                     let fmt = self.generate_expr(&call.args[0]);
@@ -10424,7 +10743,13 @@ impl Codegen {
                     let t = self.generate_expr(&call.args[0]);
                     format!("@alignOf({})", t)
                 }
-                _ => "0".to_string(),
+                _ => {
+                    let mut args_code = Vec::new();
+                    for a in &call.args {
+                        args_code.push(self.generate_expr(a));
+                    }
+                    format!("{}({})", call.name, args_code.join(", "))
+                }
             },
             Expr::Arrow(arrow) => {
                 let lambda_name = format!("lambda_{}", self.lambda_counter);
@@ -10644,7 +10969,7 @@ impl Codegen {
                     }
                 }
                 s.push_str(" }");
-                if self.expected_array_elem_type.is_some() || self.is_comptime {
+                if self.expected_array_elem_type.is_some() || self.is_comptime || self.is_lib_mode {
                     s
                 } else if !items.is_empty() {
                     let elem_zig_ty = self
@@ -11928,6 +12253,9 @@ impl Codegen {
                 if ident.sym == "FieldInfo" || ident.sym == "MethodInfo" {
                     return ident.sym.clone();
                 }
+                if ident.sym == "cstring" {
+                    return "[:0]const u8".to_string();
+                }
                 let is_custom_int = (ident.sym.starts_with('u') || ident.sym.starts_with('i'))
                     && ident.sym.len() > 1
                     && ident.sym[1..].chars().all(|c| c.is_ascii_digit());
@@ -11938,6 +12266,10 @@ impl Codegen {
                     || ident.sym == "Message"
                     || ident.sym == "Error"
                     || ident.sym == "anytype"
+                    || ident.sym == "type"
+                    || ident.sym == "anyerror"
+                    || ident.sym.starts_with("c_")
+                    || ident.sym.starts_with("Many")
                     || ident.sym.contains('.')
                     || ident.sym.starts_with("__AnonErr_")
                     || ident.sym.starts_with("__UnionErr_")
@@ -11959,6 +12291,14 @@ impl Codegen {
                     if let Type::String = &**inner {
                         return "[]u8".to_string();
                     }
+                    if let Type::Ref(id) = &**inner {
+                        if id.sym == "cstring" {
+                            return "[:0]u8".to_string();
+                        }
+                    }
+                }
+                if let Type::Optional(opt_inner) = &**inner {
+                    return format!("?*{}", self.map_type(opt_inner));
                 }
                 let inner_zig = self.map_type(inner);
                 let is_trait = if let Type::Ref(id) = &**inner {

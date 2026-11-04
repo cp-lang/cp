@@ -4768,3 +4768,79 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
    - 全文规范与代码示例统一收敛为后缀 `T?` 与 `T?!`。
 5. **四线文档维护**：
    - 完整同步更新 [`SESSION.md`](file:///data/dev/cp/SESSION.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)、[`cp_ref.md`](file:///data/dev/cp/cp_ref.md)。
+
+---
+
+## 2026-11-05 交互记录：cap 支持 CPC_BIN 环境变量并打通 cpc_dev 并行开发通道
+
+### 用户指令 (User Request)
+> 已经完成 步骤2, 你执行步骤1, 同时 将 CPC_BIN 指向开发版本
+> 然后等待我的指令, 进行并行cpc 研发
+
+### 执行操作与结果 (Execution & Result)
+1. **修改 `cap` 构建器支持 `CPC_BIN` 环境变量**：
+   - 在 [`cap/src/main.zig`](file:///data/dev/cp/cap/src/main.zig) 中增加 `getCpcBin()` 辅助函数，优先读取 `global_env.get("CPC_BIN")`，默认回退至 `/data/dev/cp/cpc/target/release/cpc`；
+   - 替换了源码运行、打包编译、测试单测中全部 5 处硬编码编译器路径；
+   - 运行 `zig fmt cap/src/main.zig` 格式化，并通过 `zig build --build-file cap/build.zig` 重新编译安装 `cap` 命令行工具。
+2. **初始化 `cpc_dev` 并行沙盒**：
+   - 在 `/data/dev/cp/cpc_dev` 中执行 `cargo check` 与 `cargo build`，成功产出开发版编译器 `/data/dev/cp/cpc_dev/target/debug/cpc`。
+3. **联调验证**：
+   - 执行 `env CPC_BIN=/data/dev/cp/cpc_dev/target/debug/cpc ./cap/bin/cap cap/test/test_err_and_move.cp`，全流程测试 100% 成功。
+4. **四线文档同步**：
+   - 完整更新 [`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)、[`SESSION.md`](file:///data/dev/cp/SESSION.md)。
+5. **当前就绪状态**：
+   - `cap` 已支持动态环境变量注入；
+   - `cpc_dev` 沙盒已完全准备就绪；
+   - 停步并等待用户进一步研发指令。
+
+---
+
+## 2026-11-05 交互记录：Bun AGY 变更审查、未变动变量 Bug 攻坚修复与全量代码库 Git 提交
+
+### 用户指令 (User Request)
+> git 提交当前项目代码库
+> 
+> 先评估 bun agy 对 cpc 的改动是否合理, 如合理, 执行 git 提交, 并给出修改报告, 同步检查 cp_ref.md 是否更新.
+> 如不合理,或者有 bug/隐患/错误, 需修正, 并同步更新 cp_ref.md 设计规范.
+
+### 执行操作与审查修复报告 (Execution & Evaluation Report)
+1. **Bun AGY 变更深度审查**：
+   - ✅ **合理且优秀的特性**：
+     - `export fn/class/struct` 声明修饰符支持（对标 ES Module 与 C 符号导出）；
+     - `is_lib_mode` 库转译模式，精简 C/Zig/Bun 动态链接库生成时的冗余运行时辅助宏；
+     - `cstring` 映射为 Zig `[:0]const u8`（可变借用指针为 `[:0]u8`），简化 C 字符串互操作；
+     - `@packed` / `@extern` 结构体内存布局免除默认成员构造函数 `init` 生成，避免破坏 C ABI 与紧凑位布局；
+     - 编译期常量整型折叠计算 `eval_const_int_expr` 与任意位宽整数 `u1`..`u128` 安全校验；
+     - 未知 `@builtin` 宏透明透传至底层 Zig/C 函数调用。
+   - ❌ **排查出的严重 Bug（已攻坚修复）**：
+     - **Bug 根因**：Bun AGY 在 `cpc/src/codegen.rs:6895` 中将普通非状态机变量始终发射 `_ = &ident;` 的防线改为了 `else if !self.is_state_machine && !is_used`。
+     - **危害**：在 Zig 中，`var x = ...;` 如果被读取（`is_used == true`）但从未被修改，Zig 编译器强制抛出 `error: local variable is never mutated: note: consider using 'const'`。因为 CP 的 `let` 变量底层统一映射为 `var`，若去掉 `_ = &ident;` 取地址标记，将导致所有含只读 `let` 变量的代码在 Zig 编译阶段彻底崩溃（如 `example_showcase.cp` 出现 8 处编译报错）。
+     - **修复方案**：恢复 `else if !self.is_state_machine { self.write_to_case(&format!("_ = &{};", ident.sym)); }`。
+2. **规范白皮书同步 (`cp_ref.md`)**：
+   - 补充 `cstring` 标量类型规范（对接 C/Bun 原生库，映射为 Zig `[:0]const u8`）；
+   - 补充 `[N]T` 定长数组语法；
+   - 补充 `export fn` 符号导出修饰符说明；
+   - 补充 `@packed` 与 `@extern` 内存布局元属性；
+   - 同步更新第 6 节（参数所有权转移语法）与第 8.2.1 节（`err(...)` 主推与 `Err(...)` 兼容）。
+3. **回归验证**：
+   - `cargo fmt --manifest-path cpc/Cargo.toml` 格式化通过；
+   - `cargo check` 0 错误 0 警告；
+   - `cargo test` 2 测试全部通过；
+   - `cargo build --release` 编译成功并原子安装至 `/data/dev/cp/cap/bin/cpc`；
+   - 全量回归测试：`test_err_and_move.cp` (100%)、`example_showcase.cp` (100%)、`test_pipe_pass.cp` (100%)、`test_walrus_binding.cp` (100%) 全部绿灯！
+
+### 本次提交范围 (Commit Scope)
+1. **编译器核心 (`cpc/src/`)**：
+   - `codegen.rs`: 修复 `_ = &ident;` 变量取地址标记；接入 `is_lib_mode`；支持 `cstring` 与透明 `@builtin` 透传；
+   - `parser.rs`: 支持 `err(...)` 构造与匹配；支持 `move` 参数灵活前置；支持 `export` 与 `[N]T` 数组语法；
+   - `sema.rs`: 注册 `err` 标识符；免除 `@packed` / `@extern` 的 `init` 构造器生成；实现 `eval_const_int_expr`。
+2. **构建系统与工程配置 (`cap/`, `.gitignore`, `GEMINI.md`)**：
+   - `cap/src/main.zig`: 支持 `CPC_BIN` 环境变量优先路由；
+   - `.gitignore`: 忽略 `cpc_dev/` 影子沙盒；
+   - `GEMINI.md`: 记录用户针对 temp/test 目录的操作权限补充。
+3. **测试用例 (`cap/test/`)**：
+   - `test_err_and_move.cp`: 覆盖双位置 `move`、`err(...)` 与 `Err(...)` 兼容性。
+4. **规范与文档 (`cp_ref.md`, `SESSION.md`, `CHANGELOG.md`, `DEVLOG.md`)**：
+   - 四线文档全量同步更新。
+
+

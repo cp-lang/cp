@@ -580,9 +580,10 @@ CP 是一门严格无 GC 的静态类型编译型语言，禁止任何隐式类�
 | `isize`  | 与符号系统字长 (32/64-bit) | 内存偏移量、容器长度          |
 | `f32`    | 32-bit 单精度浮点          | 图形计算、Tensor 运算基准     |
 | `f64`    | 64-bit 双精度浮点          | 默认浮点字面量类型            |
-| `bool`   | 1-bit / 1-byte             | 布尔真假值 (`true` / `false`) |
-| `string` | 连续只读 UTF-8 内存视图    | 附带长度信息的不可变切片视图  |
-| `void`   | 0-bit                      | 空单元类型，表示无返回值      |
+| `bool`    | 1-bit / 1-byte             | 布尔真假值 (`true` / `false`) |
+| `string`  | 连续只读 UTF-8 内存视图    | 附带长度信息的不可变切片视图  |
+| `cstring` | 以 null 结尾的连续字节切片 | 对接 C/Bun 原生库，映射为 Zig `[:0]const u8` (可变借用为 `[:0]u8`) |
+| `void`    | 0-bit                      | 空单元类型，表示无返回值      |
 
 ---
 
@@ -594,7 +595,7 @@ let nums: [i32] = [10, 20, 30];
 let slice: [i32] = nums[1..3];
 
 // 2. 静态定长数组与重复初始化：[T; N] / [N]T 与 [val; count]
-let fixed_arr: [u8; 4] = [1, 2, 3, 4];
+let fixed_arr: [u8; 4] = [1, 2, 3, 4];   // 亦支持 Zig 风格 [4]u8
 let zero_buf: [u8; 256] = [0; 256];      // 编译期生成 ([_]u8{ 0 } ** 256)
 let lookup_table: [u8; 256] = [0xFF; 256];
 
@@ -1014,49 +1015,346 @@ switch (worker) {
 
 ## 五、函数系统与参数方法契约
 
-### 5.1 函数修饰符与前缀矩阵
+> 核心设计思路：统一普通运行期函数、`comptime`编译期函数；支持闭包、管道传参；参数区分所有权/借用；返回类型支持 `void`、可空 `T?`、错误联合 `T!E`；错误冒泡 `?` 作用于调用表达式。
 
-函数修饰符保持正交、严格正序：
+### 5.1 函数基础语法
 
-- `pub`：公开导出符号；
-- `static`：类中静态方法，不绑定实例；
-- `async`：异步函数，切分为 CPS 状态机；
-- `unsafe`：不安全函数，调用方必须位于 `unsafe { }` 作用域内。
+关键字 `fn` 定义函数；冒号 `:` 之后标注返回类型；`void` 返回类型**可以省略**。
+标准格式：
 
-```typescript
-pub async fn fetch_remote_metrics(url: string): string ! NetError {
-    // ...
+```ts
+fn 函数名(参数列表): 返回类型 {
+    语句
+}
+```
+
+示例：
+
+```ts
+fn add(a:i32, b:i32): i32 {
+    return a + b;
+}
+
+// 无返回
+fn print_msg(msg:string): void {
+    print(msg);
+}
+
+// 无返回、可空
+fn print_msg(msg:string): void? {
+    print(msg);
+}
+
+// 无返回、可错
+fn print_msg(msg:string): void! {
+    print(msg);
+}
+
+// 动态链接库与 C FFI 符号导出：export fn
+export fn calculate(val: i32): i32 {
+    return val * 2;
+}
+
+```
+
+---
+
+### 5.2 参数分类：值、所有权、只读借用、可变借用
+
+参数的传递语义写在参数类型前，**四种参数修饰**，严格区分：
+
+1. **值/只读借用参数**：`arg: T`
+   - 基础Copy类型（bool、整数、浮点数）：传入副本。
+   - 复合类型：只读借用，调用方传入只读借用变量或所有权变量，所有权变量编译时，自动转为只读借用变量。
+   - 只读借用只读访问，不获取所有权；不能修改内部数据。
+2. **所有权转移参数**：`move arg: T`
+   - 函数取得这个值的所有权；函数退出时资源释放
+   - 调用方只可传入所有权变量。
+3. **可变借用参数**：`arg: *T`
+   - 独占可变访问，可以修改；遵守借用互斥规则
+
+示例汇总：
+
+```ts
+// 值参数，复合类型自动转为只读借用
+fn accept_val(u: i32) {}
+// data 默认为只读借用，传参零拷贝，禁止内部任何原地修改
+fn inspect(data: [i32]) {}
+// move 参数，函数接管所有权
+fn take_own(move u: User) {}
+fn take_ownership(move data: Tensor) {
+    // data 所有权完全移交进函数体，调用方原变量变为未初始化失效态
+}
+// 只读借用
+fn read_u(u: User) {}
+// 可变借用
+fn modify_u(u: *User) {}
+fn append_seed(*data: [i32], seed: i32) {
+    data.push(seed); // 允许对调用方传入的实参进行原地修改
+}
+
+let u = User{id:1};
+accept_val(u.id);
+take_own(u);
+read_u(u);
+modify_u(*u);
+
+```
+
+> 重要：借用参数不会触发所有权转移；借用生命周期不能超过调用方原始所有者。
+
+---
+
+### 5.3 返回值体系（void / 普通 / 可空 / 错误联合）
+
+四种返回类型形式，语义严格隔离：
+
+1. `void`：无返回，可省略
+2. `T`：正常返回 T，非空、无错误
+3. `T?`：可空返回，结果为 `T` 或者 `null`，使用 `??`、`?.` 处理 null
+4. `T!E`：错误联合返回，正常是 `T`，错误是 `E`，使用 `?` 冒泡错误，`err(...)` 构造错误
+
+```ts
+// 可空返回
+fn find_user(id:u64): User? {
+    return null;
+}
+
+// 错误联合返回
+fn load_config(path:string): Config ! LoadErr {
+    return err(LoadErr.NotFound);
+}
+```
+
+return 规则：
+
+- 返回所有权：`return val` 自动移交所有权给调用方，**不需要在 return 写 move**
+- 返回借用：必须保证借用指向的值存活；编译器生命周期检查，禁止悬垂借用返回
+
+```ts
+fn ok(): &i32 {
+    let x = 10;
+    return &x; // ❌ 编译报错，悬垂借用
 }
 ```
 
 ---
 
-### 5.2 形参借用与所有权语义规范
+### 5.4 函数调用、错误冒泡 `?`
 
-为了达成无 GC 与零成本抽象，函数形参具备极其严谨的所有权语义：
+普通调用：`add(1,2)`
+如果返回是 `T!E`，调用表达式末尾加 `?`：**错误冒泡**
 
-1. **缺省形参（只读借用）**：
-   ```typescript
-   fn inspect(data: [i32]) {
-       // data 默认为只读借用，传参零拷贝，禁止内部任何原地修改
-   }
-   ```
-2. **可变借用形参（`*param` 或 `mut param`）**：
-   ```typescript
-   fn append_seed(*data: [i32], seed: i32) {
-       data.push(seed); // 允许对调用方传入的实参进行原地修改
-   }
-   ```
-3. **所有权转移形参（`move param`）**：
-   ```typescript
-   fn take_ownership(move data: Tensor) {
-       // data 所有权完全移交进函数体，调用方原变量变为未初始化失效态
-   }
-   ```
+- 成功：取出 T，继续执行
+- 失败：向上抛出错误，当前函数必须同是 `T!E` 返回类型
+
+```ts
+let cfg = load_config("cfg.toml")?;
+```
+
+> 重点区分：
+>
+> - `expr?`：只冒泡错误（`T!E`），不处理 null
+> - `expr ??：只兜底 null（`T?`），不处理错误
+
+switch 是另一种处理错误/可空的方式，适合分支处理。
 
 ---
 
-### 5.3 方法接收者（Receiver）终极哲学
+### 5.5 匿名函数 & 闭包
+
+箭头 `=>` 定义匿名函数（闭包）；可以捕获外层变量，捕获遵守所有权/借用规则。
+
+```ts
+let sum = (a: i32, b: i32) => a + b;
+
+// 多行闭包，加大括号
+let print_fn = (msg: string) => {
+  print(msg);
+};
+```
+
+闭包捕获规则：
+
+- 默认捕获借用；
+- 如果闭包需要拿走所有权，捕获时显式标记 `move`；
+- 闭包同样受借用检查约束，不能捕获已经失效、move 走的值。
+
+闭包属于一等公民，可以作为参数、返回值、存入变量。
+
+函数类型写法：`(A,B): R`
+
+```ts
+let op: (i32,i32): i32 = (a,b) => a * b;
+```
+
+---
+
+### 5.6 管道 `|>` 和函数调用交互规则
+
+管道 `|>`：把左侧结果，作为右侧函数的第一个入参；管道内部隐式值用 `.` 指代。
+
+```ts
+// 等价于 add(10, 20)
+10 |> add(*, 20)
+```
+
+- 管道可以链式连续调用
+- 管道传递的值同样遵守所有权规则：如果是复合类型，需要 move 则在左侧写 move
+
+```ts
+move u |> modify_u(*)
+```
+
+- 管道表达式可以是可空、错误联合；`?`、`??` 可以加在整个管道表达式尾部
+
+```ts
+"config.txt" |> load_config(*)?
+```
+
+---
+
+### 5.7 comptime 编译期函数
+
+> 区分：普通函数运行时执行；`comptime` 函数在编译阶段求值，属于编译期计算。
+> 语法标记：函数定义前加 `comptime`；调用使用 `@func(...)`。
+
+```ts
+fn square(n: u32): u32 {
+    return n * n;
+}
+
+let size = @square(4); // 编译期直接算出 16
+```
+
+> 和宏区分：comptime 函数是普通函数语义，只是执行时机在编译期；宏是代码展开，二者不是一回事。
+
+---
+
+### 5.8 泛型函数
+
+尖括号 `<T>` 声明泛型参数；支持类型参数和 comptime 常量参数。
+
+```ts
+fn max<T>(a:T, b:T): T {
+    if a > b { a } else { b }
+}
+
+let m = max<i32>(10, 20);
+```
+
+泛型约束（后续 trait 章节完善）：
+
+```ts
+fn sort<T: Ord>(arr: []T) {}
+```
+
+编译期单态化（monomorphization），每个实例生成独立代码，无运行时开销。
+
+---
+
+### 5.9 方法（struct / class 上的函数）
+
+- 在 `struct` / `class` 内部定义 `fn` 即为方法；
+- 方法内使用 `this` 指代当前实例；`_` 是 `this` 的简写。
+- 只读借用可省略。
+
+```ts
+class User {
+    id: u64,
+    fn set_id(*_, new_id:u64) {
+        _.id = new_id;
+    }
+    fn get_id(): u64 {
+        return _.id;
+    }
+}
+```
+
+> 方法第一个参数约定：
+>
+> - `&_`：只读方法，只读借用实例, 可省略。
+> - `*_`：可变方法，可变借用实例。
+> - `move _`：消耗实例，方法拿到所有权，调用后实例失效
+
+调用：
+
+```ts
+let u = User{id:1};
+u.set_id(99);
+print(u.get_id());
+```
+
+---
+
+### 5.10 重载、递归、函数类型
+
+1. **函数重载：CP 不支持同名重载**
+   同一个命名空间，函数名唯一；区分功能使用泛型或者不同名字。
+2. **递归：支持递归调用**
+   递归函数需要提前声明原型（如果前向引用）。
+
+```ts
+   fn fib(n:u32): u32 {
+   if n <= 1 { return n; }
+   return fib(n-1) + fib(n-2);
+   }
+
+```
+
+3. 函数指针 / 函数类型：
+   函数类型 `(A,B)->R` 是一等类型，可以存入结构体、作为返回值。
+
+---
+
+### 5.11 约束与禁止行为汇总
+
+1. move 参数，调用点必须显式 `move`；禁止隐式转移所有权
+2. 借用参数遵守借用互斥规则：不能同时存在活跃可变借用
+3. `?` 只能附加在 `T!E` 调用表达式后；不能用来传播 null
+4. `??` 只能用于 `?T`；不能捕获错误
+5. comptime 函数 `@name()` 不能在运行时表达式位置调用
+6. 不能返回悬垂借用；生命周期检查拦截
+7. 闭包捕获同样遵守所有权、move、借用规则
+8. 不支持函数重载；函数名在模块内唯一
+
+---
+
+### 5.12 函数修饰符与前缀矩阵
+
+函数修饰符保持正交、严格正序：
+
+- `pub`：公开函数；
+- `priv`：私有函数；
+- `static`：类中静态方法，不绑定实例；
+- `async`：异步函数，切分为 CPS 状态机；
+- `unsafe`：不安全函数，调用方必须位于 `unsafe { }` 作用域内。
+
+在 CP 语言中，函数前缀 pub 与 priv 是用于控制**符号可见性（Visibility）与接口封装性（Encapsulation）**的访问控制修饰符。
+它们在**模块级（顶层函数）与面向对象级（类/结构体方法）**中发挥着关键作用：
+──────
+
+#### 5.12.1 核心作用与分层语义
+
+                            ┌── pub   => 公开可见（对外导出，跨模块/类外部可调用）
+    函数可见性修饰符 (Visibility) ┤
+                            └── priv  => 私有封装（仅当前文件内 / 当前类内部可见）
+
+#### 5.12.1 模块层级（Top-level Functions）
+
+| 修饰符                | 示例                                         | 作用与行为                                                                                    | 底层行为与映射                            |
+| --------------------- | -------------------------------------------- | --------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| **pub**               | `pub fn serve() {}` (等价于 `export fn`)     | 公开导出（Exported）：允许其他 `.cp` 文件通过 `import { serve } from "./server"` 导入并调用。 | 映射为 Zig 的 `pub fn`，生成导出符号。    |
+| **priv** (或默认缺省) | `priv fn helper() {}` (或直接 `fn helper()`) | 模块私有（Module-private）：仅供当前 `.cp` 文件内部的逻辑使用，禁止被外部模块 import。        | 映射为 Zig 内部局部函数，不对外暴露符号。 |
+
+#### 5.12.2 类与结构体层级（Class / Struct Methods）
+
+| 修饰符   | 示例                                      | 作用与行为                                                                                            |
+| -------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| **pub**  | `class Client { pub fn connect() {} }`    | 公开方法：外部持有该实例的调用方均可调用：`client.connect()`。                                        |
+| **priv** | `class Client { priv fn handshake() {} }` | 私有方法：仅允许类内部通过 `_.handshake()` 或 `this.handshake()` 调用，外部调用时将被编译器拦截报错。 |
+
+### 5.13 方法接收者（Receiver）终极哲学
 
 在 CP 语言中，**`_` 被确立为方法接收者（Receiver）的唯一专属符号**（等同于 TS 中的 `this`）：
 
@@ -1092,7 +1390,7 @@ class Account {
 
 ---
 
-### 5.4 返回值类型与省略原则
+### 5.14 返回值类型与省略原则
 
 - **`void` 省略哲学**：当函数无返回值时，直接省略 `: void` 声明；
 - **错误联合类型与正交省略规范**：
@@ -1114,13 +1412,20 @@ class Account {
     // 等价兼容写法：
     fn flush_cache2(): ! { ... }
     fn flush_cache3(): void! { ... }
+    fn print_msg(msg:string)? {
+      print(msg);
+    }
+
+    fn print_msg(msg:string)?! {
+      print(msg);
+    }
     ```
     > [!IMPORTANT]
     > **契约强防御设计戒律**：严禁无任何标记的隐式推导（即 `fn sum() { ... }` 绝不可静默隐式推导为 `void!`）。函数的失败能力属于对外接口强契约（Contract），必须在签名处显式保留 `!`，以彻底避免内部改动导致调用方全局报错的错误蔓延灾难，并保持编译器 O(1) 极速解析。
   - **强类型显式错误联合（`T ! ErrorSet`）**：指定具体错误枚举时：
     ```typescript
     fn save(): void ! IOError  // 或简写为 fn save() ! IOError
-    fn find(): User? ! DBError
+    fn find(): User ?! DBError
     ```
 
 ---
@@ -1159,7 +1464,7 @@ CP 语言通过编译器底层的“所有权、隐式借用、读写互斥与�
 
 ```cp
 fn new_user(): User {
-    return User{id:3, name:"abc"}; // 返回值所有权交给调用方
+return User{id:3, name:"abc"}; // 返回值所有权交给调用方
 }
 ```
 
@@ -1426,6 +1731,9 @@ switch(some_user) {
 CP 彻底废除传统的 `interface` 混合模型，实现彻底解耦：
 
 - **`struct` / `class`**：仅用于定义纯内存布局容器（Memory Layout Container），无任何虚表指针额外开销；
+- **`@packed` / `@extern`**：底层系统级布局注解：
+  - `@packed struct Foo { ... }`：紧凑位内存布局，禁止填充对齐，不自动生成默认 `init` 构造函数；
+  - `@extern struct Bar { ... }`：严格遵循 C ABI 内存对齐布局，用于无缝对接 C 头文件结构体。
 - **`trait`**：声明纯行为契约与默认实现；
 - **`impl Trait for Target`**：独立实现契约，支持零侵入地为已有第三方结构体实现新行为。
 
@@ -1541,19 +1849,21 @@ CP 原生引入**三态原生值类型（3-State Value Type）**，彻底终结�
 
 ### 8.2 错误返回值构建与模式匹配
 
-#### 8.2.1 3 字母极简哲学与大小写镜像对称（`err` vs `Err` vs `errdefer`）
+#### 8.2.1 3 字母极简哲学与 `err(...)` / `Err(...)` 双轨协同
 
-CP 语言在错误处理体系中全面采用 **3 字母极简与大小写镜像对称哲学**：
+CP 语言在错误处理体系中全面采用 **3 字母极简哲学**：
 
-- **小写 `err`（定义、关键字与即席命名空间）**：
-  - 声明错误集合：`err Base64Error { DecodingFailed, InvalidPadding }`；
-  - 抛出即席错误标签：`return err.InvalidPadding;`；
-  - 缺省开放错误类型：`fn parse(): string ! err`；
-  - 延迟守卫前缀对齐：`errdefer alloc.free(dest);` 天然契合 `err`；
+- **小写 `err`（核心正统：声明、构造、匹配与命名空间）**：
+  - **声明错误集合**：`err Base64Error { DecodingFailed, InvalidPadding }`；
+  - **即席错误字面量**：`return err.InvalidPadding;`（直接发射为 Zig `error.InvalidPadding`）；
+  - **构造错误返回值（主推推荐）**：`return err(NetworkErr.NotFound);` 或 `return err("Timeout");`；
+  - **模式匹配解包（主推推荐）**：`switch (res) { err(e) => print(e), data => print(data) }`；
+  - **开放错误签名**：`fn parse(): string ! err`；
+  - **延迟守卫前缀对齐**：`errdefer alloc.free(dest);` 天然契合 `err`；
   - _向前兼容_：保留 `error` 作为透明别名（`error.Tag` 与 `error Name { ... }`）。
-- **大写 `Err`（构造器与模式匹配解包）**：
-  - 构造错误值：`return Err(.HostUnreachable);` 或 `return Err("Timeout");`；
-  - 模式匹配解包：`switch (res) { Err(e) => ..., data => ... }`。
+- **大写 `Err`（兼容别名：值构造器与模式匹配解包）**：
+  - 构造错误值（完全兼容）：`return Err(NetworkErr.NotFound);`；
+  - 模式匹配解包（完全兼容）：`switch (res) { Err(e) => ..., data => ... }`。
 
 #### 8.2.2 极简推导错误联合（`T!`）、`void!` 省略（`fn sum()!`）与即席错误字面量（`err.TagName`）
 
@@ -2944,7 +3254,7 @@ for f of info.fields {
 为什么 CP 不学 Java、Python 或 Go 那样“默认所有类都无条件支持反射”？
 这正是系统级语言中极其关键的 零开销抽象与按需付费哲学（Zero-Cost Abstraction & Pay-As-You-Go）：
 
-##### 11.5.2.1 痛点：Java / Go / Python 的全量反射灾难
+##### 1. 痛点：Java / Go / Python 的全量反射灾难
 
 - 在 Java 或 Go 中，编译器会盲目地为每一个结构体、类、字段、方法名强制生成全套符号和元数据字符串并硬编码打包进二进制产物中；
 - 恶果：
@@ -2953,7 +3263,7 @@ for f of info.fields {
   - 极易被逆向工程轻易还原出全部业务类与内部私有字段名；
   - 即使你的业务代码中 99% 的类根本不需要反射，你也必须为那 1% 的反射功能买单！
 
-##### 11.5.2.2 CP 语言的终极解法：精准白名单（Explicit Opt-in）
+##### 2. CP 语言的终极解法：精准白名单（Explicit Opt-in）
 
 - 未标注 @reflect 的普通类：
   编译为 Native 机器码时，类型被最大程度擦除与内联优化，内存布局是极致紧凑的纯裸数据对齐，不产生哪怕 1 个字节的冗余元数据表，可执行文件体积仅数
@@ -3010,11 +3320,11 @@ for f of info.fields {
 
 ---
 
-#### 5.4 不标注 @reflect 时，编译期类型信息的典型应用场景
+#### 11.5.5 不标注 @reflect 时，编译期类型信息的典型应用场景
 
 在没有标注 @reflect 时，编译器前端（cpc/）自身在内存中已经掌握了整个程序完整的抽象语法树（AST）和符号表。这些信息被广泛应用于以下场景：
 
-##### 5.4.1 宏代码生成与自动派生（Macro & Derive）
+##### 1. 宏代码生成与自动派生（Macro & Derive）
 
 在 CP 语言中，类上即使不打 @reflect，也可以直接挂载宏（如 @Json、@Table、@Clone）：
 
@@ -3034,7 +3344,7 @@ class OrderItem {
 • 结果：生成的序列化代码和手写的一样快（硬编码高效存取），既实现了自动化，又完全不需要在运行时维护任何反射字典！
 ──────
 
-##### 5.4.2 编译期 AOP 装饰器感知（Decorators）
+##### 2. 编译期 AOP 装饰器感知（Decorators）
 
 当您为一个方法编写装饰器时，同样不需要 @reflect：
 
@@ -3059,7 +3369,7 @@ class OrderItem {
 
 ──────
 
-##### 5.4.3 自动内存释放（Comptime Auto-Drop 机制）
+##### 3. 自动内存释放（Comptime Auto-Drop 机制）
 
 这是我们在编译器中实现的最具代表性的零成本编译期内省。
 当您在 CP 中写下：
@@ -3087,7 +3397,7 @@ defer if (!__t_moved) {
 依赖类型的元数据探测，但对运行时性能完全是 0 损耗。
 ──────
 
-#### 5.4.4 严格编译期安全（借用检查与所有权分析）
+##### 4. 严格编译期安全（借用检查与所有权分析）
 
 编译器在语义分析阶段（Sema）：
 
@@ -3265,41 +3575,28 @@ export @value struct Compact {
 
 CP 编译器在每个库模块头部自动注入 `const string = []const u8;`。无论是纯 CP 类型推导、还是内嵌 `zig { ... }` 块中复用的宿主代码（如 Bun 内部普遍使用的 `string`），均能天然无缝解析，彻底消除未声明标识符报错。
 
-#### 11.8.12 紧凑值结构体（`@value struct`）与零开销值传递语义
+#### 11.8.12 函数调用约定装饰器（`@callconv`）与 C-ABI 回调兼容
 
-在底层高性能系统开发中，诸如句柄、短索引、紧凑枚举包装等小型 POD 结构体（如 `Compact { value: u14 }`）通常需要像原生标量一样按值传递，避免指针解引用的间接开销，并支持在临时右值上直接调用成员方法（例如 `Compact.from(entry).toMimeType()`）。
+在对接底层 C 库、OS 系统调用或第三方 C 动态库回调（如 BoringSSL, libuv, lsquic, JSC 回调函数）时，回调函数通常必须严格遵循 C 语言调用约定（`callconv(.c)`）。
 
-CP 提供了 `@value` 装饰器：
+CP 语言提供了 `@callconv` 函数级装饰器：
 
 ```typescript
-export @value struct Compact {
-    value: Table,
-
-    static fn from(value: Table): Compact {
-        return Compact { value: value };
-    }
-
-    pub fn toMimeType(this): MimeType {
-        // ...
-    }
+@callconv("c")
+pub fn onHskDone(qs: *quic.Socket, ok: c_int): void {
+    // ...
 }
 ```
 
-- **值接收者发射**：编译器将成员方法的 `this` 接收者直接转译为值拷贝 `self: Compact`，而非指针借用 `self: *const Compact`；
-- **免除多余析构与移动守卫**：`@value` 结构体天然免疫析构守卫代码生成，零开销、零冗余胶水；
-- **支持右值链式调用**：在转译至 Zig 目标代码时，调用临时对象方法不会触发“taking pointer of rvalue”的 Zig 编译报错。
-
-#### 11.8.13 原生二元比较（`==` / `!=`）与枚举/布尔/数值直接发射
-
-在早期编译模式中，二元比较易误触发泛型比较器 `cp_eq`，引入数十行字符串与反射辅助模板。现代 CP 编译器内置智能二元分流器：
-
-1. **数值/指针/字面量原生比较**：任一操作数为整型、浮点型、布尔型或 `null` 时，直接发射 `(a == b)` 或 `(a != b)`；
-2. **枚举变体原生比较**：当操作数涉及无载荷枚举变体（如 `.text`、`.image`）或枚举类型时，直接发射原生 Zig `(self.category == .text)`，不引入任何辅助模板；
-3. **摇树按需注入**：仅在两个动态字符串或未知复杂对象等值比较时，才精确激活 `needs_equality` 运行时支持。
-
-#### 11.8.14 顶层 `string` 原生别名与跨语言零摩擦交互
-
-CP 编译器在每个库模块头部自动注入 `const string = []const u8;`。无论是纯 CP 类型推导、还是内嵌 `zig { ... }` 块中复用的宿主代码（如 Bun 内部普遍使用的 `string`），均能天然无缝解析，彻底消除未声明标识符报错。
+- **语义**：修饰函数在转译为 Zig 时自动生成 `callconv(.c)` 函数调用约定修饰；
+- **支持格式**：`@callconv("c")`、`@callconv(".c")` 或 `@callconv(c)`；
+- **生成的 Zig 产物**：
+  ```zig
+  pub fn onHskDone(qs: *quic.Socket, ok: c_int) callconv(.c) void {
+      // ...
+  }
+  ```
+- **消除逃逸**：无需为了实现 C 回调而将整个回调函数被迫写进 `zig { ... }` 块中，使底层协议回调完全可以用 CP 现代语法书写。
 
 ---
 
@@ -3530,6 +3827,23 @@ cpc emit-types src/url.cp -o src/url.d.cp
    函数返回推导错误联合时，统一采用后缀语法 `T!`（如 `fn parse(): usize!`、`fn write(): void!`），正常返回类型 `T` 永远在最前，错误由编译器自动收集，与 `T?`（可空）及 `T ! ErrorSet`（显式错误集）构建完全自洽统一的后缀类型修饰符体系。
 5. **`void!` 正交省略语法（`fn sum()!` 与 `fn sum(): !`）**：
    对于无成功返回值且可能报错的函数，允许在函数签名处省略 `void`，直接保留 `!` 标记：`fn sum()!` 或 `fn sum(): !`，等价于 `fn sum(): void!`，转译为 Zig 的 `!void`。严禁无标记隐式推导，必须在签名处显式保留 `!` 锁定失败契约，保障 API 强安全与编译器 O(1) 极速解析。
+6. **全量确立纯后缀修饰符体系，彻底废除前缀 `?T`**：
+   可选类型统一采用纯正 TypeScript 现代风格后缀 `T?`（如 `let s: string? = null;`）；当函数返回同时可能为 `null` 且可能发生错误时，统一采用纯正交链式后缀 `T?!`（如 `fn find(): User?!`、`fn get(): string?!`），底层自动映射为 Zig 原生错误联合 `!?T`；带显式错误集时写作 `T? ! ErrorSet`。编译器已在语义与语法层面彻底废除前缀 `?T`，静态拦截任何前置问号声明并明确报错，杜绝三明治前后包夹带来的混乱，确立“类型主体永远居首、修饰状态纯后缀链式向右展开”的全局统一规范。
+7. **原生 Zig 错误集（`error{ ... }`）互操作规范**：
+   在与底层 Zig 强类型错误集深度互操作时，Zig 的 `error{ ... }` 属于原生的错误枚举集合（Error Sets），与 CP 默认发射的 Tagged Union（`union(enum)`）存在语义差异。当需要向下游 Zig 消费方导出严格兼容的错误联合（如 `InitError!void`）时，可通过在 `zig { ... }` 原生逃逸舱中声明 `pub const InitError = error{ ... };`，确保与底层系统调用的类型系统与错误传播 100% 契合。
+
+### 13.4 `--lib` 静态库模式死代码消除（DCE）与零开销原生转译
+
+在通过 `cpc src/foo.cp -o src/foo.zig --lib` 构建供 Zig 宿主模块调用的库时，编译器全面启用模式感知的死代码消除与原生直通机制：
+
+1. **原生操作符直通**：
+   在 `--lib` 模式下，二元运算符（`==`、`!=`、`<`、`+`）与逻辑非（`!`）直接发射为 Zig 原生操作符，绝不发射未调用的通用运行时辅助函数（`cp_eq`、`cp_lt`、`cp_not`、`cp_add`），从源头上杜绝数十至上百行的 Prelude 模板代码膨胀。
+2. **切片原生遍历（Native Slice Iteration）**：
+   针对 `for (item of container)` 循环，若容器为已知切片属性（如 `.items`、`.values()`），编译器自动生成零开销的 Zig 原生 `for (container) |item|` 循环，无需注入 `cp_iter_slice` / `cp_mut_slice` 迭代器封装。
+3. **空值合并与短路返回原生对齐**：
+   针对 `a ?? b`（空值合并）与 `expr ? return null`（短路解包），在 `--lib` 模式下直接发射为标准的 Zig 原生 `(a orelse b)` 与 `((expr) orelse { return null; })`，无需任何辅助函数。
+4. **辅助函数精细按需摇树**：
+   将切片索引查找辅助（`indexOf`、`lastIndexOf`、`includes`）与切片迭代解耦，仅在实际存在该方法调用时才按需发射，保证生成的 `.zig` 源码紧凑、纯粹，膨胀率严格受控在 10% 以内，部分模块代码量甚至少于原始手写 Zig。
 
 ---
 

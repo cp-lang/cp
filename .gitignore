@@ -2,6 +2,7 @@
 GEMINI-BAK.md
 
 # Build
+cpc_dev/
 cpc/target/
 cpc/**/*.rs.bk
 cap/**/*.zig.bk

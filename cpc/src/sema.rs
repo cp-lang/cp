@@ -617,11 +617,15 @@ impl Analyzer {
                         }
                     }
                 }
-                // Auto-generate memberwise init if not present and fields are non-empty (exempting @root and @value structs)
+                // Auto-generate memberwise init if not present and fields are non-empty (exempting @root, @value, @packed, @extern structs)
                 let is_root = cls.meta.iter().any(|m| m.name.sym == "root");
                 let is_value = cls.meta.iter().any(|m| m.name.sym == "value");
+                let is_packed = cls.meta.iter().any(|m| m.name.sym == "packed");
+                let is_extern = cls.meta.iter().any(|m| m.name.sym == "extern");
                 if !is_root
                     && !is_value
+                    && !is_packed
+                    && !is_extern
                     && !cls.methods.iter().any(|m| m.ident.sym == "init")
                     && !cls.fields.is_empty()
                 {
@@ -1514,14 +1518,18 @@ impl Analyzer {
             } else {
                 trimmed
             };
-            let ident_opt = if let Some(rest) = stripped.strip_prefix("const ") {
-                rest.split(&[' ', ':', '='][..]).next()
+            let (ident_opt, is_var) = if let Some(rest) = stripped.strip_prefix("const ") {
+                (rest.split(&[' ', ':', '='][..]).next(), false)
             } else if let Some(rest) = stripped.strip_prefix("var ") {
-                rest.split(&[' ', ':', '='][..]).next()
+                (rest.split(&[' ', ':', '='][..]).next(), true)
             } else if let Some(rest) = stripped.strip_prefix("fn ") {
-                rest.split(&[' ', '(', '<'][..]).next()
+                (rest.split(&[' ', '(', '<'][..]).next(), false)
+            } else if let Some(rest) = stripped.strip_prefix("extern fn ") {
+                (rest.split(&[' ', '(', '<'][..]).next(), false)
+            } else if let Some(rest) = stripped.strip_prefix("extern \"c\" fn ") {
+                (rest.split(&[' ', '(', '<'][..]).next(), false)
             } else {
-                None
+                (None, false)
             };
             if let Some(ident) = ident_opt {
                 let id = ident.trim();
@@ -1530,7 +1538,11 @@ impl Analyzer {
                         id.to_string(),
                         SymbolKind::Var {
                             ty: Type::Any,
-                            kind: VarDeclKind::Const,
+                            kind: if is_var {
+                                VarDeclKind::Let
+                            } else {
+                                VarDeclKind::Const
+                            },
                         },
                     );
                 }
@@ -2630,7 +2642,71 @@ impl Analyzer {
             Type::U64 | Type::U128 | Type::USize => true,
             Type::I64 | Type::I128 | Type::ISize => true,
             Type::F32 | Type::F64 => true,
+            Type::Ref(id)
+                if (id.sym.starts_with('u') || id.sym.starts_with('i'))
+                    && id.sym[1..].chars().all(|c| c.is_ascii_digit()) =>
+            {
+                if let Ok(bits) = id.sym[1..].parse::<u32>() {
+                    if id.sym.starts_with('u') {
+                        val >= 0 && (bits >= 64 || val < (1i64 << bits.min(62)))
+                    } else {
+                        bits >= 64
+                            || (val >= -(1i64 << (bits - 1).min(62))
+                                && val < (1i64 << (bits - 1).min(62)))
+                    }
+                } else {
+                    true
+                }
+            }
             _ => false,
+        }
+    }
+
+    fn eval_const_int_expr(expr: &Expr) -> Option<i64> {
+        match expr {
+            Expr::Lit(Lit::Int(n)) => Some(*n),
+            Expr::Bin(bin) => {
+                let l = Self::eval_const_int_expr(&bin.left)?;
+                let r = Self::eval_const_int_expr(&bin.right)?;
+                match bin.op {
+                    BinaryOp::Add => Some(l.wrapping_add(r)),
+                    BinaryOp::Sub => Some(l.wrapping_sub(r)),
+                    BinaryOp::Mul => Some(l.wrapping_mul(r)),
+                    BinaryOp::Div => {
+                        if r != 0 {
+                            Some(l.wrapping_div(r))
+                        } else {
+                            None
+                        }
+                    }
+                    BinaryOp::Mod => {
+                        if r != 0 {
+                            Some(l.wrapping_rem(r))
+                        } else {
+                            None
+                        }
+                    }
+                    BinaryOp::Shl => {
+                        if (0..64).contains(&r) {
+                            Some(l << r)
+                        } else {
+                            None
+                        }
+                    }
+                    BinaryOp::Shr => {
+                        if (0..64).contains(&r) {
+                            Some(l >> r)
+                        } else {
+                            None
+                        }
+                    }
+                    BinaryOp::BitAnd => Some(l & r),
+                    BinaryOp::BitOr => Some(l | r),
+                    BinaryOp::BitXor => Some(l ^ r),
+                    _ => None,
+                }
+            }
+            _ => None,
         }
     }
 
@@ -2689,8 +2765,13 @@ impl Analyzer {
             return true;
         }
 
-        // Layer 1.1: Literal fitting
+        // Layer 1.1: Literal and Const Expr fitting
         if let Some(expr) = init_expr {
+            if let Some(val) = Self::eval_const_int_expr(expr) {
+                if Self::int_fits_in_type(val, target) {
+                    return true;
+                }
+            }
             match expr {
                 Expr::Lit(lit) => match lit {
                     Lit::Int(val) => {
@@ -2710,10 +2791,19 @@ impl Analyzer {
                     }
                     _ => {}
                 },
-                Expr::NullCoalesce { right, .. }
-                | Expr::QuestionFallback {
-                    fallback: right, ..
+                Expr::NullCoalesce { right, .. } => {
+                    if self.can_coerce(target, src, Some(right)) {
+                        return true;
+                    }
+                }
+                Expr::QuestionFallback {
+                    fallback: right,
+                    is_return_fallback,
+                    ..
                 } => {
+                    if *is_return_fallback {
+                        return true;
+                    }
                     if self.can_coerce(target, src, Some(right)) {
                         return true;
                     }
@@ -2725,6 +2815,29 @@ impl Analyzer {
         // Layer 1.2: Numeric safe widening
         if Self::is_safe_widening(target, src) {
             return true;
+        }
+
+        if let Type::Ref(id) = target {
+            if (id.sym.starts_with('u') || id.sym.starts_with('i'))
+                && id.sym.len() > 1
+                && id.sym[1..].chars().all(|c| c.is_ascii_digit())
+            {
+                if matches!(
+                    src,
+                    Type::I8
+                        | Type::U8
+                        | Type::I16
+                        | Type::U16
+                        | Type::I32
+                        | Type::U32
+                        | Type::I64
+                        | Type::U64
+                        | Type::ISize
+                        | Type::USize
+                ) {
+                    return true;
+                }
+            }
         }
 
         // Layer 1.3: Structural wrapping (Optional, ErrorUnion, ResultType)
@@ -2776,6 +2889,13 @@ impl Analyzer {
         // Layer 1.5: Subclass to base class or matching type ref
         if let (Type::Ref(base), Type::Ref(derived)) = (target, src) {
             if base.sym == derived.sym || self.is_subclass(&derived.sym, &base.sym) {
+                return true;
+            }
+        }
+
+        // Object literal initializing a struct/class reference
+        if let Type::Ref(_) = target {
+            if matches!(src, Type::Object(_)) || matches!(init_expr, Some(Expr::Object(_))) {
                 return true;
             }
         }
@@ -3238,6 +3358,7 @@ impl Analyzer {
                     || ident.sym == "super"
                     || ident.sym == "Box"
                     || ident.sym == "Err"
+                    || ident.sym == "err"
                     || ident.sym == "Error"
                     || ident.sym == "reflect"
                     || matches!(
@@ -3313,7 +3434,10 @@ impl Analyzer {
                 {
                     Ok(Type::String)
                 } else {
-                    if !self.types_eq(&left, &right) {
+                    if !self.types_eq(&left, &right)
+                        && !self.can_coerce(&left, &right, Some(&*bin.right))
+                        && !self.can_coerce(&right, &left, Some(&*bin.left))
+                    {
                         return Err(SemaError::TypeMismatch(left, right, bin.span));
                     }
                     Ok(left)

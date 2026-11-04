@@ -505,6 +505,13 @@ fn copyDir(src: []const u8, dest: []const u8) !void {
     _ = try child.wait(global_io);
 }
 
+fn getCpcBin() []const u8 {
+    if (global_env.get("CPC_BIN")) |custom_bin| {
+        if (custom_bin.len > 0) return custom_bin;
+    }
+    return "/data/dev/cp/cpc/target/release/cpc";
+}
+
 fn runFile(allocator: std.mem.Allocator, filename: []const u8) !void {
     try runFileWithOpt(allocator, filename, "Debug");
 }
@@ -543,10 +550,11 @@ fn runFileWithOpt(allocator: std.mem.Allocator, filename: []const u8, opt_mode: 
     if (zig_stat != null and src_stat != null and zig_stat.?.mtime.nanoseconds >= src_stat.?.mtime.nanoseconds) {
         std.debug.print("  → [cpc] Intermediate Zig source is up to date (skipped)\n", .{});
     } else {
+        const cpc_bin = getCpcBin();
         const cpc_start = std.Io.Timestamp.now(global_io, .awake);
         var cpc_args_buf: [15][]const u8 = undefined;
         var cpc_argc: usize = 0;
-        cpc_args_buf[cpc_argc] = "/data/dev/cp/cpc/target/release/cpc";
+        cpc_args_buf[cpc_argc] = cpc_bin;
         cpc_argc += 1;
         cpc_args_buf[cpc_argc] = "compile";
         cpc_argc += 1;
@@ -577,12 +585,13 @@ fn runFileWithOpt(allocator: std.mem.Allocator, filename: []const u8, opt_mode: 
 
     // Emit Type Definitions (.d.cp)
     {
+        const cpc_bin = getCpcBin();
         const type_out_path = try std.fmt.allocPrint(allocator, "bin/{s}.d.cp", .{bin_subpath});
         defer allocator.free(type_out_path);
         if (std.Io.Dir.path.dirname(type_out_path)) |dirname| {
             fs_shim.cwd().createDirPath(global_io, dirname) catch {};
         }
-        const emit_types_args = &[_][]const u8{ "/data/dev/cp/cpc/target/release/cpc", "emit-types", filename, "--output", type_out_path };
+        const emit_types_args = &[_][]const u8{ cpc_bin, "emit-types", filename, "--output", type_out_path };
         var emit_types_child = try std.process.spawn(global_io, .{ .argv = emit_types_args });
         _ = try emit_types_child.wait(global_io);
     }
@@ -906,10 +915,11 @@ fn compileSingleFile(
     if (!force_rebuild and zig_stat != null and src_stat != null and zig_stat.?.mtime.nanoseconds >= src_stat.?.mtime.nanoseconds) {
         std.debug.print("  → [cpc] Intermediate Zig source is up to date (skipped)\n", .{});
     } else {
+        const cpc_bin = getCpcBin();
         const cpc_start = std.Io.Timestamp.now(global_io, .awake);
         var cpc_args_buf: [15][]const u8 = undefined;
         var cpc_argc: usize = 0;
-        cpc_args_buf[cpc_argc] = "/data/dev/cp/cpc/target/release/cpc";
+        cpc_args_buf[cpc_argc] = cpc_bin;
         cpc_argc += 1;
         cpc_args_buf[cpc_argc] = "compile";
         cpc_argc += 1;
@@ -944,12 +954,13 @@ fn compileSingleFile(
 
     // Emit Type Definitions (.d.cp)
     {
+        const cpc_bin = getCpcBin();
         const type_out_path = try std.fmt.allocPrint(allocator, "{s}/{s}.d.cp", .{ out_dir_val, bin_subpath });
         defer allocator.free(type_out_path);
         if (std.Io.Dir.path.dirname(type_out_path)) |dirname| {
             fs_shim.cwd().createDirPath(global_io, dirname) catch {};
         }
-        const emit_types_args = &[_][]const u8{ "/data/dev/cp/cpc/target/release/cpc", "emit-types", filename, "--output", type_out_path };
+        const emit_types_args = &[_][]const u8{ cpc_bin, "emit-types", filename, "--output", type_out_path };
         var emit_types_child = try std.process.spawn(global_io, .{ .argv = emit_types_args });
         _ = try emit_types_child.wait(global_io);
     }
@@ -1291,8 +1302,9 @@ fn runTestSingleFile(allocator: std.mem.Allocator, filename: []const u8) !void {
         fs_shim.cwd().createDirPath(global_io, dirname) catch {};
     }
 
+    const cpc_bin = getCpcBin();
     const cpc_args = &[_][]const u8{
-        "/data/dev/cp/cpc/target/release/cpc",
+        cpc_bin,
         "compile",
         filename,
         "--output",

@@ -2328,3 +2328,53 @@ Bun AGY 在推进 Bun 基础算法库（如 `wyhash`、`base64`）转译过程�
 - `./cap/bin/cap cap/test/test_walrus_binding.cp` 100% 成功；
 - 静态拦截反向测试用例精准拦截并报错；
 - `cargo fmt`、`cargo check`、`cargo test` 与 `cargo build --release` 100% 绿灯。
+
+---
+
+## 2026-11-05 开发日志：多 Agent 并发隔离机制（CPC_BIN 环境变量路由与 cpc_dev 影子沙盒）
+
+### 1. 任务背景与核心矛盾
+当前 `bun` 项目的 AGY 会高频修改并重新编译 `/data/dev/cp/cpc` 编译器，而本项目也在对错误系统（`Err`、`AnyErr`、模式匹配等）进行底层编译研发。若两方在同一个源码目录和同一个 `target/` 目录下同时执行 `cargo build`，将引发：
+1. **Cargo 编译锁抢占超时**；
+2. **Linux `ETXTBSY (Text file busy)` 导致正在运行测试的对方进程被强行杀死**；
+3. **半成品源码语法错误互相穿透打断**。
+
+### 2. 解决方案与实施步骤
+我们采纳了“**影子沙盒 + 动态路由 + CAS 乐观哈希校验 + 原子并网**”的完整隔离体系：
+1. **物理目录与编译锁隔离**：
+   用户已创建 `/data/dev/cp/cpc_dev`，并将 `cpc_dev/` 写入 `.gitignore`；
+   我们在 `cpc_dev` 中独立执行 `cargo build` 生成开发版二进制 `/data/dev/cp/cpc_dev/target/debug/cpc`，毫秒级热编译且彻底脱离主目录编译锁。
+2. **`cap` 路由解耦（CPC_BIN 环境变量）**：
+   在 `cap/src/main.zig` 中实现 `getCpcBin()`：
+   ```zig
+   fn getCpcBin() []const u8 {
+       if (global_env.get("CPC_BIN")) |custom_bin| {
+           if (custom_bin.len > 0) return custom_bin;
+       }
+       return "/data/dev/cp/cpc/target/release/cpc";
+   }
+   ```
+   替换了 `runFileWithOpt`、`buildFile` 和 `runTestSingleFile` 中所有 5 处硬编码路径。
+   使用 `zig build --build-file cap/build.zig` 重新编译安装 `cap` CLI。
+3. **隔离验证**：
+   执行 `env CPC_BIN=/data/dev/cp/cpc_dev/target/debug/cpc ./cap/bin/cap cap/test/test_err_and_move.cp`，成功打通由开发版 `cpc` 驱动的完整转译和运行，而未设置该环境变量的外部进程（Bun AGY）继续无感调用正式版本。
+
+### 3. Bun AGY 改动审查评估与关键 Bug 攻坚修复
+在审核 Bun AGY 对 `cpc/src` 提交的变动时，我们执行了严格的逐行审阅与全量测试：
+1. **合理且有价值的改动**：
+   - `export fn/class/struct` 修饰符支持；
+   - 库编译模式 `is_lib_mode`，大幅精简底层 C/Zig/Bun 动态链接库转译时的冗余 runtime 代码；
+   - `cstring` 映射为 Zig `[:0]const u8`，极大简化 C 字符串交互；
+   - `@packed` / `@extern` 结构体内存布局免除生成成员默认 `init` 构造器，确保标准 C ABI 兼容；
+   - 编译期常量折叠 `eval_const_int_expr` 与自定义位宽整数 `u1`..`u128` 安全校验；
+   - 未知 `@builtin` 宏透明透传至 Zig/C 函数调用。
+2. **排查出的严重 Bug 与修复**：
+   - **问题现象**：在全量回归时，`example_showcase.cp` 出现大量编译失败：
+     `.cap/zig/cap/test/example_showcase.zig:950:13: error: local variable is never mutated: var cfg = ...; note: consider using 'const'`
+   - **根本原因**：Bun AGY 在 `cpc/src/codegen.rs` 的变量生成处，将原本对普通非状态机变量无条件发射 `_ = &ident;` 的防线修改成了 `else if !self.is_state_machine && !is_used`。
+   - **分析**：在 Zig 中，`var x = ...;` 如果被读取（`is_used == true`）但从未被重新赋值修改，Zig 编译器会当场报致命错误 `error: local variable is never mutated`！由于 CP 的 `let` 变量在底层映射为 Zig 的 `var`，必须无条件对所有变量执行 `_ = &ident;`（取其可变指针）来消除该检查。
+   - **修复**：恢复 `else if !self.is_state_machine { self.write_to_case(&format!("_ = &{};", ident.sym)); }`，成功消除该隐患，`example_showcase.cp` 及全部测试集 100% 满血复活！
+3. **规范同步**：
+   - 将 `cstring`、`[N]T`、`export fn`、`@packed`、`@extern` 同步写入 `cp_ref.md` 设计规范。
+
+

@@ -1344,3 +1344,41 @@
   - 清理并统一所有示例与规范表述中的可选类型，全面采用后缀 `T?` / `T?!`。
 - `cap/test/` (25+ 测试文件全量更新):
   - 包含 `hello.cp`, `main.cp`, `test_actor.cp`, `test_advanced.cp`, `test_all.cp`, `test_async_tuple.cp`, `test_builtins.cp`, `test_comptime.cp`, `test_dependency.cp`, `test_dist.cp`, `test_error_box_switch_pass.cp`, `test_error_fail_non_exhaustive_switch.cp`, `test_error_fail_null_coalesce_on_err.cp`, `test_errors.cp`, `test_features.cp`, `test_fs_async.cp`, `test_macro_pass.cp`, `test_map_set_dict.cp`, `test_matmul.cp`, `test_object.cp`, `test_spawn_arrow.cp`, `test_sqlite.cp`, `test_stdlib.cp`, `test_switch_binding_pass.cp`, `test_tensor.cp`, `test_traits_enums.cp`, `test_undefined.cp`, `test_zero_copy.cp`, `example_showcase.cp`。
+
+---
+
+## 2026-11-05 (评估并整合 Bun AGY 编译器升级、修复未变动变量判定 Bug、支持 CPC_BIN 环境变量路由与 err/move 语法双轨完善)
+
+### 修改文件 (Modified)
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - **关键修复**：回滚了导致不可变 `let` 变量在 Zig 中触发 `error: local variable is never mutated` 的误判逻辑，恢复对非状态机变量始终发射 `_ = &ident;` 取地址标记，彻底修复 `example_showcase.cp` 等测试用例编译失败问题；
+  - 接入 `is_lib_mode`，优化库编译模式下 Zig 代码生成精简度；
+  - 支持 `cstring` 映射为 Zig `[:0]const u8`（指针为 `[:0]u8`）；
+  - 支持未注册 `@builtin` 宏透明透传至底层 Zig/C 函数调用。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - **双轨错误值构造器与匹配**：在 `parse_primary_expr` 与 `parse_pattern` 中支持小写 `err(...)`，同时 100% 保持对大写 `Err(...)` 兼容；
+  - **灵活 move 参数位置**：在 `parse_params` 中同时支持 `fn f(move u: User)`（标识符前置）与 `fn f(u: move User)`（类型位置前置）；
+  - 支持声明前置 `export`（如 `export fn`、`export class`）；
+  - 支持 `[N]T` 固定长度数组类型语法。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 注册 `ident.sym == "err"` 为内建符号标识符；
+  - 对 `@packed` 与 `@extern` 结构体免除成员逐项 `init` 构造器生成，保证二进制紧凑布局与 C ABI 对齐；
+  - 增加编译期整型常量折叠计算 `eval_const_int_expr`。
+- [`cap/src/main.zig`](file:///data/dev/cp/cap/src/main.zig):
+  - 增加 `getCpcBin()` 辅助函数，优先读取环境变量 `CPC_BIN`，未配置时安全回退至默认正式编译器路径 `/data/dev/cp/cpc/target/release/cpc`，支持多 Agent 并行开发；
+  - 替换全部 5 处死绑定的编译器硬编码路径。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 补充 `cstring` 标量类型规范（对接 C/Bun 原生库，映射为 Zig `[:0]const u8`）；
+  - 补充 `[N]T` 定长数组语法；
+  - 补充 `export fn` 符号导出修饰符说明；
+  - 补充 `@packed` 与 `@extern` 内存布局元属性；
+  - 同步更新第 6 节（参数所有权转移语法）与第 8.2.1 节（`err(...)` 主推与 `Err(...)` 兼容）。
+- [`.gitignore`](file:///data/dev/cp/.gitignore):
+  - 将 `cpc_dev/` 目录加入版本忽略，防止并发沙盒本地改动污染主仓库。
+- [`GEMINI.md`](file:///data/dev/cp/GEMINI.md):
+  - 用户更新：明确 rm 指令针对 temp/test 目录及其文件的免申请操作权限。
+
+### 新增文件 (Added)
+- [`cap/test/test_err_and_move.cp`](file:///data/dev/cp/cap/test/test_err_and_move.cp):
+  - 包含 `fn f(move u: User)`、`fn f(u: move User)`、`err(...)` 错误构造与模式匹配、大写 `Err(...)` 兼容性的全景回归测试，经 `./cap/bin/cap` 执行 100% 成功。
+
