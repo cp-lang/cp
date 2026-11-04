@@ -2267,3 +2267,30 @@ Bun AGY 在推进 Bun 基础算法库（如 `wyhash`、`base64`）转译过程�
 - 经 `./cap/bin/cap` 编译执行 100% 成功输出；
 - 既有长期测试用例全量回归无任何错误；
 - Rust 前端执行 `cargo fmt`、`cargo check`、`cargo test` 与 `cargo build --release` 100% 绿灯。
+
+
+---
+
+## 2026-11-04: Walrus 海象操作符条件解包、函数缺省错误返回简写与平滑兼容设计实录
+
+### 1. 业务背景与架构考量
+在 Bun.js 1.3.14 底层网络通信、URL 迭代切分与 HTTP 报头解析的代码迁移中，存在极为高频的“条件判断 + 可选值解包”逻辑（如 `while (token = next())`、`if (header = get(k))`）。
+1. **旧语法的认知阻碍**：
+   CP 早期借鉴了 Zig 的管道捕获 `while (expr) |item|`。这一语法对熟悉 TypeScript/JavaScript 的开发者而言认知负担较重，且管道符容易与按位或、联合类型混淆。
+2. **海象操作符的自然表达**：
+   采用通用海象操作符 `:=`（`while (binding := expr)` / `if (binding := expr)`），将表达式求值、非空判定、解包赋值与局部声明四合为一，既符合现代脚本语言心智，又能 100% 映射至 Zig 的底层解包指令。
+3. **函数返回 void 时的语法冗余**：
+   许多底层系统级调用无需成功载荷（如初始化、注销、发送等），只可能报错。写 `: void!` 显得冗余，直接支持 `fn foo() !` 或 `fn foo() !Err` 大幅提升了代码紧凑度。
+
+### 2. 深入审查与关键技术修复
+在审查 Bun 迁移修改时，排查并解决了两项核心问题：
+1. **防止过度激进破坏现有生态 (Prefix `?T` 平滑兼容)**：
+   Bun AGY 在 `cpc/src/parser.rs` 中将 `?T` 直接抛出硬性编译错误，导致全量既有测试及标准库 `lib/cap/sqlite.cp` 崩溃。经过架构权衡，我们将其修正为向下兼容支持，允许 `?T` 与 `T?` 并存，消除破坏性断层。
+2. **Zig 捕获未使用告警抑制 (Unused Capture Elimination)**：
+   Zig 对未使用的解包捕获（如 `if (expr) |unused|`）有严格的编译期报错。我们在 `codegen.rs` 的条件块和循环块头部自动注入 `_ = &cap;`，确保在用户仅利用解包做非空断言而未读取绑定值时依然干净通过编译。
+
+### 3. 测试与回归验证
+- 编写长期回归测试套件 [`cap/test/test_walrus_binding.cp`](file:///data/dev/cp/cap/test/test_walrus_binding.cp)；
+- 经 `./cap/bin/cap` 编译执行 100% 成功输出；
+- 既有长期测试用例全量回归无任何错误；
+- Rust 前端执行 `cargo fmt`、`cargo check`、`cargo test` 与 `cargo build --release` 100% 绿灯，产物已同步部署至 [`cap/bin/cpc`](file:///data/dev/cp/cap/bin/cpc)。

@@ -7246,15 +7246,24 @@ impl Codegen {
                 }
                 let test = self.generate_expr(&i.test);
                 let old_uninit = self.uninitialized_vars.clone();
-                if test == "true" {
+                if test == "true" && i.capture.is_none() {
                     self.generate_stmt(&i.cons);
-                } else if test == "false" {
+                } else if test == "false" && i.capture.is_none() {
                     if let Some(alt) = &i.alt {
                         self.generate_stmt(alt);
                     }
                 } else {
-                    self.write_to_case(&format!("if ({}) {{", test));
+                    if let Some(cap) = &i.capture {
+                        self.var_scope_depth
+                            .insert(cap.sym.clone(), self.current_scope_depth + 1);
+                        self.write_to_case(&format!("if ({}) |{}| {{", test, cap.sym));
+                    } else {
+                        self.write_to_case(&format!("if ({}) {{", test));
+                    }
                     self.indent();
+                    if let Some(cap) = &i.capture {
+                        self.write_to_case(&format!("_ = &{};", cap.sym));
+                    }
                     self.current_scope_depth += 1;
                     if let Stmt::Block(b) = &*i.cons {
                         for s in &b.body {
@@ -7299,11 +7308,16 @@ impl Codegen {
                 let test = self.generate_expr(&w.test);
                 let old_uninit = self.uninitialized_vars.clone();
                 if let Some(cap) = &w.capture {
+                    self.var_scope_depth
+                        .insert(cap.sym.clone(), self.current_scope_depth + 1);
                     self.write_to_case(&format!("while ({}) |{}| {{", test, cap.sym));
                 } else {
                     self.write_to_case(&format!("while ({}) {{", test));
                 }
                 self.indent();
+                if let Some(cap) = &w.capture {
+                    self.write_to_case(&format!("_ = &{};", cap.sym));
+                }
                 self.current_scope_depth += 1;
                 if let Stmt::Block(b) = &*w.body {
                     for s in &b.body {
@@ -12089,7 +12103,7 @@ fn type_to_display_string(ty: &Type) -> String {
         Type::Ref(id) => id.sym.clone(),
         Type::Optional(inner) => format!("?{}", type_to_display_string(inner)),
         Type::ResultType { ok, .. } => type_to_display_string(ok),
-        Type::ErrorUnion(inner) => format!("!{}", type_to_display_string(inner)),
+        Type::ErrorUnion(inner) => format!("{}!", type_to_display_string(inner)),
         Type::BorrowType { inner, .. } => type_to_display_string(inner),
         Type::Shared(inner) => type_to_display_string(inner),
         Type::RawPtr { inner, depth } => {

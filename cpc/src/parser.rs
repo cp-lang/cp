@@ -323,7 +323,18 @@ impl<'a> Parser<'a> {
         let ident = self.parse_ident()?;
         let params = self.parse_params()?;
         let mut return_type = None;
-        if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Arrow) {
+        if self.peek() == Some(&Token::Bang) {
+            self.bump()?;
+            if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw)) {
+                let err = self.parse_error_type_rhs()?;
+                return_type = Some(Type::ResultType {
+                    ok: Box::new(Type::Void),
+                    err,
+                });
+            } else {
+                return_type = Some(Type::ErrorUnion(Box::new(Type::Void)));
+            }
+        } else if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Arrow) {
             self.bump()?;
             return_type = Some(self.parse_type()?);
         }
@@ -344,7 +355,18 @@ impl<'a> Parser<'a> {
         let ident = self.parse_ident()?;
         let params = self.parse_params()?;
         let mut return_type = None;
-        if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Arrow) {
+        if self.peek() == Some(&Token::Bang) {
+            self.bump()?;
+            if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw)) {
+                let err = self.parse_error_type_rhs()?;
+                return_type = Some(Type::ResultType {
+                    ok: Box::new(Type::Void),
+                    err,
+                });
+            } else {
+                return_type = Some(Type::ErrorUnion(Box::new(Type::Void)));
+            }
+        } else if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Arrow) {
             self.bump()?;
             return_type = Some(self.parse_type()?);
         }
@@ -553,7 +575,18 @@ impl<'a> Parser<'a> {
         let ident = self.parse_ident()?;
         let params = self.parse_params()?;
         let mut return_type = None;
-        if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Arrow) {
+        if self.peek() == Some(&Token::Bang) {
+            self.bump()?;
+            if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw)) {
+                let err = self.parse_error_type_rhs()?;
+                return_type = Some(Type::ResultType {
+                    ok: Box::new(Type::Void),
+                    err,
+                });
+            } else {
+                return_type = Some(Type::ErrorUnion(Box::new(Type::Void)));
+            }
+        } else if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Arrow) {
             self.bump()?;
             return_type = Some(self.parse_type()?);
         }
@@ -1157,6 +1190,18 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type(&mut self) -> ParseResult<Type> {
+        if self.peek() == Some(&Token::Bang) {
+            self.bump()?;
+            if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw)) {
+                let err = self.parse_error_type_rhs()?;
+                return Ok(Type::ResultType {
+                    ok: Box::new(Type::Void),
+                    err,
+                });
+            } else {
+                return Ok(Type::ErrorUnion(Box::new(Type::Void)));
+            }
+        }
         let base = self.parse_base_type()?;
         if self.peek() == Some(&Token::Bang) {
             self.bump()?;
@@ -1773,13 +1818,20 @@ impl<'a> Parser<'a> {
     fn parse_while_stmt(&mut self) -> ParseResult<WhileStmt> {
         let start = self.expect(Token::While)?.start;
         self.expect(Token::LParen)?;
+        let mut capture = None;
+        if matches!(self.peek(), Some(Token::Ident(_)))
+            && self.peek_next() == Some(&Token::ColonAssign)
+        {
+            capture = Some(self.parse_ident()?);
+            self.expect(Token::ColonAssign)?;
+        }
         let test = self.parse_expr()?;
         self.expect(Token::RParen)?;
-        let mut capture = None;
         if self.peek() == Some(&Token::Pipe) {
-            self.bump()?;
-            capture = Some(self.parse_ident()?);
-            self.expect(Token::Pipe)?;
+            return Err(ParseError::Generic(
+                "Zig-style '|capture|' syntax in 'while' loop is deprecated in CP; use 'while (binding := expr)' instead".to_string(),
+                self.peek_span(),
+            ));
         }
         let body = self.parse_stmt()?;
         Ok(WhileStmt {
@@ -1878,14 +1930,33 @@ impl<'a> Parser<'a> {
         } else {
             self.expect(Token::If)?.start
         };
+        let mut capture = None;
         let test = if self.peek() == Some(&Token::LParen) {
             self.bump()?;
+            if matches!(self.peek(), Some(Token::Ident(_)))
+                && self.peek_next() == Some(&Token::ColonAssign)
+            {
+                capture = Some(self.parse_ident()?);
+                self.expect(Token::ColonAssign)?;
+            }
             let t = self.parse_expr()?;
             self.expect(Token::RParen)?;
             t
         } else {
+            if matches!(self.peek(), Some(Token::Ident(_)))
+                && self.peek_next() == Some(&Token::ColonAssign)
+            {
+                capture = Some(self.parse_ident()?);
+                self.expect(Token::ColonAssign)?;
+            }
             self.parse_bin_expr(0)?
         };
+        if self.peek() == Some(&Token::Pipe) {
+            return Err(ParseError::Generic(
+                "Zig-style '|capture|' syntax in 'if' statement is deprecated in CP; use 'if (binding := expr)' instead".to_string(),
+                self.peek_span(),
+            ));
+        }
         let cons = self.parse_stmt()?;
         let mut alt = None;
         if self.peek() == Some(&Token::Else) {
@@ -1905,6 +1976,7 @@ impl<'a> Parser<'a> {
             cons: Box::new(cons),
             alt,
             is_comptime,
+            capture,
         })
     }
 
@@ -2019,7 +2091,18 @@ impl<'a> Parser<'a> {
             let m_ident = self.parse_ident()?;
             let params = self.parse_params()?;
             let mut return_type = None;
-            if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Arrow) {
+            if self.peek() == Some(&Token::Bang) {
+                self.bump()?;
+                if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw)) {
+                    let err = self.parse_error_type_rhs()?;
+                    return_type = Some(Type::ResultType {
+                        ok: Box::new(Type::Void),
+                        err,
+                    });
+                } else {
+                    return_type = Some(Type::ErrorUnion(Box::new(Type::Void)));
+                }
+            } else if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Arrow) {
                 self.bump()?;
                 return_type = Some(self.parse_type()?);
             }
@@ -3426,7 +3509,18 @@ impl<'a> Parser<'a> {
             Token::Fn => {
                 let params = self.parse_params()?;
                 let mut _return_type = None;
-                if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Arrow) {
+                if self.peek() == Some(&Token::Bang) {
+                    self.bump()?;
+                    if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw)) {
+                        let err = self.parse_error_type_rhs()?;
+                        _return_type = Some(Type::ResultType {
+                            ok: Box::new(Type::Void),
+                            err,
+                        });
+                    } else {
+                        _return_type = Some(Type::ErrorUnion(Box::new(Type::Void)));
+                    }
+                } else if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Arrow) {
                     self.bump()?;
                     _return_type = Some(self.parse_type()?);
                 }
@@ -3484,7 +3578,20 @@ impl<'a> Parser<'a> {
                     self.bump()?;
                     let params = self.parse_params()?;
                     let mut _return_type = None;
-                    if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Arrow) {
+                    if self.peek() == Some(&Token::Bang) {
+                        self.bump()?;
+                        if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw)) {
+                            let err = self.parse_error_type_rhs()?;
+                            _return_type = Some(Type::ResultType {
+                                ok: Box::new(Type::Void),
+                                err,
+                            });
+                        } else {
+                            _return_type = Some(Type::ErrorUnion(Box::new(Type::Void)));
+                        }
+                    } else if self.peek() == Some(&Token::Colon)
+                        || self.peek() == Some(&Token::Arrow)
+                    {
                         self.bump()?;
                         _return_type = Some(self.parse_type()?);
                     }

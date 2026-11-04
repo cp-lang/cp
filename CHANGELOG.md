@@ -1295,3 +1295,28 @@
 ### 新增文件 (Added)
 - [`cap/test/test_class_extra_zig.cp`](file:///data/dev/cp/cap/test/test_class_extra_zig.cp):
   - 长期回归测试用例，覆盖结构体内嵌原生 `zig` 块、后缀 `T!` 推导错误联合、`err.Variant` 错误成员访问以及静态空结构体 `{}` 与匿名结构体 `{ count: 123 }`，经 `./cap/bin/cap` 编译执行 100% 成功。
+
+
+---
+
+## 2026-11-04 (海象操作符条件解包、函数缺省返回类型简写与前缀可选兼容优化)
+
+### 修改文件 (Modified)
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs):
+  - `IfStmt` 结构体新增 `capture: Option<Ident>` 字段，用于支持 `if (binding := expr)` 的条件绑定标识符。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - 在 `parse_if_stmt` 与 `parse_while_stmt` 中全面支持海象操作符语法 `(binding := expr)`，同时对旧版 Zig 管道捕获 `|capture|` 输出清晰的迁移指引报错；
+  - 函数、箭头函数与方法返回类型解析中，支持 `!` 与 `!Error` 简写形式（自动将 ok 类型补全为 `Type::Void`）；
+  - 保留前缀 `?T` 向下兼容解析，杜绝历史测试用例与标准库代码被破坏性中断。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 在 `Stmt::If` 的语义分析中，若存在 `capture` 则自动创建局部子作用域并登记不可变绑定符号，支持后续表达式直接引用。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 在 `Stmt::If` 与 `Stmt::While` 的代码生成中，将海象操作符转译为 Zig 原生的 `if (expr) |binding|` 与 `while (expr) |binding|`；
+  - 自动注入 `_ = &binding;` 抑制语句，避免 Zig 编译器在捕获未被全部分支引用时抛出 `unused capture` 错误；
+  - 在 `type_to_display_string` 中将 `Type::ErrorUnion` 统一输出为现代后缀 `T!` 格式。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 新增第 9.3.2 节与第 9.3.3 节，详尽规范 `while (binding := expr)` 与 `if (binding := expr)` 的类型收窄、作用域隔离与零成本转译机制。
+
+### 新增文件 (Added)
+- [`cap/test/test_walrus_binding.cp`](file:///data/dev/cp/cap/test/test_walrus_binding.cp):
+  - 长期回归测试用例，全量验证 `if (val := find())` 成功与 else 分支、`while (item := iter.next())` 循环解包、以及 `fn foo() !` 错误联合简写，经 `./cap/bin/cap` 编译执行 100% 成功。

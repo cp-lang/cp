@@ -287,6 +287,8 @@ pub struct IfStmt {
     pub alt: Option<Box<Stmt>>,
     #[serde(default)]
     pub is_comptime: bool,
+    #[serde(default)]
+    pub capture: Option<Ident>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -789,6 +789,7 @@ impl Analyzer {
                 })),
                 alt: None,
                 is_comptime: false,
+                capture: None,
             }));
         }
         body.push(Stmt::Return(crate::ast::ReturnStmt {
@@ -861,6 +862,7 @@ impl Analyzer {
                 })),
                 alt: None,
                 is_comptime: false,
+                capture: None,
             }));
             let gt = Expr::Bin(BinExpr {
                 span: mock_span,
@@ -877,6 +879,7 @@ impl Analyzer {
                 })),
                 alt: None,
                 is_comptime: false,
+                capture: None,
             }));
         }
         body.push(Stmt::Return(crate::ast::ReturnStmt {
@@ -2092,7 +2095,21 @@ impl Analyzer {
             Stmt::If(i) => {
                 self.infer_type(&i.test)?;
                 self.analyze_expr(&i.test)?;
-                self.analyze_stmt(&i.cons)?;
+                if let Some(cap) = &i.capture {
+                    self.enter_scope();
+                    self.define(
+                        cap.sym.clone(),
+                        SymbolKind::Var {
+                            ty: Type::Any,
+                            kind: VarDeclKind::Const,
+                        },
+                        cap.span,
+                    )?;
+                    self.analyze_stmt(&i.cons)?;
+                    self.exit_scope();
+                } else {
+                    self.analyze_stmt(&i.cons)?;
+                }
                 if let Some(alt) = &i.alt {
                     self.analyze_stmt(alt)?;
                 }
