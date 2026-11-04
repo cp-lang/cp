@@ -126,13 +126,36 @@ cp-lang/cp
 • 🏆 正式非临时测试用例（test/）：
 • 具备长期回归验证价值的正式测试文件（如各类语法特性测试、标准库功能测试等），一律规范存放在 cap/test/test_*.cp 目录，作为系统的长期测试套件资产。
 
-### rust编译提速
+### CP编译器生成（Rust）提速与 Debug / Release 模式决策
 
-为了在任务中大幅缩短等待时间，需严格采取以下两项优化：
+若在迁移过程中修改了 `/data/dev/cp/cpc/src`编译器源码，为了实现最快迭代，请明确以下原则：
 
-1. 先用 cargo check 秒级验证，最后只跑 1 次 cargo build --release：在修改 Rust 编译器代码时，用 cargo check（仅需 1~2 秒）排查语法/借用问题，全部无误后再执行唯一的 1 次。
-   cargo build --release 供 cap 调用，直接节省 70% 编译等待时间。
-2. 并行合并读写调用：一次性集中读取目标区域并一次性批量完成所有 edit_file，减少工具往返轮次。
+- 先用 cargo check 秒级验证：在修改 Rust 编译器代码时，用 cargo check（仅需 1~2 秒）排查语法/借用问题，全部无误后再执行
+  `cargo build --release` 供 cap 调用，直接节省 70% 编译等待时间。
+- 并行合并读写调用：一次性集中读取目标区域并一次性批量完成所有 edit_file，减少工具往返轮次。
+- **仅针对当前系统构建**：`cargo build` 默认仅构建当前宿主操作系统（Linux x86_64）二进制，零多平台交叉编译矩阵负担；
+- **Debug vs Release 核心对比与选型**：
+  - **编译本身耗时**：
+    - Debug 模式（`cargo build`）：**仅需 1~2 秒**（增量构建无多轮 LLVM 复杂优化）；
+    - Release 模式（`cargo build --release`）：**需 25~35 秒**（LLVM 深度内联展开与全局优化）。
+  - **单文件转译耗时（cpc 运行自身）**：
+    - Debug 版 `cpc`：约 **10 ~ 15 ms**；
+    - Release 版 `cpc`：约 **3 ~ 5 ms**；
+    - \_注：在 Bun 整体编译流水线中，10ms 与 5ms 的差异完全处于无感区间，但编译器的重新构建时间缩短了 90% 以上！
+  - **调试支持**：Debug 模式保留完整的 panic 调用栈（Backtrace）与断言，排查编译器内部 Bug 极快！
+- **开发节奏规范**：
+  1. **cp编译器重构与调试时，首选 Debug**：
+     ```bash
+     cargo check --manifest-path /data/dev/cp/cpc/Cargo.toml
+     cargo build --manifest-path /data/dev/cp/cpc/Cargo.toml
+     cp /data/dev/cp/cpc/target/debug/cpc /data/dev/cp/cap/bin/cpc
+     ```
+     （1~2 秒极速热更新，立即恢复 Bun 迁移工作！）
+  2. **cp编译器稳定了，首选 Release**：
+     ```bash
+     cargo build --release --manifest-path /data/dev/cp/cpc/Cargo.toml
+     cp /data/dev/cp/cpc/target/release/cpc /data/dev/cp/cap/bin/cpc
+     ```
 
 ## cap 跨平台编译输出
 
@@ -471,7 +494,7 @@ beam_api.zig 的原生链接。 这将是两股力量真正的胜利会师！
 
 ### 异步 I/O
 
-> 很好, 先在 Bun-BEAM 模式下 打通异步 I/O 的消息映射，
+> 很好, 先在 Bun 模式下 打通异步 I/O 的消息映射，
 > 然后 在 原生单机模式下 为我们的轻量级调度器装上 epoll 引擎
 > 实现 网络 文件等 IO的 异步能力
 
@@ -483,7 +506,7 @@ beam_api.zig 的原生链接。 这将是两股力量真正的胜利会师！
 
 ---
 
-🛡️ 战役一：Bun-BEAM 模式下的异步 I/O 消息映射 (Message-Driven I/O)
+🛡️ 战役一：Bun 模式下的异步 I/O 消息映射 (Message-Driven I/O)
 
 在 BEAM 虚拟机中，我们绝对不能在 C-ABI (NIF) 里执行任何阻塞系统的调用（如 try std.net.tcpConnectToAddress），否则会卡死整个调度线程。一切 I/O 必须转化为消息互传。
 
