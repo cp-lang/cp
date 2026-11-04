@@ -4,7 +4,7 @@ enum FileErr {
     ReadEOF
 }
 
-fn readFile(path: string) : ?string ! FileErr {
+fn readFile(path: string) : string? ! FileErr {
     if (path == "") return Err(FileErr.FileNotFound);
     return path;
 }

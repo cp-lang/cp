@@ -1,7 +1,7 @@
 // con/test_tensor.cp
 import { print } from "std/io";
 
-fn main(): ?void {
+fn main(): void? {
     @print("--- Tensor and Arena Test ---");
 
     // Test Tensor Initialization (mapping to @tensor_init)

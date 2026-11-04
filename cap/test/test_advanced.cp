@@ -1,4 +1,4 @@
-fn main(): ?void {
+fn main(): void? {
     let msg = "Hello CP";
     let len: i32 = 0;
     __zig__ { ctx.len = @intCast(ctx.msg.len); }

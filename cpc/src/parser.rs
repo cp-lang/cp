@@ -325,7 +325,7 @@ impl<'a> Parser<'a> {
         let mut return_type = None;
         if self.peek() == Some(&Token::Bang) {
             self.bump()?;
-            if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw)) {
+            if self.is_error_type_rhs_start() {
                 let err = self.parse_error_type_rhs()?;
                 return_type = Some(Type::ResultType {
                     ok: Box::new(Type::Void),
@@ -357,7 +357,7 @@ impl<'a> Parser<'a> {
         let mut return_type = None;
         if self.peek() == Some(&Token::Bang) {
             self.bump()?;
-            if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw)) {
+            if self.is_error_type_rhs_start() {
                 let err = self.parse_error_type_rhs()?;
                 return_type = Some(Type::ResultType {
                     ok: Box::new(Type::Void),
@@ -577,7 +577,7 @@ impl<'a> Parser<'a> {
         let mut return_type = None;
         if self.peek() == Some(&Token::Bang) {
             self.bump()?;
-            if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw)) {
+            if self.is_error_type_rhs_start() {
                 let err = self.parse_error_type_rhs()?;
                 return_type = Some(Type::ResultType {
                     ok: Box::new(Type::Void),
@@ -799,6 +799,30 @@ impl<'a> Parser<'a> {
         )
     }
 
+    fn is_error_type_rhs_start(&mut self) -> bool {
+        if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw)) {
+            return true;
+        }
+        if self.peek() == Some(&Token::LBrace) {
+            let checkpoint = self.lexer.clone();
+            let p1 = self.peeked.clone();
+            let p2 = self.peeked2.clone();
+            let _ = self.bump();
+            let mut is_anon = false;
+            if matches!(self.peek(), Some(Token::Ident(_))) {
+                let _ = self.bump();
+                if matches!(self.peek(), Some(Token::Comma) | Some(Token::RBrace)) {
+                    is_anon = true;
+                }
+            }
+            self.lexer = checkpoint;
+            self.peeked = p1;
+            self.peeked2 = p2;
+            return is_anon;
+        }
+        false
+    }
+
     fn parse_error_type_rhs(&mut self) -> ParseResult<ErrorType> {
         if self.peek() == Some(&Token::LBrace) {
             self.bump()?;
@@ -848,9 +872,11 @@ impl<'a> Parser<'a> {
 
     fn parse_base_type(&mut self) -> ParseResult<Type> {
         if self.peek() == Some(&Token::Question) {
-            self.bump()?;
-            let inner = self.parse_base_type()?;
-            return Ok(Type::Optional(Box::new(inner)));
+            let (_, span) = self.bump()?;
+            return Err(ParseError::Generic(
+                "Prefix '?' for optional type is deprecated in CP; use postfix 'T?' or 'T?!' instead".to_string(),
+                span,
+            ));
         }
         if self.peek() == Some(&Token::Dyn) {
             self.bump()?;
@@ -1192,7 +1218,7 @@ impl<'a> Parser<'a> {
     fn parse_type(&mut self) -> ParseResult<Type> {
         if self.peek() == Some(&Token::Bang) {
             self.bump()?;
-            if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw)) {
+            if self.is_error_type_rhs_start() {
                 let err = self.parse_error_type_rhs()?;
                 return Ok(Type::ResultType {
                     ok: Box::new(Type::Void),
@@ -1205,7 +1231,7 @@ impl<'a> Parser<'a> {
         let base = self.parse_base_type()?;
         if self.peek() == Some(&Token::Bang) {
             self.bump()?;
-            if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw)) {
+            if self.is_error_type_rhs_start() {
                 let err = self.parse_error_type_rhs()?;
                 return Ok(Type::ResultType {
                     ok: Box::new(base),
@@ -2093,7 +2119,7 @@ impl<'a> Parser<'a> {
             let mut return_type = None;
             if self.peek() == Some(&Token::Bang) {
                 self.bump()?;
-                if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw)) {
+                if self.is_error_type_rhs_start() {
                     let err = self.parse_error_type_rhs()?;
                     return_type = Some(Type::ResultType {
                         ok: Box::new(Type::Void),
@@ -3511,7 +3537,7 @@ impl<'a> Parser<'a> {
                 let mut _return_type = None;
                 if self.peek() == Some(&Token::Bang) {
                     self.bump()?;
-                    if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw)) {
+                    if self.is_error_type_rhs_start() {
                         let err = self.parse_error_type_rhs()?;
                         _return_type = Some(Type::ResultType {
                             ok: Box::new(Type::Void),
@@ -3580,7 +3606,7 @@ impl<'a> Parser<'a> {
                     let mut _return_type = None;
                     if self.peek() == Some(&Token::Bang) {
                         self.bump()?;
-                        if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw)) {
+                        if self.is_error_type_rhs_start() {
                             let err = self.parse_error_type_rhs()?;
                             _return_type = Some(Type::ResultType {
                                 ok: Box::new(Type::Void),

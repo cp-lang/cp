@@ -4714,3 +4714,57 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
    - 覆盖 `if (binding := expr)`、`while (binding := expr)` 及 `fn foo() !` 错误联合简写。
 4. **四线文档维护**：
    - 同步更新 [`SESSION.md`](file:///data/dev/cp/SESSION.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)、[`cp_ref.md`](file:///data/dev/cp/cp_ref.md)。
+
+
+---
+
+## 2026-11-04 对话与任务执行记录
+
+### 用户指令 (User Directives)
+> 可选类型 ?T 和 T?, 我们选择了 T?, 去掉了 ?T, 保持语法统一, 保留两种语法, 会导致代码混乱, 因此, 强行拦截 ?T 并报错是对的
+> 需要修改我们之前的测试代码和库代码, 统一改为 T?, 包括类型定义, 函数返回等
+
+### 架构师执行与落地汇报 (Execution Report)
+报告大师！遵照您的最高决断，我们彻底废除了历史遗留的前缀 `?T` 语法，确立并全面执行了后缀 `T?`（以及错误联合后缀 `T?!`）的唯一正统规范，彻底杜绝了双重语法带来的心智认知负担与语法歧义。
+
+#### 1. 编译器前端强行拦截与精准报错 (`cpc/src/parser.rs`)
+- 在 `parse_base_type` 中遇到前置 `?` 时，坚决抛出编译期硬报错：
+  `"Prefix '?' for optional type is deprecated in CP; use postfix 'T?' or 'T?!' instead"`；
+- 实现了前瞻探测方法 `is_error_type_rhs_start`，通过词法探测智能区分匿名错误集 `!{ Err1, Err2 }` 与普通函数体/块语句 `{ ... }`，彻底根除了 `fn foo(): void! { ... }` 和 `fn foo() ! { ... }` 将函数体 `{` 误判为错误集的严重语法解析 Bug。
+
+#### 2. 代码生成与运行时修复 (`cpc/src/codegen.rs`)
+- 注入 `cp_match_tag` 宏/辅助函数，统一支持 Zig 纯枚举 (`enum`) 与带负载标签联合 (`union(enum)`) 的 `switch` 分支匹配，消除了对纯枚举调用 `std.meta.activeTag` 导致的 Zig 类型冲突；
+- 确保所有类/结构体始终发射 `pub fn _create(allocator)` 构造器；
+- 纠正 `Type::ResultType` 搭配 `Error` 时的转译逻辑，统一映射为 `CpResult(ok, Error)`；
+- 在 `Expr::Builtin` 中正式接入 `@expect_eq` 与 `@test`，并将 `lib/cap/test.cp` 形参定义升级为泛型 `auto`，消除了转译后未使用形参导致的 Zig 编译错误。
+
+#### 3. 标准库与长期测试用例全量迁移
+- **标准库 (`lib/cap/`)**：全量迁移 [`lib/cap/sqlite.cp`](file:///data/dev/cp/lib/cap/sqlite.cp)（如 `init(this, path: string): void!`、`exec(this, sql: string): void!`、`query_string(this, sql: string): string?!`）与 [`lib/cap/test.cp`](file:///data/dev/cp/lib/cap/test.cp)；
+- **长期测试套件 (`cap/test/`)**：全量更新 25 个测试用例文件，消除全部前缀 `?T`，统一采用现代后缀 `T?` / `T?!` / `void!`：
+  - [`test_error_box_switch_pass.cp`](file:///data/dev/cp/cap/test/test_error_box_switch_pass.cp) (14 项三态返回、模式匹配与 Box 胖指针测试全绿通过)；
+  - [`example_showcase.cp`](file:///data/dev/cp/cap/example_showcase.cp) (12 项全景错误处理与语言特性全绿通过)；
+  - [`test_pipe_pass.cp`](file:///data/dev/cp/cap/test/test_pipe_pass.cp) (8 项管道与占位符测试全绿通过)；
+  - [`test_walrus_binding.cp`](file:///data/dev/cp/cap/test/test_walrus_binding.cp) (海象操作符与简写错误联合全绿通过)；
+  - 反向静态拦截测试 [`test_error_fail_non_exhaustive_switch.cp`](file:///data/dev/cp/cap/test/test_error_fail_non_exhaustive_switch.cp) 与 [`test_error_fail_null_coalesce_on_err.cp`](file:///data/dev/cp/cap/test/test_error_fail_null_coalesce_on_err.cp) 精准拦截并报错。
+
+#### 4. 语言设计规范白皮书 (`cp_ref.md`)
+- 全文检索并清除了所有前缀 `?T` 残留代码段与示例，全量收敛为后缀 `T?` 与 `T?!`。
+
+#### 5. 质量保证与构建
+- `cargo fmt` 格式化通过；
+- `cargo check`、`cargo test` 100% 绿灯；
+- `cargo build --release` 编译完成，并由 `cap` 引擎实时挂载。
+
+### 本次提交范围 (Commit Scope)
+1. **编译器前端核心模块 (`cpc/src/parser.rs`, `cpc/src/codegen.rs`)**：
+   - `parser.rs`: 严格拦截前缀 `?T` 并报错；实现 `is_error_type_rhs_start` 预读探测，精准消歧匿名错误集与代码块/函数体；
+   - `codegen.rs`: 注入 `cp_match_tag` 宏兼容 Zig 纯枚举与标签联合；保证类构造器 `_create` 始终发射；统一 `Error` 结构映射为 `CpResult`；`Expr::Builtin` 接入 `@expect_eq` 与 `@test`。
+2. **标准库 (`lib/cap/sqlite.cp`, `lib/cap/test.cp`)**：
+   - `sqlite.cp`: 函数返回值与成员变量全量收敛为后缀 `T?` / `void!`；
+   - `test.cp`: `test` 与 `expect_eq` 参数类型适配为泛型 `auto`，映射至 Zig `anytype`。
+3. **长期测试套件 (`cap/test/` 25+ 文件)**：
+   - 全量迁移现有测试代码中的前缀 `?T` 为后缀 `T?` / `T?!` / `void!`，全量回归验证 100% 通过。
+4. **语言设计规范白皮书 (`cp_ref.md`)**：
+   - 全文规范与代码示例统一收敛为后缀 `T?` 与 `T?!`。
+5. **四线文档维护**：
+   - 完整同步更新 [`SESSION.md`](file:///data/dev/cp/SESSION.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)、[`cp_ref.md`](file:///data/dev/cp/cp_ref.md)。

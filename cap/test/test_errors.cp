@@ -1,9 +1,14 @@
 error ModelError { NotFound, OutOfVRAM }
 
-fn main(): ?void {
+fn trigger_err(): i32! {
+    return err.NotFound;
+}
+
+fn main(): void? {
     defer { @print("Deferred action."); }
     errdefer { @print("Error deferred action."); }
-    let data: ?string = null;
+    let data: string? = null;
     @print("Running...");
-    return error.ModelError.NotFound;
+    let val = trigger_err() catch 42;
+    @print("Caught val: {d}", val);
 }

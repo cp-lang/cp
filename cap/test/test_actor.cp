@@ -1,6 +1,6 @@
 import { print } from "std/io";
 
-fn main(): ?void {
+fn main(): void? {
     @print("--- Actor Concurrency Test ---");
 
     let worker = @spawn((msg) => {

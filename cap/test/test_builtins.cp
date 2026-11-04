@@ -1,6 +1,6 @@
 // con/test_builtins.cp
 
-fn main(): ?void {
+fn main(): void? {
     // Test @print builtin
     @print("Hello from CP Builtins! val={d}", 42);
 

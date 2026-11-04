@@ -1,6 +1,6 @@
 import { print } from "cap:io";
 
-fn main(): ?void {
+fn main(): void? {
     @print("--- Distributed Transparent Routing Test ---");
 
     // 1. Local Message (Standard)

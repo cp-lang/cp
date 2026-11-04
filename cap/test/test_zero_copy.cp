@@ -1,7 +1,7 @@
 // con/test/test_zero_copy.cp
 import { print } from "std/io";
 
-fn main(): ?void {
+fn main(): void? {
     @print("--- Zero-Copy Shared Memory Test ---");
 
     let shape = [1024, 1024]; 

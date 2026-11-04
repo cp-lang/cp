@@ -10,7 +10,7 @@ async fn main(): void {
     map.set("version", 2);
     expect_eq(map.size, 2);
 
-    // .get() returns ?Message
+    // .get() returns Message?
     let title_msg = map.get("title");
     expect_eq(title_msg.to_string(), "CP Language");
 

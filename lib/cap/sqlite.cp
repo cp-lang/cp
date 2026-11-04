@@ -12,7 +12,7 @@ __zig__ {
 export class Database {
     ptr: any?,
 
-    fn init(this, path: string): ?void {
+    fn init(this, path: string): void! {
         __zig__ {
             var db: ?*anyopaque = null;
             const allocator = std.heap.page_allocator;
@@ -32,7 +32,7 @@ export class Database {
         }
     }
 
-    fn exec(this, sql: string): ?void {
+    fn exec(this, sql: string): void! {
         __zig__ {
             std.debug.print("Executing SQL on db={*}...\n", .{self.ptr});
             const allocator = std.heap.page_allocator;
@@ -49,7 +49,7 @@ export class Database {
         }
     }
 
-    fn query_string(this, sql: string): ?string {
+    fn query_string(this, sql: string): string?! {
         __zig__ {
             const allocator = std.heap.page_allocator;
             const sql_z = allocator.alloc(u8, sql.len + 1) catch return error.OutOfMemory;

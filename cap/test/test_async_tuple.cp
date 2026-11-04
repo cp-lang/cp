@@ -9,7 +9,7 @@ async fn async_tuple(): [i32, i32] {
     return [100, 200];
 }
 
-async fn main(): ?void {
+async fn main(): void? {
     // Test Tuple destructuring (positional)
     let [x, s]: [i32, string] = get_tuple();
     __zig__ {

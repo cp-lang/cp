@@ -23,14 +23,14 @@ enum AppErr {
 }
 
 // ============================================================================
-// 2. 三态函数返回类型 (?T ! E) 与直接返回值 / null / Err(...)
+// 2. 三态函数返回类型 (T?!E) 与直接返回值 / null / Err(...)
 // ============================================================================
 
 // 返回值三态：
 // 1. 成功返回 string（直接返回，不用 Ok(...) 包装）
 // 2. 找到文件但内容为空时返回 null
 // 3. 失败返回 FileErr（使用 Err(...) 构造）
-fn readConfigFile(filename: string): ?string ! FileErr {
+fn readConfigFile(filename: string): string? ! FileErr {
     if (filename == "") {
         return Err(FileErr.NotFound);
     }
@@ -77,16 +77,16 @@ class HardwareSpec {
 }
 
 class RuntimeEnv {
-    spec: ?HardwareSpec;
-    fn init(move s: ?HardwareSpec) {
+    spec: HardwareSpec?;
+    fn init(move s: HardwareSpec?) {
         _.spec = s;
     }
 }
 
 class AgentProfile {
     name: string;
-    runtime: ?RuntimeEnv;
-    fn init(n: string, move r: ?RuntimeEnv) {
+    runtime: RuntimeEnv?;
+    fn init(n: string, move r: RuntimeEnv?) {
         _.name = n;
         _.runtime = r;
     }
@@ -238,9 +238,9 @@ fn main() {
     // F. 可选链 (?.) 深度访问
     let spec = new HardwareSpec(0);
     let env = new RuntimeEnv(spec);
-    let agent1: ?AgentProfile = new AgentProfile("Agent-Alpha", env);
-    let agent2: ?AgentProfile = new AgentProfile("Agent-Beta", null);
-    let null_agent: ?AgentProfile = null;
+    let agent1: AgentProfile? = new AgentProfile("Agent-Alpha", env);
+    let agent2: AgentProfile? = new AgentProfile("Agent-Beta", null);
+    let null_agent: AgentProfile? = null;
 
     let gpu_id1 = agent1?.runtime?.spec?.getGpuId() ?? -1;
     let gpu_id2 = agent2?.runtime?.spec?.getGpuId() ?? -1;

@@ -2294,3 +2294,37 @@ Bun AGY 在推进 Bun 基础算法库（如 `wyhash`、`base64`）转译过程�
 - 经 `./cap/bin/cap` 编译执行 100% 成功输出；
 - 既有长期测试用例全量回归无任何错误；
 - Rust 前端执行 `cargo fmt`、`cargo check`、`cargo test` 与 `cargo build --release` 100% 绿灯，产物已同步部署至 [`cap/bin/cpc`](file:///data/dev/cp/cap/bin/cpc)。
+
+
+---
+
+## 2026-11-04: 可选类型语法收敛统一为后缀 T?、匿名错误集前瞻消歧与测试套件全量迁移实录
+
+### 1. 架构决断与语法收敛
+在现代语言设计中，类型的正交性与唯一性是保持代码清晰度与降低开发者心智负担的基石。
+- **历史问题**：早期的设计同时存在前缀 `?T`（类似 Zig）与后缀 `T?`（类似 TypeScript/Swift/Kotlin）。双轨并存造成了代码库混乱，让程序员在编写类型与函数返回时产生认知摇摆，且前缀 `?` 容易与三元运算符、安全调用混淆；
+- **最高决断**：彻底弃用前缀 `?T`，选择全面拥抱广大主流开发者直觉的后缀 `T?`（以及三态错误联合后缀 `T?!`、推导错误联合 `T!`）。
+- **拦截机制**：在编译器前端 `cpc/src/parser.rs` 的 `parse_base_type` 中，直接强行拦截前置 `?` 并抛出带有迁移指引的清晰编译错误，从源头上杜绝不规范语法的滋生。
+
+### 2. 深入排查与编译器关键修复
+在全量迁移过程中，我们攻坚并解决了数个关键技术瓶颈：
+1. **匿名错误集与函数体/代码块的大括号前瞻消歧 (Lookahead Disambiguation)**：
+   - 当函数返回类型写为 `fn foo(): void! { ... }` 或 `fn foo() ! { ... }` 时，类型后缀 `!` 后紧随函数体的大括号 `{`；
+   - 之前为支持匿名错误集 `!{ Err1, Err2 }`，在预读到 `{` 时无条件尝试将其解析为匿名错误集，导致函数体内的第一行代码（如 `@print(...)`）被误当成错误变体标识符，抛出解析崩溃；
+   - **技术解法**：实现轻量词法前瞻探测 `is_error_type_rhs_start`，利用 `checkpoint` 机制预读 `{` 内部的首个 Token：仅当内部首项为 `Ident` 且紧接 `,` 或 `}` 时，才判定为匿名错误集；若为关键字、表达式或函数语句，则判定为代码块/函数体，完美消歧。
+2. **纯枚举与标签联合的 Tag 匹配适配 (`cp_match_tag`)**：
+   - 在 pattern matching 的转译中，原本统一发射 `std.meta.activeTag(val) == .Variant`；
+   - 但对 Zig 纯枚举 (`enum`) 而言，`std.meta.activeTag` 返回的是枚举自身的类型，与枚举字面量直接对比会导致编译错误；
+   - **技术解法**：在 Zig 运行时前导中注入 `cp_match_tag(val, tag)`，利用 Zig 编译期反射自动分流：纯枚举走 `val == tag`，标签联合走 `std.meta.activeTag(val) == tag`。
+3. **测试运行时泛型适配**：
+   - 在 `cpc/src/codegen.rs` 的 `Expr::Builtin` 中正式接入 `@expect_eq` 与 `@test`；
+   - 将 `lib/cap/test.cp` 中的断言参数升级为泛型 `auto`（对应 Zig `anytype`），完美支撑字符串、布尔、整数等任意类型的比较。
+
+### 3. 测试与全量回归验证
+- 25+ 长期测试文件及所有标准库全量完成向后缀 `T?` / `T?!` / `void!` 的平滑升级；
+- `./cap/bin/cap cap/test/test_error_box_switch_pass.cp` 14 项子测试 100% 成功；
+- `./cap/bin/cap cap/test/example_showcase.cp` 12 项全景子测试 100% 成功；
+- `./cap/bin/cap cap/test/test_pipe_pass.cp` 8 项管道测试 100% 成功；
+- `./cap/bin/cap cap/test/test_walrus_binding.cp` 100% 成功；
+- 静态拦截反向测试用例精准拦截并报错；
+- `cargo fmt`、`cargo check`、`cargo test` 与 `cargo build --release` 100% 绿灯。

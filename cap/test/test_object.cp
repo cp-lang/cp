@@ -9,7 +9,7 @@ class MyLogger implements Logger {
     }
 }
 
-fn main(): ?void {
+fn main(): void? {
     let logger: Logger = new MyLogger();
     logger.log("Object model works!");
 }

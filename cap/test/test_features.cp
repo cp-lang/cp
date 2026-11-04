@@ -1,4 +1,4 @@
-fn main(): ?void {
+fn main(): void? {
     let limit = 10;
     let i = 0;
     while (i < limit) {

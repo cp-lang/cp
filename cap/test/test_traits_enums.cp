@@ -17,7 +17,7 @@ impl Worker for AIWorker {
     }
 }
 
-fn main(): ?void {
+fn main(): void? {
     let task: Task = Task.Compute { batch: 100 };
     let worker = new AIWorker();
     worker.id = 1;

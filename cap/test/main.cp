@@ -1,5 +1,5 @@
 import { print } from "cap:io";
 
-fn main(): ?void {
+fn main(): void? {
     @print("Hello from CP! 🚀");
 }

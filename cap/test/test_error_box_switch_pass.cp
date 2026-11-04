@@ -21,10 +21,10 @@ enum AppErr {
 }
 
 // ============================================================================
-// 2. Tri-State Return (`?string ! FileErr`), Direct Value, `null`, `Err(...)`,
+// 2. Tri-State Return (`string?!FileErr`), Direct Value, `null`, `Err(...)`,
 //    and Postfix `?` Bubbling
 // ============================================================================
-fn readFile(path: string): ?string ! FileErr {
+fn readFile(path: string): string? ! FileErr {
     if (path == "") {
         return Err(FileErr.FileNotFound);
     }
@@ -38,7 +38,7 @@ fn readFile(path: string): ?string ! FileErr {
     return "hello_cp";
 }
 
-fn load(path: string): ?string ! FileErr {
+fn load(path: string): string? ! FileErr {
     let txt = readFile(path)?;
     return "prefix:" + txt;
 }
@@ -120,8 +120,8 @@ class CityInfo {
 
 class Address {
     city: string;
-    info: ?CityInfo;
-    fn init(c: string, move inf: ?CityInfo) {
+    info: CityInfo?;
+    fn init(c: string, move inf: CityInfo?) {
         _.city = c;
         _.info = inf;
     }
@@ -129,8 +129,8 @@ class Address {
 
 class UserProfile {
     name: string;
-    addr: ?Address;
-    fn init(n: string, move a: ?Address) {
+    addr: Address?;
+    fn init(n: string, move a: Address?) {
         _.name = n;
         _.addr = a;
     }
@@ -199,8 +199,8 @@ fn invokePlugin(kind: i32): i32 ! Box<dyn PluginError> {
     return 42;
 }
 
-fn main() {
-    // --- A. Tri-state switch pattern matching on `?string ! FileErr` ---
+fn main(): void {
+    // --- A. Tri-state switch pattern matching on `string?!FileErr` ---
     let r1 = load("data.txt");
     let out1 = switch r1 {
         content => "ok:" + content,
@@ -278,9 +278,9 @@ fn main() {
     // --- D. Optional Chaining `?.` ---
     let info = new CityInfo(94105);
     let addr = new Address("SF", info);
-    let user_with_addr: ?UserProfile = new UserProfile("Alice", addr);
-    let user_no_addr: ?UserProfile = new UserProfile("Bob", null);
-    let null_user: ?UserProfile = null;
+    let user_with_addr: UserProfile? = new UserProfile("Alice", addr);
+    let user_no_addr: UserProfile? = new UserProfile("Bob", null);
+    let null_user: UserProfile? = null;
 
     let city1 = user_with_addr?.addr?.city ?? "unknown_city";
     let zip1 = user_with_addr?.addr?.info?.getZip() ?? -1;

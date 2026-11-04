@@ -105,7 +105,7 @@ class NumberStream {
         _.limit = limit;
     }
 
-    fn next(*_): ?i32 {
+    fn next(*_): i32? {
         if (_.current >= _.limit) {
             return null;
         }
@@ -218,3 +218,4 @@ fn main(): void {
 
     @print("=== All Macro Metaprogramming tests passed 100%! ===");
 }
+

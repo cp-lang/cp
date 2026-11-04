@@ -1320,3 +1320,27 @@
 ### 新增文件 (Added)
 - [`cap/test/test_walrus_binding.cp`](file:///data/dev/cp/cap/test/test_walrus_binding.cp):
   - 长期回归测试用例，全量验证 `if (val := find())` 成功与 else 分支、`while (item := iter.next())` 循环解包、以及 `fn foo() !` 错误联合简写，经 `./cap/bin/cap` 编译执行 100% 成功。
+
+
+---
+
+## 2026-11-04 (全面废弃前缀 ?T 统一收敛为后缀 T?、匿名错误集前瞻消歧与测试库代码全量升级)
+
+### 修改文件 (Modified)
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - 在 `parse_base_type` 中对前缀 `?` 实施编译期硬报错，强行拦截 `?T` 并给出迁移至 `T?` 或 `T?!` 的指导；
+  - 新增 `is_error_type_rhs_start` 前瞻探测方法，精准判定匿名错误集 `!{ ... }`，消除函数体/代码块 `{` 与匿名错误集之间的语法冲突；
+  - 恢复 `try/catch` 表达式中错误变量标识符的准确解析。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 引入 `cp_match_tag` 宏，支持 Zig 纯枚举 (`enum`) 与标签联合 (`union(enum)`) 在 `switch` 匹配中的无缝兼容；
+  - 确保所有类/结构体始终发射 `pub fn _create(allocator)` 实例构造函数；
+  - 统一 `Type::ResultType` 搭配 `Error` 时的转译逻辑为 `CpResult(ok, Error)`；
+  - 在 `Expr::Builtin` 中正式支持 `@expect_eq` 与 `@test` 内建断言与运行宏。
+- [`lib/cap/sqlite.cp`](file:///data/dev/cp/lib/cap/sqlite.cp):
+  - 全量升级函数返回类型与字段类型为后缀 `T?` / `T?!` / `void!`。
+- [`lib/cap/test.cp`](file:///data/dev/cp/lib/cap/test.cp):
+  - 将 `test` 与 `expect_eq` 参数类型升级为泛型 `auto`，映射为 Zig `anytype`。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 清理并统一所有示例与规范表述中的可选类型，全面采用后缀 `T?` / `T?!`。
+- `cap/test/` (25+ 测试文件全量更新):
+  - 包含 `hello.cp`, `main.cp`, `test_actor.cp`, `test_advanced.cp`, `test_all.cp`, `test_async_tuple.cp`, `test_builtins.cp`, `test_comptime.cp`, `test_dependency.cp`, `test_dist.cp`, `test_error_box_switch_pass.cp`, `test_error_fail_non_exhaustive_switch.cp`, `test_error_fail_null_coalesce_on_err.cp`, `test_errors.cp`, `test_features.cp`, `test_fs_async.cp`, `test_macro_pass.cp`, `test_map_set_dict.cp`, `test_matmul.cp`, `test_object.cp`, `test_spawn_arrow.cp`, `test_sqlite.cp`, `test_stdlib.cp`, `test_switch_binding_pass.cp`, `test_tensor.cp`, `test_traits_enums.cp`, `test_undefined.cp`, `test_zero_copy.cp`, `example_showcase.cp`。

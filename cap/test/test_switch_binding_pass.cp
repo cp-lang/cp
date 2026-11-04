@@ -31,7 +31,7 @@ fn test_walrus_range_binding(score: i32): i32 {
     };
 }
 
-fn main(): ?void {
+fn main(): void? {
     // 1. 无载荷变体构造与匹配
     let t_idle: Task = .Idle;
     expect_eq(test_enum_matching(t_idle), 1);

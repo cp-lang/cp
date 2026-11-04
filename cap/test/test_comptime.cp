@@ -12,7 +12,7 @@ fn get_type_size(val: auto): usize {
     return @sizeOf(@typeOf(val));
 }
 
-fn main(): ?void {
+fn main(): void? {
     @print("--- CP Comptime System Test ---");
 
     // 1. @{ } 编译期代码执行块

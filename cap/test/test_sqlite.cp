@@ -1,6 +1,6 @@
 import { Database } from "cap:sqlite";
 
-fn test_sqlite_sync(): ?void {
+fn test_sqlite_sync(): void! {
     @print("Testing cap:sqlite initialization...");
     // 1. Initialize DB with memory (auto-drop will trigger when this function ends)
     const db = new Database(":memory:");
@@ -21,6 +21,6 @@ fn test_sqlite_sync(): ?void {
     @print("SQLite executed successfully. Exiting function to trigger Auto-Drop...");
 }
 
-export fn main(): ?void {
+export fn main(): void! {
     test_sqlite_sync()?;
 }

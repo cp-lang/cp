@@ -1,7 +1,7 @@
 // con/test_matmul.cp
 import { print } from "std/io";
 
-fn main(): ?void {
+fn main(): void? {
     @print("--- High Performance MatMul Test ---");
 
     // Initialize 2x2 identity-like matrices

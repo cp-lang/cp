@@ -1,7 +1,7 @@
 // con/test_spawn_arrow.cp
 import { print } from "std/io";
 
-fn main(): ?void {
+fn main(): void? {
     @print("--- Spawn Arrow Test ---");
 
     // Spawn an anonymous async arrow function

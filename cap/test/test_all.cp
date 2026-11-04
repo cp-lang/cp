@@ -15,7 +15,7 @@ async fn test_nested_await(data_a: string, data_b: string): void {
     @print("Nested await executed with args: {s} {s}", data_a, data_b);
 }
 
-fn test_auto_drop(): ?void {
+fn test_auto_drop(): void? {
     @print("Testing Auto-Drop (Compiler injected defer)...");
     const sync_t = new SharedTensor(512 * 1024);
     sync_t.retain();

@@ -2,7 +2,7 @@
 import { print } from "std/io";
 import { get_arena } from "std/mem";
 
-fn main(): ?void {
+fn main(): void? {
     // Testing standard library IO wrapper
     print("Standard Library IO check: status={s}", "ok");
 

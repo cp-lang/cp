@@ -1,7 +1,7 @@
 import { writeFileSync, mkdir } from "cap:fs";
 import { print } from "cap:io";
 
-fn main(): ?void {
+fn main(): void? {
     @print("--- Async File System Test ---");
 
     let test_dir = "./test_fs_async";
