@@ -4636,3 +4636,43 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
    - 长期回归测试用例，覆盖逃逸舱原生类型按值传递与参数抑制优化。
 4. **四线文档维护**：
    - 同步更新 [`SESSION.md`](file:///data/dev/cp/SESSION.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)、[`cp_ref.md`](file:///data/dev/cp/cp_ref.md)。
+
+
+---
+
+## 2026-11-04 (Session Update - 结构体内嵌逃逸舱、多级点路径类型、后缀推导错误联合与 Git 提交)
+
+### 用户指令
+> bun 迁移 agy 修改了cp编译器源代码和对应的cp_ref.md, 你仔细审核后, 执行git 提交
+
+### 审核与执行结果汇报
+全面审核并验证了 Bun 迁移过程中对 `cpc` 编译器前端（`ast.rs`、`parser.rs`、`sema.rs`、`codegen.rs`）及规范手册 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md) 的核心功能增强：
+
+1. **类与结构体内嵌原生逃逸舱 (`extra_zig`)**：
+   - 在 AST `Class` 节点中增加 `extra_zig` 容器，`parse_class` 支持直接解析并容纳内嵌的 `zig { ... }` 块；
+   - Codegen 扫描阶段提取类内 `extra_zig` 声明的常量与类型别名同步至值类型白名单，并在结构体内部精准发射原生 Zig 胶水代码（如内部引用计数器、常量查找表或 JSC 桥接回调）。
+2. **多级命名空间点路径类型与值传递保留 (`Dotted Path Types`)**：
+   - 在 `map_type` 中对包含 `.` 的外部原生多级路径类型（如 `jsc.ZigString.Slice`、`std.mem.Allocator`）放行，识别为原生值类型保留完整路径，杜绝错误附加 `*` 堆指针前缀。
+3. **后缀推导错误联合语法 (`T!`) 与标准错误成员访问**：
+   - 扩展类型解析器，支持现代统一的后缀 `T!` 语法（如 `fn test(): usize!`），与 `T?` 及 `T ! ErrorSet` 构建一致的后缀修饰符体系；
+   - 在成员访问 `Expr::Member` 中支持 `err.Variant` 与 `error.Variant`，统一发射为原生 Zig `error.Variant`。
+4. **标准 TS 静态空结构体字面量映射**：
+   - 空对象 `{}` 与空结构体变体直接发射为 Zig 原生紧凑结构体 `.{}`。
+5. **长期回归测试验证**：
+   - 编写长期回归测试套件 [`cap/test/test_class_extra_zig.cp`](file:///data/dev/cp/cap/test/test_class_extra_zig.cp)，经 `./cap/bin/cap` 编译执行 100% 绿灯；
+   - 既有回归测试（`test_escape_param_opt.cp`、`test_bun_enums.cp` 等）全部验证通过；
+   - `cargo fmt`、`cargo check`、`cargo test` 及 `cargo build --release` 验证全绿并同步至 `cap/bin/cpc`。
+
+### 本次提交范围 (Commit Scope)
+1. **编译器前端核心模块 (`cpc/src/ast.rs`, `cpc/src/parser.rs`, `cpc/src/sema.rs`, `cpc/src/codegen.rs`)**：
+   - `ast.rs`: `Class` 增加 `extra_zig`；
+   - `parser.rs`: `parse_class` 支持内嵌 `zig` 块，`parse_base_type` 支持后缀 `T!`；
+   - `sema.rs`: 适配内建 Mock 类声明；
+   - `codegen.rs`: 类内原生块符号扫描与发射、多级点路径类型保留、`err.Variant` 映射及 `{}` 字面量转译。
+2. **语言设计规范手册 (`cp_ref.md`)**：
+   - 完善所有权与借用符号矩阵；
+   - 新增第 13.3 节《结构体扩展逃逸舱、多级命名空间类型与标准 TS 静态结构体字面量》。
+3. **长期测试套件补充 (`cap/test/test_class_extra_zig.cp`)**：
+   - 覆盖结构体内嵌原生块、后缀 `T!` 错误联合、`err.Variant` 与空结构体字面量。
+4. **四线文档维护**：
+   - 同步更新 [`SESSION.md`](file:///data/dev/cp/SESSION.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)、[`cp_ref.md`](file:///data/dev/cp/cp_ref.md)。

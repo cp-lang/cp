@@ -1068,6 +1068,26 @@ impl Codegen {
                 if c.meta.iter().any(|m| m.name.sym == "value") {
                     self.value_classes.insert(c.ident.sym.clone());
                 }
+                for code in &c.extra_zig {
+                    for line in code.lines() {
+                        let trimmed = line.trim();
+                        let stripped = if let Some(s) = trimmed.strip_prefix("pub ") {
+                            s.trim_start()
+                        } else {
+                            trimmed
+                        };
+                        if let Some(rest) = stripped.strip_prefix("const ") {
+                            let mut parts = rest.split(&[' ', ':', '='][..]);
+                            if let Some(name) = parts.next() {
+                                let name = name.trim();
+                                if !name.is_empty() {
+                                    self.ref_classes.insert(name.to_string());
+                                    self.value_classes.insert(name.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
                 if c.implements.iter().any(|i| i.sym == "Agent") {
                     self.agent_classes.push(c.clone());
                 }
@@ -2932,6 +2952,11 @@ impl Codegen {
             for m in &class.methods {
                 self.generate_function_decorated(m, Some(&class.ident.sym));
             }
+            for code in &class.extra_zig {
+                for line in code.lines() {
+                    self.writeln(line);
+                }
+            }
             return;
         }
         let type_id = Self::fnv1a_type_id(&class.ident.sym);
@@ -2967,6 +2992,11 @@ impl Codegen {
         }
         for m in &class.methods {
             self.generate_function_decorated(m, Some(&class.ident.sym));
+        }
+        for code in &class.extra_zig {
+            for line in code.lines() {
+                self.writeln(line);
+            }
         }
         self.dedent();
         self.writeln("};");
@@ -9642,7 +9672,11 @@ impl Codegen {
                             )
                         }
                     } else if fields_slice.is_empty() {
-                        format!(".{}", ei.variant_name.sym)
+                        if ei.variant_name.sym.is_empty() {
+                            ".{}".to_string()
+                        } else {
+                            format!(".{}", ei.variant_name.sym)
+                        }
                     } else {
                         let mut f_str = String::new();
                         for (idx, f) in fields_slice.iter().enumerate() {
@@ -9655,7 +9689,11 @@ impl Codegen {
                                 f_str.push_str(", ");
                             }
                         }
-                        format!(".{{ .{} = .{{ {} }} }}", ei.variant_name.sym, f_str)
+                        if ei.variant_name.sym.is_empty() {
+                            format!(".{{ {} }}", f_str)
+                        } else {
+                            format!(".{{ .{} = .{{ {} }} }}", ei.variant_name.sym, f_str)
+                        }
                     }
                 } else if !tuple_slice.is_empty() {
                     if tuple_slice.len() == 1 {
@@ -9927,6 +9965,9 @@ impl Codegen {
             }
             Expr::Member(member) => {
                 if let Expr::Ident(id) = &*member.obj {
+                    if id.sym == "err" || id.sym == "error" {
+                        return format!("error.{}", member.prop.sym);
+                    }
                     if id.sym == "Math" {
                         if member.prop.sym == "PI" {
                             return "@import(\"std\").math.pi".to_string();
@@ -10525,6 +10566,9 @@ impl Codegen {
                             prop_map.push((key.sym.clone(), val_code));
                         }
                     }
+                }
+                if prop_map.is_empty() {
+                    return ".{}".to_string();
                 }
                 let mut s = String::from(".{ ");
                 for (idx, (k, v)) in prop_map.iter().enumerate() {
@@ -11875,6 +11919,7 @@ impl Codegen {
                     || ident.sym == "Message"
                     || ident.sym == "Error"
                     || ident.sym == "anytype"
+                    || ident.sym.contains('.')
                     || ident.sym.starts_with("__AnonErr_")
                     || ident.sym.starts_with("__UnionErr_")
                     || self.ref_classes.contains(&ident.sym)

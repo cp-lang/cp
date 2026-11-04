@@ -220,6 +220,7 @@ impl Analyzer {
             extends: None,
             is_ref: false,
             meta: Vec::new(),
+            extra_zig: vec![],
         };
         self.classes
             .insert("RegExp".to_string(), regex_class.clone());
@@ -236,6 +237,7 @@ impl Analyzer {
             extends: None,
             is_ref: false,
             meta: Vec::new(),
+            extra_zig: vec![],
         };
         self.classes.insert("Set".to_string(), set_class.clone());
         self.scopes[0].insert("Set".to_string(), SymbolKind::Class(set_class));
@@ -252,6 +254,7 @@ impl Analyzer {
             extends: None,
             is_ref: false,
             meta: Vec::new(),
+            extra_zig: vec![],
         };
         self.classes.insert("Map".to_string(), map_class.clone());
         self.scopes[0].insert("Map".to_string(), SymbolKind::Class(map_class));
@@ -268,6 +271,7 @@ impl Analyzer {
             extends: None,
             is_ref: false,
             meta: Vec::new(),
+            extra_zig: vec![],
         };
         self.classes.insert("Dict".to_string(), dict_class.clone());
         self.scopes[0].insert("Dict".to_string(), SymbolKind::Class(dict_class));
@@ -305,6 +309,7 @@ impl Analyzer {
             extends: None,
             is_ref: false,
             meta: Vec::new(),
+            extra_zig: vec![],
         };
         self.classes
             .insert("Error".to_string(), error_class.clone());
@@ -322,6 +327,7 @@ impl Analyzer {
             extends: None,
             is_ref: false,
             meta: Vec::new(),
+            extra_zig: vec![],
         };
         self.classes.insert("Box".to_string(), box_class.clone());
         self.scopes[0].insert("Box".to_string(), SymbolKind::Class(box_class));
@@ -338,6 +344,7 @@ impl Analyzer {
                 implements: vec![],
                 extends: None,
                 is_ref: false,
+                extra_zig: vec![],
                 meta: vec![crate::ast::MetaItem {
                     span: mock_span.clone(),
                     name: crate::ast::Ident {
@@ -374,6 +381,7 @@ impl Analyzer {
                 implements: vec![],
                 extends: None,
                 is_ref: false,
+                extra_zig: vec![],
                 meta: vec![],
             };
             self.classes.insert(name.to_string(), cls.clone());

@@ -1160,11 +1160,15 @@ impl<'a> Parser<'a> {
         let base = self.parse_base_type()?;
         if self.peek() == Some(&Token::Bang) {
             self.bump()?;
-            let err = self.parse_error_type_rhs()?;
-            return Ok(Type::ResultType {
-                ok: Box::new(base),
-                err,
-            });
+            if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw)) {
+                let err = self.parse_error_type_rhs()?;
+                return Ok(Type::ResultType {
+                    ok: Box::new(base),
+                    err,
+                });
+            } else {
+                return Ok(Type::ErrorUnion(Box::new(base)));
+            }
         }
         Ok(base)
     }
@@ -1941,8 +1945,14 @@ impl<'a> Parser<'a> {
 
         let mut fields = Vec::new();
         let mut methods = Vec::new();
+        let mut extra_zig = Vec::new();
         self.expect(Token::LBrace)?;
         while self.peek() != Some(&Token::RBrace) && self.peek().is_some() {
+            if self.peek() == Some(&Token::ZigEscape) {
+                let (_, code) = self.parse_raw_zig_block()?;
+                extra_zig.push(code);
+                continue;
+            }
             let meta_list = self.parse_meta_list()?;
             if self.peek() == Some(&Token::Export) {
                 self.bump()?;
@@ -1989,6 +1999,7 @@ impl<'a> Parser<'a> {
             extends,
             is_ref,
             meta: Vec::new(),
+            extra_zig,
         })
     }
 

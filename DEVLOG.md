@@ -2232,3 +2232,38 @@ Bun AGY 在推进 Bun 基础算法库（如 `wyhash`、`base64`）转译过程�
 - 编写长期回归测试用例 [`cap/test/test_escape_param_opt.cp`](file:///data/dev/cp/cap/test/test_escape_param_opt.cp)，经 `./cap/bin/cap` 编译执行 100% 成功；
 - 全量既有测试用例（`test_bun_enums.cp`、`test_err_features.cp`、`test_slice_calc.cp`、`test_bun_features.cp`、`test_type_conversion.cp`、`test_root_inline.cp`）全量回归通过；
 - Rust 前端运行 `cargo fmt`、`cargo check` 与 `cargo test` 100% 绿灯。
+
+
+---
+
+## 2026-11-04: 结构体内嵌逃逸舱、多级命名空间类型、后缀推导错误联合与错误成员访问设计实录
+
+### 1. 业务背景与架构演进
+在 Bun.js 1.3.14 核心模块深度移植到 CP-BEAM 原生执行体的过程中，遇到如下四个强烈的编译器语言级诉求：
+1. **结构体与底层运行时的强绑定扩展**：
+   许多底层数据结构（例如 JSC 的 JSValue、StringImpl 或自定义 Allocator 容器）需要在自身结构体内部直接内嵌引用计数器（`pub const RefCount = ...;`）、函数指针虚表或底层 C 回调（`pub const toJS = ...;`）。此前 `zig { ... }` 仅支持在顶层文件或枚举内嵌入，类与结构体无法内嵌原生代码。
+2. **多级命名空间外部原生类型引用**：
+   在对接复杂外部库或 Zig 标准库时，类型常以点路径形式出现（如 `jsc.ZigString.Slice`、`std.mem.Allocator`）。此前编译器遇到此类类型名时，会将其当做未定义类并错误附加 `*` 堆指针，导致类型失配。
+3. **后缀推导错误联合语法统一 (`T!`)**：
+   CP 早期支持 `!T` 前缀语法，但与现代 TypeScript 及 Zig 的后缀修饰习惯（`T?` 可空、`T ! ErrorSet` 显式错误集）存在形式割裂。将有效载荷 `T` 统一置于前部并支持 `T!` 后缀，使得三类返回修饰符在语法体系上达成统一自洽。
+4. **标准 TS 静态空结构体字面量与错误成员直接发射**：
+   对于无需显式键值的空配置项或选项对象，`{}` 应直接转译为 Zig 的原生空结构体 `.{}`；对于错误联合的错误变体，`err.Variant` 应直接发射为 Zig 原生 `error.Variant`。
+
+### 2. 技术方案与实现细节
+1. **AST 与 Parser 扩展**：
+   - 在 AST `Class` 中新增 `extra_zig: Vec<String>`；
+   - 在 `parse_class` 的成员循环中，当遇到 `Token::ZigEscape` 时调用 `parse_raw_zig_block` 提取原生代码块并存入 `extra_zig`；
+   - 在 `parse_base_type` 中，当解析完基础类型遇到 `Token::Bang` 时，预读下一个 Token：若不是类型标识符或 `err` 关键字，则判定为后缀推导错误联合 `Type::ErrorUnion(Box::new(base))`。
+2. **Codegen 声明与发射链路打通**：
+   - 在 Codegen 初始化符号收集阶段，遍历所有类的 `extra_zig`，逐行解析 `pub const T = ...` 或 `const T = ...` 并将类型名称注册进 `ref_classes` 与 `value_classes`；
+   - 在生成类/结构体定义代码时（涵盖一般结构体与 `@root` 根模块），将 `extra_zig` 内的代码逐行原样发射至结构体内部作用域；
+   - 在 `Expr::Member` 中针对 `obj == "err" || obj == "error"` 统一映射发射为 `error.{prop}`；
+   - 在对象字面量生成中针对空字典属性映射直接发射 `.{}`；
+   - 在 `map_type` 中针对包含 `.` 的类型名称直接返回原生标识符，杜绝添加 `*`。
+
+### 3. 测试与回归验证
+- 编写长期回归测试套件 [`cap/test/test_class_extra_zig.cp`](file:///data/dev/cp/cap/test/test_class_extra_zig.cp)；
+- 覆盖内嵌原生 `zig` 块的 `@value struct`、后缀 `T!` 错误返回与 catch 捕获、`err.BadValue` 返回、静态空对象 `{}` 以及匿名紧凑结构体 `{ count: 123 }`；
+- 经 `./cap/bin/cap` 编译执行 100% 成功输出；
+- 既有长期测试用例全量回归无任何错误；
+- Rust 前端执行 `cargo fmt`、`cargo check`、`cargo test` 与 `cargo build --release` 100% 绿灯。

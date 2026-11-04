@@ -160,6 +160,8 @@ pub struct Class {
     pub is_ref: bool,
     #[serde(default)]
     pub meta: Vec<MetaItem>,
+    #[serde(default)]
+    pub extra_zig: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -1267,3 +1267,31 @@
 ### 新增文件 (Added)
 - [`cap/test/test_escape_param_opt.cp`](file:///data/dev/cp/cap/test/test_escape_param_opt.cp):
   - 长期回归测试用例，验证逃逸舱原生结构体纯值传递、内嵌原生块中形参引用感知以及未使用参数抑制，经 `./cap/bin/cap` 编译执行 100% 成功。
+
+
+---
+
+## 2026-11-04 (结构体内嵌逃逸舱、多级命名空间类型、后缀推导错误联合与错误成员访问)
+
+### 修改文件 (Modified)
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs):
+  - `Class` 结构体新增 `extra_zig: Vec<String>`，用于存储类或结构体内部内嵌的 `zig { ... }` 原生逃逸舱源码片段。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - 在 `parse_class` 中支持解析类与结构体作用域内的 `zig { ... }` 块并存入 `extra_zig`；
+  - 在 `parse_base_type` 中支持后缀 `T!` 语法：当后置 `!` 之后无特定错误标识符或 `err` 关键字时，将类型解析为推导错误联合 `Type::ErrorUnion(Box::new(base))`。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 为所有内置 Mock 类（`RegExp`, `Set`, `Map`, `Dict`, `Error`, `Box` 等）补全 `extra_zig: vec![]` 初始化字段。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 扫描所有类的 `extra_zig` 声明，将 `pub const T = ...` 或 `const T = ...` 常量名称自动加入 `ref_classes` 与 `value_classes`；
+  - 在结构体定义体内原样发射内嵌的 `class.extra_zig` 原生代码段；
+  - `Expr::EnumInit`: 支持匿名空结构体 `.{{}}` 与字段紧凑结构体 `.{{ .field = val }}`；
+  - `Expr::Member`: 支持 `err.Variant` 与 `error.Variant` 直接发射为 Zig 原生 `error.Variant`；
+  - 静态对象字面量：空对象 `{}` 直接发射为 Zig 原生紧凑结构体 `.{}`；
+  - `map_type`: 多级点路径类型（如 `jsc.ZigString.Slice`、`std.mem.Allocator`）按值类型直接发射完整路径，不添加 `*` 堆指针前缀。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 完善所有权与借用符号矩阵；
+  - 新增第 13.3 节《结构体扩展逃逸舱、多级命名空间类型与标准 TS 静态结构体字面量》，详尽规范内嵌 `zig` 块、`{}` 结构体字面量、多级点路径类型与后缀 `T!` 体系。
+
+### 新增文件 (Added)
+- [`cap/test/test_class_extra_zig.cp`](file:///data/dev/cp/cap/test/test_class_extra_zig.cp):
+  - 长期回归测试用例，覆盖结构体内嵌原生 `zig` 块、后缀 `T!` 推导错误联合、`err.Variant` 错误成员访问以及静态空结构体 `{}` 与匿名结构体 `{ count: 123 }`，经 `./cap/bin/cap` 编译执行 100% 成功。
