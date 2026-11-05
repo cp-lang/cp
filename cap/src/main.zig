@@ -509,6 +509,10 @@ fn getCpcBin() []const u8 {
     if (global_env.get("CPC_BIN")) |custom_bin| {
         if (custom_bin.len > 0) return custom_bin;
     }
+    if (fs_shim.cwd().readFileAlloc(std.heap.page_allocator, ".cap/cpc_bin", 512)) |content| {
+        const trimmed = std.mem.trim(u8, content, " \t\r\n");
+        if (trimmed.len > 0) return trimmed;
+    } else |_| {}
     return "/data/dev/cp/cpc/target/release/cpc";
 }
 

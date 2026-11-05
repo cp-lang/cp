@@ -1453,5 +1453,29 @@
   - 详述 Switch 模式匹配对 `err(e: T)` 与 `err(e := T)` 的双轨支持；
   - 完善第 8.2.5 节已完全实装的标量错误自动打包与 From 自动化提升机制规范。
 
+---
+
+## 2026-11-05 (结构体错误、类错误与复杂枚举载荷错误架构实装)
+
+### 修改文件 (Modified - cpc 正式合并与 Release 发布)
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 全量合入 `cpc_dev` 的结构体错误映射、类错误指针与 `cause` 挂载、枚举载荷解构匹配（元组/结构体/整包）、点推断返回优化与 Zig 0.17 运行时指针 `@hasField` 限制突破；
+  - 完整保留 Bun agy 对库模式 `needs_actors = false`、可选数组/字符串指针映射 `?[]T` 与 `prop_map` 修复。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - 全量合入结构体解构模式 `MyStructError { ... }` 语法支持。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 确认并合并 Bun agy 对 `@packed` / `@extern` 结构体豁免生成 `init` 的优化。
+- [`cap/bin/cpc`](file:///data/dev/cp/cap/bin/cpc):
+  - 重新编译 Release 版本（`cargo build --release`）并替换安装。
+- [`cap/src/main.zig`](file:///data/dev/cp/cap/src/main.zig):
+  - `getCpcBin`: 支持通过 `.cap/cpc_bin` 安全读取本地影子调试编译器路径，使 `cap run` / `cap test` 无需额外 env 前缀直接调用开发版本。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 新增第 8.2.6 节《自定义结构体错误（Struct Errors）与类错误（Class Errors）深度对比与实战》；
+  - 新增第 8.2.7 节《复杂枚举载荷错误（Enum Payload Errors）：定义、返回与多维解构匹配》。
+
+### 新增文件 (Added)
+- [`cap/test/test_struct_and_enum_payload_errors.cp`](file:///data/dev/cp/cap/test/test_struct_and_enum_payload_errors.cp):
+  - 系统长期回归测试用例，涵盖 9 大测试场景：结构体错误直接解构匹配、结构体自动提升为统一 `Err`、类错误直接匹配、类错误通过 `: MyClassError` downcast 还原、类错误通过 `:= MyClassError` Walrus 绑定 downcast 还原、枚举标量载荷匹配 `.Text`、枚举元组载荷匹配 `.Move [x, y]`、枚举结构体属性精确解构 `.Compute { batch, priority }`、枚举结构体属性整包捕获 `.Compute { ...fields }`、以及枚举点推断返回错误与模式匹配。
+
 
 

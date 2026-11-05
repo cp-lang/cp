@@ -633,11 +633,15 @@ impl Analyzer {
                         }
                     }
                 }
-                // Auto-generate memberwise init if not present and fields are non-empty (exempting @root and @value structs)
+                // Auto-generate memberwise init if not present and fields are non-empty (exempting @root, @value, @packed, @extern structs)
                 let is_root = cls.meta.iter().any(|m| m.name.sym == "root");
                 let is_value = cls.meta.iter().any(|m| m.name.sym == "value");
+                let is_packed = cls.meta.iter().any(|m| m.name.sym == "packed");
+                let is_extern = cls.meta.iter().any(|m| m.name.sym == "extern");
                 if !is_root
                     && !is_value
+                    && !is_packed
+                    && !is_extern
                     && !cls.methods.iter().any(|m| m.ident.sym == "init")
                     && !cls.fields.is_empty()
                 {

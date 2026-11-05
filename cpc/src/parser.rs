@@ -1935,6 +1935,72 @@ impl<'a> Parser<'a> {
                         tuple_pats,
                     }));
                 }
+                if first_id
+                    .sym
+                    .chars()
+                    .next()
+                    .map_or(false, |c| c.is_uppercase())
+                    && self.peek() == Some(&Token::LBrace)
+                {
+                    self.bump()?;
+                    self.in_paren_pattern += 1;
+                    let mut props = Vec::new();
+                    while self.peek() != Some(&Token::RBrace) && self.peek().is_some() {
+                        if self.peek() == Some(&Token::DotDotDot) {
+                            let dot_span = self.bump()?.1;
+                            let (key, val) = if !matches!(
+                                self.peek(),
+                                Some(Token::Comma | Token::RBrace) | None
+                            ) {
+                                let id = self.parse_ident()?;
+                                (id, None)
+                            } else {
+                                (
+                                    Ident {
+                                        span: dot_span,
+                                        sym: "_".to_string(),
+                                    },
+                                    None,
+                                )
+                            };
+                            props.push(ObjectPatProp {
+                                key,
+                                val,
+                                is_rest: true,
+                            });
+                            if self.peek() == Some(&Token::Comma) {
+                                self.bump()?;
+                            }
+                            continue;
+                        }
+                        let key = self.parse_ident()?;
+                        let mut val = None;
+                        if self.peek() == Some(&Token::Colon) {
+                            self.bump()?;
+                            val = Some(self.parse_pattern()?);
+                        }
+                        props.push(ObjectPatProp {
+                            key,
+                            val,
+                            is_rest: false,
+                        });
+                        if self.peek() == Some(&Token::Comma) {
+                            self.bump()?;
+                        }
+                    }
+                    self.expect(Token::RBrace)?;
+                    self.in_paren_pattern -= 1;
+                    return Ok(Pattern::Enum(EnumPattern {
+                        span: first_id.span,
+                        enum_name: first_id,
+                        variant_name: Ident {
+                            span: Span { start: 0, end: 0 },
+                            sym: "".to_string(),
+                        },
+                        fields: Some(props),
+                        tuple_pats: None,
+                    }));
+                }
                 Ok(Pattern::Ident(first_id))
             }
         }

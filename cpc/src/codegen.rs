@@ -50,6 +50,10 @@ impl ModuleFeatures {
                 _ => {}
             }
         }
+        if f.is_lib_mode {
+            f.needs_actors = false;
+        }
+
         if f.needs_collections || f.needs_actors {
             f.needs_string_helpers = true;
             f.needs_equality = true;
@@ -226,10 +230,28 @@ impl ModuleFeatures {
         match p {
             Pattern::Rest(_) => self.needs_unpack = true,
             Pattern::Tuple(items) => {
+                self.needs_unpack = true;
                 for item in items {
                     self.scan_pat(item);
                 }
             }
+            Pattern::Enum(ep) => {
+                if ep.tuple_pats.is_some() {
+                    self.needs_unpack = true;
+                }
+                if let Some(tp) = &ep.tuple_pats {
+                    for item in tp {
+                        self.scan_pat(item);
+                    }
+                }
+            }
+            Pattern::Err(inner) => self.scan_pat(inner),
+            Pattern::Or(pats) => {
+                for item in pats {
+                    self.scan_pat(item);
+                }
+            }
+            Pattern::Binding { subpat, .. } => self.scan_pat(subpat),
             _ => {}
         }
     }
@@ -243,10 +265,11 @@ impl ModuleFeatures {
             Type::Ref(id) => {
                 if id.sym == "RegExp" {
                     self.needs_regex = true;
-                } else if id.sym == "Task"
-                    || id.sym == "Message"
-                    || id.sym == "PID"
-                    || id.sym == "Agent"
+                } else if !self.is_lib_mode
+                    && (id.sym == "Task"
+                        || id.sym == "Message"
+                        || id.sym == "PID"
+                        || id.sym == "Agent")
                 {
                     self.needs_actors = true;
                 } else if id.sym == "Error" || id.sym == "CpResult" {
@@ -275,10 +298,11 @@ impl ModuleFeatures {
             Expr::Ident(id) => {
                 if id.sym == "RegExp" {
                     self.needs_regex = true;
-                } else if id.sym == "Task"
-                    || id.sym == "Message"
-                    || id.sym == "PID"
-                    || id.sym == "Agent"
+                } else if !self.is_lib_mode
+                    && (id.sym == "Task"
+                        || id.sym == "Message"
+                        || id.sym == "PID"
+                        || id.sym == "Agent")
                 {
                     self.needs_actors = true;
                 } else if id.sym == "reflect"
@@ -308,8 +332,18 @@ impl ModuleFeatures {
                 self.scan_expr(left);
                 self.scan_expr(right);
             }
-            Expr::Question(_) | Expr::Catch { .. } | Expr::ErrWrap(_) => {
+            Expr::Question(q) => {
                 self.needs_result_error = true;
+                self.scan_expr(q);
+            }
+            Expr::Catch { expr, body, .. } => {
+                self.needs_result_error = true;
+                self.scan_expr(expr);
+                self.scan_stmt(body);
+            }
+            Expr::ErrWrap(inner) => {
+                self.needs_result_error = true;
+                self.scan_expr(inner);
             }
             Expr::Template(_) => {
                 self.needs_fmt = true;
@@ -432,7 +466,9 @@ impl ModuleFeatures {
                 self.scan_expr(index);
             }
             Expr::Array(items) => {
-                self.needs_array_helpers = true;
+                if !self.is_lib_mode {
+                    self.needs_array_helpers = true;
+                }
                 for item in items {
                     self.scan_expr(item);
                 }
@@ -444,6 +480,18 @@ impl ModuleFeatures {
             Expr::Object(fields) => {
                 for f in fields {
                     self.scan_expr(&f.val);
+                }
+            }
+            Expr::EnumInit(ei) => {
+                if let Some(fields) = &ei.fields {
+                    for f in fields {
+                        self.scan_expr(&f.val);
+                    }
+                }
+                if let Some(args) = &ei.tuple_args {
+                    for a in args {
+                        self.scan_expr(a);
+                    }
                 }
             }
             Expr::Match(m) => {
@@ -749,6 +797,9 @@ impl Codegen {
                     "Err".to_string()
                 } else if id.sym == "AnyErr" || id.sym == "anyErr" || id.sym == "anyerror" {
                     "anyerror".to_string()
+                } else if self.ref_classes.contains(&id.sym) || self.value_classes.contains(&id.sym)
+                {
+                    id.sym.clone()
                 } else if self.class_defs.contains_key(&id.sym) {
                     format!("*{}", id.sym)
                 } else {
@@ -1081,6 +1132,7 @@ impl Codegen {
                 _ => {}
             }
         }
+
         if let Some(zig_ty) = self.locals.get(var_name) {
             let clean = zig_ty.trim_start_matches('?').trim_start_matches('*');
             if clean == "Error"
@@ -1473,7 +1525,7 @@ impl Codegen {
             self.writeln("    cause_type_id: u64 = 0,");
             self.writeln("    pub const __TYPE_ID: u64 = 0xEE00_0000_0000_0001;");
             self.writeln("    pub fn init(code: i32, msg: []const u8) Err { return Err{ .code = code, .msg = msg }; }");
-            self.writeln("    pub fn with_cause(self: Err, cause: anytype) Err { const CType = @TypeOf(cause); var ptr: ?*const anyopaque = null; var tid: u64 = 0; if (comptime @hasField(CType, \"ptr\")) { ptr = @ptrCast(cause.ptr); if (comptime @hasField(CType, \"vtable\")) { tid = cause.vtable.__type_id; } } else if (comptime @typeInfo(CType) == .pointer) { ptr = @ptrCast(cause); const Child = @typeInfo(CType).pointer.child; if (comptime @hasDecl(Child, \"__TYPE_ID\")) { tid = Child.__TYPE_ID; } } else if (comptime @typeInfo(CType) == .optional) { if (cause) |c| return self.with_cause(c); } else { if (comptime @hasDecl(CType, \"__TYPE_ID\")) { tid = CType.__TYPE_ID; } ptr = @ptrCast(&cause); } return Err{ .code = self.code, .msg = self.msg, .cause = ptr, .cause_type_id = tid }; }");
+            self.writeln("    pub fn with_cause(self: Err, cause: anytype) Err { const CType = @TypeOf(cause); var ptr: ?*const anyopaque = null; var tid: u64 = 0; if (comptime @typeInfo(CType) == .pointer) { ptr = @ptrCast(cause); const Child = @typeInfo(CType).pointer.child; if (comptime @hasDecl(Child, \"__TYPE_ID\")) { tid = Child.__TYPE_ID; } } else if (comptime (@typeInfo(CType) == .@\"struct\" or @typeInfo(CType) == .@\"union\") and @hasField(CType, \"ptr\")) { ptr = @ptrCast(cause.ptr); if (comptime @hasField(CType, \"vtable\")) { tid = cause.vtable.__type_id; } } else if (comptime @typeInfo(CType) == .optional) { if (cause) |c| return self.with_cause(c); } else { if (comptime @hasDecl(CType, \"__TYPE_ID\")) { tid = CType.__TYPE_ID; } ptr = @ptrCast(&cause); } return Err{ .code = self.code, .msg = self.msg, .cause = ptr, .cause_type_id = tid }; }");
             self.writeln("    pub fn downcast(self: Err, comptime Target: type) ?*const Target {");
             self.writeln("        if (self.cause) |c| {");
             self.writeln("            if (comptime @hasDecl(Target, \"__TYPE_ID\")) {");
@@ -2301,7 +2353,7 @@ impl Codegen {
             self.writeln("fn cp_unwrap_ok_val(v: anytype) CpUnwrapOkType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_cp_result(T)) { const OkT = @FieldType(T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok.?; } else { return v.ok; } } else if (comptime @typeInfo(T) == .error_union) { return v catch unreachable; } else if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; } }");
             self.writeln("fn cp_unwrap_err_val(v: anytype) CpUnwrapErrType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_cp_result(T)) return v.err; if (comptime @typeInfo(T) == .error_union) { if (v) |_| unreachable else |e| return e; } return v; }");
             self.writeln("fn cp_is_null_val(v: anytype) bool { const T = @TypeOf(v); if (comptime is_cp_result(T)) { if (v != .ok) return false; const OkT = @FieldType(T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok == null; } else { return false; } } else if (comptime @typeInfo(T) == .optional) { return v == null; } else { return false; } }");
-            self.writeln("fn cp_convert_err(comptime TargetErr: type, err_val: anytype) TargetErr { const SrcType = @TypeOf(err_val); if (comptime SrcType == TargetErr) { return err_val; } else if (comptime TargetErr == Err or TargetErr == Error) { if (comptime @typeInfo(SrcType) == .@\"union\") { return Err{ .code = @intCast(@intFromEnum(std.meta.activeTag(err_val))), .msg = @tagName(err_val) }; } else if (comptime @typeInfo(SrcType) == .@\"enum\") { return Err{ .code = @intCast(@intFromEnum(err_val)), .msg = @tagName(err_val) }; } else if (comptime @typeInfo(SrcType) == .error_set) { return Err{ .code = 0, .msg = @errorName(err_val) }; } else { return Err{ .code = -1, .msg = \"error\" }; } } else if (comptime @typeInfo(TargetErr) == .pointer and @typeInfo(SrcType) != .pointer) { return @ptrCast(&err_val); } else if (comptime @typeInfo(SrcType) == .pointer and @typeInfo(TargetErr) != .pointer and @typeInfo(SrcType).pointer.child == TargetErr) { return err_val.*; } else if (comptime @typeInfo(TargetErr) == .@\"union\" and @hasDecl(TargetErr, \"__from\")) { return TargetErr.__from(err_val); } else if (comptime @hasDecl(TargetErr, \"from\")) { return TargetErr.from(err_val); } else { return err_val; } }");
+            self.writeln("fn cp_convert_err(comptime TargetErr: type, err_val: anytype) TargetErr { const SrcType = @TypeOf(err_val); if (comptime SrcType == TargetErr) { return err_val; } else if (comptime TargetErr == Err or TargetErr == Error) { if (comptime @typeInfo(SrcType) == .@\"union\") { return Err{ .code = @intCast(@intFromEnum(std.meta.activeTag(err_val))), .msg = @tagName(err_val) }; } else if (comptime @typeInfo(SrcType) == .@\"enum\") { return Err{ .code = @intCast(@intFromEnum(err_val)), .msg = @tagName(err_val) }; } else if (comptime @typeInfo(SrcType) == .error_set) { return Err{ .code = 0, .msg = @errorName(err_val) }; } else if (comptime @typeInfo(SrcType) == .@\"struct\") { var c: i32 = 0; var m: []const u8 = \"\"; if (comptime @hasField(SrcType, \"code\")) { c = @as(i32, @intCast(err_val.code)); } if (comptime @hasField(SrcType, \"msg\")) { m = to_string_slice(err_val.msg); } else if (comptime @hasField(SrcType, \"message\")) { m = to_string_slice(err_val.message); } else if (comptime @hasDecl(SrcType, \"message\")) { m = to_string_slice(err_val.message()); } else { m = @typeName(SrcType); } return Err.init(c, m); } else if (comptime @typeInfo(SrcType) == .pointer and @typeInfo(@typeInfo(SrcType).pointer.child) == .@\"struct\") { const Child = @typeInfo(SrcType).pointer.child; var c: i32 = 0; var m: []const u8 = \"\"; if (comptime @hasField(Child, \"code\")) { c = @as(i32, @intCast(err_val.code)); } if (comptime @hasField(Child, \"msg\")) { m = to_string_slice(err_val.msg); } else if (comptime @hasField(Child, \"message\")) { m = to_string_slice(err_val.message); } else if (comptime @hasDecl(Child, \"message\")) { m = to_string_slice(err_val.message()); } else { m = @typeName(Child); } return Err.init(c, m).with_cause(err_val); } else { return Err{ .code = -1, .msg = \"error\" }; } } else if (comptime @typeInfo(TargetErr) == .pointer and @typeInfo(SrcType) != .pointer) { return @ptrCast(@constCast(&err_val)); } else if (comptime @typeInfo(SrcType) == .pointer and @typeInfo(TargetErr) != .pointer and @typeInfo(SrcType).pointer.child == TargetErr) { return err_val.*; } else if (comptime @typeInfo(TargetErr) == .@\"union\" and @hasDecl(TargetErr, \"__from\")) { return TargetErr.__from(err_val); } else if (comptime @hasDecl(TargetErr, \"from\")) { return TargetErr.from(err_val); } else { return err_val; } }");
             self.writeln("fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@\"enum\") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime T == Err or T == Error or (@typeInfo(T) == .@\"struct\" and @hasField(T, \"msg\"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@\"union\") { return std.meta.activeTag(val) == tag; } else { return false; } }");
         }
 
@@ -4943,7 +4995,14 @@ impl Codegen {
                 }
             }
             Pattern::Enum(ep) => {
-                covered.insert(ep.variant_name.sym.clone());
+                if ep.variant_name.sym.is_empty() {
+                    *has_err_catchall = true;
+                } else {
+                    covered.insert(ep.variant_name.sym.clone());
+                }
+            }
+            Pattern::Tuple(_) | Pattern::Object(_) => {
+                *has_err_catchall = true;
             }
             Pattern::Or(pats) => {
                 for p in pats {
@@ -5510,12 +5569,26 @@ impl Codegen {
                             }
                             binds.push_str(&b);
                         }
-                        return (format!("({})", conds.join(" and ")), binds);
+                        let cond_str = if conds.is_empty() {
+                            "true".to_string()
+                        } else {
+                            format!("({})", conds.join(" and "))
+                        };
+                        return (cond_str, binds);
                     }
                 } else if let Some(fields) = &ep.fields {
-                    let payload_expr = format!("@field({}, \"{}\")", val_expr, vname);
+                    let is_struct_pattern = ep.variant_name.sym.is_empty();
+                    let payload_expr = if is_struct_pattern {
+                        val_expr.to_string()
+                    } else {
+                        format!("@field({}, \"{}\")", val_expr, vname)
+                    };
                     let mut binds = String::new();
-                    let mut conds = vec![base_cond];
+                    let mut conds = if is_struct_pattern {
+                        vec![]
+                    } else {
+                        vec![base_cond]
+                    };
                     let is_tuple_variant = if !ep.enum_name.sym.is_empty() {
                         self.enum_defs
                             .get(&ep.enum_name.sym)
@@ -5558,7 +5631,12 @@ impl Codegen {
                             ));
                         }
                     }
-                    return (format!("({})", conds.join(" and ")), binds);
+                    let cond_str = if conds.is_empty() {
+                        "true".to_string()
+                    } else {
+                        format!("({})", conds.join(" and "))
+                    };
+                    return (cond_str, binds);
                 }
                 (base_cond, String::new())
             }
@@ -6195,9 +6273,16 @@ impl Codegen {
                     if self.error_sets.contains_key(&dst_zig) || dst_zig == "anyerror" {
                         return format!("error.{}", ei.variant_name.sym);
                     }
-                    return format!("@as({}, .{})", dst_zig, ei.variant_name.sym);
+                    if ei.fields.is_none() && ei.tuple_args.is_none() {
+                        return format!("@as({}, .{})", dst_zig, ei.variant_name.sym);
+                    }
+                    let val_expr = self.generate_expr(err_inner);
+                    if val_expr.starts_with(".{") {
+                        return format!("{}{}", dst_zig, &val_expr[1..]);
+                    }
+                    return format!("cp_convert_err({}, {})", dst_zig, val_expr);
                 }
-                format!(".{}", ei.variant_name.sym)
+                self.generate_expr(err_inner)
             }
             Expr::Ident(id)
                 if !self.locals.contains_key(&id.sym) && !self.is_class_field(&id.sym) =>
@@ -6501,6 +6586,7 @@ impl Codegen {
                 _ => {}
             }
         }
+
         false
     }
 
@@ -10349,12 +10435,36 @@ impl Codegen {
                 }
                 if ei.enum_name.sym.is_empty() {
                     if !tuple_slice.is_empty() {
+                        let is_expected_tuple = self.enum_defs.values().any(|en| {
+                            en.variants.iter().any(|v| {
+                                &v.ident.sym == &ei.variant_name.sym
+                                    && matches!(v.tuple_type, Some(Type::Tuple(_)))
+                            })
+                        });
                         if tuple_slice.len() == 1 {
-                            format!(
-                                ".{{ .{} = {} }}",
-                                ei.variant_name.sym,
-                                self.generate_expr(&tuple_slice[0])
-                            )
+                            if is_expected_tuple {
+                                if let Expr::Array(items) = &tuple_slice[0] {
+                                    let args_str: Vec<String> =
+                                        items.iter().map(|a| self.generate_expr(a)).collect();
+                                    format!(
+                                        ".{{ .{} = .{{ {} }} }}",
+                                        ei.variant_name.sym,
+                                        args_str.join(", ")
+                                    )
+                                } else {
+                                    format!(
+                                        ".{{ .{} = {} }}",
+                                        ei.variant_name.sym,
+                                        self.generate_expr(&tuple_slice[0])
+                                    )
+                                }
+                            } else {
+                                format!(
+                                    ".{{ .{} = {} }}",
+                                    ei.variant_name.sym,
+                                    self.generate_expr(&tuple_slice[0])
+                                )
+                            }
                         } else {
                             let args_str: Vec<String> =
                                 tuple_slice.iter().map(|a| self.generate_expr(a)).collect();
@@ -10389,13 +10499,39 @@ impl Codegen {
                         }
                     }
                 } else if !tuple_slice.is_empty() {
+                    let is_expected_tuple = self.enum_defs.get(&ei.enum_name.sym).map_or(false, |en| {
+                        en.variants.iter().any(|v| {
+                            &v.ident.sym == &ei.variant_name.sym
+                                && matches!(v.tuple_type, Some(Type::Tuple(_)))
+                        })
+                    });
                     if tuple_slice.len() == 1 {
-                        format!(
-                            "{}{{ .{} = {} }}",
-                            ei.enum_name.sym,
-                            ei.variant_name.sym,
-                            self.generate_expr(&tuple_slice[0])
-                        )
+                        if is_expected_tuple {
+                            if let Expr::Array(items) = &tuple_slice[0] {
+                                let args_str: Vec<String> =
+                                    items.iter().map(|a| self.generate_expr(a)).collect();
+                                format!(
+                                    "{}{{ .{} = .{{ {} }} }}",
+                                    ei.enum_name.sym,
+                                    ei.variant_name.sym,
+                                    args_str.join(", ")
+                                )
+                            } else {
+                                format!(
+                                    "{}{{ .{} = {} }}",
+                                    ei.enum_name.sym,
+                                    ei.variant_name.sym,
+                                    self.generate_expr(&tuple_slice[0])
+                                )
+                            }
+                        } else {
+                            format!(
+                                "{}{{ .{} = {} }}",
+                                ei.enum_name.sym,
+                                ei.variant_name.sym,
+                                self.generate_expr(&tuple_slice[0])
+                            )
+                        }
                     } else {
                         let args_str: Vec<String> =
                             tuple_slice.iter().map(|a| self.generate_expr(a)).collect();
@@ -11303,7 +11439,8 @@ impl Codegen {
                 }
                 let mut s = String::from(".{ ");
                 for (idx, (k, v)) in prop_map.iter().enumerate() {
-                    s.push_str(&format!(".{} = {}", k, v));
+                    let val_out = if v == ".{}" && k == "none" { "{}" } else { v.as_str() };
+                    s.push_str(&format!(".{} = {}", k, val_out));
                     if idx + 1 < prop_map.len() {
                         s.push_str(", ");
                     }
@@ -12124,6 +12261,7 @@ impl Codegen {
                 _ => {}
             }
         }
+
         "*anyopaque".to_string() // Fallback
     }
 
@@ -12688,6 +12826,14 @@ impl Codegen {
                     if let Type::Ref(id) = &**inner {
                         if id.sym == "cstring" {
                             return "[:0]u8".to_string();
+                        }
+                    }
+                    if let Type::Optional(opt_inner) = &**inner {
+                        if let Type::Array(elem) = &**opt_inner {
+                            return format!("?[]{}", self.map_type(elem));
+                        }
+                        if let Type::String = &**opt_inner {
+                            return "?[]u8".to_string();
                         }
                     }
                 }

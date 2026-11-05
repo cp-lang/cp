@@ -926,7 +926,7 @@ switch (result) {
     // 1. 成功正常值解包
     data => print("Loaded payload:", data),
     // 2. 显式错误匹配与提取
-    Err(e) => print("Load failed with error:", e),
+    err(e) => print("Load failed with error:", e),
     // 3. 空值匹配
     null => print("No data present")
 }
@@ -960,6 +960,13 @@ CP 的 `switch` 匹配体系彻底废除早期 Zig 风格的 `|fields|` 管道�
 - **单载荷变量捕获**：`.Text text` 或 `.Text(text)`
 
 ```typescript
+// 枚举载荷
+enum Message {
+       Idle,
+       Compute: { batch: usize },
+       Move: [i32, i32]
+   }
+
 fn process_task(task: Task): i32 {
     return switch (task) {
         .Idle => 0,
@@ -975,6 +982,16 @@ fn process_task(task: Task): i32 {
     };
 }
 ```
+
+#### 美学的完美对称：花括号对花括号，方括号对方括号
+
+当我们把定义、构造与解构匹配三者放在一起看时，.Move [x, y] 展现出了绝妙的自洽性与对称美感：
+
+| 枚举类型                 | 定义（Definition）          | 构造（Initialization）    | 模式匹配解构（Pattern Destructuring）  |
+| ------------------------ | --------------------------- | ------------------------- | -------------------------------------- |
+| **无载荷（Unit）**       | `Idle`                      | `.Idle`                   | `.Idle => ...`                         |
+| **结构体载荷（Object）** | `Compute: { batch: usize }` | `.Compute { batch: 100 }` | `.Compute { batch } => ...` （花括号） |
+| **元组载荷（Tuple）**    | `Move: [i32, i32]`          | `.Move [10, 20]`          | `.Move [x, y] => ...` （方括号）       |
 
 #### 4.5.2 Walrus（海象操作符 `:=`）子模式绑定
 
@@ -2100,6 +2117,125 @@ switch (res) {
    - **枚举声明式 `from` 桥接**：在定义错误枚举时，可声明 `enum AppErr { Io(FileErr) from FileErr, Net(NetErr) from NetErr }`。当子函数返回 `! FileErr` 时，使用 `?` 冒泡会自动根据 `from FileErr` 规则转换为 `AppErr.Io(fe)`；
    - **结构体 `from` 自定义转换**：目标错误类型只需提供静态方法 `pub fn from(e: SourceErr): Self`，在 `?` 错误传播时，底层 `cp_convert_err` 会自动侦测并调用该转换逻辑；
    - **向统一 `Err` 的自动无损提升**：任意具名错误变体或普通枚举变体，通过 `?` 冒泡到返回 `T ! Err` 的函数时，`cp_convert_err` 会自动将其提升为带有确切状态码与标签名的 `Err` 动态对象。
+
+---
+
+#### 8.2.6 自定义结构体错误（Struct Errors）与类错误（Class Errors）深度对比与实战
+
+在 CP 语言中，`struct` 与 `class` 均可作为强类型错误直接返回（通过 `return err(...)`）：
+
+| 特性维度                 | 结构体错误（`struct`）                         | 类错误（`class`）                                    |
+| ------------------------ | --------------------------------------------- | --------------------------------------------------- |
+| **内存语义**             | **值类型（Value Type）**                      | **引用类型（Reference Type）**                      |
+| **分配位置**             | 纯栈上分配 / 内联值复制，**零堆分配、零 GC**  | 通过 `new` 在堆上分配，传递对象指针（`*ClassName`） |
+| **适用场景**             | 高频、高性能、高吞吐的轻量纯数据错误          | 富上下文业务错误诊断、错误链回溯、支持继承与多态    |
+| **函数返回签名**         | `fn foo(): T ! MyStructError`                 | `fn foo(): T ! MyClassError`                        |
+| **自动转统一 `Err`**     | 自动读取 `code`、`msg`/`message` 拷贝至 `Err` | 自动提取 `code`、`msg`，**并将指针自动挂载到 `cause`** |
+| **downcast 运行时还原**  | 值类型直接在 `switch` 中进行模式解构匹配      | 可通过 `err(e: MyClassError)` 或 `err(er := MyClassError)` 完美还原 |
+
+```typescript
+// 1. 结构体错误：纯值类型，零堆内存分配
+struct MyStructError {
+    code: i32;
+    msg: string;
+}
+
+fn fail_struct(): i32 ! MyStructError {
+    return err(MyStructError { code: 404, msg: "struct not found" });
+}
+
+// 2. 类错误：引用类型，堆分配，支持全链路溯源挂载
+class MyClassError {
+    pub code: i32;
+    pub msg: string;
+    pub fn init(c: i32, m: string) {
+        this.code = c;
+        this.msg = m;
+    }
+}
+
+fn fail_class(): i32 ! MyClassError {
+    let ce = new MyClassError(500, "class server crash");
+    return err(ce);
+}
+
+// 自动向统一 Err 提升并保留 cause 胖指针
+fn fail_class_to_err(): i32 ! Err {
+    return err(new MyClassError(502, "bad gateway"));
+}
+
+// 消费端匹配
+fn handle_errors() {
+    // 结构体直接解构模式匹配
+    let r1 = fail_struct();
+    switch (r1) {
+        err(MyStructError { code, msg }) => print(`Struct matched: ${code} ${msg}`),
+        val => print(val)
+    }
+
+    // 类错误直接匹配与 downcast 还原
+    let r2 = fail_class_to_err();
+    switch (r2) {
+        // 支持类型窄化匹配风格 (: 语法)
+        err(e: MyClassError) => print(`Downcasted (:): ${e.code} ${e.msg}`),
+        // 同时支持 Walrus 海象解构风格 (:= 语法)
+        err(er := MyClassError) => print(`Downcasted (:=): ${er.code} ${er.msg}`),
+        err(code, msg) => print(`Err fallback: ${code} ${msg}`),
+        val => print(val)
+    }
+}
+```
+
+---
+
+#### 8.2.7 复杂枚举载荷错误（Enum Payload Errors）：定义、返回与多维解构匹配
+
+对于多变体且携带异构载荷的错误场景，CP 提供完全自洽的定义、返回与解构模式匹配体系：
+
+```typescript
+// 1. 枚举错误定义（含单值标量、元组、结构体等多样载荷）
+enum TaskErr {
+    Idle,                                      // 无载荷变体
+    Text(string),                              // 标量载荷变体
+    Move([i32, i32]),                          // 元组载荷变体
+    Compute { batch: i32, priority: i32 }      // 结构体属性载荷变体
+}
+
+// 2. 函数签名与错误返回（支持显式前缀与点推断语法）
+fn fail_scalar(): i32 ! TaskErr {
+    return err(TaskErr.Text("scalar_failed"));
+}
+
+fn fail_tuple(): i32 ! TaskErr {
+    return err(TaskErr.Move([10, 20]));        // 或 TaskErr.Move(10, 20)
+}
+
+fn fail_struct_payload(): i32 ! TaskErr {
+    return err(TaskErr.Compute { batch: 64, priority: 1 });
+}
+
+fn fail_dot_inference(): i32 ! TaskErr {
+    // 点推断（Dot Inference）：自动根据函数返回签名推导 TaskErr 枚举类型
+    return err(.Compute { batch: 128, priority: 2 });
+}
+
+// 3. 全维度 switch 模式匹配解构
+fn process_err(res: i32 ! TaskErr) {
+    switch (res) {
+        // 单载荷变量捕获
+        err(.Text text) => print(`Text payload: ${text}`),
+        // 原生元组方括号解构
+        err(.Move [x, y]) => print(`Move tuple: ${x}, ${y}`),
+        // 结构体精确解构
+        err(.Compute { batch, priority }) => print(`Compute exact: ${batch}, ${priority}`),
+        // 结构体剩余/整包解构捕获 (...fields)
+        err(.Compute { ...fields }) => print(`Compute rest: ${fields.batch}`),
+        // 兜底错误或成功
+        err(e) => print(`Other err: ${e}`),
+        val => print(`Success: ${val}`)
+    }
+}
+```
 
 ---
 

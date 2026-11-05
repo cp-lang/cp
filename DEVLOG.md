@@ -2484,6 +2484,67 @@ Bun AGY 在推进 Bun 基础算法库（如 `wyhash`、`base64`）转译过程�
 2. 经 `CPC_BIN` 开发态极速转译并运行，测试 100% 全绿通过（`ALL_TESTS_SUCCESS`）。
 3. 检查主干 `cpc/src` 文件哈希，确认未受外部干扰，等待用户批准并线。
 
+---
+
+## 2026-11-05 - 阶段续：结构体错误（Struct Errors）、类错误（Class Errors）与复杂枚举载荷错误（Enum Payload Errors）架构实装
+
+### 1. 任务背景与核心诉求
+用户就 CP 语言的高级错误体系提出了两大全新演进方向：
+1. **自定义结构体错误（Struct Errors）与类错误（Class Errors）**：
+   - 允许任意 `struct` / `class` 作为错误类型（`T ! MyStructError` / `T ! MyClassError`），并通过 `return err(MyStructError { ... })` 或 `return err(new MyClassError(...))` 直接返回；
+   - 深度明确结构体错误（纯值语义、栈上分配、零堆开销、零 GC 压力）与类错误（引用语义、堆分配指针、继承与多态、全链路动态挂载 cause）的架构分工。
+2. **复杂枚举载荷错误（Enum Payload Errors）全维度解构**：
+   - 彻底落地 RFC-002 规范 4.5.1 中的四种枚举载荷匹配：
+     - 单载荷变量捕获：`err(.Text text) => ...`
+     - 元组原生方括号解构：`err(.Move [x, y]) => ...`
+     - 结构体精确属性解构：`err(.Compute { batch, priority }) => ...`
+     - 结构体剩余/整包字段解构捕获：`err(.Compute { ...fields }) => ...`
+   - 支持显式前缀与点推断语法返回：`return err(TaskErr.Compute { ... })` 与 `return err(.Compute { ... })`。
+
+### 2. 攻坚攻克的关键技术瓶颈
+1. **结构体错误 vs 类错误的类型映射正交化**：
+   - 原 `map_error_type` 将所有在 `class_defs` 中的类型一律映射为指针 `*TypeName`。当用户定义 `struct MyStructError`（值类型）时，导致 `CpResult` 错误期望指针类型并在 `cp_convert_err` 中触发 const discard 错误；
+   - **解法**：在 `map_error_type` 中区分结构体与类：`self.ref_classes.contains(&id.sym) || self.value_classes.contains(&id.sym)`（即 `struct`）直接映射为纯值类型 `MyStructError`，类才映射为指针 `*MyClassError`。
+2. **结构体错误的 Switch 模式解析与穷尽性检查闭环**：
+   - 在语法解析中，支持 `err(MyStructError { code, msg })` 原生结构体属性解构模式；
+   - 在 `check_switch_exhaustiveness` 中，结构体不是具有多变体的枚举，匹配结构体本身或其属性即已覆盖全部错误分支。完善 `collect_covered_err_variants`，识别空变体名的结构体模式以及元组/对象模式，设置 `has_err_catchall = true`，消除了误报的 Non-exhaustive 错误。
+3. **AST 特性扫描器的盲区修复**：
+   - 发现 `scan_expr` 在遍历 `Expr::ErrWrap` 时未递归扫描内部表达式，且完全遗漏了 `Expr::EnumInit` 的字段/参数遍历；同时 `scan_pat` 在遇到 `Pattern::Err` 时未递归进入内部模式；
+   - 修复后，`fail_payload_move` 中包含的数组字面量 `[10, 20]` 与元组解构模式被正确捕获，自动按需触发生成 `cp_array_lit` 与 `cp_unpack_elem` 辅助函数。
+4. **Zig 0.17 运行时元编程与指针 `@hasField` 限制突破**：
+   - 在 Zig 0.17 中，`@hasField` 作用于指针类型（如 `*MyClassError`）会直接编译报错；
+   - 重构 `with_cause`：优先判断 `@typeInfo(CType) == .pointer`，安全提取其指针与声明的 `__TYPE_ID`；对于动态对象再判断 `@typeInfo(CType) == .@"struct"` 且具有 `ptr` 字段；
+   - 实现了对普通类指针错误与 `Box<dyn Trait>` 胖指针错误的双重无缝捕获与 Downcast。
+5. **元组载荷构造的字面量自适应（`[x, y]` vs `(x, y)`）**：
+   - 当枚举变体期望元组 `struct { i32, i32 }` 时，无论是传入方括号数组字面量 `.Move([10, 20])` 还是多参列表 `.Move(10, 20)`，编译器均自适应生成 Zig 匿名结构体 `.{ 10, 20 }`，达成零堆分配、零开销映射。
+6. **点推断返回错误（Dot Inference）的类型联合闭环**：
+   - 针对 `return err(.Compute { ... })`，在 `generate_err_value` 中结合目标错误类型 `dst_zig`，将匿名字面量直接包装为 `TaskErr{ .Compute = ... }`，消除 Zig 对匿名结构体无法隐式推导联合体类型的限制。
+
+### 3. 测试与验证
+1. 正式测试资产：新建 `cap/test/test_struct_and_enum_payload_errors.cp`，包含 9 大深度测试：
+   - 测试 1：结构体错误直接解构匹配；
+   - 测试 2：结构体错误自动提升为统一 `Err`；
+   - 测试 3：类错误直接匹配；
+   - 测试 4：类错误自动提升为统一 `Err` 并通过 `: MyClassError` downcast 还原；
+   - 测试 4b：类错误通过 `:= MyClassError` Walrus 绑定 downcast 还原；
+   - 测试 5：枚举标量载荷匹配 `.Text text`；
+   - 测试 6：枚举元组载荷匹配 `.Move [x, y]`；
+   - 测试 7：枚举结构体属性精确解构 `.Compute { batch, priority }`；
+   - 测试 8：枚举结构体属性整包捕获 `.Compute { ...fields }`；
+   - 测试 9：枚举点推断返回错误与解构匹配；
+2. 运行 `./cap/bin/cap run cap/test/test_struct_and_enum_payload_errors.cp`，7ms 转译，全部 9 项测试 100% 绿色通过，终端输出 `ALL_STRUCT_AND_ENUM_PAYLOAD_TESTS_PASSED`！
+3. 回归测试：运行现有 `test_pub_priv.cp`、`test_unified_errors.cp`、`test_error_union_downcast.cp`，全部一次性全绿通过，零回归隐患。
+
+### 4. 正式版本合并与 Release 构建发布
+1. **源码无损合并**：
+   - 将 `cpc_dev/src/codegen.rs`、`cpc_dev/src/parser.rs` 完整合入正式版本 `cpc/src/`，并与 Bun agy 的并发修复达成 100% 同步（`diff -r -q cpc/src cpc_dev/src` 输出一致）；
+   - 执行 `cargo fmt --manifest-path cpc/Cargo.toml` 格式化源码。
+2. **Release 深度优化编译**：
+   - 执行 `cargo build --release --manifest-path /data/dev/cp/cpc/Cargo.toml`，耗时 31 秒生成正式交付物；
+   - 安装至 `/data/dev/cp/cap/bin/cpc`，并清理临时调试覆盖 `.cap/cpc_bin`。
+3. **正式版本回归跑测**：
+   - 运行 `./cap/bin/cap run cap/test/test_struct_and_enum_payload_errors.cp`：正式版 `cpc` 转译耗时仅 4ms，全部 9 项测试一次性全绿通过。
+
 
 
 
