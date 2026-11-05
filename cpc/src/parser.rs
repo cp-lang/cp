@@ -25,6 +25,7 @@ pub struct Parser<'a> {
     in_match_guard: bool,
     in_pipeline_rhs: usize,
     in_switch_arm: usize,
+    in_paren_pattern: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -37,6 +38,7 @@ impl<'a> Parser<'a> {
             in_match_guard: false,
             in_pipeline_rhs: 0,
             in_switch_arm: 0,
+            in_paren_pattern: 0,
         }
     }
 
@@ -136,6 +138,7 @@ impl<'a> Parser<'a> {
             in_match_guard: self.in_match_guard,
             in_pipeline_rhs: self.in_pipeline_rhs,
             in_switch_arm: self.in_switch_arm,
+            in_paren_pattern: self.in_paren_pattern,
         }
     }
 
@@ -375,11 +378,17 @@ impl<'a> Parser<'a> {
         let mut methods = Vec::new();
         let mut body_stmts = Vec::new();
         while self.peek() != Some(&Token::RBrace) && self.peek().is_some() {
-            if matches!(self.peek(), Some(Token::Ident(id)) if id == "pub") {
+            let mut is_pub = true;
+            if self.peek() == Some(&Token::Private) {
                 self.bump()?;
+                is_pub = false;
+            } else if self.peek() == Some(&Token::Export) {
+                self.bump()?;
+                is_pub = true;
             }
             if self.peek() == Some(&Token::Fn) || self.peek() == Some(&Token::Async) {
-                let func = self.parse_function()?;
+                let mut func = self.parse_function()?;
+                func.is_pub = is_pub;
                 methods.push(func);
             } else {
                 body_stmts.push(self.parse_stmt()?);
@@ -401,7 +410,11 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_module_item(&mut self) -> ParseResult<ModuleItem> {
-        if self.peek() == Some(&Token::Export) {
+        let mut is_pub = false;
+        while self.peek() == Some(&Token::Export) || self.peek() == Some(&Token::Private) {
+            if self.peek() == Some(&Token::Export) {
+                is_pub = true;
+            }
             self.bump()?;
         }
         if self.peek() == Some(&Token::At) {
@@ -455,7 +468,7 @@ impl<'a> Parser<'a> {
             }
             if has_decl {
                 let meta_list = self.parse_meta_list()?;
-                return Ok(ModuleItem::Decl(self.parse_decl(meta_list)?));
+                return Ok(ModuleItem::Decl(self.parse_decl(meta_list, is_pub)?));
             }
         }
         match self.peek() {
@@ -473,12 +486,12 @@ impl<'a> Parser<'a> {
             | Some(Token::Impl)
             | Some(Token::Enum)
             | Some(Token::Async)
-            | Some(Token::Static) => Ok(ModuleItem::Decl(self.parse_decl(vec![])?)),
+            | Some(Token::Static) => Ok(ModuleItem::Decl(self.parse_decl(vec![], is_pub)?)),
             Some(Token::Unsafe) => {
                 if self.peek_next() == Some(&Token::LBrace) {
                     Ok(ModuleItem::Stmt(self.parse_stmt()?))
                 } else {
-                    Ok(ModuleItem::Decl(self.parse_decl(vec![])?))
+                    Ok(ModuleItem::Decl(self.parse_decl(vec![], is_pub)?))
                 }
             }
             _ => Ok(ModuleItem::Stmt(self.parse_stmt()?)),
@@ -518,8 +531,13 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_decl(&mut self, meta: Vec<MetaItem>) -> ParseResult<Decl> {
-        while self.peek() == Some(&Token::Export) {
+    fn parse_decl(&mut self, meta: Vec<MetaItem>, mut is_pub: bool) -> ParseResult<Decl> {
+        while self.peek() == Some(&Token::Export) || self.peek() == Some(&Token::Private) {
+            if self.peek() == Some(&Token::Export) {
+                is_pub = true;
+            } else if self.peek() == Some(&Token::Private) {
+                is_pub = false;
+            }
             self.bump()?;
         }
         match self.peek() {
@@ -529,11 +547,17 @@ impl<'a> Parser<'a> {
             Some(Token::Fn) | Some(Token::Async) | Some(Token::Static) | Some(Token::Unsafe) => {
                 let mut f = self.parse_function()?;
                 f.meta = meta;
+                if is_pub {
+                    f.is_pub = true;
+                }
                 Ok(Decl::Func(f))
             }
             Some(Token::Class) | Some(Token::Struct) | Some(Token::Ref) => {
                 let mut c = self.parse_class()?;
                 c.meta = meta;
+                if is_pub {
+                    c.is_pub = true;
+                }
                 Ok(Decl::Class(c))
             }
             Some(Token::Trait) => {
@@ -560,12 +584,21 @@ impl<'a> Parser<'a> {
         let mut is_static = false;
         let mut is_async = false;
         let mut is_unsafe = false;
+        let mut is_pub = false;
         while matches!(
             self.peek(),
-            Some(Token::Static) | Some(Token::Async) | Some(Token::Unsafe) | Some(Token::Export)
+            Some(Token::Static)
+                | Some(Token::Async)
+                | Some(Token::Unsafe)
+                | Some(Token::Export)
+                | Some(Token::Private)
         ) {
             if self.peek() == Some(&Token::Export) {
                 self.bump()?;
+                is_pub = true;
+            } else if self.peek() == Some(&Token::Private) {
+                self.bump()?;
+                is_pub = false;
             } else if self.peek() == Some(&Token::Static) {
                 self.bump()?;
                 is_static = true;
@@ -617,6 +650,7 @@ impl<'a> Parser<'a> {
             is_static,
             is_unsafe,
             meta: Vec::new(),
+            is_pub,
         })
     }
 
@@ -627,11 +661,7 @@ impl<'a> Parser<'a> {
             let meta = self.parse_meta_list()?;
             let mut is_mut = false;
             let mut is_move = false;
-            let mut is_comptime = meta.iter().any(|m| m.name.sym == "comptime");
-            if matches!(self.peek(), Some(Token::Ident(s)) if s == "comptime") {
-                self.bump()?;
-                is_comptime = true;
-            }
+            let is_comptime = meta.iter().any(|m| m.name.sym == "comptime");
 
             if self.peek() == Some(&Token::Mut) {
                 self.bump()?;
@@ -762,15 +792,8 @@ impl<'a> Parser<'a> {
             } else {
                 Type::Any
             };
-            let mut ty = ty;
             if matches!(ty, Type::BorrowType { is_mut: true, .. }) {
                 is_mut = true;
-            } else if is_mut && p_ident.sym != "this" && p_ident.sym != "_" {
-                ty = Type::BorrowType {
-                    inner: Box::new(ty),
-                    is_mut: true,
-                    lifetimes: vec![],
-                };
             }
             let default = if self.peek() == Some(&Token::Assign) {
                 self.bump()?;
@@ -858,7 +881,7 @@ impl<'a> Parser<'a> {
             return Ok(ErrorType::AnonSet(variants));
         }
         if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw)) {
-            let first = self.parse_ident()?;
+            let mut first = self.parse_ident()?;
             if first.sym == "Box" && self.peek() == Some(&Token::Less) {
                 self.bump()?;
                 if self.peek() == Some(&Token::Dyn) {
@@ -868,23 +891,86 @@ impl<'a> Parser<'a> {
                 self.expect(Token::Greater)?;
                 return Ok(ErrorType::BoxDyn(tr));
             }
-            if self.peek() == Some(&Token::Pipe) {
-                let mut list = vec![first];
-                while self.peek() == Some(&Token::Pipe) {
-                    self.bump()?;
-                    list.push(self.parse_ident()?);
-                }
-                return Ok(ErrorType::Union(list));
-            }
-            let mut first = first;
             while self.peek() == Some(&Token::Dot) {
                 self.bump()?;
                 let next = self.parse_ident()?;
                 first.sym.push('.');
                 first.sym.push_str(&next.sym);
             }
-            if first.sym == "Error" || first.sym == "error" || first.sym == "err" {
+            if self.peek() == Some(&Token::Pipe) || self.peek() == Some(&Token::PipePipe) {
+                let mut list = vec![first];
+                while self.peek() == Some(&Token::Pipe) || self.peek() == Some(&Token::PipePipe) {
+                    self.bump()?;
+                    if self.peek() == Some(&Token::LBrace) {
+                        self.bump()?;
+                        let mut variants = Vec::new();
+                        while self.peek() != Some(&Token::RBrace) && self.peek().is_some() {
+                            variants.push(self.parse_ident()?);
+                            if self.peek() == Some(&Token::Comma) {
+                                self.bump()?;
+                            }
+                        }
+                        self.expect(Token::RBrace)?;
+                        let anon_name = format!(
+                            "error{{{}}}",
+                            variants
+                                .iter()
+                                .map(|v| v.sym.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                        list.push(Ident {
+                            sym: anon_name,
+                            span: Span { start: 0, end: 0 },
+                        });
+                        continue;
+                    }
+                    let mut next = self.parse_ident()?;
+                    if (next.sym == "err" || next.sym == "error")
+                        && self.peek() == Some(&Token::LBrace)
+                    {
+                        self.bump()?;
+                        let mut variants = Vec::new();
+                        while self.peek() != Some(&Token::RBrace) && self.peek().is_some() {
+                            variants.push(self.parse_ident()?);
+                            if self.peek() == Some(&Token::Comma) {
+                                self.bump()?;
+                            }
+                        }
+                        self.expect(Token::RBrace)?;
+                        let anon_name = format!(
+                            "error{{{}}}",
+                            variants
+                                .iter()
+                                .map(|v| v.sym.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                        list.push(Ident {
+                            sym: anon_name,
+                            span: next.span,
+                        });
+                        continue;
+                    }
+                    while self.peek() == Some(&Token::Dot) {
+                        self.bump()?;
+                        let sub = self.parse_ident()?;
+                        next.sym.push('.');
+                        next.sym.push_str(&sub.sym);
+                    }
+                    list.push(next);
+                }
+                return Ok(ErrorType::Union(list));
+            }
+            if first.sym == "Error"
+                || first.sym == "error"
+                || first.sym == "err"
+                || first.sym == "Err"
+            {
                 return Ok(ErrorType::DefaultError);
+            }
+            if first.sym == "AnyErr" || first.sym == "anyErr" || first.sym == "anyerror" {
+                return Ok(ErrorType::AnyErr);
             }
             return Ok(ErrorType::Named(first));
         }
@@ -1103,6 +1189,7 @@ impl<'a> Parser<'a> {
                     ty,
                     meta: Vec::new(),
                     default: None,
+                    is_pub: true,
                 });
                 if self.peek() == Some(&Token::Comma) {
                     self.bump()?;
@@ -1468,11 +1555,15 @@ impl<'a> Parser<'a> {
     fn parse_pattern(&mut self) -> ParseResult<Pattern> {
         let first = self.parse_single_pattern()?;
         if self.peek() == Some(&Token::Pipe)
-            || (self.in_switch_arm > 0 && self.peek() == Some(&Token::Comma))
+            || (self.in_switch_arm > 0
+                && self.in_paren_pattern == 0
+                && self.peek() == Some(&Token::Comma))
         {
             let mut pats = vec![first];
             while self.peek() == Some(&Token::Pipe)
-                || (self.in_switch_arm > 0 && self.peek() == Some(&Token::Comma))
+                || (self.in_switch_arm > 0
+                    && self.in_paren_pattern == 0
+                    && self.peek() == Some(&Token::Comma))
             {
                 self.bump()?;
                 pats.push(self.parse_single_pattern()?);
@@ -1510,6 +1601,7 @@ impl<'a> Parser<'a> {
             Some(Token::LBracket) => {
                 let mut elements = Vec::new();
                 self.bump()?;
+                self.in_paren_pattern += 1;
                 while self.peek() != Some(&Token::RBracket) {
                     elements.push(self.parse_pattern()?);
                     if self.peek() == Some(&Token::Comma) {
@@ -1517,10 +1609,12 @@ impl<'a> Parser<'a> {
                     }
                 }
                 self.expect(Token::RBracket)?;
+                self.in_paren_pattern -= 1;
                 Ok(Pattern::Tuple(elements))
             }
             Some(Token::LBrace) => {
                 let _start = self.bump()?.1.start;
+                self.in_paren_pattern += 1;
                 let mut props = Vec::new();
                 while self.peek() != Some(&Token::RBrace) {
                     if self.peek() == Some(&Token::DotDotDot) {
@@ -1575,6 +1669,7 @@ impl<'a> Parser<'a> {
                     }
                 }
                 let _end = self.expect(Token::RBrace)?.end;
+                self.in_paren_pattern -= 1;
                 Ok(Pattern::Object(props))
             }
             Some(Token::Dot) => {
@@ -1685,10 +1780,8 @@ impl<'a> Parser<'a> {
                     if let (Token::IntLiteral(v), _) = self.bump()? {
                         if self.peek() == Some(&Token::DotDotEq)
                             || self.peek() == Some(&Token::DotDot)
-                            || self.peek() == Some(&Token::DotDotDot)
                         {
-                            let tok = self.bump()?.0;
-                            let inclusive = tok == Token::DotDotEq || tok == Token::DotDotDot;
+                            let inclusive = self.bump()?.0 == Token::DotDotEq;
                             let end_v = if let (Token::IntLiteral(ev), _) = self.bump()? {
                                 ev
                             } else {
@@ -1735,9 +1828,25 @@ impl<'a> Parser<'a> {
                     && self.peek() == Some(&Token::LParen)
                 {
                     self.bump()?;
-                    let inner = self.parse_pattern()?;
-                    self.expect(Token::RParen)?;
-                    return Ok(Pattern::Err(Box::new(inner)));
+                    self.in_paren_pattern += 1;
+                    let first_p = self.parse_pattern()?;
+                    if self.peek() == Some(&Token::Comma) {
+                        self.bump()?;
+                        let mut pats = vec![first_p];
+                        while self.peek() != Some(&Token::RParen) && self.peek().is_some() {
+                            pats.push(self.parse_pattern()?);
+                            if self.peek() == Some(&Token::Comma) {
+                                self.bump()?;
+                            }
+                        }
+                        self.expect(Token::RParen)?;
+                        self.in_paren_pattern -= 1;
+                        return Ok(Pattern::Err(Box::new(Pattern::Tuple(pats))));
+                    } else {
+                        self.expect(Token::RParen)?;
+                        self.in_paren_pattern -= 1;
+                        return Ok(Pattern::Err(Box::new(first_p)));
+                    }
                 }
                 if self.peek() == Some(&Token::Dot) {
                     self.bump()?;
@@ -2117,7 +2226,13 @@ impl<'a> Parser<'a> {
                 continue;
             }
             let meta_list = self.parse_meta_list()?;
-            if self.peek() == Some(&Token::Export) {
+            let mut member_is_pub = false;
+            while self.peek() == Some(&Token::Export) || self.peek() == Some(&Token::Private) {
+                if self.peek() == Some(&Token::Export) {
+                    member_is_pub = true;
+                } else if self.peek() == Some(&Token::Private) {
+                    member_is_pub = false;
+                }
                 self.bump()?;
             }
             if matches!(
@@ -2126,6 +2241,9 @@ impl<'a> Parser<'a> {
             ) {
                 let mut method = self.parse_function()?;
                 method.meta = meta_list;
+                if member_is_pub {
+                    method.is_pub = true;
+                }
                 methods.push(method);
             } else {
                 let f_ident = self.parse_ident()?;
@@ -2149,6 +2267,7 @@ impl<'a> Parser<'a> {
                     ty,
                     meta: meta_list,
                     default,
+                    is_pub: member_is_pub,
                 });
             }
         }
@@ -2163,6 +2282,7 @@ impl<'a> Parser<'a> {
             is_ref,
             meta: Vec::new(),
             extra_zig,
+            is_pub: false,
         })
     }
 
@@ -2288,7 +2408,13 @@ impl<'a> Parser<'a> {
                 continue;
             }
             let meta_list = self.parse_meta_list()?;
-            if self.peek() == Some(&Token::Export) {
+            let mut method_is_pub = false;
+            while self.peek() == Some(&Token::Export) || self.peek() == Some(&Token::Private) {
+                if self.peek() == Some(&Token::Export) {
+                    method_is_pub = true;
+                } else {
+                    method_is_pub = false;
+                }
                 self.bump()?;
             }
             if matches!(
@@ -2297,6 +2423,9 @@ impl<'a> Parser<'a> {
             ) {
                 let mut method = self.parse_function()?;
                 method.meta = meta_list;
+                if method_is_pub {
+                    method.is_pub = true;
+                }
                 methods.push(method);
                 continue;
             }
@@ -2319,6 +2448,7 @@ impl<'a> Parser<'a> {
                             ty,
                             meta: Vec::new(),
                             default: None,
+                            is_pub: true,
                         });
                         if self.peek() == Some(&Token::Comma) {
                             self.bump()?;
@@ -2346,6 +2476,7 @@ impl<'a> Parser<'a> {
                         ty,
                         meta: Vec::new(),
                         default: None,
+                        is_pub: true,
                     });
                     if self.peek() == Some(&Token::Comma) {
                         self.bump()?;
@@ -3338,11 +3469,35 @@ impl<'a> Parser<'a> {
                 let text = &self.input[span.start..span.end];
                 if self.peek() == Some(&Token::LParen) {
                     self.bump()?;
-                    let inner = self.parse_expr()?;
+                    let first = self.parse_expr()?;
+                    if self.peek() == Some(&Token::Comma) {
+                        self.bump()?;
+                        let second = self.parse_expr()?;
+                        self.expect(Token::RParen)?;
+                        return Ok(Expr::ErrWrap(Box::new(Expr::Call(CallExpr {
+                            span: Span {
+                                start: span.start,
+                                end: self.peek_span().start,
+                            },
+                            callee: Box::new(Expr::Member(MemberExpr {
+                                span,
+                                obj: Box::new(Expr::Ident(Ident {
+                                    span,
+                                    sym: "Err".to_string(),
+                                })),
+                                prop: Ident {
+                                    span,
+                                    sym: "init".to_string(),
+                                },
+                            })),
+                            args: vec![first, second],
+                            is_comptime: false,
+                        }))));
+                    }
                     self.expect(Token::RParen)?;
-                    return Ok(Expr::ErrWrap(Box::new(inner)));
+                    return Ok(Expr::ErrWrap(Box::new(first)));
                 }
-                if self.peek() == Some(&Token::Dot) {
+                if (text == "err" || text == "error") && self.peek() == Some(&Token::Dot) {
                     Ok(Expr::Ident(Ident {
                         span,
                         sym: "error".to_string(),
@@ -3903,60 +4058,6 @@ impl<'a> Parser<'a> {
             }
 
             Token::LBracket => {
-                let checkpoint = self.lexer.clone();
-                let p1 = self.peeked.clone();
-                let p2 = self.peeked2.clone();
-                if let Some(Token::IntLiteral(n)) = self.peek() {
-                    let n_val = *n;
-                    let _ = self.bump();
-                    if self.peek() == Some(&Token::RBracket) {
-                        let _ = self.bump();
-                        let type_sym = match self.peek() {
-                            Some(Token::U8) => Some("u8"),
-                            Some(Token::I8) => Some("i8"),
-                            Some(Token::U16) => Some("u16"),
-                            Some(Token::I16) => Some("i16"),
-                            Some(Token::U32) => Some("u32"),
-                            Some(Token::I32) => Some("i32"),
-                            Some(Token::U64) => Some("u64"),
-                            Some(Token::I64) => Some("i64"),
-                            Some(Token::U128) => Some("u128"),
-                            Some(Token::I128) => Some("i128"),
-                            Some(Token::USize) => Some("usize"),
-                            Some(Token::ISize) => Some("isize"),
-                            Some(Token::F32) => Some("f32"),
-                            Some(Token::F64) => Some("f64"),
-                            Some(Token::Bool) => Some("bool"),
-                            Some(Token::Void) => Some("void"),
-                            _ => None,
-                        };
-                        if let Some(tsym) = type_sym {
-                            let end_span = self.bump()?.1;
-                            return Ok(Expr::Ident(Ident {
-                                span: Span {
-                                    start: span.start,
-                                    end: end_span.end,
-                                },
-                                sym: format!("[{}]{}", n_val, tsym),
-                            }));
-                        } else if let Some(Token::Ident(_)) = self.peek() {
-                            let (id_tok, id_span) = self.bump()?;
-                            if let Token::Ident(id_name) = id_tok {
-                                return Ok(Expr::Ident(Ident {
-                                    span: Span {
-                                        start: span.start,
-                                        end: id_span.end,
-                                    },
-                                    sym: format!("[{}]{}", n_val, id_name),
-                                }));
-                            }
-                        }
-                    }
-                }
-                self.lexer = checkpoint;
-                self.peeked = p1;
-                self.peeked2 = p2;
-
                 if self.peek() == Some(&Token::RBracket) {
                     self.bump()?;
                     return Ok(Expr::Array(Vec::new()));

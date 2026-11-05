@@ -3,6 +3,8 @@ import { readFile, writeFile } from "cap:fs";
 import { fetch } from "cap:http";
 import { Agent } from "cap:beam";
 
+// Multi-library test suite
+
 class ComplexAgent extends Agent {
     async fn onMessage(this, action_id: u32, payload: any): void {
         __zig__ { _ = ctx.payload; }
@@ -17,5 +19,5 @@ class ComplexAgent extends Agent {
     }
 }
 fn main(): void {
-    @print("--- CP SDK Multi-Library Test ---");
+    @print("--- CP SDK Multi-Library Test Run ---");
 }

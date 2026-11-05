@@ -564,26 +564,26 @@ import {default as App, start } from "./app.cp";
 
 CP 是一门严格无 GC 的静态类型编译型语言，禁止任何隐式类型提升：
 
-| 标量类型 | 内存宽度                   | 说明                          |
-| :------- | :------------------------- | :---------------------------- |
-| `i8`     | 8-bit 有符号整型           | 默认整数字面量类型            |
-| `u8`     | 8-bit 无符号整型           | 无符号索引、尺寸              |
-| `i16`    | 16-bit 有符号整型          | 默认整数字面量类型            |
-| `u16`    | 16-bit 无符号整型          | 无符号索引、尺寸              |
-| `i32`    | 32-bit 有符号整型          | 默认整数字面量类型            |
-| `u32`    | 32-bit 无符号整型          | 无符号索引、尺寸              |
-| `i64`    | 64-bit 有符号整型          | 高精度时间戳、大计数器        |
-| `u64`    | 64-bit 无符号整型          | 高精度时间戳、大计数器        |
-| `i128`   | 128-bit 有符号整型         | 超大整型计算、高精度中间量    |
-| `u128`   | 128-bit 无符号整型         | 超大整型计算、位运算混淆计算  |
-| `usize`  | 无符号系统字长 (32/64-bit) | 内存偏移量、容器长度          |
-| `isize`  | 与符号系统字长 (32/64-bit) | 内存偏移量、容器长度          |
-| `f32`    | 32-bit 单精度浮点          | 图形计算、Tensor 运算基准     |
-| `f64`    | 64-bit 双精度浮点          | 默认浮点字面量类型            |
-| `bool`    | 1-bit / 1-byte             | 布尔真假值 (`true` / `false`) |
-| `string`  | 连续只读 UTF-8 内存视图    | 附带长度信息的不可变切片视图  |
+| 标量类型  | 内存宽度                   | 说明                                                               |
+| :-------- | :------------------------- | :----------------------------------------------------------------- |
+| `i8`      | 8-bit 有符号整型           | 默认整数字面量类型                                                 |
+| `u8`      | 8-bit 无符号整型           | 无符号索引、尺寸                                                   |
+| `i16`     | 16-bit 有符号整型          | 默认整数字面量类型                                                 |
+| `u16`     | 16-bit 无符号整型          | 无符号索引、尺寸                                                   |
+| `i32`     | 32-bit 有符号整型          | 默认整数字面量类型                                                 |
+| `u32`     | 32-bit 无符号整型          | 无符号索引、尺寸                                                   |
+| `i64`     | 64-bit 有符号整型          | 高精度时间戳、大计数器                                             |
+| `u64`     | 64-bit 无符号整型          | 高精度时间戳、大计数器                                             |
+| `i128`    | 128-bit 有符号整型         | 超大整型计算、高精度中间量                                         |
+| `u128`    | 128-bit 无符号整型         | 超大整型计算、位运算混淆计算                                       |
+| `usize`   | 无符号系统字长 (32/64-bit) | 内存偏移量、容器长度                                               |
+| `isize`   | 与符号系统字长 (32/64-bit) | 内存偏移量、容器长度                                               |
+| `f32`     | 32-bit 单精度浮点          | 图形计算、Tensor 运算基准                                          |
+| `f64`     | 64-bit 双精度浮点          | 默认浮点字面量类型                                                 |
+| `bool`    | 1-bit / 1-byte             | 布尔真假值 (`true` / `false`)                                      |
+| `string`  | 连续只读 UTF-8 内存视图    | 附带长度信息的不可变切片视图                                       |
 | `cstring` | 以 null 结尾的连续字节切片 | 对接 C/Bun 原生库，映射为 Zig `[:0]const u8` (可变借用为 `[:0]u8`) |
-| `void`    | 0-bit                      | 空单元类型，表示无返回值      |
+| `void`    | 0-bit                      | 空单元类型，表示无返回值                                           |
 
 ---
 
@@ -1347,12 +1347,47 @@ print(u.get_id());
 | **pub**               | `pub fn serve() {}` (等价于 `export fn`)     | 公开导出（Exported）：允许其他 `.cp` 文件通过 `import { serve } from "./server"` 导入并调用。 | 映射为 Zig 的 `pub fn`，生成导出符号。    |
 | **priv** (或默认缺省) | `priv fn helper() {}` (或直接 `fn helper()`) | 模块私有（Module-private）：仅供当前 `.cp` 文件内部的逻辑使用，禁止被外部模块 import。        | 映射为 Zig 内部局部函数，不对外暴露符号。 |
 
-#### 5.12.2 类与结构体层级（Class / Struct Methods）
+#### 5.12.2 类与结构体层级（Class / Struct Methods & Fields）
 
-| 修饰符   | 示例                                      | 作用与行为                                                                                            |
-| -------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| **pub**  | `class Client { pub fn connect() {} }`    | 公开方法：外部持有该实例的调用方均可调用：`client.connect()`。                                        |
-| **priv** | `class Client { priv fn handshake() {} }` | 私有方法：仅允许类内部通过 `_.handshake()` 或 `this.handshake()` 调用，外部调用时将被编译器拦截报错。 |
+在 `class` 与 `struct` 内部，**属性与方法默认均为 `priv` 私有封装**。只有显式标注 `pub`（或 `export`）的成员才对外公开访问：
+
+| 修饰符与成员       | 示例                                              | 作用与访问权限行为                                                                                         |
+| ------------------ | ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| **pub 属性**       | `class User { pub name: string; }`                | 公开属性：类外部可自由通过 `user.name` 读取/写入。                                                         |
+| **默认/priv 属性** | `class User { priv balance: i64; }` 或 `id: u64;` | 私有属性（默认）：仅允许类自身方法内通过 `this.balance` / `_.balance` 访问，外部访问被编译器静态拦截报错。 |
+| **pub 方法**       | `pub fn get_balance(): i64 {}`                    | 公开方法：外部持有该实例的调用方均可调用：`user.get_balance()`。                                           |
+| **默认/priv 方法** | `priv fn check_limit() {}` 或 `fn helper() {}`    | 私有方法（默认）：仅允许类内部通过 `_.check_limit()` 或 `this.check_limit()` 调用，外部调用编译报错。      |
+
+> **生命周期方法豁免**：
+> `init` 构造器、`release` 析构器以及编译器底层内部方法（`_create`、`__*`）属于对象的生命周期管理特权函数，不受外部私有属性/方法拦截限制。
+
+```typescript
+class BankAccount {
+    pub owner: string;       // 显式 pub：外部可读
+    priv balance: i64;       // 显式 priv：私有安全
+    account_no: string;      // 未标注：默认等价于 priv
+
+    pub fn deposit(*_, amount: i64) {
+        if validate_amount(amount) { // 内部调用私有方法
+            balance = balance + amount;
+        }
+    }
+
+    pub fn get_balance(): i64 {
+        return balance;
+    }
+
+    fn validate_amount(amt: i64): bool { // 默认 priv 私有方法
+        return amt > 0;
+    }
+}
+
+let acc = new BankAccount("Alice", 100);
+print(acc.owner);          // ✅ 正常：pub 属性
+// print(acc.balance);     // ❌ 编译拦截：Cannot access private field 'balance'
+// acc.validate_amount(50);// ❌ 编译拦截：Cannot call private method 'validate_amount'
+acc.deposit(50);           // ✅ 正常：pub 方法
+```
 
 ### 5.13 方法接收者（Receiver）终极哲学
 
@@ -1826,7 +1861,7 @@ handlers.push(Box.new(NetworkHandler.init()));
 
 // 运行时安全向下转型 (Downcast)
 for handler of handlers {
-    if let Some(net) = handler.downcast<NetworkHandler>() {
+    if (net := NetworkHandler>) {
         net.flush_socket();
     }
 }
@@ -1847,109 +1882,221 @@ CP 原生引入**三态原生值类型（3-State Value Type）**，彻底终结�
 
 ---
 
-### 8.2 错误返回值构建与模式匹配
+### 8.2 错误类型体系与正交规范 (Unified Error Architecture)
 
-#### 8.2.1 3 字母极简哲学与 `err(...)` / `Err(...)` 双轨协同
+CP 语言构建了一套将 **Zig 原生全局错误集（AnyErr / anyerror）的零开销暴力性能**、**Rust 灵活具名与枚举错误集**、以及 **TypeScript/现代业务动态错误（Err）** 融为一体的统一错误架构。
 
-CP 语言在错误处理体系中全面采用 **3 字母极简哲学**：
+#### 8.2.1 错误返回类型分类与 `T!` 省略规则
 
-- **小写 `err`（核心正统：声明、构造、匹配与命名空间）**：
-  - **声明错误集合**：`err Base64Error { DecodingFailed, InvalidPadding }`；
-  - **即席错误字面量**：`return err.InvalidPadding;`（直接发射为 Zig `error.InvalidPadding`）；
-  - **构造错误返回值（主推推荐）**：`return err(NetworkErr.NotFound);` 或 `return err("Timeout");`；
-  - **模式匹配解包（主推推荐）**：`switch (res) { err(e) => print(e), data => print(data) }`；
-  - **开放错误签名**：`fn parse(): string ! err`；
-  - **延迟守卫前缀对齐**：`errdefer alloc.free(dest);` 天然契合 `err`；
-  - _向前兼容_：保留 `error` 作为透明别名（`error.Tag` 与 `error Name { ... }`）。
-- **大写 `Err`（兼容别名：值构造器与模式匹配解包）**：
-  - 构造错误值（完全兼容）：`return Err(NetworkErr.NotFound);`；
-  - 模式匹配解包（完全兼容）：`switch (res) { Err(e) => ..., data => ... }`。
+在 CP 中，所有可产生错误的函数，其返回值类型在底层均对应明确的错误集或错误结构体：
 
-#### 8.2.2 极简推导错误联合（`T!`）、`void!` 省略（`fn sum()!`）与即席错误字面量（`err.TagName`）
+1. **全局错误推导与 `T!`（等价于 `T ! AnyErr`）**：
+   - **`T!` 是 `T ! AnyErr` 的官方语法糖省略**（成功返回 `T`，失败返回全局错误集合 `AnyErr`，在底层 Zig 中映射为 `anyerror!T`）；
+   - **闭环与快译**：在 `T!` 或 `T ! AnyErr` 函数体内，**只能返回 `err.TagName` 即席错误字面量**，或通过 `?` 冒泡其他返回 `T ! AnyErr` 的函数；
+   - **编译期严禁动态错误装箱**：在 `T!` / `T ! AnyErr` 函数内若试图 `return err(...)`，**编译器在编译期直接报错拦截**，严禁深层隐式推导，保障编译器百毫秒级极速构建。
 
-在日常业务逻辑、纯算法与底层计算模块中，CP 推荐使用最精炼的**推导错误联合**：
+2. **业务级动态错误（`T ! Err` / `T ! err`）**：
+   - 内置轻量动态错误结构体 `Err`（原 `Error` 保留为完全兼容别名）；
+   - 包含属性：`code: i32`、`msg: string`、`cause: ?*anyopaque`，并具备 `downcast` 胖指针还原能力；
+   - 函数体内若通过 `err("msg")` 或 `err(code, "msg")` 抛出错误，函数签名**必须显式声明返回类型为 `T ! Err`（或 `T ! err`）**，不可省略为 `T!`。
 
-- **统一纯后缀修饰**：使用后缀感叹号 `T!`（如 `usize!`, `u8[]!`, `void!`），正常返回类型 `T` 永远在最前；
-- **`void!` 极致精炼省略（`fn sum()!`）**：
-  若函数无成功返回值，成功返回 `void`，失败可能抛错，可省略 `void`，直接写作 **`fn sum()!`**（或 `fn sum(): !`），等价于 `fn sum(): void!`；
-- **错误抛出**：直接返回即席错误字面量 `return err.TagName;`（`err` 为内置语法关键字，无需任何模块导入）；
-- **底层映射**：在底层转译为 Zig 的推导错误联合 `!T`（或 `!void`）与 `error.TagName`，由编译器在编译期自动收集函数内所有抛出的错误标签。
+3. **具名错误集（Dedicated Error Set：`err SetName { ... }`）**：
+   - 使用 `err SetName { ... }` 声明原生错误集合；
+   - 函数签名标注为 `T ! SetName`；
+   - **函数内直接返回变体，无需 `err()` 包裹**：`return SetName.NotFound;` 或简写 `return .NotFound;`。
 
-```typescript
-// 示例 1：返回具体类型，后缀 ! 推导错误联合
-fn calcSizeUpperBound(source_len: usize): usize! {
-    let leftover = source_len % 4;
-    if (leftover % 4 != 0) {
-        return err.InvalidPadding; // 极简 3 字母即写即用错误字面量
-    }
-    return (source_len / 4) * 3;
-}
+4. **多错误联合与即席合并（`T ! E1 || E2`）**：
+   - 生产级代码 / 跨模块公共 API / 大型项目构建（严谨工程流）：
+     - `T !` 等同 `T ! AnyErr`（全局即席错误集，映射为 Zig 原生 `anyerror!T`）
+     - `T ! FileErr`（单一具名错误集，映射为 Zig 原生 `FileErr!T`）
+     - `T ! FileErr || NetErr`（多错误集合并，映射为 Zig 原生 `(FileErr || NetErr)!T`，零额外开销）
+     - `T ! FileErr || err{Timeout, Canceled}`（具名 + 匿名即席联合，映射为 Zig 原生 `(FileErr || error{Timeout, Canceled})!T`）
+     - `T ! FileErr || Err`（具名错误集 + 动态业务错误，底层映射为 `CpResult(T, Err)`，具名错误自动升格）
+   - 享受秒级极速并行编译，以及最严格的架构契约保护。
 
-// 示例 2：无返回值但可能出错，省略 void 直接以 ! 结尾
-fn decode(*dest: u8[], source: string)! {
-    let size = calcSizeUpperBound(source.len)?; // 后缀 ? 自动向上传播错误
-    // ...
-}
-```
-
-#### 8.2.3 强类型显式错误联合（`T ! ErrorSet`）
-
-当需要对公开 API 施加严格契约，限定调用方必须且只能处理特定错误时，使用**显式错误集与中缀联合语法**：
-
-- **声明错误集**：采用 `err SetName { Variant1, Variant2 }` 原生语法声明；
-- **函数类型标注**：遵循 CP 标准**中缀感叹号规范**：`返回值类型 ! 错误集`（正常类型在最前，错误集在后，符合 TypeScript/Rust 现代直觉）；
-- **错误集合并**：通过 `||` 运算符在编译期将多个错误集合并（如 `Base64Error || AllocatorError`）；
-- **编译对齐**：CP 的 `T ! ErrorSet` 在转译到底层原生 Zig 时，自动转换为 Zig 的前缀语法 `ErrorSet!T`。
+5. **普通枚举作为错误类型（`enum EnumName { ... }`）**：
+   - 普通枚举可直接作为强类型业务错误码集合（如 `enum HttpError { BadRequest = 400, ServerError = 500 }`）；
+   - 函数签名标注为 `T ! HttpError`；
+   - **函数内必须使用 `err()` 包裹以标明错误态（类似 Rust 的 `Err()`）**：`return err(HttpError.BadRequest);` 或点号推导 `return err(.BadRequest);`。
 
 ```typescript
-// 1. 显式声明强类型错误集 (支持 err 与 error)
-err Base64Error {
-    DecodingFailed,
-    InvalidPadding
+// 1. 具名错误集：直接返回变体，无需 err() 包裹
+err FileErr {
+    NotFound,
+    AccessDenied
 }
 
-err AllocatorError {
-    OutOfMemory
-}
-
-// 2. CP 规范函数签名：返回值类型在前，中缀 !，错误集在后
-pub fn decodeAlloc(allocator: Allocator, input: string): u8[] ! Base64Error || AllocatorError {
-    let len = decodeLen(input);
-    let mut dest = allocator.alloc(u8, len)?;
-    errdefer allocator.free(dest);
-
-    let result = decode(dest, input);
-    if (!result.isSuccessful()) {
-        return err.DecodingFailed;
-    }
-    return dest[0..result.count];
-}
-```
-
-#### 8.2.4 带载荷错误与 Err 构造器
-
-```typescript
-err NetworkError {
+err NetErr {
     Timeout,
-    ConnectionReset,
-    HostUnreachable
+    ConnectionReset
 }
 
-fn ping(host: string): string ! NetworkError {
-    if host == "" {
-        return Err(.HostUnreachable);
+// 2. 具名 + 匿名错误联合声明
+fn test_anon_union(flag: i32): string ! FileErr || err{Timeout, Canceled} {
+    if flag == 1 {
+        return FileErr.NotFound; // 具名变体
     }
-    return "PONG";
+    if flag == 2 {
+        return err.Timeout;      // 即席匿名标签
+    }
+    return "ok_anon";
 }
 
-fn ping(host: string): string ! NetworkError {
-if host == "" {
-return Err(.HostUnreachable);
-}
-return "PONG";
+// 3. 具名 + 动态 Err 联合声明
+fn test_err_union(flag: i32): string ! FileErr || Err {
+    if flag == 1 {
+        return FileErr.NotFound; // 自动转换为 Err
+    }
+    if flag == 2 {
+        return err(500, "internal server failure"); // 动态业务错误
+    }
+    return "ok_err";
 }
 
+fn open_file(path: string): string ! FileErr {
+    if path == "missing.txt" {
+        return FileErr.NotFound; // 或直接 return .NotFound;
+    }
+    return "file content";
+}
+
+// 2. 普通枚举错误：必须使用 err() 包裹转换为错误态
+enum HttpError {
+    BadRequest = 400,
+    ServerError = 500
+}
+
+fn handle_req(id: i32): string ! HttpError {
+    if id < 0 {
+        return err(HttpError.BadRequest); // 或 return err(.BadRequest);
+    }
+    return "ok";
+}
+
+// 3. 业务动态错误 Err：签名必须显式标注 T ! Err，不能写成 T!
+fn query_db(sql: string): string ! Err {
+    if sql == "" {
+        return err(404, "record not found"); // 动态 Err 实例
+    }
+    return "result";
+}
+
+// 4. 全局错误 AnyErr / T!：函数内只能返回 err.TagName 即席错误
+fn calc(val: i32): i32! { // 展开等价于 i32 ! AnyErr
+    if val < 0 {
+        return err.NegativeNotAllowed; // 静态即席标签
+    }
+    // return err("bad"); // ❌ 编译拦截：Cannot return dynamic 'err(...)' in 'T ! AnyErr'
+    return val * 2;
+}
 ```
+
+---
+
+#### 8.2.2 错误类型自动转换（Auto Conversion）与声明式 `from` 规则
+
+在系统分层调用中，CP 提供了安全的**编译期自动错误类型提升与转换机制**：
+
+1. **安全拓扑自动转换**：
+   - 具名错误集 `FileErr`、枚举错误 `HttpError`、全局错误 `AnyErr` 在通过 `?` 冒泡到返回 `T ! Err` 的函数时，编译器自动织入 `cp_convert_err`，将其自动转换为统一的动态错误实例 `Err`，并将原始错误无损记录至 `cause`；
+2. **声明式 `from` / `__from` 自动桥接**：
+   - 若目标错误类型定义了 `pub fn from(e: SourceErr): Self`，在通过 `?` 传播时，编译器优先调用用户声明的 `from` 进行确定性语义转换。
+
+```typescript
+class ServiceErr {
+    pub message: string;
+    pub fn from(fe: FileErr): ServiceErr {
+        return ServiceErr { message: "Transformed from FileErr" };
+    }
+}
+
+fn run_pipeline(): string ! ServiceErr {
+    let content = open_file("missing.txt")?; // 自动调用 ServiceErr.from(FileErr.NotFound)
+    return content;
+}
+```
+
+---
+
+#### 8.2.3 全景 `switch` 模式匹配错误解构
+
+CP 的 `switch` 具备一流的**错误联合值解构与分支匹配**能力，无需手工解包即可在单个 `switch` 表达式中同时处理成功值与各类错误形式：
+
+| 匹配模式                | 示例语法                                                       | 语义说明                                     |
+| ----------------------- | -------------------------------------------------------------- | -------------------------------------------- |
+| **具名错误变体**        | `FileErr.NotFound => ...` / `.NotFound => ...`                 | 匹配具名错误集中的指定标签                   |
+| **枚举错误包裹**        | `err(HttpError.BadRequest) => ...` / `err(.BadRequest) => ...` | 匹配经 `err()` 包裹的枚举错误变体            |
+| **动态 Err 代码与信息** | `err(404, "record not found") => ...` / `err(404, msg) => ...` | 匹配动态 Err 的特定 code 与 msg              |
+| **动态 Err 变量解构**   | `err(code, msg) => ...`                                        | 提取动态 Err 的错误码与错误描述字符串        |
+| **动态 Err 单参数匹配** | `err("timeout") => ...` / `err(500) => ...`                    | 按消息字符串或错误码单维度匹配               |
+| **即席错误标签**        | `err.InvalidPadding => ...`                                    | 匹配 AnyErr / anyerror 中的具体静态错误标签  |
+| **通用捕获通配符**      | `err(e) => ...` / `err => ...`                                 | 兜底捕获未匹配的任意错误对象或标签           |
+| **正常成功值**          | `val => ...`                                                   | 当表达式未发生错误时，提取解包后的成功载荷值 |
+
+```typescript
+fn inspect_outcome(res: string ! FileErr) {
+    switch (res) {
+        .NotFound => print("文件未找到"),
+        .AccessDenied => print("无权访问"),
+        content => print("成功读取内容:", content)
+    }
+}
+
+fn inspect_dynamic(res: string ! Err) {
+    switch (res) {
+        err(404, msg) => print("404 资源未找到:", msg),
+        err(code, msg) => print("通用业务错误:", code, msg),
+        err(e) => print("其他错误:", e),
+        data => print("业务执行成功:", data)
+    }
+}
+```
+
+---
+
+#### 8.2.4 胖指针动态错误与 `downcast` 运行时类型还原（双轨解构语法）
+
+针对极其复杂的微服务错误栈或插件体系，CP 提供了与 Rust 类似但更轻量安全的 **`Box<dyn Trait>` 胖指针与 `downcast` 机制**：
+
+- 动态错误 `Err` 可通过 `Err.with_cause(move box_err)` 挂载堆上动态分配的胖指针；
+- 在模式匹配与函数调用中，**双轨支持 `:` 与 `:=`（Walrus 海象解构符）**，均能精确向下转型并绑定解构后的具体错误实例：
+  - `err(e: ConcreteError) => ...`（类型窄化匹配与绑定）
+  - `err(e := ConcreteError) => ...`（显式解构赋值与绑定）
+- 两种写法在语义与底层发射上完全等价，在成功 downcast 后，变量 `e` 将安全获得 `*const ConcreteError` 具体类型指针，支持直接访问其属性与方法：
+
+```typescript
+switch (res) {
+    // 语法 1：类型窄化风格
+    err(e: TimeoutError) => {
+        print("精确匹配到超时错误实例，重试时长:", e.retry_after);
+    },
+    // 语法 2：Walrus 海象解构绑定风格（完全等价）
+    err(e := SqlError) => {
+        print("精确匹配到 SQL 错误实例，SQLState:", e.sql_state);
+    },
+    err(500, msg) => print("通用 500 业务错误:", msg),
+    err(e) => print("其他泛型错误:", e),
+    ok_val => print("成功结果:", ok_val)
+}
+```
+
+---
+
+#### 8.2.5 普通类型转换为错误类型体系（对标 Rust 乃至超越）
+
+在 CP 语言中，错误类型不仅限于 Zig 的轻量全局枚举，更具备 Rust 般强大的全类型抽象能力：
+
+1. **已实装的错误类型形态**：
+   - **Zig 原生轻量错误集**：`err FileErr { ... }`、全局 `AnyErr`（`anyerror`）、匿名即席集合 `err{A, B}`；
+   - **动态业务错误**：内置 `Err`（`code`, `msg`, `cause`），原 `Error` 保持完全兼容；
+   - **普通枚举转错误**：`enum HttpError`，通过 `err(HttpError.BadRequest)` 包裹升格为错误；
+   - **多态胖指针错误**：`Box<dyn Trait>`，通过 `downcast` 还原为具体实例；
+   - **错误集联合**：`FileErr || NetErr`、`FileErr || err{...}`、`FileErr || Err`。
+
+2. **错误类型扩展蓝图（后续演化路线）**：
+   - **自定义结构体错误**：支持任意结构体实现错误 Trait 后，通过 `err(MyStruct { ... })` 直接升格为强类型错误；
+   - **标量即席错误**：支持直接将字符串字面量或数字作为轻量即席错误：`return err("not found")` 或 `return err(404)`；
+   - **声明式 `From` 自动链式传播**：如同 Rust `std::convert::From`，在 `?` 传播时根据 `pub fn from(...)` 自动完成错误转换。
 
 ---
 

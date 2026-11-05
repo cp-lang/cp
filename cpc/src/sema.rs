@@ -65,6 +65,8 @@ pub enum SemaError {
         "Compile Error: Destructuring pattern cannot contain multiple '...' rest elements at {0:?}"
     )]
     MultipleRestInPattern(Span),
+    #[error("Compile Error: {0} at {1:?}")]
+    PrivateAccess(String, Span),
 }
 
 pub type SemaResult<T> = Result<T, SemaError>;
@@ -105,6 +107,7 @@ pub struct Analyzer {
     pub macro_call_stack: Vec<(String, String)>,
     pub loop_borrowed_vars: std::collections::HashSet<String>,
     pub moved_vars: std::collections::HashSet<String>,
+    pub current_class: Option<String>,
 }
 
 impl Analyzer {
@@ -199,6 +202,7 @@ impl Analyzer {
             macro_call_stack: Vec::new(),
             loop_borrowed_vars: std::collections::HashSet::new(),
             moved_vars: std::collections::HashSet::new(),
+            current_class: None,
         }
     }
 
@@ -221,6 +225,7 @@ impl Analyzer {
             is_ref: false,
             meta: Vec::new(),
             extra_zig: vec![],
+            is_pub: true,
         };
         self.classes
             .insert("RegExp".to_string(), regex_class.clone());
@@ -238,6 +243,7 @@ impl Analyzer {
             is_ref: false,
             meta: Vec::new(),
             extra_zig: vec![],
+            is_pub: true,
         };
         self.classes.insert("Set".to_string(), set_class.clone());
         self.scopes[0].insert("Set".to_string(), SymbolKind::Class(set_class));
@@ -255,6 +261,7 @@ impl Analyzer {
             is_ref: false,
             meta: Vec::new(),
             extra_zig: vec![],
+            is_pub: true,
         };
         self.classes.insert("Map".to_string(), map_class.clone());
         self.scopes[0].insert("Map".to_string(), SymbolKind::Class(map_class));
@@ -272,6 +279,7 @@ impl Analyzer {
             is_ref: false,
             meta: Vec::new(),
             extra_zig: vec![],
+            is_pub: true,
         };
         self.classes.insert("Dict".to_string(), dict_class.clone());
         self.scopes[0].insert("Dict".to_string(), SymbolKind::Class(dict_class));
@@ -292,6 +300,7 @@ impl Analyzer {
                     ty: Type::I32,
                     meta: Vec::new(),
                     default: None,
+                    is_pub: true,
                 },
                 crate::ast::Field {
                     span: mock_span.clone(),
@@ -302,6 +311,7 @@ impl Analyzer {
                     ty: Type::String,
                     meta: Vec::new(),
                     default: None,
+                    is_pub: true,
                 },
             ],
             methods: vec![],
@@ -310,10 +320,13 @@ impl Analyzer {
             is_ref: false,
             meta: Vec::new(),
             extra_zig: vec![],
+            is_pub: true,
         };
         self.classes
             .insert("Error".to_string(), error_class.clone());
-        self.scopes[0].insert("Error".to_string(), SymbolKind::Class(error_class));
+        self.scopes[0].insert("Error".to_string(), SymbolKind::Class(error_class.clone()));
+        self.classes.insert("Err".to_string(), error_class.clone());
+        self.scopes[0].insert("Err".to_string(), SymbolKind::Class(error_class));
 
         let box_class = crate::ast::Class {
             span: mock_span.clone(),
@@ -328,6 +341,7 @@ impl Analyzer {
             is_ref: false,
             meta: Vec::new(),
             extra_zig: vec![],
+            is_pub: true,
         };
         self.classes.insert("Box".to_string(), box_class.clone());
         self.scopes[0].insert("Box".to_string(), SymbolKind::Class(box_class));
@@ -353,6 +367,7 @@ impl Analyzer {
                     },
                     args: vec![],
                 }],
+                is_pub: true,
             };
             self.classes.insert(reflect_name.to_string(), cls.clone());
             self.scopes[0].insert(reflect_name.to_string(), SymbolKind::Class(cls));
@@ -383,6 +398,7 @@ impl Analyzer {
                 is_ref: false,
                 extra_zig: vec![],
                 meta: vec![],
+                is_pub: true,
             };
             self.classes.insert(name.to_string(), cls.clone());
             self.scopes[0].insert(name.to_string(), SymbolKind::Class(cls));
@@ -617,15 +633,11 @@ impl Analyzer {
                         }
                     }
                 }
-                // Auto-generate memberwise init if not present and fields are non-empty (exempting @root, @value, @packed, @extern structs)
+                // Auto-generate memberwise init if not present and fields are non-empty (exempting @root and @value structs)
                 let is_root = cls.meta.iter().any(|m| m.name.sym == "root");
                 let is_value = cls.meta.iter().any(|m| m.name.sym == "value");
-                let is_packed = cls.meta.iter().any(|m| m.name.sym == "packed");
-                let is_extern = cls.meta.iter().any(|m| m.name.sym == "extern");
                 if !is_root
                     && !is_value
-                    && !is_packed
-                    && !is_extern
                     && !cls.methods.iter().any(|m| m.ident.sym == "init")
                     && !cls.fields.is_empty()
                 {
@@ -675,6 +687,7 @@ impl Analyzer {
                             is_static: false,
                             is_unsafe: false,
                             meta: vec![],
+                            is_pub: true,
                         },
                     );
                 }
@@ -751,6 +764,7 @@ impl Analyzer {
             is_static: false,
             is_unsafe: false,
             meta: vec![],
+            is_pub: true,
         }
     }
 
@@ -828,6 +842,7 @@ impl Analyzer {
             is_static: false,
             is_unsafe: false,
             meta: vec![],
+            is_pub: true,
         }
     }
 
@@ -918,6 +933,7 @@ impl Analyzer {
             is_static: false,
             is_unsafe: false,
             meta: vec![],
+            is_pub: true,
         }
     }
 
@@ -958,6 +974,7 @@ impl Analyzer {
             is_static: false,
             is_unsafe: false,
             meta: vec![],
+            is_pub: true,
         }
     }
 
@@ -1061,6 +1078,7 @@ impl Analyzer {
             is_static: false,
             is_unsafe: false,
             meta: vec![], // Macro Hygiene!
+            is_pub: true,
         }
     }
 
@@ -1094,6 +1112,7 @@ impl Analyzer {
             is_static: false,
             is_unsafe: false,
             meta: vec![],
+            is_pub: true,
         }
     }
 
@@ -1152,6 +1171,7 @@ impl Analyzer {
             is_static: false,
             is_unsafe: false,
             meta: vec![],
+            is_pub: true,
         }
     }
 
@@ -1191,6 +1211,7 @@ impl Analyzer {
             is_static: false,
             is_unsafe: false,
             meta: vec![],
+            is_pub: true,
         }
     }
 
@@ -1242,10 +1263,13 @@ impl Analyzer {
                     }
                 }
 
+                let mut subst_ordered: Vec<(&String, &String)> = subst.iter().collect();
+                subst_ordered.sort_by_key(|(k, _)| std::cmp::Reverse(k.len()));
+
                 let mut expanded = Vec::new();
                 for m in &macro_def.methods {
                     let mut instantiated = m.clone();
-                    Self::substitute_function(&mut instantiated, &subst);
+                    Self::substitute_function(&mut instantiated, &subst_ordered);
                     instantiated.meta.clear(); // Macro Hygiene!
                     expanded.push(instantiated);
                 }
@@ -1269,14 +1293,14 @@ impl Analyzer {
         }
     }
 
-    fn substitute_type(ty: &mut Type, subst: &HashMap<String, String>) {
+    fn substitute_type(ty: &mut Type, subst: &[(&String, &String)]) {
         match ty {
             Type::Ref(id) => {
                 for (k, v) in subst {
-                    if id.sym == *k {
-                        id.sym = v.clone();
-                    } else if id.sym.contains(k) {
-                        id.sym = id.sym.replace(k, v);
+                    if id.sym == **k {
+                        id.sym = (*v).clone();
+                    } else if id.sym.contains(*k) {
+                        id.sym = id.sym.replace(*k, v);
                     }
                 }
                 match id.sym.as_str() {
@@ -1302,12 +1326,12 @@ impl Analyzer {
         }
     }
 
-    fn substitute_function(func: &mut Function, subst: &HashMap<String, String>) {
+    fn substitute_function(func: &mut Function, subst: &[(&String, &String)]) {
         for (k, v) in subst {
-            if func.ident.sym == *k {
-                func.ident.sym = v.clone();
-            } else if func.ident.sym.contains(k) {
-                func.ident.sym = func.ident.sym.replace(k, v);
+            if func.ident.sym == **k {
+                func.ident.sym = (*v).clone();
+            } else if func.ident.sym.contains(*k) {
+                func.ident.sym = func.ident.sym.replace(*k, v);
             }
         }
         if let Some(ret) = &mut func.return_type {
@@ -1315,10 +1339,10 @@ impl Analyzer {
         }
         for p in &mut func.params {
             for (k, v) in subst {
-                if p.ident.sym == *k {
-                    p.ident.sym = v.clone();
-                } else if p.ident.sym.contains(k) {
-                    p.ident.sym = p.ident.sym.replace(k, v);
+                if p.ident.sym == **k {
+                    p.ident.sym = (*v).clone();
+                } else if p.ident.sym.contains(*k) {
+                    p.ident.sym = p.ident.sym.replace(*k, v);
                 }
             }
             Self::substitute_type(&mut p.ty, subst);
@@ -1328,7 +1352,7 @@ impl Analyzer {
         }
     }
 
-    fn substitute_stmt(stmt: &mut Stmt, subst: &HashMap<String, String>) {
+    fn substitute_stmt(stmt: &mut Stmt, subst: &[(&String, &String)]) {
         match stmt {
             Stmt::Expr(e) => Self::substitute_expr(e, subst),
             Stmt::Return(r) => {
@@ -1360,10 +1384,10 @@ impl Analyzer {
             Stmt::Var(v) => {
                 if let Pattern::Ident(id) = &mut v.pat {
                     for (k, v_sub) in subst {
-                        if id.sym == *k {
-                            id.sym = v_sub.clone();
-                        } else if id.sym.contains(k) {
-                            id.sym = id.sym.replace(k, v_sub);
+                        if id.sym == **k {
+                            id.sym = (*v_sub).clone();
+                        } else if id.sym.contains(*k) {
+                            id.sym = id.sym.replace(*k, v_sub);
                         }
                     }
                 }
@@ -1378,24 +1402,24 @@ impl Analyzer {
         }
     }
 
-    fn substitute_expr(expr: &mut Expr, subst: &HashMap<String, String>) {
+    fn substitute_expr(expr: &mut Expr, subst: &[(&String, &String)]) {
         match expr {
             Expr::Ident(id) => {
                 for (k, v) in subst {
-                    if id.sym == *k {
-                        id.sym = v.clone();
-                    } else if id.sym.contains(k) {
-                        id.sym = id.sym.replace(k, v);
+                    if id.sym == **k {
+                        id.sym = (*v).clone();
+                    } else if id.sym.contains(*k) {
+                        id.sym = id.sym.replace(*k, v);
                     }
                 }
             }
             Expr::Member(m) => {
                 Self::substitute_expr(&mut m.obj, subst);
                 for (k, v) in subst {
-                    if m.prop.sym == *k {
-                        m.prop.sym = v.clone();
-                    } else if m.prop.sym.contains(k) {
-                        m.prop.sym = m.prop.sym.replace(k, v);
+                    if m.prop.sym == **k {
+                        m.prop.sym = (*v).clone();
+                    } else if m.prop.sym.contains(*k) {
+                        m.prop.sym = m.prop.sym.replace(*k, v);
                     }
                 }
             }
@@ -1411,16 +1435,16 @@ impl Analyzer {
             }
             Expr::Lit(Lit::Str(s)) => {
                 for (k, v) in subst {
-                    if s.contains(k) {
-                        *s = s.replace(k, v);
+                    if s.contains(*k) {
+                        *s = s.replace(*k, v);
                     }
                 }
             }
             Expr::Template(t) => {
                 for q in &mut t.quasis {
                     for (k, v) in subst {
-                        if q.contains(k) {
-                            *q = q.replace(k, v);
+                        if q.contains(*k) {
+                            *q = q.replace(*k, v);
                         }
                     }
                 }
@@ -1704,6 +1728,8 @@ impl Analyzer {
                         self.validate_meta_items(&p.meta, "param")?;
                     }
                 }
+                let old_class = self.current_class.clone();
+                self.current_class = Some(c.ident.sym.clone());
                 for m in &c.methods {
                     let old_async = self.current_fn_is_async;
                     let old_unsafe = self.current_fn_is_unsafe;
@@ -1817,6 +1843,7 @@ impl Analyzer {
                     self.current_fn_is_async = old_async;
                     self.current_fn_is_unsafe = old_unsafe;
                 }
+                self.current_class = old_class;
             }
             Decl::Trait(t) => {
                 self.validate_meta_items(&t.meta, "trait")?;
@@ -2305,6 +2332,38 @@ impl Analyzer {
                     }
                 }
                 if let Expr::Member(mem) = &*call.callee {
+                    if let Ok(obj_ty) = self.infer_type(&mem.obj) {
+                        let base_ty = match &obj_ty {
+                            Type::BorrowType { inner, .. } | Type::RawPtr { inner, .. } => {
+                                inner.as_ref()
+                            }
+                            other => other,
+                        };
+                        if let Type::Ref(cid) = base_ty {
+                            if let Some(cls) = self.classes.get(&cid.sym) {
+                                if let Some(m) =
+                                    cls.methods.iter().find(|m| m.ident.sym == mem.prop.sym)
+                                {
+                                    let is_lifecycle = m.ident.sym == "init"
+                                        || m.ident.sym == "release"
+                                        || m.ident.sym == "_create"
+                                        || m.ident.sym.starts_with("__");
+                                    if !m.is_pub
+                                        && !is_lifecycle
+                                        && self.current_class.as_deref() != Some(&cid.sym)
+                                    {
+                                        return Err(SemaError::PrivateAccess(
+                                            format!(
+                                                "Cannot call private method '{}' of class '{}'",
+                                                mem.prop.sym, cid.sym
+                                            ),
+                                            mem.prop.span,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
                     if let Expr::Ident(id) = &*mem.obj {
                         if self.loop_borrowed_vars.contains(&id.sym) {
                             let prop = mem.prop.sym.as_str();
@@ -2343,6 +2402,32 @@ impl Analyzer {
             }
             Expr::Member(member) | Expr::OptMember(member) => {
                 self.analyze_expr(&member.obj)?;
+                if let Ok(obj_ty) = self.infer_type(&member.obj) {
+                    let base_ty = match &obj_ty {
+                        Type::BorrowType { inner, .. } | Type::RawPtr { inner, .. } => {
+                            inner.as_ref()
+                        }
+                        other => other,
+                    };
+                    if let Type::Ref(cid) = base_ty {
+                        if let Some(cls) = self.classes.get(&cid.sym) {
+                            if let Some(field) =
+                                cls.fields.iter().find(|f| f.ident.sym == member.prop.sym)
+                            {
+                                if !field.is_pub && self.current_class.as_deref() != Some(&cid.sym)
+                                {
+                                    return Err(SemaError::PrivateAccess(
+                                        format!(
+                                            "Cannot access private field '{}' of class '{}'",
+                                            member.prop.sym, cid.sym
+                                        ),
+                                        member.prop.span,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
             }
             Expr::Slice(slice) => {
                 self.analyze_expr(&slice.obj)?;
@@ -3572,6 +3657,7 @@ impl Analyzer {
                             ty,
                             meta: Vec::new(),
                             default: None,
+                            is_pub: true,
                         };
                         if let Some(pos) =
                             fs.iter().position(|existing| existing.ident.sym == k.sym)

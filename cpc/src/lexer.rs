@@ -56,6 +56,9 @@ pub enum Token {
     #[token("export")]
     #[token("pub")]
     Export,
+    #[token("priv")]
+    #[token("private")]
+    Private,
     #[token("undefined")]
     Undefined,
     #[token("import")]
@@ -94,6 +97,8 @@ pub enum Token {
     New,
     #[token("error")]
     #[token("err")]
+    #[token("Error")]
+    #[token("Err")]
     ErrorKw,
     #[token("defer")]
     Defer,

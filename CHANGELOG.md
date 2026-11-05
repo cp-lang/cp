@@ -1382,3 +1382,76 @@
 - [`cap/test/test_err_and_move.cp`](file:///data/dev/cp/cap/test/test_err_and_move.cp):
   - 包含 `fn f(move u: User)`、`fn f(u: move User)`、`err(...)` 错误构造与模式匹配、大写 `Err(...)` 兼容性的全景回归测试，经 `./cap/bin/cap` 执行 100% 成功。
 
+---
+
+## 2026-11-05 (成员可见性 pub/priv 默认私有封装与统一错误体系 Err/AnyErr/T! 全景落地)
+
+### 修改文件 (Modified)
+- [`cpc/src/lexer.rs`](file:///data/dev/cp/cpc/src/lexer.rs):
+  - 注册 `priv` 与 `private` 关键字，解析为 `Token::Private`；
+  - 识别 `Err` 与 `Error` 关键字，统一归入 `Token::ErrorKw`。
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs):
+  - 在 `Field`、`Function`、`Class` AST 结构中增加 `is_pub: bool` 可见性修饰标记；
+  - 在 `ErrorType` 枚举中新增 `AnyErr` 变体，表示映射 Zig 底层 `anyerror` 的全局开放错误集合。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - `parse_class`: 字段与方法默认标记为私有（`is_pub = false`），遇到 `pub` / `export` 设置 `is_pub = true`，遇到 `priv` 设置 `is_pub = false`；
+  - `parse_macro_def`: 宏展开方法支持 `export` 与 `priv` 修饰符，内部辅助方法默认保持公开；
+  - `parse_error_type_rhs`: 映射 `AnyErr` / `anyerror` 为 `ErrorType::AnyErr`，映射 `Err` / `Error` 为 `ErrorType::DefaultError`；
+  - `parse_pattern` 与 `parse_primary_expr`: 全面支持多元动态错误 `err(code, msg)` / `err(msg)` 的语法解析与元组模式匹配。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 新增 `SemaError::PrivateAccess(String, Span)`；
+  - 维护 `current_class: Option<String>` 上下文跟踪当前分析所在的类作用域；
+  - 在 `Expr::Member`（属性访问）与 `Expr::Call`（方法调用）中严格校验成员可见性：跨类访问非 `is_pub` 成员立即在编译期抛出清晰错误；
+  - **特权豁免**：生命周期方法（`init`、`release`、`_create`、`__*`）以及类自身内部访问（`this` / `_` / 裸标识符）均合法放行；
+  - 修复宏模板替换按长度降序排序（`subst_ordered`），彻底消除 `${field}` 与 `field` 子串替换碰撞冲突。
+- [`cpc/src/dcp.rs`](file:///data/dev/cp/cpc/src/dcp.rs):
+  - 适配 `ErrorType::AnyErr => "AnyErr"` 与 `DefaultError => "Err"` 的反向格式化输出。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 发射 Zig 原生 `Err` 结构体（包含 `code: i32`、`msg: []const u8`、`cause: ?*anyopaque`，以及 `init`、`with_cause`、`downcast` 方法），并注入 `pub const Error = Err;` 兼容别名；
+  - 生成 `cp_convert_err` 辅助函数，优先通过 `@hasDecl(TargetErr, "from")` 执行用户自定义声明式转换，或将任意错误包装提升为动态 `Err`；
+  - 生成 `cp_has_ok_val`、`cp_unwrap_ok_val` 与 `cp_unwrap_err_val`，抹平 Zig 原生 `anyerror!T` 与 `CpResult` 在 Switch 模式匹配中的语法差异；
+  - 在 `Stmt::Return` 中设立静态安全防线：若函数返回类型为 `T!`（`AnyErr`），严禁返回动态 `err(...)`，编译器直接拦截报错；
+  - 修复类方法中异步回调状态机名称格式化（`ComplexAgent.onMessage`）；
+  - 优化函数丢弃语句为 `_ = &self;`，防止 Zig 报 `pointless discard`；
+  - 跟踪 `drop_flag_vars`，仅在真正声明过 drop flag 的变量上生成 `__{}_moved = true;`。
+- [`lib/cap/http.cp`](file:///data/dev/cp/lib/cap/http.cp):
+  - 依据类成员默认私有规则，为 `Request`、`Response`、`Server` 成员属性与方法补齐 `pub` 公开修饰符。
+- [`lib/cap/sqlite.cp`](file:///data/dev/cp/lib/cap/sqlite.cp):
+  - 补齐导出类的 `pub` 成员修饰符。
+- [`cap/test/test_all_libs.cp`](file:///data/dev/cp/cap/test/test_all_libs.cp):
+  - 适配公开访问属性的 `pub` 声明。
+- [`cap/test/test_macro_pass.cp`](file:///data/dev/cp/cap/test/test_macro_pass.cp):
+  - 适配宏生成方法的 `pub` 声明。
+- [`cap/test/test_trait_class_pass.cp`](file:///data/dev/cp/cap/test/test_trait_class_pass.cp):
+  - 适配测试类的 `pub` 声明。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 第 5.12.2 节详述类与结构体成员 `pub` / `priv` 访问控制与默认私有封装规范及代码示例；
+  - 第 8.2 节全景重构为统一错误体系规范（`Err` 与 `Error` 别名、`T!` 作为 `T ! AnyErr` 省略、具名错误集 vs 普通枚举、自动转换与 `from` 桥接、全景 `switch` 模式匹配与 `downcast` 胖指针还原）。
+
+### 新增文件 (Added)
+- [`cap/test/test_pub_priv.cp`](file:///data/dev/cp/cap/test/test_pub_priv.cp):
+  - 长期回归测试用例，覆盖属性/方法 `pub` 导出、默认私有封装、内部方法/属性自由访问、生命周期构造器豁免、以及外部私有访问编译期精准拦截。
+- [`cap/test/test_unified_errors.cp`](file:///data/dev/cp/cap/test/test_unified_errors.cp):
+  - 长期回归测试用例，覆盖具名错误集 `FileErr`、普通枚举错误 `HttpError`、业务动态错误 `Err`、全局推导错误 `AnyErr` / `T!`、`?` 自动转换、声明式 `from`、全景 `switch` 错误匹配解构与 `downcast` 动态向下转型。
+- [`cap/test/test_error_union_downcast.cp`](file:///data/dev/cp/cap/test/test_error_union_downcast.cp):
+  - 长期回归测试用例，覆盖具名与匿名即席联合声明（`FileErr || err{Timeout, Canceled}`）、具名与动态 Err 联合声明（`FileErr || Err`）、以及 `switch` 下对 `err(e: ConcreteError)` 与 `err(e := ConcreteError)` 动态胖指针双轨解构。
+
+### 修改文件 (Modified - cpc 正式合并与 Release 发布)
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - 新增 `in_paren_pattern: usize` 状态计数，精确区分 Switch 分支顶层逗号（多模式 `case A, B =>`）与括号内部模式（`err(code, msg)` 元组模式）逗号，杜绝多元错误模式被误判为 `Pattern::Or`；
+  - 扩展 `parse_error_type_rhs`：支持 `||` 运算符并允许在错误类型联合中直接使用 `error{A, B}` 或 `err{A, B}` 匿名集合；
+  - 修复 `Token::ErrorKw` 解析：仅当小写 `err.` / `error.` 时替换为 `error` 命名空间，严格保留大写 `Err.` / `Error.` 作为标识符调用 `Err.init(...)`。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 统一映射多错误联合：全原生错误集合并发射为 Zig 零开销 `(Set1 || Set2)!T`；包含 `Err` 时发射为统一契约 `CpResult(T, Err)`；
+  - 支持 `err(e := ConcreteError)` 与 `err(e: ConcreteError)` 双轨 Walrus / Colon 动态向下转型与实例绑定；
+  - 增强 `Err.with_cause` 与 `downcast`：智能识别 Trait Object（`.ptr` 与 `.vtable`）并记录 `type_id`，安全解构真实堆实例；
+  - 扩展 `collect_err_variants_for_type` 自动解析联合集合中包含的匿名 `error{...}` 变体，消除 switch 匹配歧义。
+- [`cap/bin/cpc`](file:///data/dev/cp/cap/bin/cpc):
+  - 正式发布 release 版本独立编译器二进制。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 补充 5 种函数错误签名规范（`T!`、`T!Set`、`T!S1 || S2`、`T!S1 || err{...}`、`T!S1 || Err`）；
+  - 详述 Switch 模式匹配对 `err(e: T)` 与 `err(e := T)` 的双轨支持；
+  - 梳理普通类型转换为错误类型的全景蓝图（对标 Rust 乃至超越）。
+
+
+

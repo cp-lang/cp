@@ -162,6 +162,8 @@ pub struct Class {
     pub meta: Vec<MetaItem>,
     #[serde(default)]
     pub extra_zig: Vec<String>,
+    #[serde(default)]
+    pub is_pub: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -178,6 +180,8 @@ pub struct Function {
     pub is_unsafe: bool,
     #[serde(default)]
     pub meta: Vec<MetaItem>,
+    #[serde(default)]
+    pub is_pub: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -555,6 +559,7 @@ pub enum ErrorType {
     AnonSet(Vec<Ident>),
     BoxDyn(Ident),
     DefaultError,
+    AnyErr,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -632,6 +637,8 @@ pub struct Field {
     pub meta: Vec<MetaItem>,
     #[serde(default)]
     pub default: Option<Expr>,
+    #[serde(default)]
+    pub is_pub: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

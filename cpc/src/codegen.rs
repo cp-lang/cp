@@ -492,6 +492,8 @@ pub struct Codegen {
     globals: HashSet<String>,
     lambda_funcs: Vec<String>,
     current_zig_fn_name: String,
+    current_fn_zig_name: String,
+    pub drop_flag_vars: HashSet<String>,
     is_class_method: bool,
     is_main: bool,
     pub moved_vars: HashSet<String>,
@@ -555,6 +557,8 @@ impl Codegen {
             globals: HashSet::new(),
             lambda_funcs: Vec::new(),
             current_zig_fn_name: String::new(),
+            current_fn_zig_name: String::new(),
+            drop_flag_vars: HashSet::new(),
             is_class_method: false,
             is_main: false,
             moved_vars: HashSet::new(),
@@ -740,17 +744,51 @@ impl Codegen {
 
     pub fn map_error_type(&self, err: &ErrorType) -> String {
         match err {
-            ErrorType::Named(id) => id.sym.clone(),
+            ErrorType::Named(id) => {
+                if id.sym == "Err" || id.sym == "Error" || id.sym == "err" || id.sym == "error" {
+                    "Err".to_string()
+                } else if id.sym == "AnyErr" || id.sym == "anyErr" || id.sym == "anyerror" {
+                    "anyerror".to_string()
+                } else if self.class_defs.contains_key(&id.sym) {
+                    format!("*{}", id.sym)
+                } else {
+                    id.sym.clone()
+                }
+            }
             ErrorType::Union(idents) => {
-                let names: Vec<String> = idents.iter().map(|i| i.sym.clone()).collect();
-                format!("__UnionErr_{}", names.join("_"))
+                let has_err = idents
+                    .iter()
+                    .any(|i| i.sym == "Err" || i.sym == "Error" || i.sym == "err");
+                if has_err {
+                    "Err".to_string()
+                } else if idents.iter().all(|i| {
+                    self.error_sets.contains_key(&i.sym)
+                        || i.sym.starts_with("error{")
+                        || i.sym == "anyerror"
+                }) {
+                    let names: Vec<String> = idents
+                        .iter()
+                        .map(|i| {
+                            if i.sym == "anyerror" {
+                                "anyerror".to_string()
+                            } else {
+                                i.sym.clone()
+                            }
+                        })
+                        .collect();
+                    format!("({})", names.join(" || "))
+                } else {
+                    let names: Vec<String> = idents.iter().map(|i| i.sym.clone()).collect();
+                    format!("__UnionErr_{}", names.join("_"))
+                }
             }
             ErrorType::AnonSet(idents) => {
                 let names: Vec<String> = idents.iter().map(|i| i.sym.clone()).collect();
                 format!("__AnonErr_{}", names.join("_"))
             }
             ErrorType::BoxDyn(id) => id.sym.clone(),
-            ErrorType::DefaultError => "Error".to_string(),
+            ErrorType::DefaultError => "Err".to_string(),
+            ErrorType::AnyErr => "anyerror".to_string(),
         }
     }
 
@@ -773,10 +811,20 @@ impl Codegen {
                         }
                     }
                     ErrorType::Union(idents) => {
-                        let zig_name = self.map_error_type(err);
-                        if !self.union_err_sets.iter().any(|(n, _)| n == &zig_name) {
-                            let sub_names = idents.iter().map(|i| i.sym.clone()).collect();
-                            self.union_err_sets.push((zig_name, sub_names));
+                        let has_err = idents
+                            .iter()
+                            .any(|i| i.sym == "Err" || i.sym == "Error" || i.sym == "err");
+                        let all_err_sets = idents.iter().all(|i| {
+                            self.error_sets.contains_key(&i.sym)
+                                || i.sym.starts_with("error{")
+                                || i.sym == "anyerror"
+                        });
+                        if !has_err && !all_err_sets {
+                            let zig_name = self.map_error_type(err);
+                            if !self.union_err_sets.iter().any(|(n, _)| n == &zig_name) {
+                                let sub_names = idents.iter().map(|i| i.sym.clone()).collect();
+                                self.union_err_sets.push((zig_name, sub_names));
+                            }
                         }
                     }
                     _ => {}
@@ -851,7 +899,12 @@ impl Codegen {
         }
         let src_name = self.map_error_type(src);
         let dst_name = self.map_error_type(dst);
-        if src_name == dst_name || dst_name == "Error" {
+        if src_name == dst_name
+            || dst_name == "Error"
+            || dst_name == "Err"
+            || dst_name == "anyerror"
+            || dst_name == "AnyErr"
+        {
             return;
         }
         match (src, dst) {
@@ -1304,6 +1357,7 @@ impl Codegen {
                                 is_static: false,
                                 is_unsafe: tm.is_unsafe,
                                 meta: Vec::new(),
+                                is_pub: true,
                             };
                             if let Some(cls) = self.class_defs.get_mut(c_name) {
                                 cls.methods.push(synth_fn);
@@ -1412,13 +1466,27 @@ impl Codegen {
                 "    return union(enum) { ok: T, err: E, pub const __IS_CP_RESULT = true; };",
             );
             self.writeln("}");
-            self.writeln("pub const Error = struct {");
+            self.writeln("pub const Err = struct {");
             self.writeln("    code: i32 = 0,");
             self.writeln("    msg: []const u8 = \"\",");
             self.writeln("    cause: ?*const anyopaque = null,");
+            self.writeln("    cause_type_id: u64 = 0,");
             self.writeln("    pub const __TYPE_ID: u64 = 0xEE00_0000_0000_0001;");
-            self.writeln("    pub fn init(code: i32, msg: []const u8) Error { return Error{ .code = code, .msg = msg }; }");
+            self.writeln("    pub fn init(code: i32, msg: []const u8) Err { return Err{ .code = code, .msg = msg }; }");
+            self.writeln("    pub fn with_cause(self: Err, cause: anytype) Err { const CType = @TypeOf(cause); var ptr: ?*const anyopaque = null; var tid: u64 = 0; if (comptime @hasField(CType, \"ptr\")) { ptr = @ptrCast(cause.ptr); if (comptime @hasField(CType, \"vtable\")) { tid = cause.vtable.__type_id; } } else if (comptime @typeInfo(CType) == .pointer) { ptr = @ptrCast(cause); const Child = @typeInfo(CType).pointer.child; if (comptime @hasDecl(Child, \"__TYPE_ID\")) { tid = Child.__TYPE_ID; } } else if (comptime @typeInfo(CType) == .optional) { if (cause) |c| return self.with_cause(c); } else { if (comptime @hasDecl(CType, \"__TYPE_ID\")) { tid = CType.__TYPE_ID; } ptr = @ptrCast(&cause); } return Err{ .code = self.code, .msg = self.msg, .cause = ptr, .cause_type_id = tid }; }");
+            self.writeln("    pub fn downcast(self: Err, comptime Target: type) ?*const Target {");
+            self.writeln("        if (self.cause) |c| {");
+            self.writeln("            if (comptime @hasDecl(Target, \"__TYPE_ID\")) {");
+            self.writeln("                if (self.cause_type_id != 0 and self.cause_type_id != Target.__TYPE_ID) {");
+            self.writeln("                    return null;");
+            self.writeln("                }");
+            self.writeln("            }");
+            self.writeln("            return @ptrCast(@alignCast(c));");
+            self.writeln("        }");
+            self.writeln("        return null;");
+            self.writeln("    }");
             self.writeln("};");
+            self.writeln("pub const Error = Err;");
             self.writeln("fn is_cp_result(comptime T: type) bool {");
             self.writeln(
                 "    return @typeInfo(T) == .@\"union\" and @hasDecl(T, \"__IS_CP_RESULT\");",
@@ -2227,12 +2295,14 @@ impl Codegen {
         }
 
         if !self.is_lib_mode && features.needs_result_error {
-            self.writeln("fn CpUnwrapOkType(comptime T: type) type { if (is_cp_result(T)) { const OkT = @FieldType(T, \"ok\"); if (@typeInfo(OkT) == .optional) return @typeInfo(OkT).optional.child; return OkT; } if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child; return T; }");
-            self.writeln("fn cp_has_ok_val(v: anytype) bool { const T = @TypeOf(v); if (comptime is_cp_result(T)) { if (v != .ok) return false; const OkT = @FieldType(T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok != null; } else { return true; } } else if (comptime @typeInfo(T) == .optional) { return v != null; } else { return true; } }");
-            self.writeln("fn cp_unwrap_ok_val(v: anytype) CpUnwrapOkType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_cp_result(T)) { const OkT = @FieldType(T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok.?; } else { return v.ok; } } else if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; } }");
+            self.writeln("fn CpUnwrapOkType(comptime T: type) type { if (is_cp_result(T)) { const OkT = @FieldType(T, \"ok\"); if (@typeInfo(OkT) == .optional) return @typeInfo(OkT).optional.child; return OkT; } if (@typeInfo(T) == .error_union) return @typeInfo(T).error_union.payload; if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child; return T; }");
+            self.writeln("fn CpUnwrapErrType(comptime T: type) type { if (is_cp_result(T)) return @FieldType(T, \"err\"); if (@typeInfo(T) == .error_union) return @typeInfo(T).error_union.error_set; return anyerror; }");
+            self.writeln("fn cp_has_ok_val(v: anytype) bool { const T = @TypeOf(v); if (comptime is_cp_result(T)) { if (v != .ok) return false; const OkT = @FieldType(T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok != null; } else { return true; } } else if (comptime @typeInfo(T) == .error_union) { if (v) |_| return true else |_| return false; } else if (comptime @typeInfo(T) == .optional) { return v != null; } else { return true; } }");
+            self.writeln("fn cp_unwrap_ok_val(v: anytype) CpUnwrapOkType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_cp_result(T)) { const OkT = @FieldType(T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok.?; } else { return v.ok; } } else if (comptime @typeInfo(T) == .error_union) { return v catch unreachable; } else if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; } }");
+            self.writeln("fn cp_unwrap_err_val(v: anytype) CpUnwrapErrType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_cp_result(T)) return v.err; if (comptime @typeInfo(T) == .error_union) { if (v) |_| unreachable else |e| return e; } return v; }");
             self.writeln("fn cp_is_null_val(v: anytype) bool { const T = @TypeOf(v); if (comptime is_cp_result(T)) { if (v != .ok) return false; const OkT = @FieldType(T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok == null; } else { return false; } } else if (comptime @typeInfo(T) == .optional) { return v == null; } else { return false; } }");
-            self.writeln("fn cp_convert_err(comptime TargetErr: type, err_val: anytype) TargetErr { const SrcType = @TypeOf(err_val); if (comptime SrcType == TargetErr) { return err_val; } else if (comptime TargetErr == Error) { if (comptime @typeInfo(SrcType) == .@\"union\") { return Error{ .code = @intCast(@intFromEnum(std.meta.activeTag(err_val))), .msg = @tagName(err_val) }; } else if (comptime @typeInfo(SrcType) == .@\"enum\") { return Error{ .code = @intCast(@intFromEnum(err_val)), .msg = @tagName(err_val) }; } else { return Error{ .code = -1, .msg = \"error\" }; } } else if (comptime @typeInfo(TargetErr) == .@\"union\" and @hasDecl(TargetErr, \"__from\")) { return TargetErr.__from(err_val); } else { return err_val; } }");
-            self.writeln("fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@\"enum\") { return val == tag; } else { return std.meta.activeTag(val) == tag; } }");
+            self.writeln("fn cp_convert_err(comptime TargetErr: type, err_val: anytype) TargetErr { const SrcType = @TypeOf(err_val); if (comptime SrcType == TargetErr) { return err_val; } else if (comptime TargetErr == Err or TargetErr == Error) { if (comptime @typeInfo(SrcType) == .@\"union\") { return Err{ .code = @intCast(@intFromEnum(std.meta.activeTag(err_val))), .msg = @tagName(err_val) }; } else if (comptime @typeInfo(SrcType) == .@\"enum\") { return Err{ .code = @intCast(@intFromEnum(err_val)), .msg = @tagName(err_val) }; } else if (comptime @typeInfo(SrcType) == .error_set) { return Err{ .code = 0, .msg = @errorName(err_val) }; } else { return Err{ .code = -1, .msg = \"error\" }; } } else if (comptime @typeInfo(TargetErr) == .pointer and @typeInfo(SrcType) != .pointer) { return @ptrCast(&err_val); } else if (comptime @typeInfo(SrcType) == .pointer and @typeInfo(TargetErr) != .pointer and @typeInfo(SrcType).pointer.child == TargetErr) { return err_val.*; } else if (comptime @typeInfo(TargetErr) == .@\"union\" and @hasDecl(TargetErr, \"__from\")) { return TargetErr.__from(err_val); } else if (comptime @hasDecl(TargetErr, \"from\")) { return TargetErr.from(err_val); } else { return err_val; } }");
+            self.writeln("fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@\"enum\") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime T == Err or T == Error or (@typeInfo(T) == .@\"struct\" and @hasField(T, \"msg\"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@\"union\") { return std.meta.activeTag(val) == tag; } else { return false; } }");
         }
 
         if features.needs_not {
@@ -2461,11 +2531,7 @@ impl Codegen {
                 self.generate_enum(e);
             }
             if let ModuleItem::Decl(Decl::ErrorSet(es)) = item {
-                if self.is_lib_mode {
-                    self.writeln(&format!("pub const {} = error{{", es.ident.sym));
-                } else {
-                    self.writeln(&format!("pub const {} = union(enum) {{", es.ident.sym));
-                }
+                self.writeln(&format!("pub const {} = error{{", es.ident.sym));
                 self.indent();
                 for v in &es.variants {
                     self.writeln(&format!("{},", v.sym));
@@ -4639,8 +4705,39 @@ impl Codegen {
             Expr::Match(m) => {
                 let disc_ty = self.infer_cp_type_with_mock(&m.disc, mock_types);
                 for arm in &m.arms {
+                    let mut arm_mocks = mock_types.clone();
+                    match &arm.pat {
+                        Pattern::TypeMatch { ident, ty } => {
+                            arm_mocks.insert(ident.sym.clone(), ty.clone());
+                        }
+                        Pattern::Err(ip) => match &**ip {
+                            Pattern::TypeMatch { ident, ty } => {
+                                arm_mocks.insert(ident.sym.clone(), ty.clone());
+                            }
+                            Pattern::Binding { ident, subpat } => {
+                                if let Pattern::Ident(tid) = &**subpat {
+                                    arm_mocks.insert(ident.sym.clone(), Type::Ref(tid.clone()));
+                                }
+                            }
+                            Pattern::Ident(id) => {
+                                if let Some(Type::ResultType { err, .. }) = &disc_ty {
+                                    arm_mocks
+                                        .insert(id.sym.clone(), self.error_type_to_cp_type(err));
+                                }
+                            }
+                            _ => {}
+                        },
+                        Pattern::Ident(id) => {
+                            if let Some(Type::ResultType { ok, .. }) = &disc_ty {
+                                arm_mocks.insert(id.sym.clone(), (**ok).clone());
+                            } else if let Some(dt) = &disc_ty {
+                                arm_mocks.insert(id.sym.clone(), dt.clone());
+                            }
+                        }
+                        _ => {}
+                    }
                     if let Stmt::Expr(e) = &*arm.body {
-                        if let Some(t) = self.infer_cp_type_with_mock(e, mock_types) {
+                        if let Some(t) = self.infer_cp_type_with_mock(e, &arm_mocks) {
                             return Some(t);
                         }
                         if let (Pattern::Ident(pid), Expr::Ident(eid)) = (&arm.pat, e) {
@@ -4695,6 +4792,7 @@ impl Codegen {
                             ty,
                             meta: Vec::new(),
                             default: None,
+                            is_pub: true,
                         };
                         if let Some(pos) =
                             fs.iter().position(|existing| existing.ident.sym == k.sym)
@@ -4804,10 +4902,20 @@ impl Codegen {
             }
             ErrorType::Union(ids) => {
                 for id in ids {
-                    let sub = self.collect_err_variants_for_type(&ErrorType::Named(id.clone()));
-                    for s in sub {
-                        if !out.contains(&s) {
-                            out.push(s);
+                    if id.sym.starts_with("error{") && id.sym.ends_with('}') {
+                        let inner = &id.sym[6..id.sym.len() - 1];
+                        for item in inner.split(',') {
+                            let item = item.trim().to_string();
+                            if !item.is_empty() && !out.contains(&item) {
+                                out.push(item);
+                            }
+                        }
+                    } else {
+                        let sub = self.collect_err_variants_for_type(&ErrorType::Named(id.clone()));
+                        for s in sub {
+                            if !out.contains(&s) {
+                                out.push(s);
+                            }
                         }
                     }
                 }
@@ -4899,6 +5007,13 @@ impl Codegen {
                                     &mut has_err_catchall,
                                 );
                             }
+                            Pattern::Enum(ep)
+                                if required_err_variants.contains(&ep.variant_name.sym)
+                                    || ep.enum_name.sym == "err"
+                                    || ep.enum_name.sym == "error" =>
+                            {
+                                covered_err_variants.insert(ep.variant_name.sym.clone());
+                            }
                             Pattern::Ident(_) => {
                                 has_ok_catchall = true;
                             }
@@ -4912,6 +5027,15 @@ impl Codegen {
                                             &mut covered_err_variants,
                                             &mut has_err_catchall,
                                         ),
+                                        Pattern::Enum(ep)
+                                            if required_err_variants
+                                                .contains(&ep.variant_name.sym)
+                                                || ep.enum_name.sym == "err"
+                                                || ep.enum_name.sym == "error" =>
+                                        {
+                                            covered_err_variants
+                                                .insert(ep.variant_name.sym.clone());
+                                        }
                                         Pattern::Ident(_) => has_ok_catchall = true,
                                         _ => {}
                                     }
@@ -5099,13 +5223,34 @@ impl Codegen {
         match pat {
             Pattern::Wildcard => ("true".to_string(), String::new()),
             Pattern::Null => (format!("cp_is_null_val({})", val_expr), String::new()),
-            Pattern::Lit(Lit::Int(v)) => (format!("cp_eq({}, {})", val_expr, v), String::new()),
+            Pattern::Lit(Lit::Int(v)) => {
+                if let Some(Type::Ref(id)) = val_cp_ty {
+                    if id.sym == "Err" || id.sym == "Error" {
+                        return (format!("({}.code == {})", val_expr, v), String::new());
+                    }
+                }
+                (format!("cp_eq({}, {})", val_expr, v), String::new())
+            }
             Pattern::Lit(Lit::Float(f)) => (format!("cp_eq({}, {})", val_expr, f), String::new()),
             Pattern::Lit(Lit::Bool(b)) => (format!("cp_eq({}, {})", val_expr, b), String::new()),
-            Pattern::Lit(Lit::Str(s)) => (
-                format!("cp_eq({}, \"{}\")", val_expr, Self::escape_zig_string(s)),
-                String::new(),
-            ),
+            Pattern::Lit(Lit::Str(s)) => {
+                if let Some(Type::Ref(id)) = val_cp_ty {
+                    if id.sym == "Err" || id.sym == "Error" {
+                        return (
+                            format!(
+                                "cp_eq({}.msg, \"{}\")",
+                                val_expr,
+                                Self::escape_zig_string(s)
+                            ),
+                            String::new(),
+                        );
+                    }
+                }
+                (
+                    format!("cp_eq({}, \"{}\")", val_expr, Self::escape_zig_string(s)),
+                    String::new(),
+                )
+            }
             Pattern::Range {
                 start,
                 end,
@@ -5148,6 +5293,39 @@ impl Codegen {
                 }
             }
             Pattern::Tuple(pats) => {
+                if let Some(Type::Ref(id)) = val_cp_ty {
+                    if (id.sym == "Err" || id.sym == "Error") && pats.len() == 2 {
+                        let code_expr = format!("{}.code", val_expr);
+                        let msg_expr = format!("{}.msg", val_expr);
+                        let (c0, b0) = self.generate_pattern_match(
+                            &code_expr,
+                            known_variants,
+                            &pats[0],
+                            bound_types,
+                            Some(&Type::I32),
+                        );
+                        let (c1, b1) = self.generate_pattern_match(
+                            &msg_expr,
+                            known_variants,
+                            &pats[1],
+                            bound_types,
+                            Some(&Type::String),
+                        );
+                        let mut conds = Vec::new();
+                        if c0 != "true" {
+                            conds.push(c0);
+                        }
+                        if c1 != "true" {
+                            conds.push(c1);
+                        }
+                        let cond_str = if conds.is_empty() {
+                            "true".to_string()
+                        } else {
+                            format!("({})", conds.join(" and "))
+                        };
+                        return (cond_str, format!("{}{}", b0, b1));
+                    }
+                }
                 let mut conds = Vec::new();
                 let mut binds = String::new();
                 let rest_pos = pats.iter().position(|p| matches!(p, Pattern::Rest(_)));
@@ -5385,6 +5563,37 @@ impl Codegen {
                 (base_cond, String::new())
             }
             Pattern::Binding { ident, subpat } => {
+                if let Pattern::Ident(type_id) = &**subpat {
+                    if self.class_defs.contains_key(&type_id.sym)
+                        || self.trait_defs.contains_key(&type_id.sym)
+                        || type_id
+                            .sym
+                            .chars()
+                            .next()
+                            .map_or(false, |c| c.is_uppercase())
+                    {
+                        if let Some(Type::Ref(src_id)) = val_cp_ty {
+                            if src_id.sym == "Err" || src_id.sym == "Error" {
+                                let cond =
+                                    format!("({0}.downcast({1}) != null)", val_expr, type_id.sym);
+                                let bind = format!(
+                                    "const {0}: *const {1} = {2}.downcast({1}).?; _ = &{0}; ",
+                                    ident.sym, type_id.sym, val_expr
+                                );
+                                return (cond, bind);
+                            }
+                        }
+                        let cond = format!(
+                            "({0}.vtable.__type_id == {1}.__TYPE_ID)",
+                            val_expr, type_id.sym
+                        );
+                        let bind = format!(
+                            "const {0}: *{1} = @ptrCast(@alignCast({2}.ptr)); _ = &{0}; ",
+                            ident.sym, type_id.sym, val_expr
+                        );
+                        return (cond, bind);
+                    }
+                }
                 let (sub_c, sub_b) = self.generate_pattern_match(
                     val_expr,
                     known_variants,
@@ -5425,6 +5634,17 @@ impl Codegen {
                         (cond, bind)
                     }
                     Type::Ref(ref_id) => {
+                        if let Some(Type::Ref(src_id)) = val_cp_ty {
+                            if src_id.sym == "Err" || src_id.sym == "Error" {
+                                let cond =
+                                    format!("({0}.downcast({1}) != null)", val_expr, ref_id.sym);
+                                let bind = format!(
+                                    "const {0}: *const {1} = {2}.downcast({1}).?; _ = &{0}; ",
+                                    ident.sym, ref_id.sym, val_expr
+                                );
+                                return (cond, bind);
+                            }
+                        }
                         let cond = format!(
                             "({0}.vtable.__type_id == {1}.__TYPE_ID)",
                             val_expr, ref_id.sym
@@ -5466,7 +5686,11 @@ impl Codegen {
             ErrorType::BoxDyn(id) => Type::BoxDyn(id.clone()),
             ErrorType::DefaultError => Type::Ref(Ident {
                 span: Span { start: 0, end: 0 },
-                sym: "Error".to_string(),
+                sym: "Err".to_string(),
+            }),
+            ErrorType::AnyErr => Type::Ref(Ident {
+                span: Span { start: 0, end: 0 },
+                sym: "anyerror".to_string(),
             }),
             ErrorType::AnonSet(_) | ErrorType::Union(_) => Type::Ref(Ident {
                 span: Span { start: 0, end: 0 },
@@ -5688,8 +5912,10 @@ impl Codegen {
         let blk_label = format!("__sw_blk_{}", sw_id);
         let disc_var = format!("__disc_{}", sw_id);
 
-        let is_result_disc = matches!(disc_cp_ty, Some(Type::ResultType { .. }))
-            || m.arms.iter().any(|a| matches!(a.pat, Pattern::Err(_)));
+        let is_result_disc = matches!(
+            disc_cp_ty,
+            Some(Type::ResultType { .. }) | Some(Type::ErrorUnion(_))
+        ) || m.arms.iter().any(|a| matches!(a.pat, Pattern::Err(_)));
 
         let (ok_cp_ty, err_cp_ty, err_variants) = match &disc_cp_ty {
             Some(Type::ResultType { ok, err }) => {
@@ -5701,6 +5927,20 @@ impl Codegen {
                     Some(unwrapped_ok),
                     Some(self.error_type_to_cp_type(err)),
                     self.collect_err_variants_for_type(err),
+                )
+            }
+            Some(Type::ErrorUnion(ok)) => {
+                let unwrapped_ok = match &**ok {
+                    Type::Optional(inner) => (**inner).clone(),
+                    other => other.clone(),
+                };
+                (
+                    Some(unwrapped_ok),
+                    Some(Type::Ref(Ident {
+                        sym: "anyerror".to_string(),
+                        span: Span { start: 0, end: 0 },
+                    })),
+                    vec![],
                 )
             }
             Some(Type::Optional(inner)) => (Some((**inner).clone()), None, vec![]),
@@ -5723,6 +5963,33 @@ impl Codegen {
         let mut arms_code = String::new();
         for arm in &m.arms {
             let mut bound_types = Vec::new();
+            let is_err_pat = if !is_result_disc {
+                false
+            } else {
+                match &arm.pat {
+                    Pattern::Err(_) => true,
+                    Pattern::Enum(ep) => {
+                        ep.enum_name.sym == "err"
+                            || ep.enum_name.sym == "error"
+                            || self.error_sets.contains_key(&ep.enum_name.sym)
+                            || (!ep.variant_name.sym.is_empty()
+                                && err_variants.contains(&ep.variant_name.sym))
+                    }
+                    Pattern::Or(pats) => pats.iter().all(|p| match p {
+                        Pattern::Err(_) => true,
+                        Pattern::Enum(ep) => {
+                            ep.enum_name.sym == "err"
+                                || ep.enum_name.sym == "error"
+                                || self.error_sets.contains_key(&ep.enum_name.sym)
+                                || (!ep.variant_name.sym.is_empty()
+                                    && err_variants.contains(&ep.variant_name.sym))
+                        }
+                        _ => false,
+                    }),
+                    _ => false,
+                }
+            };
+
             let (outer_cond, inner_setup, pat_cond, pat_binds) = match &arm.pat {
                 Pattern::Wildcard => (
                     "true".to_string(),
@@ -5736,18 +6003,25 @@ impl Codegen {
                     "true".to_string(),
                     String::new(),
                 ),
-                Pattern::Err(err_pat) => {
+                _ if is_err_pat => {
                     let err_val_var = format!("__err_v_{}", sw_id);
+                    let actual_pat = match &arm.pat {
+                        Pattern::Err(inner) => &**inner,
+                        other => other,
+                    };
                     let (ec, eb) = self.generate_pattern_match(
                         &err_val_var,
                         &err_variants,
-                        err_pat,
+                        actual_pat,
                         &mut bound_types,
                         err_cp_ty.as_ref(),
                     );
                     (
                         format!("(!cp_has_ok_val({0}) and !cp_is_null_val({0}))", disc_var),
-                        format!("const {0} = {1}.err; _ = &{0}; ", err_val_var, disc_var),
+                        format!(
+                            "const {0} = cp_unwrap_err_val({1}); _ = &{0}; ",
+                            err_val_var, disc_var
+                        ),
                         ec,
                         eb,
                     )
@@ -5909,9 +6183,18 @@ impl Codegen {
 
     fn generate_err_value(&mut self, err_inner: &Expr, target_err: Option<&ErrorType>) -> String {
         match err_inner {
+            Expr::Lit(Lit::Str(s)) => {
+                format!("Err.init(0, \"{}\")", Self::escape_zig_string(s))
+            }
+            Expr::Lit(Lit::Int(c)) => {
+                format!("Err.init({}, \"\")", c)
+            }
             Expr::EnumInit(ei) if ei.enum_name.sym.is_empty() => {
                 if let Some(dst_err) = target_err {
                     let dst_zig = self.map_error_type(dst_err);
+                    if self.error_sets.contains_key(&dst_zig) || dst_zig == "anyerror" {
+                        return format!("error.{}", ei.variant_name.sym);
+                    }
                     return format!("@as({}, .{})", dst_zig, ei.variant_name.sym);
                 }
                 format!(".{}", ei.variant_name.sym)
@@ -5921,6 +6204,9 @@ impl Codegen {
             {
                 if let Some(dst_err) = target_err {
                     let dst_zig = self.map_error_type(dst_err);
+                    if self.error_sets.contains_key(&dst_zig) || dst_zig == "anyerror" {
+                        return format!("error.{}", id.sym);
+                    }
                     return format!("@as({}, .{})", dst_zig, id.sym);
                 }
                 format!(".{}", id.sym)
@@ -6166,6 +6452,7 @@ impl Codegen {
                 is_static: func.is_static,
                 is_unsafe: func.is_unsafe,
                 meta: vec![],
+                is_pub: func.is_pub,
             };
 
             let old_callee = self.current_next_callee.clone();
@@ -6238,6 +6525,8 @@ impl Codegen {
         } else {
             zig_name.clone()
         };
+        self.current_fn_zig_name = zig_name.clone();
+        self.drop_flag_vars.clear();
         self.current_class_name = class_name.cloned();
         self.current_receiver_mode = if class_name.is_some() {
             Self::get_func_receiver_mode(func)
@@ -6387,10 +6676,24 @@ impl Codegen {
                 } else {
                     String::new()
                 };
+            let pub_prefix = if class_name.is_some() {
+                if func.is_pub
+                    || func.ident.sym == "init"
+                    || func.ident.sym == "release"
+                    || func.ident.sym == "_create"
+                    || func.ident.sym.starts_with("__")
+                {
+                    "pub "
+                } else {
+                    ""
+                }
+            } else {
+                "pub "
+            };
             writeln!(
                 self.output,
-                "\npub {}fn {}({}) {}{} {{",
-                inline_kw, zig_name, params_str, callconv_clause, zig_ret_ty
+                "\n{}{}fn {}({}) {}{} {{",
+                pub_prefix, inline_kw, zig_name, params_str, callconv_clause, zig_ret_ty
             )
             .unwrap();
             self.indent();
@@ -6401,7 +6704,7 @@ impl Codegen {
                     || Self::block_contains_ident(&func.body, "self")
                     || Self::block_contains_ident(&func.body, "this");
                 if !is_self_used {
-                    self.writeln("_ = self;");
+                    self.writeln("_ = &self;");
                 }
                 if self.current_receiver_mode == ReceiverMode::Move && func.ident.sym != "release" {
                     self.writeln("var __self_moved = false; _ = &__self_moved;");
@@ -6416,6 +6719,7 @@ impl Codegen {
                         self.writeln(&format!("_ = {};", p.ident.sym));
                     }
                     if p.is_move {
+                        self.drop_flag_vars.insert(p.ident.sym.clone());
                         self.writeln(&format!(
                             "var __{}_moved = false; _ = &__{}_moved;",
                             p.ident.sym, p.ident.sym
@@ -6435,8 +6739,11 @@ impl Codegen {
             self.output.push_str(&body_str);
             if let Some(Type::ResultType { ok, err }) = &func.return_type {
                 let err_str = self.map_error_type(err);
-                let is_native_err_union =
-                    self.is_lib_mode || err_str.contains('.') || err_str == "anyerror";
+                let is_native_err_union = self.is_lib_mode
+                    || err_str.contains('.')
+                    || err_str == "anyerror"
+                    || self.error_sets.contains_key(&err_str)
+                    || err_str.starts_with('(');
                 if !is_native_err_union
                     && **ok == Type::Void
                     && !body_str.trim_end().ends_with("return .{ .ok = {} };")
@@ -6897,6 +7204,7 @@ impl Codegen {
                                     .any(|c| c.methods.iter().any(|m| m.ident.sym == "release"))
                             };
                             if !self.is_state_machine && !is_var_borrow && needs_drop {
+                                self.drop_flag_vars.insert(ident.sym.clone());
                                 self.write_to_case(&format!(
                                     "var __{}_moved = false; _ = &__{}_moved;",
                                     ident.sym, ident.sym
@@ -8064,11 +8372,7 @@ impl Codegen {
                             if !is_borrow && !self.current_fn_params.contains(&ret_id.sym) {
                                 self.check_active_borrows_before_move(&ret_id.sym);
                                 if !self.is_state_machine && self.locals.contains_key(&ret_id.sym) {
-                                    let ty_str = &self.locals[&ret_id.sym];
-                                    let is_owned_type = (ty_str.starts_with('*')
-                                        && ty_str != "*anyopaque")
-                                        || self.trait_defs.contains_key(ty_str.as_str());
-                                    if is_owned_type {
+                                    if self.drop_flag_vars.contains(&ret_id.sym) {
                                         self.write_to_case(&format!(
                                             "__{}_moved = true;",
                                             ret_id.sym
@@ -8079,19 +8383,77 @@ impl Codegen {
                         }
                     }
 
+                    if matches!(self.current_fn_ret_ty, Some(Type::ErrorUnion(_))) {
+                        if let Expr::ErrWrap(_) = arg {
+                            panic!("CP Compile Error: Function return type is 'T!' (AnyErr), which only allows static error tags (e.g. err.xxx or FileErr.xxx). When returning dynamic Err(code, msg), explicitly declare return type as 'T ! Err' (or 'T ! err').");
+                        }
+                    }
+
                     if let Some(Type::ResultType {
                         ok: fn_ok,
                         err: fn_err,
                     }) = self.current_fn_ret_ty.clone()
                     {
                         let err_str = self.map_error_type(&fn_err);
-                        let is_native_err_union =
-                            self.is_lib_mode || err_str.contains('.') || err_str == "anyerror";
-                        if !is_native_err_union {
+                        let is_native_err_union = self.is_lib_mode
+                            || err_str.contains('.')
+                            || err_str == "anyerror"
+                            || self.error_sets.contains_key(&err_str)
+                            || err_str.starts_with('(');
+                        if is_native_err_union {
+                            if let Expr::ErrWrap(err_inner) = arg {
+                                if err_str == "anyerror" {
+                                    panic!("CP Compile Error: Function return type is 'T!' (AnyErr), which only allows static error tags (e.g. err.xxx or FileErr.xxx). When returning dynamic Err(code, msg), explicitly declare return type as 'T ! Err' (or 'T ! err').");
+                                }
+                                let err_val = self.generate_err_value(err_inner, Some(&fn_err));
+                                self.write_to_case(&format!("return {};", err_val));
+                                return;
+                            }
+                            if let Expr::Member(mem) = arg {
+                                if let Expr::Ident(obj_id) = &*mem.obj {
+                                    if self.error_sets.contains_key(&obj_id.sym) {
+                                        self.write_to_case(&format!(
+                                            "return error.{};",
+                                            mem.prop.sym
+                                        ));
+                                        return;
+                                    }
+                                }
+                            }
+                            if let Expr::EnumInit(ei) = arg {
+                                if ei.enum_name.sym.is_empty() {
+                                    self.write_to_case(&format!(
+                                        "return error.{};",
+                                        ei.variant_name.sym
+                                    ));
+                                    return;
+                                }
+                            }
+                        } else {
                             if let Expr::ErrWrap(err_inner) = arg {
                                 let err_val = self.generate_err_value(err_inner, Some(&fn_err));
                                 self.write_to_case(&format!("return .{{ .err = {} }};", err_val));
                                 return;
+                            } else if let Expr::Member(mem) = arg {
+                                if let Expr::Ident(obj_id) = &*mem.obj {
+                                    if self.error_sets.contains_key(&obj_id.sym) {
+                                        let target_err = self.map_error_type(&fn_err);
+                                        self.write_to_case(&format!(
+                                            "return .{{ .err = cp_convert_err({}, error.{}) }};",
+                                            target_err, mem.prop.sym
+                                        ));
+                                        return;
+                                    }
+                                }
+                            } else if let Expr::EnumInit(ei) = arg {
+                                if ei.enum_name.sym.is_empty() {
+                                    let target_err = self.map_error_type(&fn_err);
+                                    self.write_to_case(&format!(
+                                        "return .{{ .err = cp_convert_err({}, error.{}) }};",
+                                        target_err, ei.variant_name.sym
+                                    ));
+                                    return;
+                                }
                             } else if is_null_ret {
                                 self.write_to_case("return .{ .ok = null };");
                                 return;
@@ -9504,7 +9866,7 @@ impl Codegen {
                     if arg_is_move_param {
                         if let Expr::Ident(arg_id) = arg {
                             self.moved_vars.insert(arg_id.sym.clone());
-                            if !self.is_state_machine {
+                            if !self.is_state_machine && self.drop_flag_vars.contains(&arg_id.sym) {
                                 args.push_str(&format!(
                                     "(blk: {{ __{}_moved = true; break :blk {}; }})",
                                     arg_id.sym, gen_arg
@@ -9543,27 +9905,40 @@ impl Codegen {
 
                 match inner_ty {
                     Some(Type::ResultType { ok, err: src_err }) => {
-                        let err_branch = if let Some((blk_label, err_var, flag_var, target_err)) =
+                        let is_fn_native = match &self.current_fn_ret_ty {
+                            Some(Type::ResultType { err: fn_err, .. }) => {
+                                let s = self.map_error_type(fn_err);
+                                self.is_lib_mode || s.contains('.') || s == "anyerror" || self.error_sets.contains_key(&s)
+                            }
+                            Some(Type::ErrorUnion(_)) => true,
+                            _ => false,
+                        };
+
+                        let err_stmt = if let Some((blk_label, err_var, flag_var, target_err)) =
                             self.try_catch_target.clone()
                         {
                             self.verify_error_type_compatibility(&src_err, &target_err);
                             let tgt_zig = self.map_error_type(&target_err);
                             format!(
-                                ".err => |__e_{id}| {{ {err_var} = cp_convert_err({tgt_zig}, __e_{id}); {flag_var} = true; break :{blk_label}; }}"
+                                "const __e_{id} = cp_unwrap_err_val(__r_{id}); {err_var} = cp_convert_err({tgt_zig}, __e_{id}); {flag_var} = true; break :{blk_label};"
                             )
                         } else if let Some(Type::ResultType { err: fn_err, .. }) =
                             self.current_fn_ret_ty.clone()
                         {
                             self.verify_error_type_compatibility(&src_err, &fn_err);
                             let tgt_zig = self.map_error_type(&fn_err);
-                            format!(
-                                ".err => |__e_{id}| return .{{ .err = cp_convert_err({tgt_zig}, __e_{id}) }}"
-                            )
+                            if is_fn_native {
+                                format!("const __e_{id} = cp_unwrap_err_val(__r_{id}); return cp_convert_err({tgt_zig}, __e_{id});")
+                            } else {
+                                format!("const __e_{id} = cp_unwrap_err_val(__r_{id}); return .{{ .err = cp_convert_err({tgt_zig}, __e_{id}) }};")
+                            }
+                        } else if is_fn_native {
+                            format!("const __e_{id} = cp_unwrap_err_val(__r_{id}); return __e_{id};")
                         } else {
                             panic!("CP Compile Error: Operator '?' cannot be used on '!Error' expression inside a function that does not return '!Error'");
                         };
 
-                        let ok_branch = if matches!(*ok, Type::Optional(_))
+                        let ok_handling = if matches!(*ok, Type::Optional(_))
                             && self.try_catch_target.is_none()
                         {
                             match &self.current_fn_ret_ty {
@@ -9571,22 +9946,22 @@ impl Codegen {
                                     if matches!(&**fn_ok, Type::Optional(_)) =>
                                 {
                                     format!(
-                                        ".ok => |__v_{id}| {{ if (__v_{id} == null) return .{{ .ok = null }}; break :blk_q_{id} __v_{id}.?; }}"
+                                        "const __v_{id} = cp_unwrap_ok_val(__r_{id}); if (__v_{id} == null) return .{{ .ok = null }}; break :blk_q_{id} __v_{id}.?;"
                                     )
                                 }
                                 Some(Type::Optional(_)) => {
                                     format!(
-                                        ".ok => |__v_{id}| {{ if (__v_{id} == null) return null; break :blk_q_{id} __v_{id}.?; }}"
+                                        "const __v_{id} = cp_unwrap_ok_val(__r_{id}); if (__v_{id} == null) return null; break :blk_q_{id} __v_{id}.?;"
                                     )
                                 }
-                                _ => format!(".ok => |__v_{id}| break :blk_q_{id} __v_{id}"),
+                                _ => format!("break :blk_q_{id} cp_unwrap_ok_val(__r_{id});"),
                             }
                         } else {
-                            format!(".ok => |__v_{id}| break :blk_q_{id} __v_{id}")
+                            format!("break :blk_q_{id} cp_unwrap_ok_val(__r_{id});")
                         };
 
                         format!(
-                            "(blk_q_{id}: {{ const __r_{id} = {exp}; switch (__r_{id}) {{ {err_branch}, {ok_branch} }} }})"
+                            "(blk_q_{id}: {{ const __r_{id} = {exp}; if (cp_has_ok_val(__r_{id})) {{ {ok_handling} }} {err_stmt} }})"
                         )
                     }
                     Some(Type::Optional(_)) => {
@@ -9905,7 +10280,7 @@ impl Codegen {
                 let inner_code = self.generate_expr(inner);
                 let move_stmt = if let Expr::Ident(id) = &**inner {
                     self.moved_vars.insert(id.sym.clone());
-                    if !self.is_state_machine {
+                    if !self.is_state_machine && self.drop_flag_vars.contains(&id.sym) {
                         format!("__{}_moved = true; ", id.sym)
                     } else {
                         String::new()
@@ -10135,7 +10510,7 @@ impl Codegen {
                     if arg_is_move_param {
                         if let Expr::Ident(arg_id) = arg {
                             self.moved_vars.insert(arg_id.sym.clone());
-                            if !self.is_state_machine {
+                            if !self.is_state_machine && self.drop_flag_vars.contains(&arg_id.sym) {
                                 args.push_str(&format!(
                                     "(blk_arg: {{ __{}_moved = true; break :blk_arg {}; }})",
                                     arg_id.sym, gen_arg
@@ -10161,7 +10536,11 @@ impl Codegen {
                         if id.sym == "join" || id.sym == "@task_join" {
                             if self.is_state_machine {
                                 let next_pc = self.pc_counter + 1;
-                                let current_fn = self.current_zig_fn_name.clone();
+                                let current_fn = if let Some(c) = &self.current_class_name {
+                                    format!("{}.{}", c, self.current_fn_zig_name)
+                                } else {
+                                    self.current_zig_fn_name.clone()
+                                };
                                 let mut reg_tasks = String::new();
                                 for (idx, arg) in call.args.iter().enumerate() {
                                     let arg_code = self.generate_expr(arg);
@@ -10219,7 +10598,11 @@ impl Codegen {
                             args_str.push_str(&self.generate_expr(arg));
                         }
                         let next_pc = self.pc_counter + 1;
-                        let current_fn = self.current_zig_fn_name.clone();
+                        let current_fn = if let Some(c) = &self.current_class_name {
+                            format!("{}.{}", c, self.current_fn_zig_name)
+                        } else {
+                            self.current_zig_fn_name.clone()
+                        };
                         let logic = format!(
                             "const child_ctx = {}_init(ctx.arena.?, @ptrCast(ctx), @ptrCast(&{}){}); \
                             schedule(@ptrCast(&{}), @ptrCast(child_ctx)); \
@@ -10256,7 +10639,11 @@ impl Codegen {
                 } else if self.is_state_machine {
                     let task_code = self.generate_expr(inner);
                     let next_pc = self.pc_counter + 1;
-                    let current_fn = self.current_zig_fn_name.clone();
+                    let current_fn = if let Some(c) = &self.current_class_name {
+                        format!("{}.{}", c, self.current_fn_zig_name)
+                    } else {
+                        self.current_zig_fn_name.clone()
+                    };
                     let logic = format!(
                         "const __single_task: *CpTask = @ptrCast(@alignCast({0})); \
                         __single_task.lock.acquire(); \
@@ -10305,7 +10692,7 @@ impl Codegen {
                         }
                     }
                     if self.error_sets.contains_key(&id.sym) {
-                        return format!("{}{{ .{} = {{}} }}", id.sym, member.prop.sym);
+                        return format!("{}.{}", id.sym, member.prop.sym);
                     }
                 }
                 if matches!(&*member.obj, Expr::OptMember(_) | Expr::OptCall(_)) {
@@ -11360,7 +11747,7 @@ impl Codegen {
         format!(
             r#"(blk: {{
     const _port: u16 = @intCast({});
-    const _addr = @import(\"std\").Io.net.IpAddress.parse("0.0.0.0", _port) catch unreachable;
+    const _addr = @import("std").Io.net.IpAddress.parse("0.0.0.0", _port) catch unreachable;
     const _listener = _addr.listen(global_io, .{{ .reuse_address = true }}) catch unreachable;
     const _s_fd: i32 = @intCast(_listener.socket.handle);
     const _HttpState = struct {{
@@ -12016,6 +12403,13 @@ impl Codegen {
                     match &var.pat {
                         Pattern::Ident(ident) => {
                             self.locals.insert(ident.sym.clone(), ty_str.clone());
+                            if let Some(t) = var.ty.as_ref() {
+                                self.var_cp_types.insert(ident.sym.clone(), t.clone());
+                            } else if let Some(init_e) = &var.init {
+                                if let Some(inferred_ty) = self.infer_cp_type(init_e) {
+                                    self.var_cp_types.insert(ident.sym.clone(), inferred_ty);
+                                }
+                            }
                             writeln!(output, "    {}: {},", ident.sym, ty_str).unwrap();
                         }
                         Pattern::Tuple(el) => {
@@ -12324,7 +12718,12 @@ impl Codegen {
             Type::ResultType { ok, err } => {
                 let err_str = self.map_error_type(err);
                 let ok_str = self.map_type(ok);
-                if self.is_lib_mode || err_str.contains('.') || err_str == "anyerror" {
+                if self.is_lib_mode
+                    || err_str.contains('.')
+                    || err_str == "anyerror"
+                    || self.error_sets.contains_key(&err_str)
+                    || err_str.starts_with('(')
+                {
                     format!("{}!{}", err_str, ok_str)
                 } else {
                     format!("CpResult({}, {})", ok_str, err_str)

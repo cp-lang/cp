@@ -320,7 +320,8 @@ impl DcpEmitter {
                             .join(", ")
                     ),
                     crate::ast::ErrorType::BoxDyn(id) => format!("Box<dyn {}>", id.sym),
-                    crate::ast::ErrorType::DefaultError => "Error".to_string(),
+                    crate::ast::ErrorType::DefaultError => "Err".to_string(),
+                    crate::ast::ErrorType::AnyErr => "AnyErr".to_string(),
                 };
                 format!("{} ! {}", self.format_type(ok), err_str)
             }

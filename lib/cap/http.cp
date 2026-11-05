@@ -6,59 +6,59 @@
 import { SystemAction } from "cap:beam";
 
 export class Request {
-    method: string;
-    url: string;
-    body: string;
+    pub method: string;
+    pub url: string;
+    pub body: string;
 
-    fn init(this, method: string, url: string, body: string): void {
+    pub fn init(this, method: string, url: string, body: string): void {
         this.method = method;
         this.url = url;
         this.body = body;
     }
 
-    fn text(this): string {
+    pub fn text(this): string {
         return this.body;
     }
 
-    fn json(this): any {
+    pub fn json(this): any {
         return @json_parse(this.body);
     }
 }
 
 export class Response {
-    status: i32;
-    body: string;
-    contentType: string;
+    pub status: i32;
+    pub body: string;
+    pub contentType: string;
 
-    fn init(this, body: string): void {
+    pub fn init(this, body: string): void {
         this.status = 200;
         this.body = body;
         this.contentType = "text/plain";
     }
 
-    fn text(this): string {
+    pub fn text(this): string {
         return this.body;
     }
 
-    fn json(this): any {
+    pub fn json(this): any {
         return @json_parse(this.body);
     }
 
-    fn ok(this): bool {
+    pub fn ok(this): bool {
         if (this.status >= 200) { if (this.status < 300) { return true; } } return false;
     }
 }
 
 export class Server {
-    port: i32;
-    fd: i32;
+    pub port: i32;
+    pub fd: i32;
 
-    fn init(this, port: i32, fd: i32): void {
+    pub fn init(this, port: i32, fd: i32): void {
         this.port = port;
         this.fd = fd;
     }
 
-    fn stop(this): void {
+    pub fn stop(this): void {
         @net_close(this.fd);
     }
 }

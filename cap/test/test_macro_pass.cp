@@ -7,7 +7,7 @@ import { print } from "cap:io";
 
 // 1. User-Defined Custom Template Macro
 macro Accessor(target, field) {
-    fn get_${field}(_): string {
+    pub fn get_${field}(_): string {
         return _.${field};
     }
 }

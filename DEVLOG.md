@@ -2377,4 +2377,113 @@ Bun AGY 在推进 Bun 基础算法库（如 `wyhash`、`base64`）转译过程�
 3. **规范同步**：
    - 将 `cstring`、`[N]T`、`export fn`、`@packed`、`@extern` 同步写入 `cp_ref.md` 设计规范。
 
+---
+
+## 2026-11-05 (Part 2): 成员可见性（pub/priv 默认私有封装）与统一错误架构（Err/AnyErr/T!/自动转换/全景 Switch 匹配）工业级落地
+
+### 1. 任务背景与核心诉求
+在构建大规模高并发 AI Agent 与底层系统组件时，语言需要兼备：
+1. **严格的面向对象与模块封装性**：在 `export` 基础上，支持显式 `pub`（公开）与 `priv`（私有）；类与结构体内部成员（属性与方法）默认私有封装，杜绝外部随意破坏内部状态；
+2. **正交高效且类型确定的统一错误体系**：
+   - 将 Zig 全局错误集（零开销纯整数 ID 集合）、Rust 灵活具名与枚举错误集、以及现代业务动态错误（带 code/msg/cause 追踪）融为一体；
+   - 确立 `T!` 为 `T ! AnyErr`（映射 Zig `anyerror`）的唯一省略语法糖；在 `T!` 内部严禁返回动态装箱错误 `err(...)`，杜绝深层递归类型推导爆炸；
+   - 动态业务错误统一命名为 `Err`（保留 `Error` 兼容别名），函数必须显式标注 `T ! Err`；
+   - 具名错误集（`err FileErr`）直接返回变体，普通枚举（`enum HttpError`）以 `err(...)` 包裹表征错误态；
+   - 错误在 `?` 冒泡时支持安全拓扑自动转换与声明式 `from` 桥接；
+   - 全景 `switch` 模式匹配：同时解构成功值与具名错误、枚举错误、动态 `Err(code, msg)`、即席错误标签 `err.xxx` 以及 `Box<dyn Trait>` 动态胖指针 `downcast`。
+
+### 2. 核心架构设计与编译实现
+
+#### 2.1 成员可见性与默认私有控制 (pub & priv)
+- **词法与 AST 层**：
+  - 在 `cpc/src/lexer.rs` 中支持 `priv` 和 `private` 关键字（解析为 `Token::Private`）；
+  - 在 `ast::Field`、`ast::Function` 和 `ast::Class` 中增加 `is_pub: bool` 标志；
+- **语法解析层 (`cpc/src/parser.rs`)**：
+  - `parse_class`: 类与结构体中成员属性与方法默认 `is_pub = false`；遇 `Token::Export` 或 `Token::Pub` 设为 `true`，遇 `Token::Private` 设为 `false`；
+  - `parse_macro_def`: 宏展开中正确支持 `export` 与 `priv` 修饰符，内部辅助方法默认公开；
+- **语义分析层 (`cpc/src/sema.rs`)**：
+  - 新增 `SemaError::PrivateAccess(String, Span)`；
+  - 维护 `current_class: Option<String>` 上下文；
+  - 在 `Expr::Member`（字段访问）与 `Expr::Call`（方法调用）中执行严格拦截：
+    - 若访问目标所属类不是当前类自身，且目标成员未标注 `is_pub`，立即拦截报错 `Cannot access private field '...'` 或 `Cannot call private method '...'`；
+    - **特权豁免**：生命周期方法（`init`、`release`、`_create`、`__*`）属于对象管理基础设施，不受私有权限阻断。
+- **代码生成层 (`cpc/src/codegen.rs`)**：
+  - 顶层声明与类成员函数依据 `is_pub` 精确生成 Zig 的 `pub fn` 或局部非导出 `fn`。
+
+#### 2.2 统一错误体系与 T! 省略规则
+- **`Err` 与 `Error` 别名**：
+  - 生成原生 Zig 结构体 `Err`，内嵌 `code: i32`、`msg: []const u8`、`cause: ?*anyopaque`，并具备 `init`、`with_cause`、`downcast` 方法；
+  - 自动注入 `pub const Error = Err;` 保持 100% 向后兼容；
+- **`T!` 与 `AnyErr` 精确映射**：
+  - `T!` 在 AST 中解析为 `ErrorType::AnyErr`，在底层生成 Zig 的 `anyerror!T`；
+  - 在 `Stmt::Return` 处理中执行静态防线拦截：若函数返回类型为 `ErrorType::AnyErr` 但返回值试图为 `err(...)`，直接抛出 `Compile Error: Cannot return dynamic 'err(...)' in function returning 'T ! AnyErr' (use explicit 'T ! Err')`；
+- **具名错误集 vs 普通枚举错误**：
+  - `err FileErr { NotFound, AccessDenied }`：作为原生 `error{ NotFound, AccessDenied }` 发射；在 `T ! FileErr` 函数内直接 `return .NotFound;` 或 `return FileErr.NotFound;`；
+  - `enum HttpError { BadRequest = 400 }`：作为普通 Zig 枚举发射；在 `T ! HttpError` 函数内通过 `return err(.BadRequest);` 将枚举值打包转换为错误态；
+- **自动转换与声明式 `from` (`cp_convert_err`)**：
+  - 注入 `cp_convert_err(TargetErr, err_val)`：优先侦测 `@hasDecl(TargetErr, "from")` 调用用户自定义声明式转换；若目标为 `Err`，自动将任意原生错误标签、枚举值或联合打包为 `Err` 动态实例；
+  - 错误传播符 `?`（`Expr::Question`）无缝衔接 `cp_has_ok_val`、`cp_unwrap_ok_val` 与 `cp_convert_err`，实现零摩擦冒泡；
+- **全景 `switch` 模式匹配解构**：
+  - 注入统一判断与解包逻辑：`cp_has_ok_val`、`cp_unwrap_ok_val` 与 `cp_unwrap_err_val`；
+  - 当 `switch` 匹配错误联合时，将带 `err(...)`、`err.xxx`、`.Variant` 的分支通过 `cp_unwrap_err_val` 解包匹配；
+  - 支持 `err(code, msg)` 元组解构、`err("msg")` 单字面量匹配、`err(e)` 全捕获，以及 `err(e: ConcreteError)` 动态胖指针向下转型。
+
+### 3. 攻坚攻克的关键技术瓶颈
+1. **宏参数字符串替换的子串碰撞问题**：
+   - 在 `substitute_function` 中，如果宏参数中同时包含 `${field}` 和 `field`，在无序 `HashMap` 中若先替换短键 `field`，会导致 `${field}` 变为 `${val}`，破坏带括号宏模板；
+   - **解法**：在替换前将宏键按长度降序排序（`keys.sort_by(|a, b| b.len().cmp(&a.len()))`），优先替换长模板标识符。
+2. **Zig 错误联合 switch 解构统一**：
+   - Zig 不允许在原生错误联合 `anyerror!T` 上直接执行 `switch` 语法解构，必须先用 `catch` 或辅助函数分流；
+   - 通过实现一组通用的编译期内联函数 `cp_has_ok_val` / `cp_unwrap_ok_val` / `cp_unwrap_err_val`，统一兼容了 CP 的自定义 `CpResult` 结构与 Zig 的原生错误联合。
+3. **方法中未读接收者的丢弃语句优化**：
+   - 在某些空方法或仅调用兄弟成员的方法中，生成 `_ = self;` 会触发 Zig `pointless discard of function parameter` 编译错误；
+   - 改为生成 `_ = &self;`，彻底消除编译器歧义。
+4. **Drop flag 变量只在存在时标记移动**：
+   - 避免对未生成 drop flag 的变量（如只读返回值对象）无故生成 `__{}_moved = true;`。
+
+### 4. 验证与回归成效
+1. 影子沙盒验证：在 `cpc_dev` 中独立完成研发并跑通全部新特性测试用例：
+   - `cap/test/test_pub_priv.cp`：覆盖属性/方法 `pub` 与默认 `priv` 访问控制，正向与负向拦截；
+   - `cap/test/test_unified_errors.cp`：覆盖 `FileErr`、`HttpError`、`Err`、`AnyErr`、`?` 自动转换、`from` 自定义转换、`switch` 全景解构与 downcast 匹配；
+2. 现有大型测试全量回归：`example_showcase.cp`、`test_all_libs.cp`、`test_macro_pass.cp`、`test_pipe_pass.cp`、`test_reflect_pass.cp`、`test_ownership_pass.cp` 全部 100% 成功；
+3. 正式合并并线：比对 `cpc/src` 与 `cpc_dev/src`，确认主干无冲突后原子合并，重新编译 `cpc` 正式 release 二进制并安装至 `cap/bin/cpc`。
+
+---
+
+## 2026-11-05 - 阶段续：多错误联合签名、Walrus/Colon 双轨 Downcast 动态错误解构实装与 cpc_dev 验证
+
+### 1. 任务背景与核心诉求
+用户就 CP 语言的错误架构提出了五项进阶提问与深度确认：
+1. **Downcast 实例解构语法**：确认 `err(e: ConcreteError)` 与 `err(e := ConcreteError)` 在 Switch 模式匹配中的实例捕获能力，探讨使用 `:` 还是 `:=`；
+2. **两级可见性模型**：确认顶层模块可见性（`pub` = `export` vs `priv`）与类/结构体成员可见性（默认 `priv`，显式 `pub`）的完全落实；
+3. **函数签名 5 种错误形态**：确认 `T!`（`AnyErr`）、`T!FileErr`、`T!FileErr || NetErr`、`T!FileErr || err{...}`、`T!FileErr || Err` 在编译期的完整落地；
+4. **全景 `switch` 模式匹配**：确保模式匹配能够简洁统一地处理各类具名错误、业务错误、胖指针实例解构和正常值；
+5. **普通类型转换为错误类型的全景蓝图**：对标 Rust 乃至超越 Rust，梳理已实现与未来需扩充的错误类型体系。
+
+### 2. 核心技术突破与架构落地
+1. **Switch 模式匹配中的逗号歧义攻坚 (`in_paren_pattern`)**：
+   - 在语法解析中，Switch 分支原本允许逗号分隔多个模式（`case A, B =>`，产生 `Pattern::Or`）；但当遇到多元错误模式 `err(500, msg)` 或元组解构 `[a, b]` 时，如果处于 Switch 分支内，逗号会被误认为顶层 Or 分隔符，导致 `err(500, msg)` 被切碎为 `Pattern::Or([500, msg])`；
+   - **解法**：在 `Parser` 中引入 `in_paren_pattern: usize` 计数器，仅当 `in_switch_arm > 0 && in_paren_pattern == 0` 时才将逗号视为 Or 分隔符。进入 `err(...)`、`[...]`、`{...}` 时递增该计数器，彻底修复括号内参数模式的解析。
+2. **多错误联合与原生 Zig 零开销映射**：
+   - 扩展 `parse_error_type_rhs` 支持 `||` 及内联匿名集合 `error{Timeout, Canceled}`；
+   - 在代码生成端，若联合集合全为错误集（`FileErr || NetErr` 或 `FileErr || err{...}`），直接映射为 Zig 原生零开销错误联合 `(FileErr || NetErr)!T`；若联合中包含动态 `Err`（如 `FileErr || Err`），则统一提升为 `CpResult(T, Err)`，并通过 `cp_convert_err` 实现具名错误变体的自动无损升格。
+3. **`err(e := ConcreteError)` 与 `err(e: ConcreteError)` 双轨 Downcast 支持**：
+   - 在 `Pattern::Binding` 代码生成中，当子模式为类型标识符（大写类型名或已注册的 Class/Trait）时，自动触发动态 Downcast 生成逻辑；
+   - 从而实现 `:`（类型窄化风格）与 `:=`（Walrus 海象解构风格）双轨完全等价并进。
+4. **`Err.with_cause` 胖指针堆实例解构与生命周期内存安全**：
+   - 原 `with_cause(self: Err, cause: anytype)` 在传入 `Box<dyn Trait>` 结构体值时，取 `&cause` 误指到了局部函数栈参数地址；
+   - **重构**：优先侦测 `cause.ptr`，直接提取堆上真实对象的指针，并记录 `cause.vtable.__type_id`；
+   - 在 `downcast` 时，利用 `__TYPE_ID` 进行绝对安全的运行时类型鉴别；
+   - 配合 CP 的 `move b` 语义，安全转移所有权，彻底杜绝悬垂指针与段错误。
+
+### 3. 测试与验证
+1. 在 `cap/test/test_error_union_downcast.cp` 中全方位覆盖：
+   - `test_anon_union`: 返回 `string ! FileErr || err{Timeout, Canceled}`，成功匹配 `.Timeout`；
+   - `test_err_union`: 返回 `string ! FileErr || Err`，成功匹配 `err(500, msg)` 与 `.NotFound`；
+   - `fail_with_box`: 返回 `i32 ! Err`，分别使用 `err(e: NetError)` 与 `err(e := NetError)` 双轨成功 downcast 并读取 `e.status`（输出 503 与 504）；
+2. 经 `CPC_BIN` 开发态极速转译并运行，测试 100% 全绿通过（`ALL_TESTS_SUCCESS`）。
+3. 检查主干 `cpc/src` 文件哈希，确认未受外部干扰，等待用户批准并线。
+
+
+
 

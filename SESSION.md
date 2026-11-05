@@ -4843,4 +4843,158 @@ CP-BEAM now possesses a production-grade, Bun.js-compatible HTTP server subsyste
 4. **规范与文档 (`cp_ref.md`, `SESSION.md`, `CHANGELOG.md`, `DEVLOG.md`)**：
    - 四线文档全量同步更新。
 
+---
+
+## 2026-11-05
+
+### 用户指令 (User Request)
+> 1. 我们既然实现了 export, 在此基础上, 实现 pub(等同于 export), 包括结构/类内部的方法, 结构/类内部的方法/属性默认 priv 私有,外部不可访问, pub 外部可访问.
+> 2. 我们刚才讨论的成果, 错误返回类型与缺省类型规则:
+> 2.1 Err 代替 Error, 同时保留 Error, 代码兼容
+> 2.2 T! 等于 T!AnyErr 的省略, AnyErr 对应 zig的 全局错误集合anyerror,  所有函数返回错误都有错误类型, 按我们讨论的规则, 进行类型匹配/转换于编译拦截报错.
+> 2.3 函数内部如有 err(code, "msg") err("msg"), 自动为 Err 类型, 返回类型为 T!Err, 不能省略为 T!, 避免错误深度推理.
+> 2.4 错误类型,在安全情况下, 可自动转换.
+> 2.5 错误类型可按from 规则自动转换.
+> 2.6 错误类型可以是普通枚举等(实现类似 rust, 支持的那些类型), 也可以是 err FileErr {}, 带 err 定义的为 具名错误类型, 函数内部返回时, 无需 err()包裹.
+> 2.6 类似rust的普通枚举等,则需类似rusg的Err(), cp 中需err()包裹转换为错误类型, 函数签名T!E不可省略E. err() 中可使用 .xxx省略类型前缀. 
+> 2.7 switch 模式匹配对应 具名错误(FileErr.xxx), err()包裹的普通枚举等转为的错误类型(err(枚举.xxx)), Err(err(code,'msg') err('msg') err(code)) 和 AnyErr(err.xxx), 和 err(e) 未匹配的其他错误.
+> 2.8 我们为了实现动态错误专门实现了Box 动态胖指针,  在出错时, 可downcast 获取出错实例,获得详细错误信息, 类似 rust, 这个功能, 是否实装到 函数和switch模式匹配?
+> 
+> 这些内容大部分都是我们之前讨论过的, 没有提及的, 你自行完善/补充/优化, 确保合理/完整/简洁/优雅.
+> 既具备zig的全局错误集合,同时兼具rust的灵活错误类型,还增加了类似Typescript业务类型错误Err(Error),几种错误类型,井然有序,且编译效率极高.
+
+### 执行操作与成果汇报 (Execution & Delivery Report)
+1. **成员可见性体系（pub / priv 默认私有封装）全面落地**：
+   - **词法与 AST**：支持 `priv` / `private` 关键字；在 `ast::Field`、`Function`、`Class` 中增加 `is_pub: bool`；
+   - **默认私有原则**：类与结构体内部属性和方法在未标注时统一默认为私有（`is_pub = false`），显式标注 `pub`（或 `export`）方可被外部持有者访问；
+   - **语义编译期拦截**：在 `sema.rs` 中新增 `SemaError::PrivateAccess`，跨类访问私有属性/调用私有方法立即拦截报错；
+   - **特权放行**：类自身方法内部访问（`this` / `_` / 裸字段名）与生命周期基础设施（`init`、`release`、`_create`、`__*`）合法放行；
+   - **代码生成**：根据 `is_pub` 决定生成 Zig 原生 `pub fn` 还是局部未导出 `fn`。
+
+2. **统一错误体系（Unified Error Architecture）工业级实现**：
+   - **Err 与 Error**：原生生成 `Err` 结构体（包含 `code`、`msg`、`cause`、`downcast`），自动注入 `pub const Error = Err;` 保持 100% 兼容；
+   - **`T!` 严格对齐 `T ! AnyErr`**：
+     - `T!` 在语义与生成期严格等价于 `T ! AnyErr`，映射 Zig 全局错误集合 `anyerror!T`；
+     - **编译期防线**：在返回 `T!` 或 `T ! AnyErr` 的函数内，严禁返回动态装箱错误 `err(...)`，编译器静态拦截并提示 `Cannot return dynamic 'err(...)' in function returning 'T ! AnyErr' (use explicit 'T ! Err')`，杜绝深层递归推导；
+   - **具名错误集 vs 普通枚举错误**：
+     - 具名错误集（`err FileErr { NotFound }`）：函数签名 `T ! FileErr`，内部直接 `return FileErr.NotFound;` 或 `return .NotFound;`（无需 `err()` 包裹）；
+     - 普通枚举错误（`enum HttpError { BadRequest = 400 }`）：函数签名 `T ! HttpError`，内部必须使用 `err()` 包裹标明错误态：`return err(HttpError.BadRequest);` 或 `return err(.BadRequest);`；
+   - **自动转换与声明式 `from`**：
+     - 注入 `cp_convert_err` 辅助函数：优先通过 `@hasDecl(TargetErr, "from")` 执行用户自定义声明式转换；若目标类型为 `Err`，自动将任意具名错误、枚举错误或联合提升转换为带有上下文与原始 `cause` 的 `Err` 实例；
+     - 错误传播符 `?` 无缝衔接 `cp_convert_err`，实现多模块调用间的无摩擦自动错误冒泡；
+   - **全景 `switch` 模式匹配**：
+     - 注入统一匹配与解构函数 `cp_has_ok_val`、`cp_unwrap_ok_val` 与 `cp_unwrap_err_val`；
+     - 全面覆盖：具名错误集变体（`FileErr.NotFound` / `.NotFound`）、经 `err()` 包裹的枚举错误（`err(HttpError.BadRequest)` / `err(.BadRequest)`）、动态 `Err` 多元匹配（`err(404, "not found")`、`err(404, msg)`、`err(code, msg)`、`err("timeout")`、`err(500)`）、即席错误标签（`err.NotFound`）、通用捕获（`err(e)`），以及解包成功值（`val => ...`）；
+   - **Box 动态胖指针与 downcast 类型分支还原**：
+     - `Err` 原生支持 `Err.with_cause(box_trait)`；
+     - 模式匹配支持 `err(e: ConcreteError) => ...`，并在编译期通过 `e.downcast<ConcreteError>()` 精准向下转型并解包出错实例。
+
+3. **影子沙盒隔离研发与主干合并**：
+   - 全程在 `cpc_dev` 影子沙盒中进行代码修改，利用 `CPC_BIN` 环境变量驱动 `cap` 进行热测试，零干扰正式编译环境；
+   - 确认主干 `cpc/src` 无冲突后，原子合并至正式 `cpc/src`；
+   - 构建 `cargo build --release` 正式版本二进制并原子更新至 `/data/dev/cp/cap/bin/cpc`。
+
+4. **全量测试与回归验证**：
+   - `cap/test/test_pub_priv.cp`：属性/方法公开与默认私有封装、内部方法调用、生命周期方法构造、外部私有违规拦截，100% 通过；
+   - `cap/test/test_unified_errors.cp`：具名错误集、普通枚举错误、Err 动态错误、AnyErr / T!、`?` 自动转换、`from` 自定义转换、全景 switch 匹配、downcast 匹配，100% 通过；
+   - 全量回归测试：`example_showcase.cp`、`test_all_libs.cp`、`test_macro_pass.cp`、`test_pipe_pass.cp`、`test_reflect_pass.cp`、`test_ownership_pass.cp` 全部 100% 绿灯通过；
+   - `cargo test --manifest-path cpc/Cargo.toml` 单元测试通过；
+   - `cargo fmt --manifest-path cpc/Cargo.toml` 格式化通过。
+
+5. **四线文档全量同步更新**：
+   - `cp_ref.md`：更新第 5.12.2 节（`pub` / `priv` 默认私有规范与示例）与第 8.2 节（统一错误架构规范与全景示例）；
+   - `DEVLOG.md`：详细记录架构设计、原理、攻坚技术难点及实施步骤；
+   - `CHANGELOG.md`：按规范记录修改与新增文件清单；
+   - `SESSION.md`：追加记录用户指令与执行结果。
+
+---
+
+## 2026-11-05 对话记录
+
+### 用户指令 (User Input)
+1. Box 动态胖指针与 downcast 匹配, switch 支持 err(e: ConcreteError) => ... 分支。这里的解构, 应该使用 err(er := ConcreteError), 而不是 : 符号, 单个 : 符号用于类型匹配, 好像无法捕获 downcast 错误实例, 确认下这个。
+2. pub 与 priv, export, 是否是你之前提到的实现（两级模型：模块层级与类/结构体层级）？
+3. 函数签名错误类型, 是否完整实现你之前建议的 5 种形态（T! / T!FileErr / T!FileErr || NetErr / T!FileErr || err{...} / T!FileErr || Err）？
+4. switch 能简洁匹配所有错误类型。
+5. 普通类型转换为错误类型, 类似 rust, 错误类型不仅仅只是枚举, 还有结构等其他类型, 我们当前实现了哪些类型, 还应该实现哪些类型, 以完善 cp 的错误类型。
+
+### 执行汇报 (Execution Report)
+1. **Downcast 实例解构语法支持**：
+   - 深入确认了 `:` 与 `:=`（Walrus 海象运算符）的语义。在 CP 模式匹配中全面实现**双轨完全等价并进**：
+     - `err(e: ConcreteError) => ...`（类型窄化风格）
+     - `err(e := ConcreteError) => ...`（显式解构绑定风格）
+   - 两种语法在底层均利用 `cause` 胖指针与 `__TYPE_ID` 进行安全的运行时类型鉴别与向下转型，并将转换后的 `*const ConcreteError` 实例指针绑定到变量 `e`，在测试用例中同时验证通过。
+2. **两级可见性（Visibility）模型完整落地确认**：
+   - **模块层级**：`pub` 等价于 `export`（生成 Zig `pub fn`，允许跨文件 `import`）；`priv` 或缺省为模块私有（内部局部函数，禁止外部 `import`）；
+   - **类/结构体层级**：属性与方法**默认均为私有（priv）**；显式标记 `pub` 的对外公开；外部越权访问在 `sema` 语义分析阶段即时静态拦截；`init` / `release` 等生命周期方法特权放行。
+3. **函数签名 5 种错误形态全量实装**：
+   - `T !` 等同 `T ! AnyErr`：映射 Zig 原生 `anyerror!T`（全局即席错误集，零额外成本，秒级编译）；
+   - `T ! FileErr`：单一具名错误集（映射 Zig `FileErr!T`）；
+   - `T ! FileErr || NetErr`：多具名错误集合并（映射 Zig 原生零开销错误集合并 `(FileErr || NetErr)!T`）；
+   - `T ! FileErr || err{Timeout, Canceled}`：具名 + 匿名即席错误集合并（映射 Zig 原生 `(FileErr || error{Timeout, Canceled})!T`）；
+   - `T ! FileErr || Err`：具名错误集 + 动态业务错误（底层统一映射为 `CpResult(T, Err)`，具名变体自动升格转换）。
+4. **全景 `switch` 简洁统一匹配**：
+   - 具名变体（`FileErr.NotFound`、`.NotFound`、`.Timeout`）；
+   - 动态业务错误（`err(500, msg)`、`err(code, msg)`）；
+   - 动态胖指针实例解构（`err(e: ConcreteError)` 与 `err(e := ConcreteError)`）；
+   - 即席标签与通配（`err.Tag`、`err(e)`）；
+   - 成功解包分支（`val`）。
+5. **普通类型转换为错误类型的全景蓝图**：
+   - 梳理已实装类型（Zig 原生错误集、动态 `Err`、普通枚举转错误态 `err(Enum.Variant)`、多态胖指针 `Box<dyn Trait>`、错误集合并）；
+   - 规划后续扩展（自定义结构体错误实现 Error Trait、标量即席错误字面量、`From` 链式自动传播）。
+6. **沙盒测试与主干状态**：
+   - 编写长期回归测试用例 [`cap/test/test_error_union_downcast.cp`](file:///data/dev/cp/cap/test/test_error_union_downcast.cp)，使用 `CPC_BIN` 测试通过；
+   - 经校验，主干 `cpc/src` 文件哈希未发生变动，向用户请求批准合并至正式主干。
+
+### 用户指令 (User Input)
+替换
+
+### 执行汇报 (Execution Report)
+1. **正式代码合并与原子同步**：
+   - 将影子沙盒 `cpc_dev/src` 中的 [`parser.rs`](file:///data/dev/cp/cpc/src/parser.rs) 与 [`codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs) 完整同步合并至正式主干 `cpc/src`，经 `diff -q -r` 校验完全一致；
+   - 执行 `cargo fmt --manifest-path cpc/Cargo.toml` 保持全局代码风格统一；
+   - 执行 `cargo check --manifest-path cpc/Cargo.toml` 验证编译期借用与语法零警告/零错误。
+2. **正式 Release 版本构建与分发部署**：
+   - 执行 `cargo build --release --manifest-path cpc/Cargo.toml` 完成 LLVM 深度内联与全局优化构建；
+   - 将正式产物同步复制安装至 `/data/dev/cp/cap/bin/cpc`（系统 PATH 默认调用路径）。
+3. **正式环境全量回归验证**：
+   - 指向正式版本 `CPC_BIN=/data/dev/cp/cap/bin/cpc` 重新编译并执行全部测试：
+     - [`cap/test/test_error_union_downcast.cp`](file:///data/dev/cp/cap/test/test_error_union_downcast.cp) 输出全绿（`matched_timeout`、`internal server failure`、`not_found_named`、`503`、`504`、`ALL_TESTS_SUCCESS`）；
+     - [`cap/test/test_pub_priv.cp`](file:///data/dev/cp/cap/test/test_pub_priv.cp) 全绿通过；
+     - [`cap/test/test_unified_errors.cp`](file:///data/dev/cp/cap/test/test_unified_errors.cp) 全绿通过。
+4. **临时环境清理**：
+   - 清理所有中间探测产物及 `temp/` 目录，保持工作区 100% 干净受控。
+   - 正式版本替换已圆满完成，可安全恢复 bun agy 继续执行任务。
+
+---
+
+### 用户指令 (User Input)
+git 提交当前版本
+
+### 执行汇报 (Execution Report)
+1. **写入提交范围至记录**：严格遵循 git 提交铁律规范，在执行暂存与提交前将本次提交的范围完整写入 SESSION.md。
+2. **本次提交完整范围 (Commit Scope)**：
+   - **编译器核心与前端 (`cpc/src/`)**：
+     - `ast.rs` / `lexer.rs` / `parser.rs` / `sema.rs` / `codegen.rs` / `dcp.rs`：
+       - 全面实装两级可见性控制（顶层 `pub` / `priv`，类与结构体成员默认私有 `priv`，显式 `pub` 导出，生命周期方法特权豁免）；
+       - 统一错误架构工业级落地（`Err` 与兼容别名 `Error`，`T!` 严格对齐 `T ! AnyErr` 并设立静态防线拦截动态装箱，具名错误集 vs 普通枚举错误态）；
+       - 多错误联合类型签名（`T ! S1 || S2`、`T ! S1 || err{...}` 原生零开销映射，`T ! S1 || Err` 统一契约映射）；
+       - 全景 `switch` 错误匹配解构与 `in_paren_pattern` 逗号歧义攻坚；
+       - `err(e: ConcreteError)` 与 `err(e := ConcreteError)` 动态胖指针双轨安全 Downcast 运行时类型解构；
+   - **标准库接口适配 (`lib/cap/`)**：
+     - `http.cp` / `sqlite.cp`：依默认私有原则补齐导出类的公开成员 `pub` 声明；
+   - **长期资产测试套件 (`cap/test/`)**：
+     - 新增 [`cap/test/test_pub_priv.cp`](file:///data/dev/cp/cap/test/test_pub_priv.cp)：覆盖可见性正向导出、私有封装、内部互访与外部越权拦截；
+     - 新增 [`cap/test/test_unified_errors.cp`](file:///data/dev/cp/cap/test/test_unified_errors.cp)：覆盖统一错误体系各项核心机制；
+     - 新增 [`cap/test/test_error_union_downcast.cp`](file:///data/dev/cp/cap/test/test_error_union_downcast.cp)：覆盖多错误联合与双轨 Downcast 解构；
+     - 适配既有测试：`test_all_libs.cp`、`test_macro_pass.cp`、`test_trait_class_pass.cp`；
+   - **规范与四线文档**：
+     - `cp_ref.md`：同步更新第 5.12 节成员可见性规范与第 8.2 节统一错误体系全景规范；
+     - `CHANGELOG.md`、`DEVLOG.md`、`SESSION.md`、`TASK.md`、`GEMINI.md`：记录完整研发与并网生命周期。
+3. **一次性暂存与单次原子提交**：全量加入版本控制，执行唯一一次提交并确保工作区 100% 干净，严格遵守提交后绝对止步原则。
+
+
+
+
+
 

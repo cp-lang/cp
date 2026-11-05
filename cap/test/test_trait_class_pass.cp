@@ -1,17 +1,19 @@
 import { print } from "cap:io";
 
+// Test suite for trait and class features
+
 class Tensor {
     data: i32;
-    fn init(v: i32) {
+    pub fn init(v: i32) {
         _.data = v;
     }
-    fn get(): i32 {
+    pub fn get(): i32 {
         return _.data;
     }
-    fn set(mut _, v: i32) {
+    pub fn set(mut _, v: i32) {
         _.data = v;
     }
-    fn release() {
+    pub fn release() {
         @print("Tensor released: {d}", _.data);
     }
 }
@@ -41,12 +43,12 @@ class BaseEngine implements Resettable {
     }
 
     // Default read-only borrow receiver (omitted `_`)
-    fn basePower(): i32 {
+    pub fn basePower(): i32 {
         return _.power;
     }
 
     // Sibling call omitting `_.` and using `match` with `*` wildcard (no collision with `_`!)
-    fn classifyPower(): i32 {
+    pub fn classifyPower(): i32 {
         let p = basePower();
         let tier = 0;
         match (p) {
@@ -65,20 +67,20 @@ class BaseEngine implements Resettable {
     }
 
     // Tier 1 Method Return Lifetime Elision: `&Tensor` automatically binds to receiver `_`
-    fn getWeights(): &Tensor {
+    pub fn getWeights(): &Tensor {
         return &_.weights;
     }
 
     // Mutable borrow receiver (`mut _`)
-    fn boost(mut _, delta: i32) {
+    pub fn boost(mut _, delta: i32) {
         _.power = _.power + delta;
     }
 
-    fn reset(mut _) {
+    pub fn reset(mut _) {
         _.power = 0;
     }
 
-    fn release() {
+    pub fn release() {
         @print("BaseEngine released, power={d}", _.power);
     }
 }
@@ -87,19 +89,19 @@ class BaseEngine implements Resettable {
 class TurboEngine extends BaseEngine {
     turbo_mult: i32;
 
-    fn init(p: i32, move w: Tensor, mult: i32) {
+    pub fn init(p: i32, move w: Tensor, mult: i32) {
         _.power = p;
         _.weights = w;
         _.turbo_mult = mult;
     }
 
     // Override mutable method and delegate to `super.boost`
-    fn boost(mut _, delta: i32) {
+    pub fn boost(mut _, delta: i32) {
         super.boost(delta * _.turbo_mult);
     }
 
     // Consuming ownership method (`move _`): consumes receiver and returns final score
-    fn shutdownAndExtract(move _): i32 {
+    pub fn shutdownAndExtract(move _): i32 {
         let final_score = _.power + _.weights.get();
         @print("TurboEngine shutting down with score={d}", final_score);
         return final_score;
