@@ -4993,6 +4993,27 @@ git 提交当前版本
      - `CHANGELOG.md`、`DEVLOG.md`、`SESSION.md`、`TASK.md`、`GEMINI.md`：记录完整研发与并网生命周期。
 3. **一次性暂存与单次原子提交**：全量加入版本控制，执行唯一一次提交并确保工作区 100% 干净，严格遵守提交后绝对止步原则。
 
+---
+
+### 用户指令 (User Input)
+1. 标量错误字面量（Primitive Errors）：
+   • 支持将字符串字面量或数字作为轻量即席错误返回：return err("not found") 或 return err(404)，无需额外构建对象；
+目前是自动构建为Err业务统一错误类型, 你这句话的意思是?
+2. 类似 Rust From<E> 的自动化类型提升链：
+   • 错误传播符 ? 遇到跨类型错误时，自动沿 pub fn from(src: SourceErr): Self 进行多层确定性隐式转换。
+我们cp 这个功能不是已经实现了吗? 按你的意思, cpc 还没有实现这个功能吗?
+
+### 执行汇报 (Execution Report)
+1. **澄清标量错误字面量**：
+   - 用户指出得完全精准。在 CP 语言中，`return err("not found")` 与 `return err(404)` **早已完整实装**，底层通过 `generate_err_value` 自动将其无缝打包为 `Err.init(0, "not found")` 或 `Err.init(404, "")`，开发者裸写即可，无需手动 new/init；此前汇报中将其误归入“未来蓝图”，实为表述失误，现已在 `cp_ref.md` 第 8.2.5 节中正名归类为**已实装核心机制**。
+2. **确认 From<E> 自动化类型提升链的完整实装状态**：
+   - **`From` 机制在 CP 与 cpc 中早已 100% 落地**：
+     - 枚举声明式 `from`：`enum AppErr { Io(FileErr) from FileErr, Net(NetErr) from NetErr }` 在 `?` 冒泡时自动匹配转换（`test_error_box_switch_pass.cp` 验证通过）；
+     - 结构体/类 `from` 桥接：目标类型声明 `pub fn from(src: SourceErr): Self`，在 `?` 传播或返回时由 `cp_convert_err` 自动调用；
+     - 向统一 `Err` 的自动无损提升：具名错误集/枚举变体遇到返回 `T ! Err` 的函数时，`cp_convert_err` 自动提升为 `Err` 动态实例；
+   - 此前汇报本意仅指未来是否需要扩展多层跨度自动图搜索（A -> B -> C 隐式推导链），但用词不当造成了误解，特此澄清并纠正。
+
+
 
 
 

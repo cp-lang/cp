@@ -2082,21 +2082,24 @@ switch (res) {
 
 ---
 
-#### 8.2.5 普通类型转换为错误类型体系（对标 Rust 乃至超越）
+#### 8.2.5 统一错误类型体系与自动化提升机制（完全实装架构）
 
-在 CP 语言中，错误类型不仅限于 Zig 的轻量全局枚举，更具备 Rust 般强大的全类型抽象能力：
+在 CP 语言中，错误类型不仅兼具 Zig 的轻量零开销错误集，更融合了 Rust 般强大的类型转换与现代业务动态错误体系：
 
-1. **已实装的错误类型形态**：
+1. **已实装的核心错误形态与极简字面量**：
+   - **标量即席错误免手动构建**：
+     - 在函数内可直接返回字符串字面量或状态码：`return err("not found");` 或 `return err(404);`；
+     - **底层自动化包装**：编译器在代码生成时自动将其降解并填充为标准 `Err.init(0, "not found")` 或 `Err.init(404, "")`，开发者完全无需手动调用构造器或 new 实例，心智负担降至最低；
    - **Zig 原生轻量错误集**：`err FileErr { ... }`、全局 `AnyErr`（`anyerror`）、匿名即席集合 `err{A, B}`；
-   - **动态业务错误**：内置 `Err`（`code`, `msg`, `cause`），原 `Error` 保持完全兼容；
-   - **普通枚举转错误**：`enum HttpError`，通过 `err(HttpError.BadRequest)` 包裹升格为错误；
-   - **多态胖指针错误**：`Box<dyn Trait>`，通过 `downcast` 还原为具体实例；
-   - **错误集联合**：`FileErr || NetErr`、`FileErr || err{...}`、`FileErr || Err`。
+   - **多错误联合类型**：`FileErr || NetErr`（零成本原生联合）、`FileErr || err{...}`、`FileErr || Err`；
+   - **动态业务错误**：内置轻量结构体 `Err`（`code`, `msg`, `cause`），原 `Error` 保持完全兼容；
+   - **普通枚举转错误**：`enum HttpError`，通过 `err(HttpError.BadRequest)` 包裹升格为强类型错误；
+   - **多态胖指针错误**：`Box<dyn Trait>`，通过 `Err.with_cause(move b)` 挂载，并在 `switch` 中支持 `err(e: T)` 与 `err(e := T)` 双轨安全 downcast 还原具体出错实例。
 
-2. **错误类型扩展蓝图（后续演化路线）**：
-   - **自定义结构体错误**：支持任意结构体实现错误 Trait 后，通过 `err(MyStruct { ... })` 直接升格为强类型错误；
-   - **标量即席错误**：支持直接将字符串字面量或数字作为轻量即席错误：`return err("not found")` 或 `return err(404)`；
-   - **声明式 `From` 自动链式传播**：如同 Rust `std::convert::From`，在 `?` 传播时根据 `pub fn from(...)` 自动完成错误转换。
+2. **已实装的 `From` 声明式与自动类型提升机制**：
+   - **枚举声明式 `from` 桥接**：在定义错误枚举时，可声明 `enum AppErr { Io(FileErr) from FileErr, Net(NetErr) from NetErr }`。当子函数返回 `! FileErr` 时，使用 `?` 冒泡会自动根据 `from FileErr` 规则转换为 `AppErr.Io(fe)`；
+   - **结构体 `from` 自定义转换**：目标错误类型只需提供静态方法 `pub fn from(e: SourceErr): Self`，在 `?` 错误传播时，底层 `cp_convert_err` 会自动侦测并调用该转换逻辑；
+   - **向统一 `Err` 的自动无损提升**：任意具名错误变体或普通枚举变体，通过 `?` 冒泡到返回 `T ! Err` 的函数时，`cp_convert_err` 会自动将其提升为带有确切状态码与标签名的 `Err` 动态对象。
 
 ---
 
