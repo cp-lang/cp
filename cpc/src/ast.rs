@@ -35,6 +35,16 @@ pub enum Decl {
     Meta(MetaDef),
     Dec(DecDef),
     Macro(MacroDef),
+    TypeAlias(TypeAliasDecl),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TypeAliasDecl {
+    pub span: Span,
+    pub ident: Ident,
+    pub target_ty: Type,
+    #[serde(default)]
+    pub is_pub: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -150,6 +160,12 @@ pub struct Interface {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum GenericParam {
+    Type(Ident),
+    Const { ident: Ident, ty: Type },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Class {
     pub span: Span,
     pub ident: Ident,
@@ -168,6 +184,8 @@ pub struct Class {
     pub is_pub: bool,
     #[serde(default)]
     pub is_static: bool,
+    #[serde(default)]
+    pub generic_params: Vec<GenericParam>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -404,6 +422,13 @@ pub enum Expr {
     BitNot(Box<Expr>),
     Unsafe(BlockStmt),
     Comptime(BlockStmt),
+    If {
+        span: Span,
+        test: Box<Expr>,
+        cons: Box<Expr>,
+        alt: Option<Box<Expr>>,
+        is_comptime: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -616,6 +641,9 @@ pub enum Type {
         inner: Box<Type>,
         depth: usize,
     },
+    ManyRawPtr(Box<Type>),
+    CStr,
+    CFn(Vec<Type>, Box<Type>),
     Auto,
 }
 

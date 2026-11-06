@@ -69,6 +69,8 @@ pub enum SemaError {
     PrivateAccess(String, Span),
     #[error("Compile Error: Cannot instantiate static class or struct '{0}' at {1:?}")]
     CannotInstantiateStatic(String, Span),
+    #[error("Compile Error: {0} at {1:?}")]
+    InvalidPointerArithmetic(String, Span),
 }
 
 pub type SemaResult<T> = Result<T, SemaError>;
@@ -229,6 +231,7 @@ impl Analyzer {
             extra_zig: vec![],
             is_pub: true,
             is_static: false,
+            generic_params: vec![],
         };
         self.classes
             .insert("RegExp".to_string(), regex_class.clone());
@@ -248,6 +251,7 @@ impl Analyzer {
             extra_zig: vec![],
             is_pub: true,
             is_static: false,
+            generic_params: vec![],
         };
         self.classes.insert("Set".to_string(), set_class.clone());
         self.scopes[0].insert("Set".to_string(), SymbolKind::Class(set_class));
@@ -267,6 +271,7 @@ impl Analyzer {
             extra_zig: vec![],
             is_pub: true,
             is_static: false,
+            generic_params: vec![],
         };
         self.classes.insert("Map".to_string(), map_class.clone());
         self.scopes[0].insert("Map".to_string(), SymbolKind::Class(map_class));
@@ -286,6 +291,7 @@ impl Analyzer {
             extra_zig: vec![],
             is_pub: true,
             is_static: false,
+            generic_params: vec![],
         };
         self.classes.insert("Dict".to_string(), dict_class.clone());
         self.scopes[0].insert("Dict".to_string(), SymbolKind::Class(dict_class));
@@ -330,6 +336,7 @@ impl Analyzer {
             extra_zig: vec![],
             is_pub: true,
             is_static: false,
+            generic_params: vec![],
         };
         self.classes
             .insert("Error".to_string(), error_class.clone());
@@ -352,6 +359,7 @@ impl Analyzer {
             extra_zig: vec![],
             is_pub: true,
             is_static: false,
+            generic_params: vec![],
         };
         self.classes.insert("Box".to_string(), box_class.clone());
         self.scopes[0].insert("Box".to_string(), SymbolKind::Class(box_class));
@@ -379,6 +387,7 @@ impl Analyzer {
                 }],
                 is_pub: true,
                 is_static: false,
+                generic_params: vec![],
             };
             self.classes.insert(reflect_name.to_string(), cls.clone());
             self.scopes[0].insert(reflect_name.to_string(), SymbolKind::Class(cls));
@@ -408,9 +417,10 @@ impl Analyzer {
                 extends: None,
                 is_ref: false,
                 extra_zig: vec![],
-                meta: vec![],
+                meta: Vec::new(),
                 is_pub: true,
                 is_static: false,
+                generic_params: vec![],
             };
             self.classes.insert(name.to_string(), cls.clone());
             self.scopes[0].insert(name.to_string(), SymbolKind::Class(cls));
@@ -650,11 +660,13 @@ impl Analyzer {
                 let is_value = cls.meta.iter().any(|m| m.name.sym == "value");
                 let is_packed = cls.meta.iter().any(|m| m.name.sym == "packed");
                 let is_extern = cls.meta.iter().any(|m| m.name.sym == "extern");
+                let is_generic = !cls.generic_params.is_empty();
                 if !cls.is_static
                     && !is_root
                     && !is_value
                     && !is_packed
                     && !is_extern
+                    && !is_generic
                     && !cls.methods.iter().any(|m| m.ident.sym == "init")
                     && !cls.fields.is_empty()
                 {
@@ -2665,6 +2677,15 @@ impl Analyzer {
                     self.analyze_expr(e)?;
                 }
             }
+            Expr::If {
+                test, cons, alt, ..
+            } => {
+                self.analyze_expr(test)?;
+                self.analyze_expr(cons)?;
+                if let Some(a) = alt {
+                    self.analyze_expr(a)?;
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -3546,6 +3567,16 @@ impl Analyzer {
                 {
                     Ok(Type::String)
                 } else {
+                    if bin.op == BinaryOp::Add || bin.op == BinaryOp::Sub {
+                        let is_left_single_ptr = matches!(left, Type::RawPtr { .. });
+                        let is_right_single_ptr = matches!(right, Type::RawPtr { .. });
+                        if is_left_single_ptr || is_right_single_ptr {
+                            return Err(SemaError::InvalidPointerArithmetic(
+                                "Cannot perform pointer arithmetic on single-item pointer '*T!'; use '[*]T!' instead".to_string(),
+                                bin.span,
+                            ));
+                        }
+                    }
                     if !self.types_eq(&left, &right)
                         && !self.can_coerce(&left, &right, Some(&*bin.right))
                         && !self.can_coerce(&right, &left, Some(&*bin.left))
@@ -3573,9 +3604,28 @@ impl Analyzer {
                     if let Some(SymbolKind::Func { ret: Some(ret), .. }) = self.resolve(&fid.sym) {
                         return Ok(ret.clone());
                     }
+                    if let Some(SymbolKind::Enum(_)) = self.resolve(&fid.sym) {
+                        return Ok(Type::Ref(fid.clone()));
+                    }
                 }
                 if let Expr::Member(mem) = &*call.callee {
                     if let Expr::Ident(oid) = &*mem.obj {
+                        if (oid.sym == "string" || oid.sym == "String") && mem.prop.sym == "from" {
+                            return Ok(Type::String);
+                        }
+                        if oid.sym == "reflect" {
+                            if mem.prop.sym == "hasMethod"
+                                || mem.prop.sym == "hasField"
+                                || mem.prop.sym == "has"
+                            {
+                                return Ok(Type::Bool);
+                            }
+                        }
+                        if let Some(SymbolKind::Enum(_)) = self.resolve(&oid.sym) {
+                            if mem.prop.sym == "fromName" || mem.prop.sym == "fromString" {
+                                return Ok(Type::Optional(Box::new(Type::Ref(oid.clone()))));
+                            }
+                        }
                         if oid.sym == "spawn" && mem.prop.sym == "cpu" {
                             return Ok(Type::Ref(Ident {
                                 span: mem.prop.span,
@@ -3587,6 +3637,7 @@ impl Analyzer {
                 let callee_ty = self.infer_type(&call.callee)?;
                 match callee_ty {
                     Type::Fn(_, ret) => Ok(*ret),
+                    Type::CFn(_, ret) => Ok(*ret),
                     Type::Any => Ok(Type::Any),
                     _ => Err(SemaError::NotAFunction(call.span)),
                 }
@@ -3609,7 +3660,14 @@ impl Analyzer {
             }
             Expr::Spawn(_) => Ok(Type::PID),
             Expr::Receive(ty) => Ok(ty.as_ref().map(|t| (**t).clone()).unwrap_or(Type::I32)),
-            Expr::Slice(slice) => self.infer_type(&slice.obj),
+            Expr::Slice(slice) => {
+                let o_ty = self.infer_type(&slice.obj)?;
+                match o_ty {
+                    Type::ManyRawPtr(elem) => Ok(Type::Array(elem)),
+                    Type::CStr => Ok(Type::String),
+                    _ => Ok(o_ty),
+                }
+            }
             Expr::Question(inner) => {
                 let inner_ty = self.infer_type(inner)?;
                 match inner_ty {
@@ -3706,6 +3764,10 @@ impl Analyzer {
                 }
                 match o_ty {
                     Type::Array(elem) => Ok(*elem),
+                    Type::FixedArray(elem, _) => Ok(*elem),
+                    Type::ManyRawPtr(elem) => Ok(*elem),
+                    Type::CStr => Ok(Type::U8),
+                    Type::String => Ok(Type::U8),
                     Type::Tuple(tys) => Ok(tys.into_iter().next().unwrap_or(Type::Any)),
                     Type::Map(_, v) | Type::Dict(_, v) => Ok(Type::Optional(v)),
                     _ => Ok(Type::Any),
@@ -3887,6 +3949,13 @@ impl Analyzer {
                         other => other,
                     };
                     if let Type::Ref(id) = base_ty {
+                        if let Some(SymbolKind::Enum(_)) = self.resolve(&id.sym) {
+                            if mem.prop.sym == "name" {
+                                return Ok(Type::String);
+                            } else if mem.prop.sym == "value" {
+                                return Ok(Type::I32);
+                            }
+                        }
                         let mut cur_cls_name = Some(id.sym.clone());
                         while let Some(cls_name) = cur_cls_name {
                             if let Some(cls) = self.classes.get(&cls_name) {
@@ -3901,6 +3970,7 @@ impl Analyzer {
                             }
                         }
                     } else if (*base_ty == Type::String
+                        || *base_ty == Type::CStr
                         || matches!(base_ty, Type::Array(_) | Type::FixedArray(_, _)))
                         && (mem.prop.sym == "len" || mem.prop.sym == "length")
                     {
@@ -3908,6 +3978,19 @@ impl Analyzer {
                     }
                 }
                 Ok(Type::Any)
+            }
+            Expr::If { cons, alt, .. } => {
+                let cons_ty = self.infer_type(cons)?;
+                if let Some(a) = alt {
+                    let alt_ty = self.infer_type(a)?;
+                    if cons_ty == alt_ty {
+                        Ok(cons_ty)
+                    } else {
+                        Ok(Type::Any)
+                    }
+                } else {
+                    Ok(cons_ty)
+                }
             }
             _ => Ok(Type::Any),
         }

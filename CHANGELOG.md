@@ -1586,8 +1586,90 @@
 - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
   - 同步更新第 5.12.2 节（`struct` 默认 `pub`、`class` 默认 `priv`）、第 5.15 节（`static class` / `static struct` 规范与跨语言对比）、第 7.6 节（Trait 静态契约）、第 7.7 节（现代系统语言方法容器解耦哲学）、第 10.5.8 节（并发场景对称代码示例）与第 10.5.9 节（并发与内存模型 FAQ）。
 
+---
+
+## 2026-11-06 (C-FFI 原生声明、C 指针体系映射、常量泛型单态化、编译期反射与枚举内省实装)
+
+### 修改文件 (Modified - cpc_dev 沙盒实现)
+- [`cpc_dev/src/ast.rs`](file:///data/dev/cp/cpc_dev/src/ast.rs):
+  - 新增 `Decl::TypeAlias(TypeAliasDecl)`，支持 `type Name = Target;` 别名声明；
+  - 新增 `GenericParam` (`Type(Ident)` 与 `Const { ident, ty }`)；
+  - `Class` 新增 `generic_params: Vec<GenericParam>`，支持常量泛型参数（如 `class App<const ssl: bool>`）；
+  - `Expr` 新增 `If { span, test, cons, alt, is_comptime: bool }`，支持 `@if (cond) cons else alt` 编译期三元表达式；
+  - `Type` 新增 `CStr`（0 结尾 C 字符串）、`CFn(Vec<Type>, Box<Type>)`（C 调用约定函数指针）、`ManyRawPtr(Box<Type>)`（未定长多项指针 `[*]T!`）。
+- [`cpc_dev/src/lexer.rs`](file:///data/dev/cp/cpc_dev/src/lexer.rs):
+  - 新增 `Token::TypeKw` (`type`) 与 `Token::CStr` (`cstr`) 词法标记。
+- [`cpc_dev/src/parser.rs`](file:///data/dev/cp/cpc_dev/src/parser.rs):
+  - `parse_module` 与 `parse_module_item` 支持 `@c { ... }` 块级 C 外部函数声明批量展开；
+  - `parse_decl` 支持 `type Name = Target;` 类型别名解析；
+  - 新增 `parse_fn_type_sig`，支持 `@c fn(...) : Ret`、`(@c fn(...) : Ret)?` 及普通函数指针类型标注；
+  - `parse_base_type` 支持 `[*]T!`（未定长多项指针）、`cstr` 词元与标识符、以及泛型尖括号 `<...>` 捕获；
+  - `parse_primary_expr` 支持 `@if (cond) cons else alt`（支持可选 `=>`）、`string` 标识符表达式；
+  - 调整类成员默认导出可见性：类成员（字段与方法）默认为 `pub`（兼容 TypeScript 规范，支持 `private` 显式私有标注），确保 `@hasDecl` 与外部探测正常运作。
+- [`cpc_dev/src/sema.rs`](file:///data/dev/cp/cpc_dev/src/sema.rs):
+  - 单项裸指针安全防御：`analyze_bin_expr` 严格拦截对单项裸指针 `*T!` 执行 `+` 或 `-` 的指针算术运算，提示：`Cannot perform pointer arithmetic on single-item pointer '*T!'; use '[*]T!' instead`；
+  - `analyze_expr` 与 `infer_type` 支持 `Expr::If`（含编译期三元推导）；
+  - `Type::ManyRawPtr` 与 `Type::CStr` 接入索引与切片类型推导；
+  - 支持 `string.from(...)`、`reflect.has*`、`Enum.fromName`、`Enum(code)` 及 `Type::CFn` 调用的类型推导；
+  - `expand_macros` 阶段豁免 `!cls.generic_params.is_empty()`，避免对常量泛型单态化模板注入实例堆构造函数。
+- [`cpc_dev/src/codegen.rs`](file:///data/dev/cp/cpc_dev/src/codegen.rs):
+  - 注入前导通用转换函数 `pub fn cp_string_from(val: anytype)`；
+  - 结构体/类级 `@align(N)` 发射 `_align: [0]u8 align(N) = undefined,`，字段级 `@align(N)` 发射 `align(N)`；
+  - `@c` 无函数体声明发射 `pub extern "c" fn ...;`（支持重命名别名），有函数体发射 `callconv(.c)`；
+  - `reflect.hasMethod` / `reflect.hasField` / `reflect.has` 分别映射为 Zig `@hasDecl`、`@hasField`、`(@hasDecl or @hasField)`；
+  - `string.from(x)` 统一直通发射为 `cp_string_from(x)`；
+  - 枚举构造器 `Enum(code)` 发射为 `@as(Enum, @enumFromInt(code))`，枚举属性 `.name` 发射为 `@tagName(e)`，`.value` 发射为 `@intFromEnum(e)`，`Enum.fromName(str)` 发射为 `std.meta.stringToEnum(Enum, str)`；
+  - `cstr` 属性 `.len` / `.length` 发射为 `std.mem.span(obj).len`；
+  - `Type::CStr` 映射为 `[*:0]const u8`，`Type::ManyRawPtr` 映射为 `[*]T`，`Type::CFn` 映射为 `*const fn (...) callconv(.c) Ret`；
+  - 常量泛型类展开为 Zig 单态化函数 `pub fn Class(comptime params) type { return struct { ... }; }`，方法接收者在泛型结构体内自适应使用 `@This()`；
+  - `type_aliases` 跨上下文克隆至闭包状态机代码生成器（`lambda_gen`），在 `map_type` 中对泛型类别名自适应映射为值类型结构体；
+  - `ModuleFeatures::scan_expr` 补全 `Expr::Arrow`、`Expr::Deref`、`Expr::BitNot`、`Expr::Unsafe`、`Expr::Comptime`，解决闭包内内联 `@not` 导致 `cp_not` 未声明问题；
+  - `infer_cp_type_with_mock` 对 `Expr::Slice` 准确推导为 `Type::Array(elem)` 切片类型。
+
+### 新增测试 (Added)
+- [`cap/test/test_c_ffi_pointers.cp`](file:///data/dev/cp/cap/test/test_c_ffi_pointers.cp):
+  - 覆盖全部 11 项新特性的端到端集成测试，100% 通过：
+    1. `@align(16)` 结构体与字段内存物理对齐；
+    2. `@c` 块与单个函数声明及 C ABI 导出；
+    3. `VTable` 中带 `@c fn(...) : Ret` 的函数指针字段；
+    4. 常量泛型类 `class App<const ssl: bool>` 与 `type AppTCP = App<false>;`；
+    5. `cstr` 基础类型及其 `.len` 属性与 `string.from(cs)`；
+    6. `[*]T!` 多项裸指针下标访问与切片；
+    7. `reflect.hasMethod`、`reflect.hasField`、`reflect.has` 编译期反射探测；
+    8. `@if` 编译期三元条件求值；
+    9. 枚举 `.name` 与 `.value` 属性；
+    10. `string.from(...)` 多态字符串转换；
+    11. 枚举 `TaskState(2)` 构造器、`1 as TaskState` 转换及 `fromName("Idle")`。
 
 
 
 
 
+
+
+---
+
+## 2026-11-06 (生产目录 cpc/src 正式合并、LLVM Release 优化构建与全量端到端验证)
+
+### 合并与修改文件 (Merged & Modified - 正式生产目录)
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs):
+  - 正式合入 `TypeAliasDecl`、`GenericParam`、`Class.generic_params`、`Expr::If` 以及 `Type::CStr`、`Type::CFn`、`Type::ManyRawPtr`。
+- [`cpc/src/ast_visitor.rs`](file:///data/dev/cp/cpc/src/ast_visitor.rs):
+  - 正式合入 `Expr::If` 变量引用遍历。
+- [`cpc/src/dcp.rs`](file:///data/dev/cp/cpc/src/dcp.rs):
+  - 正式合入 `Type::ManyRawPtr`、`Type::CStr`、`Type::CFn` 的声明打印格式化。
+- [`cpc/src/lexer.rs`](file:///data/dev/cp/cpc/src/lexer.rs):
+  - 正式合入 `Token::TypeKw` 与 `Token::CStr`。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - 正式合入 `@c { ... }` 块级声明、`type` 类型别名解析、`@c fn(...) : Ret` 函数指针签名、`[*]T!` 与 `cstr` 基础类型解析、常量泛型参数解析、类成员默认可见性调整与 `@if` 编译期三元表达式。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 正式合入单项指针 `*T!` 算术拦截（`SemaError::InvalidPointerArithmetic`）、泛型类堆初始化豁免、`Expr::If` 语义分析与推导、`Type::ManyRawPtr` / `Type::CStr` 索引与切片推导、枚举内省与反射内建推导。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 正式合入 `@align(N)`、`@c`、常量泛型类单态化与 `@This()` 接收者自适应、`reflect.has*`、`string.from(...)`、枚举 `.name` / `.value` / 转换以及类型映射与切片推导。
+- [`cap/bin/cpc`](file:///data/dev/cp/cap/bin/cpc):
+  - 基于正式生产目录源码通过 `cargo build --release --manifest-path cpc/Cargo.toml` 完成 LLVM 优化构建（历时 35.36s）并发布至 `cap/bin/cpc`。
+
+### 测试验证 (Verified)
+- [`cap/test/test_c_ffi_pointers.cp`](file:///data/dev/cp/cap/test/test_c_ffi_pointers.cp): 端到端转译耗时 8ms，11/11 项测试 100% 通过；
+- [`cap/test/test_static_class.cp`](file:///data/dev/cp/cap/test/test_static_class.cp): 端到端转译耗时 5ms，2/2 项测试 100% 通过；
+- [`cap/test/test_bun_enums.cp`](file:///data/dev/cp/cap/test/test_bun_enums.cp): 端到端转译耗时 5ms，全绿通过。

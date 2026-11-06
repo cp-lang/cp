@@ -2695,9 +2695,93 @@ Bun AGY 在推进 Bun 基础算法库（如 `wyhash`、`base64`）转译过程�
      - `./cap/bin/cap cap/test/test_mutex_atomic.cp`：转译耗时 8ms，7/7 项测试 100% 绿灯；
    - 验证表明正式编译器工作稳定，性能极高，转译无任何警告与回归缺陷。
 
+---
+
+## 2026-11-06 - C-FFI 原生声明、C 指针体系映射、常量泛型单态化、编译期反射与枚举内省全量实装
+
+### 1. 任务背景与核心痛点
+在将系统底层库（如 uWebSockets / Bun 原生模块）迁移至 CP 语言的过程中，发现了 5 大必须依赖 `zig {}` 逃逸舱的系统底层场景：
+1. **Comptime 函数动态返回类型（如 `fn NewApp(ssl: bool) type`）**：导致应用入口无法原生声明强类型；
+2. **物理内存对齐注解（`@align(N)`）**：内核结构体（epoll/kqueue 事件块）需要严格 16 字节物理内存对齐；
+3. **C 调用约定函数指针（`@callconv("c") fn(...) : Ret`）**：网络虚表 VTable 中包含大量 C 回调字段，此前类型位置无法标注 C ABI 调用约定；
+4. **编译期反射探测与跳板内省（`@hasDecl` / `@hasField`）**：无法在编译期探测 Handler 是否实现了某个回调；
+5. **C 语言特殊指针体系映射（`cstr`、`[*]T!`、`*any!`）**：缺乏对 0 结尾 C 字符串、未定长数组多项裸指针以及单项裸指针算术拦截的原生抽象。
+同时，用户提出了枚举内省（`.name`、`.value`）、枚举双向转换（`Enum(code)`、`code as Enum`、`Enum.fromName(str)`）以及多态字符串转换 `string.from(...)` 的刚需。
+
+### 2. 架构设计与实现细节（`cpc_dev` 沙盒）
+
+#### 2.1 极简 C-FFI 与函数指针类型
+- **语法糖解析**：在 `cpc_dev/src/parser.rs` 中支持 `@c fn name(...) : Ret;` 单函数声明、`@c("alias") fn name(...) : Ret;` 重命名声明，以及 `@c { ... }` 块级外部声明；
+- **函数指针类型标注**：支持 `@c fn(...) : Ret` 与 `(@c fn(...) : Ret)?` 放在类型注解位置，代码生成时发射为 `*const fn (...) callconv(.c) Ret`。
+
+#### 2.2 物理内存对齐 `@align(N)`
+- 结构体与字段均支持 `@align(N)`；
+- 结构体级发射零长对齐数组 `_align: [0]u8 align(N) = undefined,`，字段级发射 `field: Type align(N)`。
+
+#### 2.3 常量泛型类（Const Generics）与单态化（Monomorphization）
+- 在 `ast.rs` 中为 `Class` 引入 `generic_params: Vec<GenericParam>`（支持 `Const { ident, ty }`）；
+- 解析器支持 `class App<const ssl: bool>` 与类型别名 `type AppTCP = App<false>;`；
+- Codegen 将其生成为 Zig 的单态化函数：
+  ```zig
+  pub fn App(comptime ssl: bool) type {
+      return struct {
+          is_ssl: bool = ssl,
+          fn get_ssl(self: @This()) bool { return self.is_ssl; }
+      };
+  }
+  ```
+- 解决泛型类内部方法接收者引用问题，自适应使用 `@This()`；
+- `sema.rs` 豁免对常量泛型单态化模板自动注入实例堆构造函数；
+- `type_aliases` 跨上下文克隆至闭包状态机代码生成器（`lambda_gen`），在 `map_type` 中对泛型类别名映射为值类型结构体。
+
+#### 2.4 C 指针体系映射与单项指针安全拦截
+- `cstr`：内置基础类型，映射至 Zig `[*:0]const u8`，支持 `.len` 属性（发射为 `std.mem.span(s).len`），可通过 `string.from(cs)` 转换为安全字符串；
+- `[*]T!`：未定长连续数组多项裸指针，映射至 Zig `[*]T`，支持下标索引 `many[i]` 与切片操作 `many[start..end]`（推导为 `Type::Array(elem)`）；
+- `*any!`：通用非类型化裸指针，映射至 `*anyopaque`；
+- **单项指针算术拦截**：在 `cpc_dev/src/sema.rs` 中严格拦截对单项裸指针 `*T!` 执行 `+` 或 `-` 的操作，静态强制保证单项指针指向单一独立对象。
+
+#### 2.5 编译期反射探测与 `@if` 三元表达式
+- `reflect.hasMethod(T, "method")` -> `@hasDecl(T, "method")`；
+- `reflect.hasField(T, "field")` -> `@hasField(T, "field")`；
+- `reflect.has(T, "name")` -> `(@hasDecl(T, "name") or @hasField(T, "name"))`；
+- `@if (cond) cons else alt` 编译期三元表达式，编译期按条件精确选取分支。
+
+#### 2.6 枚举内省、双向转换与 `string.from`
+- 枚举属性 `.name` -> `@tagName(e)`，`.value` -> `@intFromEnum(e)`；
+- 转换支持：`TaskState(2)` -> `@as(TaskState, @enumFromInt(2))`，`1 as TaskState` -> `@as(TaskState, @enumFromInt(1))`，`TaskState.fromName("Idle")` -> `std.meta.stringToEnum(TaskState, "Idle")`；
+- `string.from(val)`：生成 Zig 前导通用多态转换函数 `pub fn cp_string_from(val: anytype)`，支持 `cstr`、`enum`、`bool`、数字与带 `toString` 的对象。
+
+### 3. 测试与验证
+1. 正向全覆盖测试用例 [`cap/test/test_c_ffi_pointers.cp`](file:///data/dev/cp/cap/test/test_c_ffi_pointers.cp)：
+   - 11 大核心特性全部加入测试套件，执行测试：
+     `env CPC_BIN=/data/dev/cp/cpc_dev/target/debug/cpc ./cap/bin/cap cap/test/test_c_ffi_pointers.cp`
+   - **结果：11/11 全部一次性通过，通过率 100%，转译耗时 9ms，原生测试覆盖率 100%！**
+2. 负向安全拦截验证：
+   - 验证单项指针算术拦截：在 `unsafe` 块中执行 `p: *i32! = *x!; p + 1;`
+   - **结果：编译器精准报错拦截：`Error: Semantic Error: Compile Error: Cannot perform pointer arithmetic on single-item pointer '*T!'; use '[*]T!' instead`**。
+3. 历史回归测试验证：
+   - `test_static_class.cp`：2/2 100% 通过；
+   - `test_bun_enums.cp`：全绿通过。
 
 
 
 
 
 
+
+
+### 4. 生产合并、Release 构建与端到端回归验证
+1. **沙盒与生产目录比对与同步**：
+   - 收到用户“合并”指令后，使用 `git diff --no-index cpc/src cpc_dev/src` 进行双目录一致性校验；
+   - 完整将 `ast.rs`、`ast_visitor.rs`、`dcp.rs`、`lexer.rs`、`parser.rs`、`sema.rs`、`codegen.rs` 全部同步至正式目录 `cpc/src`；
+   - 再次校验 `git diff --no-index cpc/src cpc_dev/src` 输出为空，确保生产目录与沙盒目录 100% 达成一致。
+2. **正式构建 Release 版本**：
+   - 执行 `cargo build --release --manifest-path /data/dev/cp/cpc/Cargo.toml`；
+   - 历时 35.36s 完成 LLVM 深度全量优化编译，生成全新的生产级 `cpc` 原生可执行文件；
+   - 发布更新至系统二进制目录：`cp /data/dev/cp/cpc/target/release/cpc /data/dev/cp/cap/bin/cpc`。
+3. **端到端生产回归测试验证**：
+   - 清理所有旧缓存产物后执行端到端测试：
+     - `./cap/bin/cap cap/test/test_c_ffi_pointers.cp`：[cpc] 转译耗时 8ms，11/11 项测试 100% 绿灯；
+     - `./cap/bin/cap cap/test/test_static_class.cp`：[cpc] 转译耗时 5ms，2/2 项测试 100% 绿灯；
+     - `./cap/bin/cap cap/test/test_bun_enums.cp`：[cpc] 转译耗时 5ms，全绿通过。
+   - 所有生产级端到端测试均以微秒/毫秒级原生体验完美执行通过。

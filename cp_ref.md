@@ -4588,6 +4588,168 @@ export @opaque class App {
 
 ---
 
+### 11.9 C 语言互操作与现代系统类型映射规范 (C-ABI Interoperability & System Type Mappings)
+
+在系统级高性能网络栈（如 Bun、uWebSockets、lsquic、BoringSSL 等）重构中，与底层 C 库、OS 系统调用的互操作至关重要。CP 语言确立了兼具“TypeScript 的极简直觉”与“底层 C-ABI 绝对保真”的互操作规范体系。
+
+#### 11.9.1 `@c { ... }` 原生 C 符号与声明块
+
+为避免增加冗余关键字（如 `extern`），CP 统一采用 `@c { ... }` 块声明外部 C 符号：
+
+- **块级 C-ABI 语义**：在 `@c { ... }` 内部声明的所有函数与变量，默认拥有 C 语言外部链接与标准 C 调用约定（`callconv(.c)`）；
+- **纯正语法**：在块内部直接使用标准 CP 函数签名语法；
+- **类型自动对接**：入参和返回值使用 CP 原生系统类型（`cstr`, `*any!`, `[*]u8!`, `usize` 等）。
+
+```typescript
+@c {
+    fn malloc(size: usize): *any?!;
+    fn free(ptr: *any?!): void;
+    fn us_listen_socket_close(ssl: i32, ls: *any!): void;
+    fn us_socket_context_on_open(ssl: i32, context: *any!, handler: @c ((s: *any!, is_client: i32, ip: cstr, ip_len: i32): *any!)?): void;
+}
+```
+
+- **转译映射**：代码生成器自动将其转译为 Zig 原生 `extern "c"` 块：
+  ```zig
+  extern "c" {
+      pub fn malloc(size: usize) ?*anyopaque;
+      pub fn free(ptr: ?*anyopaque) void;
+      pub fn us_listen_socket_close(ssl: c_int, ls: *anyopaque) void;
+  }
+  ```
+
+#### 11.9.2 `@c` 单行导出与 C 调用约定修饰
+
+当需要在 CP 模块中导出供 C 语言宿主反向调用的函数（如 Trampoline 蹦床跳板、系统回调）时，使用 `@c` 前缀修饰符：
+
+```typescript
+@c pub fn bun_vtable_on_open_trampoline(s: *any!) void {
+    // 蹦床跳板实现
+}
+```
+
+- **语义**：`@c` 替代冗长的 `@callconv("c") export`，直观易读且与 `@c { ... }` 块保持完全对称的设计美学。
+
+#### 11.9.3 C-ABI 函数指针类型与可选回调 (`@c ((params): Ret)?`)
+
+在定义系统级回调（如异步 I/O 监听、协议事件分发）时，结构体字段或函数参数常常需要接收具备 C 调用约定的函数指针。
+
+CP 允许在类型位置直接声明 `@c ((args): Ret)?`：
+
+```typescript
+export class VTable {
+    on_open: @c ((s: *any!, is_client: i32, ip: cstr, ip_len: i32): *any!)? = null,
+    on_data: @c ((s: *any!, data: [*]u8!, len: usize): void)? = null,
+    on_writable: @c ((s: *any!): void)? = null,
+    on_close: @c ((s: *any!, code: i32, reason: *any?!): void)? = null,
+}
+```
+
+- **代码生成**：生成标准的 Zig C 调用约定函数指针类型：
+  `?*const fn(*anyopaque, [*]u8, usize) callconv(.c) void`。
+
+#### 11.9.4 C 语言严格系统指针映射规范
+
+为了根除 C 语言隐式类型转换与宽松指针带来的内存越界与悬垂野指针隐患，CP 确立了清晰严谨的专用指针体系：
+
+| CP 原生系统指针 | 对应 Zig 底层类型 | 语义与安全保证 | 核心应用场景 |
+| :--- | :--- | :--- | :--- |
+| **`cstr` / `cstr?`** | `[*:0]const u8` (const) / `[*:0]u8` (let) | **0 结尾 C 字符串**。可变性由 `let`（可变内容 `[*:0]u8`）与 `const`（不可变内容 `[*:0]const u8`）严格区分。 | 传递以 null 结尾的文件路径、主机名、环境变量。 |
+| **`[*]T!` / `[*]T?!`** | `[*]T` / `?[*]T` | **未定长多项指针 (Many-Item Pointer)**。表示连续内存缓冲，支持切片与下标算术，提供非空与可空（`?`）双轨。 | 接收底层的 raw packet payload、IOVEC 缓冲区。 |
+| **`*any!` / `*any?!`** | `*anyopaque` / `?*anyopaque` | **通用非类型化系统裸指针 (Universal Raw Pointer)**。对齐 C 语言 `void*`，彻底废除 `anyopaque` 冗余关键字。 | 跨语言不透明句柄、用户自定义指针 `user_data`。 |
+| **`*T!` / `*T?!`** | `*T` / `?*T` | **单对象强类型裸指针**。在 unsafe 作用域下直接映射为 C-ABI 单对象指针，**严格禁止下标操作（如 `p[i]` 编译报错）**。 | 指向具体的单一 C 结构体实例（如 `*quic.Socket!`）。 |
+
+> [!CAUTION]
+> **绝对杜绝宽松指针 `[*c]` 与单对象越界下标**：
+> 1. CP 坚决不引入 C 语言的 `[*c]` 宽松可空不确定指针。所有的可空性必须通过 `?` 显式显化，所有的数组遍历必须通过 `[*]` 显式显化，禁止任何隐式可空与隐式降级转换！
+> 2. `*T!` 仅代表单个对象的裸指针，不支持下标访问 `p[i]`；若需要进行连续内存数组访问，必须明确使用 `[*]T!` 或切片 `[]T`。
+
+#### 11.9.5 常量泛型类（Const Generic Classes）与零开销单态化
+
+在网络协议和底层系统设计中，诸如 SSL/TLS 开启与关闭、协议版本号、固定缓冲区大小等配置往往在编译期确定。传统 Zig 通常采用返回类型的泛型函数（如 `pub fn App(comptime ssl: bool) type`）。
+
+CP 引入现代优雅的**常量泛型类（Const Generic Classes）**：
+
+```typescript
+export class App<const ssl: bool> {
+    fn listen(*this, port: i32, cb: fn(ls: *any!): void): void {
+        if (ssl) {
+            // 编译期已知分支，零运行时条件分支开销
+        }
+    }
+}
+
+// 实例化特化
+let http_app = new App<false>();
+let https_app = new App<true>();
+```
+
+- **语义**：`<const name: Type>` 声明编译期值泛型参数；
+- **单态化（Monomorphization）**：编译器针对每个具体的常量组合生成特化的静态结构体，分支在编译期完全内联优化，实现 100% 零运行时开销。
+
+#### 11.9.6 字段级物理内存对齐注解 (`@align(N)`)
+
+在对接硬件网卡 DMA、SIMD 矢量寄存器或特定的操作系统事件循环（如 epoll/kqueue 事件缓冲区）时，结构体字段必须满足物理内存字节对齐要求。
+
+CP 在字段级别支持 `@align(N)` 装饰器：
+
+```typescript
+export class LoopData {
+    @align(16)
+    packet_buffer: u8[512],
+
+    @align(8)
+    timer_epoch: u64,
+}
+```
+
+- **代码生成**：直接转译为 Zig 原生的字段对齐属性：
+  ```zig
+  packet_buffer: [512]u8 align(16),
+  timer_epoch: u64 align(8),
+  ```
+
+#### 11.9.7 编译期能力与内省反射原语 (`reflect.hasMethod` 与 `reflect.has`)
+
+在编写泛型网络事件调度器（如 HTTP / WebSocket Handler）时，框架需要探知用户传入的泛型处理器是否实现了特定事件方法（如 `onOpen`、`onData`、`onClose` 等）：
+
+```typescript
+export class SocketContext<Handler> {
+    fn handle_open(s: *Socket): void {
+        if (reflect.hasMethod(Handler, "onOpen")) {
+            Handler.onOpen(s);
+        }
+    }
+
+    fn check_field(): void {
+        if (reflect.has(Handler, "custom_tag")) {
+            // 探测字段属性
+        }
+    }
+}
+```
+
+- **语义**：
+  - `reflect.hasMethod(T, "method_name")`：在编译期静态检测类型 `T` 是否包含指定名称的成员/静态方法；
+  - `reflect.has(T, "field_name")`：在编译期静态检测类型 `T` 是否包含指定属性/声明；
+- **小驼峰规范**：完全契合 CP 语言与 TypeScript 生态的统一标识符风格。
+
+#### 11.9.8 结构体与类可见性规范及全静态类型扩展
+
+为了使系统级数据结构声明兼具 TypeScript 的简洁与底层结构体的直接透明，CP 确立了清晰的可见性与静态语义：
+
+1. **`struct` 成员默认公开（Public by Default）**：
+   - 结构体（`struct`）作为 POD 数据容器，其内部所有字段与方法**默认拥有 `pub` 可见性**，无需在每个成员前显式书写 `pub`；
+   - 若需声明私有字段，可显式标注 `priv` 或使用 `#` 私有前缀。
+2. **`class` 成员默认私有（Private by Default）**：
+   - 类（`class`）作为面向对象封装体，其内部成员（字段与方法）**默认私有（`priv`）**；
+   - 若需对外开放接口，必须显式标注 `pub` 前缀（如 `pub fn run(*this): void`）。
+3. **全静态类型修饰（`static struct` / `static class`）**：
+   - 当类型被标注为 `static struct` 或 `static class` 时，其内部的所有函数与常量**默认全为静态成员**；
+   - 成员定义前可省略 `static` 关键字，大幅减少工具类与命名空间类型的样板代码。
+
+---
+
 ## 十二、标准库索引与生态路线图
 
 ### 12.1 已实装官方核心标准库索引（`cap:*`）
@@ -4918,6 +5080,7 @@ cpc emit-types src/url.cp -o src/url.d.cp
 | 语法        | 用途规范                                 |
 | ----------- | ---------------------------------------- |
 | `unsafe {}` | 安全逃逸块：关闭借用检查，允许裸指针操作 |
+| `@c {}`     | C-ABI 声明块：声明外部 C 符号与库函数     |
 | `zig {}`    | 原生Zig内嵌块：直接编写原生Zig代码       |
 | `//`        | 单行注释                                 |
 | `/* */`     | 多行块注释                               |
@@ -4930,6 +5093,11 @@ cpc emit-types src/url.cp -o src/url.d.cp
 | `*T`            | 可变借用，独占修改（主推；`&mut T` 保留为兼容备选，不推荐） |
 | `*T!`           | 一级裸指针类型，仅在 unsafe 内合法                          |
 | `**T!`          | 二级裸指针类型，仅在 unsafe 内合法                          |
+| `*any!`         | 通用非类型化裸指针 (映射至 `*anyopaque`)                     |
+| `*any?!`        | 可空通用非类型化裸指针 (映射至 `?*anyopaque`)                |
+| `[*]T!`         | 未定长多项指针 (映射至 Zig `[*]T`)                           |
+| `cstr`          | 0 结尾 C 字符串 (映射至 `[*:0]const u8`)                     |
+| `cstr?`         | 可空 0 结尾 C 字符串 (映射至 `?[*:0]const u8`)              |
 | `T!E`           | 错误联合类型：正常为 T，错误为 E                            |
 | `Err(...)`      | 构造错误值，用于返回、switch 错误分支匹配                   |
 | `*`（switch内） | switch 模式通配符                                           |
@@ -4939,7 +5107,8 @@ cpc emit-types src/url.cp -o src/url.d.cp
 
 | 符号  | 用途                |
 | ----- | ------------------- |
-| `<T>` | 泛型参数包裹        |
+| `<T>` | 泛型类型参数包裹        |
+| `<const name: T>` | 常量泛型参数包裹 (编译期值单态化) |
 | `[]`  | 动态数组 / 切片类型 |
 
 ### 14.6 编译期、装饰器、注解
@@ -4947,6 +5116,8 @@ cpc emit-types src/url.cp -o src/url.d.cp
 | 符号写法 | 用途                          |
 | -------- | ----------------------------- |
 | `@name`  | 注解、装饰器 / 编译期函数调用 |
+| `@c`     | C-ABI 函数导出与函数指针类型修饰符 |
+| `@align(N)` | 字段级物理内存字节对齐注解   |
 | `@[...]` | 聚合                          |
 
 ---
@@ -4961,7 +5132,150 @@ cpc emit-types src/url.cp -o src/url.d.cp
 6. `??` 只处理 null，不处理错误；错误兜底不能用 `??`。
 7. 错误联合 `T!E`，错误值使用 `err(...)` 构造；switch 里匹配错误分支写 `err(xxx)`。
 8. 模式匹配只使用 `switch`。
-9. switch 分支：普通值直接写、`null` 匹配空、`error(xxx)` 匹配错误分支
+9. switch 分支：普通值直接写、`null` 匹配空、`error(xxx)` 匹配错误分支。
+10. 单项指针 `*T!` 严禁指针算术（`p + 1` 编译期报错）；未定长多项内存连续操作统一使用 `[*]T!`。
+
+---
+
+### 14.8 C-FFI 声明与 C 指针原生映射规范
+
+#### 1. 极简 C 符号声明 `@c`
+通过 `@c` 消除多重关键字冗余，直接对应 C ABI 调用约定：
+```typescript
+// 单个外部 C 函数声明
+@c fn getpid(): i32;
+
+// 带别名的 C 库符号重命名
+@c("abs") fn c_abs(n: i32): i32;
+
+// 批量 C 符号声明块
+@c {
+    fn malloc(size: usize): *any!;
+    fn free(ptr: *any!): void;
+}
+
+// 导出为 C ABI 函数供宿主或外部链接
+@c export fn cp_add_three(x: i32): i32 {
+    return x + 3;
+}
+```
+
+#### 2. C 函数指针类型
+在虚表（VTable）或回调参数中，支持携带 `@c` 调用约定的函数签名类型：
+```typescript
+struct VTable {
+    on_data: (@c fn(ctx: *any!, code: i32): void)?,
+    on_close: @c fn(code: i32): void,
+}
+```
+
+#### 3. C 原生指针体系映射
+- `cstr`：只读以 `\0` 结尾的 C 字符串指针，映射至底层 `[*:0]const u8`。支持 `.len` 属性获取实际字符长度，可无开销转换为 `string`。
+- `[*]T!`：未定长连续数组多项裸指针，映射至 Zig 原生 `[*]T`。支持下标索引 `ptr[i]` 与切片操作 `ptr[start..end]`。
+- `*any!`：通用非类型化裸指针，映射至 `*anyopaque`。
+- `*T!` 安全约束：单项裸指针代表单一对象实例，编译期拦截加减指针算术操作（如 `p + 1` 触发编译期拦截：`Cannot perform pointer arithmetic on single-item pointer '*T!'; use '[*]T!' instead`）。
+
+```typescript
+let cs: cstr = "hello cp";
+let n: usize = cs.len; // 8
+let s: string = string.from(cs); // "hello cp"
+
+let arr: [4]u8 = [65, 66, 67, 68];
+let many: [*]u8! = arr as [*]u8!;
+let item = many[1]; // 66
+let slice = many[1..3]; // []u8, len = 2
+```
+
+---
+
+### 14.9 物理内存对齐注解 `@align(N)`
+
+支持在结构体/类级别以及字段级别直接指定物理内存字节对齐边界：
+```typescript
+@align(16)
+struct AlignedBlock {
+    @align(16) val: usize,
+    other: u32,
+}
+```
+
+---
+
+### 14.10 常量泛型类与类型别名
+
+支持在类/结构体定义中引入常量泛型参数（Const Generics），编译器自动在编译期将其展开为单态化（Monomorphize）特化展开类型，彻底消灭动态类型生成逃逸舱：
+```typescript
+class App<const ssl: bool> {
+    is_ssl: bool = ssl;
+
+    fn get_ssl(this): bool {
+        return this.is_ssl;
+    }
+}
+
+// 使用 type 声明类型别名
+type AppTCP = App<false>;
+type AppSSL = App<true>;
+
+let tcp: AppTCP = AppTCP{};
+let ssl_app: AppSSL = AppSSL{};
+```
+
+---
+
+### 14.11 编译期反射探测与 `@if` 表达式
+
+支持在编译期直接探测类型的方法与字段存在性，配合 `@if` 编译期三元表达式完成静态跳板函数与适配：
+```typescript
+// 探测类型是否存在指定方法或字段
+let has_open = reflect.hasMethod(Handler, "onOpen"); // true / false
+let has_field = reflect.hasField(AlignedBlock, "val"); // true / false
+let has_decl = reflect.has(Handler, "onOpen");        // 综合探测
+
+// @if 编译期三元表达式 (cons 与 alt 分支按条件编译期选取)
+let branch = @if (reflect.hasMethod(Handler, "onOpen")) 100 else 200;
+```
+
+---
+
+### 14.12 枚举内省与双向类型转换
+
+#### 1. 内置内省属性
+枚举变量或变体直接支持 `.name` 与 `.value`：
+- `e.name`：获取变体的字面量名称字符串（发射为 Zig `@tagName(e)`）。
+- `e.value`：获取枚举的数值（发射为 Zig `@intFromEnum(e)`）。
+
+#### 2. 枚举双向转换
+- 数值转枚举：支持构造器语法 `TaskState(2)` 或强制转换 `1 as TaskState`。
+- 字符串转枚举：支持静态方法 `TaskState.fromName("Idle")`，返回可选类型 `TaskState?`。
+
+```typescript
+enum TaskState {
+    Idle = 0,
+    Running = 1,
+    Completed = 2,
+}
+
+let st = TaskState.Running;
+let name = st.name;   // "Running"
+let val = st.value;   // 1
+
+let from_int = TaskState(2);             // TaskState.Completed
+let from_as = 1 as TaskState;            // TaskState.Running
+let from_str = TaskState.fromName("Idle"); // ?TaskState, .? 为 TaskState.Idle
+```
+
+---
+
+### 14.13 多态字符串转换 `string.from(val)`
+
+提供通用的强类型多态字符串转换原语 `string.from(...)`，统一处理 `cstr`、`enum`、`bool`、数字与带 `toString()` 对象的字符串化转换：
+```typescript
+let s1 = string.from(TaskState.Running); // "Running"
+let s2 = string.from(cs);                // cstr -> string
+let s3 = string.from(true);              // "true"
+let s4 = string.from(12345);             // "12345"
+```
 
 ---
 

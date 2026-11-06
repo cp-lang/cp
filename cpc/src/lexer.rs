@@ -65,6 +65,8 @@ pub enum Token {
     Import,
     #[token("from")]
     From,
+    #[token("type")]
+    TypeKw,
     #[token("as")]
     As,
     #[token("async")]
@@ -145,6 +147,8 @@ pub enum Token {
     Bool,
     #[token("string")]
     String,
+    #[token("cstr")]
+    CStr,
 
     // --- Literals ---
     #[regex(r#"@"([^"\\]|\\.)*""#, |lex| lex.slice().to_string())]

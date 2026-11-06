@@ -132,6 +132,15 @@ pub fn find_referenced_vars_in_expr(expr: &Expr, vars: &mut HashSet<String>) {
         Expr::Cast { expr, .. } => find_referenced_vars_in_expr(expr, vars),
         Expr::Deref(d) | Expr::Unwrap(d) | Expr::BitNot(d) => find_referenced_vars_in_expr(d, vars),
         Expr::Unsafe(b) | Expr::Comptime(b) => find_referenced_vars_in_block(b, vars),
+        Expr::If {
+            test, cons, alt, ..
+        } => {
+            find_referenced_vars_in_expr(test, vars);
+            find_referenced_vars_in_expr(cons, vars);
+            if let Some(a) = alt {
+                find_referenced_vars_in_expr(a, vars);
+            }
+        }
         _ => {}
     }
 }
