@@ -1477,5 +1477,117 @@
 - [`cap/test/test_struct_and_enum_payload_errors.cp`](file:///data/dev/cp/cap/test/test_struct_and_enum_payload_errors.cp):
   - 系统长期回归测试用例，涵盖 9 大测试场景：结构体错误直接解构匹配、结构体自动提升为统一 `Err`、类错误直接匹配、类错误通过 `: MyClassError` downcast 还原、类错误通过 `:= MyClassError` Walrus 绑定 downcast 还原、枚举标量载荷匹配 `.Text`、枚举元组载荷匹配 `.Move [x, y]`、枚举结构体属性精确解构 `.Compute { batch, priority }`、枚举结构体属性整包捕获 `.Compute { ...fields }`、以及枚举点推断返回错误与模式匹配。
 
+---
+
+## 2026-11-06 (多线程并发原语体系：`Mutex<T>`、`RwLock<T>` 与 `Atomic<T>` 实装)
+
+### 修改文件 (Modified)
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 更新第 6.8.2(3) 节：精简 `Shared(value)` 构造语法，确立 `Shared(Mutex(data))` 与 `Shared(RwLock(data))` 内部可变性（Interior Mutability）标准范式；
+  - 更新第 10.5 节：新增《并发线程同步原语：`Mutex<T>`、`RwLock<T>` 与 `Atomic<T>`》官方设计规范，对齐 TS 驼峰风格命名（`withLock`、`lock`、`tryLock`、`isLocked`、`withRead`、`withWrite`、`read`、`write`、`tryRead`、`tryWrite`、`isReadLocked`、`isWriteLocked`、`compareAndSwap`、`cas`、`load`、`store`、`swap`、`add`、`sub`、`inc`、`dec`、`and`、`or`、`xor`、`testAndSet`、`clear`）。
+- [`cpc_dev/src/parser.rs`](file:///data/dev/cp/cpc_dev/src/parser.rs):
+  - 新增 `Mutex<T>`、`RwLock<T>`、`Atomic<T>`、`LockGuard<T>`、`ReadGuard<T>`、`WriteGuard<T>` 类型参数化解析与 `type_to_str` 转换；
+  - `parse_arrow_params` 适配首参包含 `*` 或 `mut`（如 `(*s) => ...`）的闭包签名；
+  - `parse_ident_internal` 增加对 `Token::Dec` 与 `Token::Macro` 作为成员方法标识符（如 `atom.dec()`）的解析兼容；
+  - 同步合入主干 `cpc/src/parser.rs` 的 `Expr::Unwrap`（`.?` 操作符）、`*const` 裸借用以及 `parse_postfix_type_modifiers` 语法支持。
+- [`cpc_dev/src/codegen.rs`](file:///data/dev/cp/cpc_dev/src/codegen.rs):
+  - `ModuleFeatures` 扫描 `cap:sync`、`Mutex`、`RwLock`、`Atomic` 导入及方法调用，按需注入 `needs_sync` 运行时依赖；
+  - 运行时代码生成层注入底层自旋锁 `NativeMutex`、读写锁 `NativeRwLock`、`LockGuard`、`ReadGuard`、`WriteGuard`、`CpMutex(T)`、`CpRwLock(T)`、`CpAtomic(T)` 与无载荷裸锁 `CpBareMutex`、`CpBareRwLock`；
+  - 针对 `withLock`、`withRead`、`withWrite` 实现内联状态机展开，自动管理 `lock` 与 `defer unlock`；
+  - `inline_closure_params` 隔离闭包局部变量，避免状态机 `ctx.param` 误捕获；
+  - `infer_cp_type_with_mock` 支持内联闭包参数类型自动下推与返回值类型推断；
+  - `CpAtomicConcreteType` 解决 Zig 0.17 下 `comptime_int` / `comptime_float` 无法直接传入 `std.atomic.Value` 的问题；
+  - 自动解包守卫成员透明访问（`guard.count` 直接映射至 `guard.data.count`）；
+  - 同步合入主干 `cpc/src/codegen.rs` 的 `Expr::Unwrap` 代码生成与数组原生容器方法判断。
+- [`cpc_dev/src/ast.rs`](file:///data/dev/cp/cpc_dev/src/ast.rs), [`cpc_dev/src/ast_visitor.rs`](file:///data/dev/cp/cpc_dev/src/ast_visitor.rs):
+  - 同步合入主干 `Expr::Unwrap(Box<Expr>)` 语法节点及其遍历逻辑。
+
+### 新增文件 (Added)
+- [`cap/test/test_mutex_atomic.cp`](file:///data/dev/cp/cap/test/test_mutex_atomic.cp):
+  - 长期回归测试用例，覆盖 7 大测试场景：
+    1. `Mutex<T>`：`withLock` 闭包安全修改、`lock()` RAII 守卫访问、`tryLock()` 抢锁与 `isLocked()` 探测；
+    2. 无载荷裸互斥锁 `Mutex()`：`lock()`、`unlock()`、`tryLock()`、`isLocked()`；
+    3. `RwLock<T>`：`withRead` 只读访问、`withWrite` 独占写访问、`read()`、`write()`；
+    4. 无载荷裸读写锁 `RwLock()`：`read()`、`write()`、`unlock()`、`unlockShared()`；
+    5. `Atomic<i32>`：算术增减（`add`、`sub`、`inc`、`dec`）、原子位运算（`and`、`or`、`xor`）、原子交换（`swap`）与比较交换 CAS（`cas`、`compareAndSwap`）；
+    6. `Atomic<bool>`：测试并置位 `testAndSet()` 与清除 `clear()`；
+    7. `Shared(Mutex(T))`：内部可变性标准范式（只读句柄包装内部受锁保护的局部可变数据）。
+
+### 文档更新 (Docs)
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 新增第 10.5.6 节《内存边界对比：为什么跨线程/跨协程必须用 `Shared<T>` 而不能用 `&T`？》；
+  - 新增第 10.5.7 节《多线程数据保护机制全景对比（CP vs Rust vs Go vs Zig）》；
+  - 新增第 10.5.8 节《工业级并发实战指南：5 大经典并发场景代码示例》（包含只读配置共享、高频可变写入、读写锁缓存、无锁原子计数器、跨资源裸锁协同）。
+
+---
+
+## 2026-11-06 (静态类与静态结构体 `static class` / `static struct` 实装与并发内存模型规范)
+
+### 修改文件 (Modified)
+- [`cpc_dev/src/ast.rs`](file:///data/dev/cp/cpc_dev/src/ast.rs):
+  - 为 `ast::Class` 与 `ast::Field` 结构体新增 `#[serde(default)] pub is_static: bool` 标识。
+- [`cpc_dev/src/parser.rs`](file:///data/dev/cp/cpc_dev/src/parser.rs):
+  - 在 `parse_decl` 中将 `Token::Static` 后接 `Class` / `Struct` / `Ref` 导向 `parse_class(..., is_static = true)`；
+  - 自动将类内字段与方法标记为静态；
+  - 严格拦截 `static class` 声明 `extends` 继承；
+  - 严格拦截 `static class` / `static struct` 方法声明 `this` / `_` / `*_` / `move _` 接收者；
+  - 严格拦截声明 `init` 或 `release` 实例生命周期方法；
+  - 兼容解析字段可选的前置 `let` 与 `const` 修饰符。
+- [`cpc_dev/src/sema.rs`](file:///data/dev/cp/cpc_dev/src/sema.rs):
+  - 新增 `SemaError::CannotInstantiateStatic(String, Span)`，编译期严格拦截对静态类与静态结构体的 `new` 实例化表达式；
+  - 在 `expand_macros` 阶段豁免 `!cls.is_static`，彻底杜绝静态类自动注入带 `self: *Class` 的实例 `init` 构造函数；
+  - 适配 mock 结构体初始化的 `is_static: false` 默认值。
+- [`cpc_dev/src/codegen.rs`](file:///data/dev/cp/cpc_dev/src/codegen.rs):
+  - 静态类生成时豁免 `_create` 堆分配器函数，字段直接发射为容器级 `pub var field: type = default;`（常量发射为 `pub const`）；
+  - `infer_cp_type_with_mock` 支持静态类静态字段访问（`Expr::Member`）的类型推导；
+  - `Expr::New` 与 `Expr::EnumInit` 生成阶段针对静态目标增加硬防御报错拦截。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 新增第 5.15 节《静态类与静态结构体（static class 与 static struct）》：全员自动静态、免除生命周期与实例负担、编译期五重拦截、以及 C#、Rust、Go、TS、Python 横向对比；
+  - 新增第 7.6 节《Trait 静态契约与关联构造函数（Trait Static Contracts）》：支持无接收者静态工厂与泛型关联创建契约；
+  - 新增第 7.7 节《现代系统语言的方法容器与数据解耦演进（CP vs Rust vs Zig vs TS）》：struct 默认 pub、class 默认 priv 原理，以及 Zig 与 Rust 废除继承的原因；
+  - 新增第 10.5.9 节《并发与多线程内存模型权威问答（Concurrency & Memory Model FAQ）》：涵盖 `Shared<T>` clone 时机、原子引用计数增减与为 0 即刻释放、引用克隆 vs 深拷贝 `mut()` 代价、裸互斥锁 `Mutex()` 生命周期与死锁防范、编译期借用逃逸分析、`move` 物理零竞态保证、以及 Rust `Send`/`Sync` 极简结构化对比。
+
+### 新增文件 (Added)
+- [`cap/test/test_static_class.cp`](file:///data/dev/cp/cap/test/test_static_class.cp):
+  - 长期回归测试用例，涵盖：
+    1. `static class MathUtils` 纯静态工具类方法调用（`add`、`max`）与静态状态读写（`PI`、`call_count`）；
+    2. `static struct StringHelper` 纯静态结构体常量（`TAG`）与辅助方法（`is_empty`、`format_pair`）。
+
+---
+
+## 2026-11-06 (正式主干合并与 Release 发布：并发原语 Mutex/RwLock/Atomic 与 static class/struct 合入 cpc 生产版)
+
+### 修改文件 (Modified - cpc 正式合并与 Release 发布)
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs):
+  - 全量合入 `is_static: bool` 字段至 `ast::Class` 与 `ast::Field`；
+  - 完整保留主干 `Expr::Unwrap` 与 `ImportStmt.default_specifier`。
+- [`cpc/src/ast_visitor.rs`](file:///data/dev/cp/cpc/src/ast_visitor.rs):
+  - 保持与主干 AST 遍历一致性。
+- [`cpc/src/lexer.rs`](file:///data/dev/cp/cpc/src/lexer.rs):
+  - 保留主干 `#?` 标识符规则并确保与沙盒词元一致。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - 全量合入并发类型参数解析（`Mutex<T>`、`RwLock<T>`、`Atomic<T>`、Guard 等）；
+  - 全量合入 `static class` / `static struct` 解析与四重防御性语法拦截；
+  - 完整保留主干 `Expr::Unwrap`（`.?` 操作符）、`*const` 裸借用以及 `parse_postfix_type_modifiers` 统一后缀修饰。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 全量合入 `SemaError::CannotInstantiateStatic` 静态实例化拦截；
+  - `expand_macros` 阶段对静态容器豁免自动注入实例 `init` 方法。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 全量合入并发运行时基座：`NativeMutex`、`NativeRwLock`、`LockGuard`、`ReadGuard`、`WriteGuard`、`CpMutex(T)`、`CpRwLock(T)`、`CpAtomic(T)`、`CpBareMutex`、`CpBareRwLock`；
+  - 全量合入 `withLock` / `withRead` / `withWrite` 内联生成与闭包参数作用域隔离（`inline_closure_params`）；
+  - 全量合入 `static class` / `static struct` 无堆容器代码生成与字段访问推导；
+  - 完整保留主干对 `Expr::Unwrap` 的转译支持。
+- [`cpc/src/main.rs`](file:///data/dev/cp/cpc/src/main.rs):
+  - 保持与主干模块解析及编译入口一致。
+- [`cap/bin/cpc`](file:///data/dev/cp/cap/bin/cpc):
+  - 通过 `cargo build --release --manifest-path cpc/Cargo.toml` 重新生成正式 Release 二进制（耗时 35.85s）并发布更新。
+- [`GEMINI.md`](file:///data/dev/cp/GEMINI.md):
+  - 架构白皮书与双智能体并行规范全面升级同步。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 同步更新第 5.12.2 节（`struct` 默认 `pub`、`class` 默认 `priv`）、第 5.15 节（`static class` / `static struct` 规范与跨语言对比）、第 7.6 节（Trait 静态契约）、第 7.7 节（现代系统语言方法容器解耦哲学）、第 10.5.8 节（并发场景对称代码示例）与第 10.5.9 节（并发与内存模型 FAQ）。
+
+
+
+
 
 

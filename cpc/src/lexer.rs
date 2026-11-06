@@ -148,7 +148,7 @@ pub enum Token {
 
     // --- Literals ---
     #[regex(r#"@"([^"\\]|\\.)*""#, |lex| lex.slice().to_string())]
-    #[regex(r"(\$\{?[a-zA-Z0-9_]+\}?|[a-zA-Z_])(\$\{?[a-zA-Z0-9_]+\}?|[a-zA-Z0-9_])*", |lex| lex.slice().to_string())]
+    #[regex(r"(\$\{?[a-zA-Z0-9_]+\}?|#?[a-zA-Z_])(\$\{?[a-zA-Z0-9_]+\}?|[a-zA-Z0-9_])*", |lex| lex.slice().to_string())]
     Ident(String),
     #[regex(r"0x[0-9a-fA-F]+", |lex| u64::from_str_radix(&lex.slice()[2..], 16).map(|v| v as i64).ok())]
     #[regex(r"0b[01]+", |lex| u64::from_str_radix(&lex.slice()[2..], 2).map(|v| v as i64).ok())]
@@ -291,6 +291,8 @@ pub enum Token {
     Ampersand,
     #[token("$")]
     Dollar,
+    #[token("#")]
+    Hash,
     #[token("|>")]
     Pipeline,
     #[token("|")]

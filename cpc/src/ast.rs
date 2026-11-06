@@ -18,6 +18,8 @@ pub enum ModuleItem {
 pub struct ImportStmt {
     pub span: Span,
     pub specifiers: Vec<Ident>,
+    #[serde(default)]
+    pub default_specifier: Option<Ident>,
     pub source: String,
 }
 
@@ -164,6 +166,8 @@ pub struct Class {
     pub extra_zig: Vec<String>,
     #[serde(default)]
     pub is_pub: bool,
+    #[serde(default)]
+    pub is_static: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -396,6 +400,7 @@ pub enum Expr {
         target_ty: Type,
     },
     Deref(Box<Expr>),
+    Unwrap(Box<Expr>),
     BitNot(Box<Expr>),
     Unsafe(BlockStmt),
     Comptime(BlockStmt),
@@ -639,6 +644,8 @@ pub struct Field {
     pub default: Option<Expr>,
     #[serde(default)]
     pub is_pub: bool,
+    #[serde(default)]
+    pub is_static: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

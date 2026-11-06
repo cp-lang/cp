@@ -500,15 +500,24 @@ impl<'a> Parser<'a> {
 
     fn parse_import_stmt(&mut self) -> ParseResult<ImportStmt> {
         let start = self.expect(Token::Import)?.start;
-        self.expect(Token::LBrace)?;
         let mut specifiers = Vec::new();
-        while self.peek() != Some(&Token::RBrace) && self.peek().is_some() {
-            specifiers.push(self.parse_ident()?);
-            if self.peek() == Some(&Token::Comma) {
-                self.bump()?;
+        let mut default_specifier = None;
+        if self.peek() == Some(&Token::LBrace) {
+            self.bump()?;
+            while self.peek() != Some(&Token::RBrace) && self.peek().is_some() {
+                specifiers.push(self.parse_ident()?);
+                if self.peek() == Some(&Token::Comma) {
+                    self.bump()?;
+                }
             }
+            self.expect(Token::RBrace)?;
+        } else if self.peek() == Some(&Token::Star) {
+            self.bump()?;
+            self.expect(Token::As)?;
+            default_specifier = Some(self.parse_ident()?);
+        } else if matches!(self.peek(), Some(Token::Ident(_))) {
+            default_specifier = Some(self.parse_ident()?);
         }
-        self.expect(Token::RBrace)?;
         self.expect(Token::From)?;
         let (token, span) = self.bump()?;
         let source = if let Token::StringLiteral(s) = token {
@@ -527,6 +536,7 @@ impl<'a> Parser<'a> {
         Ok(ImportStmt {
             span: Span { start, end },
             specifiers,
+            default_specifier,
             source,
         })
     }
@@ -544,7 +554,27 @@ impl<'a> Parser<'a> {
             Some(Token::Meta) => Ok(Decl::Meta(self.parse_meta_def(meta)?)),
             Some(Token::Dec) => Ok(Decl::Dec(self.parse_dec_def(meta)?)),
             Some(Token::Macro) => Ok(Decl::Macro(self.parse_macro_def(meta)?)),
-            Some(Token::Fn) | Some(Token::Async) | Some(Token::Static) | Some(Token::Unsafe) => {
+            Some(Token::Static) => {
+                if matches!(
+                    self.peek_next(),
+                    Some(Token::Class) | Some(Token::Struct) | Some(Token::Ref)
+                ) {
+                    let mut c = self.parse_class()?;
+                    c.meta = meta;
+                    if is_pub {
+                        c.is_pub = true;
+                    }
+                    Ok(Decl::Class(c))
+                } else {
+                    let mut f = self.parse_function()?;
+                    f.meta = meta;
+                    if is_pub {
+                        f.is_pub = true;
+                    }
+                    Ok(Decl::Func(f))
+                }
+            }
+            Some(Token::Fn) | Some(Token::Async) | Some(Token::Unsafe) => {
                 let mut f = self.parse_function()?;
                 f.meta = meta;
                 if is_pub {
@@ -977,6 +1007,32 @@ impl<'a> Parser<'a> {
         Ok(ErrorType::DefaultError)
     }
 
+    fn parse_postfix_type_modifiers(&mut self, mut ty: Type) -> ParseResult<Type> {
+        loop {
+            if self.peek() == Some(&Token::Question) {
+                self.bump()?;
+                ty = Type::Optional(Box::new(ty));
+            } else if self.peek() == Some(&Token::LBracket) {
+                self.bump()?;
+                if self.peek() == Some(&Token::RBracket) {
+                    self.bump()?;
+                    ty = Type::Array(Box::new(ty));
+                } else if let Some(Token::IntLiteral(n)) = self.peek() {
+                    let size = *n as usize;
+                    self.bump()?;
+                    self.expect(Token::RBracket)?;
+                    ty = Type::FixedArray(Box::new(ty), size);
+                } else {
+                    self.expect(Token::RBracket)?;
+                    ty = Type::Array(Box::new(ty));
+                }
+            } else {
+                break;
+            }
+        }
+        Ok(ty)
+    }
+
     fn parse_base_type(&mut self) -> ParseResult<Type> {
         if self.peek() == Some(&Token::Question) {
             let (_, span) = self.bump()?;
@@ -995,6 +1051,11 @@ impl<'a> Parser<'a> {
             while self.peek() == Some(&Token::Star) {
                 self.bump()?;
                 depth += 1;
+            }
+            let mut is_mut = true;
+            if self.peek() == Some(&Token::Const) {
+                self.bump()?;
+                is_mut = false;
             }
             let mut lifetimes = Vec::new();
             if depth == 1 {
@@ -1055,21 +1116,22 @@ impl<'a> Parser<'a> {
                 };
                 if is_raw_ptr_bang {
                     self.bump()?; // consume '!'
-                    return Ok(Type::RawPtr {
+                    let ty = Type::RawPtr {
                         inner: Box::new(inner),
                         depth,
-                    });
+                    };
+                    return self.parse_postfix_type_modifiers(ty);
                 }
             }
             let mut ty = inner;
             for idx in 0..depth {
                 ty = Type::BorrowType {
                     inner: Box::new(ty),
-                    is_mut: true,
+                    is_mut,
                     lifetimes: if idx == 0 { lifetimes.clone() } else { vec![] },
                 };
             }
-            return Ok(ty);
+            return self.parse_postfix_type_modifiers(ty);
         }
         if self.peek() == Some(&Token::Ampersand) {
             self.bump()?;
@@ -1125,11 +1187,12 @@ impl<'a> Parser<'a> {
                 }
             }
             let inner = self.parse_base_type()?;
-            return Ok(Type::BorrowType {
+            let ty = Type::BorrowType {
                 inner: Box::new(inner),
                 is_mut,
                 lifetimes,
-            });
+            };
+            return self.parse_postfix_type_modifiers(ty);
         }
         if self.peek() == Some(&Token::LBracket) {
             let checkpoint = self.lexer.clone();
@@ -1142,7 +1205,8 @@ impl<'a> Parser<'a> {
                 if self.peek() == Some(&Token::RBracket) {
                     self.bump()?;
                     let elem_ty = self.parse_base_type()?;
-                    return Ok(Type::FixedArray(Box::new(elem_ty), size));
+                    let ty = Type::FixedArray(Box::new(elem_ty), size);
+                    return self.parse_postfix_type_modifiers(ty);
                 }
             }
             self.lexer = checkpoint;
@@ -1151,7 +1215,8 @@ impl<'a> Parser<'a> {
             self.bump()?;
             if self.peek() == Some(&Token::RBracket) {
                 self.bump()?;
-                return Ok(Type::Tuple(Vec::new()));
+                let ty = Type::Tuple(Vec::new());
+                return self.parse_postfix_type_modifiers(ty);
             }
             let first = self.parse_type()?;
             if self.peek() == Some(&Token::Semicolon) {
@@ -1160,7 +1225,8 @@ impl<'a> Parser<'a> {
                     let size = *n as usize;
                     self.bump()?;
                     self.expect(Token::RBracket)?;
-                    return Ok(Type::FixedArray(Box::new(first), size));
+                    let ty = Type::FixedArray(Box::new(first), size);
+                    return self.parse_postfix_type_modifiers(ty);
                 }
             }
             let mut elements = vec![first];
@@ -1174,7 +1240,8 @@ impl<'a> Parser<'a> {
                 }
             }
             self.expect(Token::RBracket)?;
-            return Ok(Type::Tuple(elements));
+            let ty = Type::Tuple(elements);
+            return self.parse_postfix_type_modifiers(ty);
         }
         if self.peek() == Some(&Token::LBrace) {
             self.bump()?;
@@ -1190,6 +1257,7 @@ impl<'a> Parser<'a> {
                     meta: Vec::new(),
                     default: None,
                     is_pub: true,
+                    is_static: false,
                 });
                 if self.peek() == Some(&Token::Comma) {
                     self.bump()?;
@@ -1239,6 +1307,22 @@ impl<'a> Parser<'a> {
                     let inner = self.parse_type()?;
                     self.expect(Token::Greater)?;
                     Type::Shared(Box::new(inner))
+                } else if (sym == "Mutex"
+                    || sym == "RwLock"
+                    || sym == "Atomic"
+                    || sym == "LockGuard"
+                    || sym == "ReadGuard"
+                    || sym == "WriteGuard")
+                    && self.peek() == Some(&Token::Less)
+                {
+                    self.bump()?;
+                    let inner = self.parse_type()?;
+                    self.expect(Token::Greater)?;
+                    let inner_str = Self::type_to_str(&inner);
+                    Type::Ref(Ident {
+                        span,
+                        sym: format!("{}<{}>", sym, inner_str),
+                    })
                 } else if sym == "Box" && self.peek() == Some(&Token::Less) {
                     self.bump()?;
                     if self.peek() == Some(&Token::Dyn) {
@@ -1315,28 +1399,7 @@ impl<'a> Parser<'a> {
             }
             _ => return Err(ParseError::UnexpectedToken(token, span)),
         };
-        loop {
-            if self.peek() == Some(&Token::Question) {
-                self.bump()?;
-                ty = Type::Optional(Box::new(ty));
-            } else if self.peek() == Some(&Token::LBracket) {
-                self.bump()?;
-                if self.peek() == Some(&Token::RBracket) {
-                    self.bump()?;
-                    ty = Type::Array(Box::new(ty));
-                } else if let Some(Token::IntLiteral(n)) = self.peek() {
-                    let size = *n as usize;
-                    self.bump()?;
-                    self.expect(Token::RBracket)?;
-                    ty = Type::FixedArray(Box::new(ty), size);
-                } else {
-                    self.expect(Token::RBracket)?;
-                    ty = Type::Array(Box::new(ty));
-                }
-            } else {
-                break;
-            }
-        }
+        ty = self.parse_postfix_type_modifiers(ty)?;
         if is_legacy_error_union {
             ty = Type::ErrorUnion(Box::new(ty));
         }
@@ -1375,6 +1438,37 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(base)
+    }
+
+    pub fn type_to_str(ty: &Type) -> String {
+        match ty {
+            Type::U8 => "u8".to_string(),
+            Type::I8 => "i8".to_string(),
+            Type::U16 => "u16".to_string(),
+            Type::I16 => "i16".to_string(),
+            Type::I32 => "i32".to_string(),
+            Type::U32 => "u32".to_string(),
+            Type::I64 => "i64".to_string(),
+            Type::U64 => "u64".to_string(),
+            Type::I128 => "i128".to_string(),
+            Type::U128 => "u128".to_string(),
+            Type::ISize => "isize".to_string(),
+            Type::USize => "usize".to_string(),
+            Type::F32 => "f32".to_string(),
+            Type::F64 => "f64".to_string(),
+            Type::Bool => "bool".to_string(),
+            Type::String => "string".to_string(),
+            Type::Void => "void".to_string(),
+            Type::Any => "any".to_string(),
+            Type::Auto => "auto".to_string(),
+            Type::PID => "PID".to_string(),
+            Type::Array(inner) => format!("[{}]", Self::type_to_str(inner)),
+            Type::FixedArray(inner, n) => format!("[{}; {}]", Self::type_to_str(inner), n),
+            Type::Optional(inner) => format!("{}?", Self::type_to_str(inner)),
+            Type::Shared(inner) => format!("Shared<{}>", Self::type_to_str(inner)),
+            Type::Ref(id) => id.sym.clone(),
+            _ => "any".to_string(),
+        }
     }
 
     fn parse_stmt(&mut self) -> ParseResult<Stmt> {
@@ -2249,13 +2343,23 @@ impl<'a> Parser<'a> {
     fn parse_class(&mut self) -> ParseResult<Class> {
         let start = self.peek_span().start;
         let mut is_ref = false;
-        if self.peek() == Some(&Token::Ref) {
-            self.bump()?;
-            is_ref = true;
+        let mut is_struct = false;
+        let mut is_static = false;
+        loop {
+            if self.peek() == Some(&Token::Static) {
+                self.bump()?;
+                is_static = true;
+            } else if self.peek() == Some(&Token::Ref) {
+                self.bump()?;
+                is_ref = true;
+            } else {
+                break;
+            }
         }
         if self.peek() == Some(&Token::Struct) {
             self.bump()?;
             is_ref = true;
+            is_struct = true;
         } else {
             self.expect(Token::Class)?;
         }
@@ -2266,6 +2370,15 @@ impl<'a> Parser<'a> {
         if self.peek() == Some(&Token::Extends) {
             self.bump()?;
             let parent = self.parse_ident()?;
+            if is_static {
+                return Err(ParseError::Generic(
+                    format!(
+                        "Static class or struct '{}' cannot extend another class",
+                        ident.sym
+                    ),
+                    parent.span,
+                ));
+            }
             if parent.sym == "Agent" {
                 implements.push(parent.clone());
             } else {
@@ -2292,7 +2405,7 @@ impl<'a> Parser<'a> {
                 continue;
             }
             let meta_list = self.parse_meta_list()?;
-            let mut member_is_pub = false;
+            let mut member_is_pub = is_struct;
             while self.peek() == Some(&Token::Export) || self.peek() == Some(&Token::Private) {
                 if self.peek() == Some(&Token::Export) {
                     member_is_pub = true;
@@ -2301,15 +2414,46 @@ impl<'a> Parser<'a> {
                 }
                 self.bump()?;
             }
+            let mut is_field_static = is_static;
+            if self.peek() == Some(&Token::Static) {
+                if !matches!(self.peek_next(), Some(Token::Fn) | Some(Token::Async)) {
+                    self.bump()?;
+                    is_field_static = true;
+                }
+            }
+            if self.peek() == Some(&Token::Const) || self.peek() == Some(&Token::Let) {
+                self.bump()?;
+            }
             if matches!(
                 self.peek(),
                 Some(Token::Fn) | Some(Token::Async) | Some(Token::Static)
             ) {
                 let mut method = self.parse_function()?;
-                method.meta = meta_list;
-                if member_is_pub {
-                    method.is_pub = true;
+                if is_static {
+                    if let Some(first) = method.params.first() {
+                        if first.ident.sym == "this" || first.ident.sym == "_" {
+                            return Err(ParseError::Generic(
+                                format!(
+                                    "Static class or struct '{}' cannot declare instance method '{}' with receiver 'this' or '_'",
+                                    ident.sym, method.ident.sym
+                                ),
+                                first.span,
+                            ));
+                        }
+                    }
+                    if method.ident.sym == "init" || method.ident.sym == "release" {
+                        return Err(ParseError::Generic(
+                            format!(
+                                "Static class or struct '{}' cannot declare instance lifecycle method '{}'",
+                                ident.sym, method.ident.sym
+                            ),
+                            method.span,
+                        ));
+                    }
+                    method.is_static = true;
                 }
+                method.meta = meta_list;
+                method.is_pub = member_is_pub;
                 methods.push(method);
             } else {
                 let f_ident = self.parse_ident()?;
@@ -2334,6 +2478,7 @@ impl<'a> Parser<'a> {
                     meta: meta_list,
                     default,
                     is_pub: member_is_pub,
+                    is_static: is_field_static,
                 });
             }
         }
@@ -2349,6 +2494,7 @@ impl<'a> Parser<'a> {
             meta: Vec::new(),
             extra_zig,
             is_pub: false,
+            is_static,
         })
     }
 
@@ -2515,6 +2661,7 @@ impl<'a> Parser<'a> {
                             meta: Vec::new(),
                             default: None,
                             is_pub: true,
+                            is_static: false,
                         });
                         if self.peek() == Some(&Token::Comma) {
                             self.bump()?;
@@ -2543,6 +2690,7 @@ impl<'a> Parser<'a> {
                         meta: Vec::new(),
                         default: None,
                         is_pub: true,
+                        is_static: false,
                     });
                     if self.peek() == Some(&Token::Comma) {
                         self.bump()?;
@@ -2686,6 +2834,12 @@ impl<'a> Parser<'a> {
                         self.bump()?; // consume .
                         self.bump()?; // consume *
                         left = Expr::Deref(Box::new(left));
+                        continue;
+                    }
+                    if self.peek_next() == Some(&Token::Question) {
+                        self.bump()?; // consume .
+                        self.bump()?; // consume ?
+                        left = Expr::Unwrap(Box::new(left));
                         continue;
                     }
                     self.bump()?;
@@ -3181,6 +3335,12 @@ impl<'a> Parser<'a> {
                         self.bump()?; // consume .
                         self.bump()?; // consume *
                         left = Expr::Deref(Box::new(left));
+                        continue;
+                    }
+                    if self.peek_next() == Some(&Token::Question) {
+                        self.bump()?; // consume .
+                        self.bump()?; // consume ?
+                        left = Expr::Unwrap(Box::new(left));
                         continue;
                     }
                     self.bump()?;
@@ -4203,6 +4363,9 @@ impl<'a> Parser<'a> {
     fn parse_arrow_params(&mut self) -> ParseResult<Vec<Pattern>> {
         let mut params = Vec::new();
         while self.peek() != Some(&Token::RParen) && self.peek().is_some() {
+            if self.peek() == Some(&Token::Star) || self.peek() == Some(&Token::Mut) {
+                self.bump()?;
+            }
             let ident = self.parse_ident()?;
             params.push(Pattern::Ident(ident));
             if self.peek() == Some(&Token::Colon) {
@@ -4270,6 +4433,8 @@ impl<'a> Parser<'a> {
             Token::From => "from".to_string(),
             Token::As => "as".to_string(),
             Token::Meta => "meta".to_string(),
+            Token::Dec => "dec".to_string(),
+            Token::Macro => "macro".to_string(),
             Token::Unsafe => "unsafe".to_string(),
             Token::Of => "of".to_string(),
             Token::In => "in".to_string(),
@@ -4340,7 +4505,7 @@ fn left_span(expr: &Expr) -> Span {
         Expr::Spawn(s) => s.span,
         Expr::Receive(_) => Span { start: 0, end: 0 },
         Expr::Zig(z) => z.span,
-        Expr::Question(e) | Expr::ErrWrap(e) | Expr::BoxNew(e) => left_span(e),
+        Expr::Question(e) | Expr::ErrWrap(e) | Expr::BoxNew(e) | Expr::Unwrap(e) => left_span(e),
         Expr::QuestionFallback { expr, .. } | Expr::Catch { expr, .. } => left_span(expr),
         Expr::NullCoalesce { left, .. } => left_span(left),
         Expr::Downcast { obj, .. } => left_span(obj),
@@ -4380,7 +4545,7 @@ fn right_span(expr: &Expr) -> Span {
         Expr::Spawn(s) => s.span,
         Expr::Receive(_) => Span { start: 0, end: 0 },
         Expr::Zig(z) => z.span,
-        Expr::Question(e) | Expr::ErrWrap(e) | Expr::BoxNew(e) => right_span(e),
+        Expr::Question(e) | Expr::ErrWrap(e) | Expr::BoxNew(e) | Expr::Unwrap(e) => right_span(e),
         Expr::QuestionFallback { fallback, .. } => right_span(fallback),
         Expr::NullCoalesce { right, .. } => right_span(right),
         Expr::Catch { expr, .. } => right_span(expr),

@@ -67,6 +67,8 @@ pub enum SemaError {
     MultipleRestInPattern(Span),
     #[error("Compile Error: {0} at {1:?}")]
     PrivateAccess(String, Span),
+    #[error("Compile Error: Cannot instantiate static class or struct '{0}' at {1:?}")]
+    CannotInstantiateStatic(String, Span),
 }
 
 pub type SemaResult<T> = Result<T, SemaError>;
@@ -226,6 +228,7 @@ impl Analyzer {
             meta: Vec::new(),
             extra_zig: vec![],
             is_pub: true,
+            is_static: false,
         };
         self.classes
             .insert("RegExp".to_string(), regex_class.clone());
@@ -244,6 +247,7 @@ impl Analyzer {
             meta: Vec::new(),
             extra_zig: vec![],
             is_pub: true,
+            is_static: false,
         };
         self.classes.insert("Set".to_string(), set_class.clone());
         self.scopes[0].insert("Set".to_string(), SymbolKind::Class(set_class));
@@ -262,6 +266,7 @@ impl Analyzer {
             meta: Vec::new(),
             extra_zig: vec![],
             is_pub: true,
+            is_static: false,
         };
         self.classes.insert("Map".to_string(), map_class.clone());
         self.scopes[0].insert("Map".to_string(), SymbolKind::Class(map_class));
@@ -280,6 +285,7 @@ impl Analyzer {
             meta: Vec::new(),
             extra_zig: vec![],
             is_pub: true,
+            is_static: false,
         };
         self.classes.insert("Dict".to_string(), dict_class.clone());
         self.scopes[0].insert("Dict".to_string(), SymbolKind::Class(dict_class));
@@ -301,6 +307,7 @@ impl Analyzer {
                     meta: Vec::new(),
                     default: None,
                     is_pub: true,
+                    is_static: false,
                 },
                 crate::ast::Field {
                     span: mock_span.clone(),
@@ -312,6 +319,7 @@ impl Analyzer {
                     meta: Vec::new(),
                     default: None,
                     is_pub: true,
+                    is_static: false,
                 },
             ],
             methods: vec![],
@@ -321,6 +329,7 @@ impl Analyzer {
             meta: Vec::new(),
             extra_zig: vec![],
             is_pub: true,
+            is_static: false,
         };
         self.classes
             .insert("Error".to_string(), error_class.clone());
@@ -342,6 +351,7 @@ impl Analyzer {
             meta: Vec::new(),
             extra_zig: vec![],
             is_pub: true,
+            is_static: false,
         };
         self.classes.insert("Box".to_string(), box_class.clone());
         self.scopes[0].insert("Box".to_string(), SymbolKind::Class(box_class));
@@ -368,6 +378,7 @@ impl Analyzer {
                     args: vec![],
                 }],
                 is_pub: true,
+                is_static: false,
             };
             self.classes.insert(reflect_name.to_string(), cls.clone());
             self.scopes[0].insert(reflect_name.to_string(), SymbolKind::Class(cls));
@@ -399,6 +410,7 @@ impl Analyzer {
                 extra_zig: vec![],
                 meta: vec![],
                 is_pub: true,
+                is_static: false,
             };
             self.classes.insert(name.to_string(), cls.clone());
             self.scopes[0].insert(name.to_string(), SymbolKind::Class(cls));
@@ -638,7 +650,8 @@ impl Analyzer {
                 let is_value = cls.meta.iter().any(|m| m.name.sym == "value");
                 let is_packed = cls.meta.iter().any(|m| m.name.sym == "packed");
                 let is_extern = cls.meta.iter().any(|m| m.name.sym == "extern");
-                if !is_root
+                if !cls.is_static
+                    && !is_root
                     && !is_value
                     && !is_packed
                     && !is_extern
@@ -2399,6 +2412,16 @@ impl Analyzer {
                 }
             }
             Expr::New(call) => {
+                if let Expr::Ident(id) = &*call.callee {
+                    if let Some(cls) = self.classes.get(&id.sym) {
+                        if cls.is_static {
+                            return Err(SemaError::CannotInstantiateStatic(
+                                id.sym.clone(),
+                                call.span,
+                            ));
+                        }
+                    }
+                }
                 self.analyze_expr(&call.callee)?;
                 for arg in &call.args {
                     self.analyze_expr(arg)?;
@@ -3662,6 +3685,7 @@ impl Analyzer {
                             meta: Vec::new(),
                             default: None,
                             is_pub: true,
+                            is_static: false,
                         };
                         if let Some(pos) =
                             fs.iter().position(|existing| existing.ident.sym == k.sym)

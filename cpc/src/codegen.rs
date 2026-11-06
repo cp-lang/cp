@@ -34,6 +34,7 @@ pub struct ModuleFeatures {
     pub needs_index_helpers: bool,
     pub needs_shift: bool,
     pub needs_cast_int: bool,
+    pub needs_sync: bool,
     pub is_lib_mode: bool,
 }
 
@@ -47,7 +48,16 @@ impl ModuleFeatures {
             match item {
                 ModuleItem::Decl(d) => f.scan_decl(d),
                 ModuleItem::Stmt(s) => f.scan_stmt(s),
-                _ => {}
+                ModuleItem::Import(imp) => {
+                    if imp.source == "cap:sync"
+                        || imp
+                            .specifiers
+                            .iter()
+                            .any(|s| s.sym == "Mutex" || s.sym == "RwLock" || s.sym == "Atomic")
+                    {
+                        f.needs_sync = true;
+                    }
+                }
             }
         }
         if f.is_lib_mode {
@@ -265,6 +275,19 @@ impl ModuleFeatures {
             Type::Ref(id) => {
                 if id.sym == "RegExp" {
                     self.needs_regex = true;
+                } else if id.sym == "Mutex"
+                    || id.sym == "RwLock"
+                    || id.sym == "Atomic"
+                    || id.sym.starts_with("Mutex<")
+                    || id.sym.starts_with("RwLock<")
+                    || id.sym.starts_with("Atomic<")
+                    || id.sym.starts_with("LockGuard")
+                    || id.sym.starts_with("ReadGuard")
+                    || id.sym.starts_with("WriteGuard")
+                    || id.sym == "CpBareMutex"
+                    || id.sym == "CpBareRwLock"
+                {
+                    self.needs_sync = true;
                 } else if !self.is_lib_mode
                     && (id.sym == "Task"
                         || id.sym == "Message"
@@ -298,6 +321,8 @@ impl ModuleFeatures {
             Expr::Ident(id) => {
                 if id.sym == "RegExp" {
                     self.needs_regex = true;
+                } else if id.sym == "Mutex" || id.sym == "RwLock" || id.sym == "Atomic" {
+                    self.needs_sync = true;
                 } else if !self.is_lib_mode
                     && (id.sym == "Task"
                         || id.sym == "Message"
@@ -422,6 +447,9 @@ impl ModuleFeatures {
                         "slice" | "substring" if !c.args.is_empty() => {
                             self.needs_iter_helpers = true
                         }
+                        "withLock" | "withRead" | "withWrite" | "lock" | "tryLock" | "unlock"
+                        | "read" | "tryRead" | "write" | "tryWrite" | "isLocked"
+                        | "isReadLocked" | "isWriteLocked" => self.needs_sync = true,
                         _ => {}
                     }
                 }
@@ -514,6 +542,7 @@ impl ModuleFeatures {
             Expr::Borrow(inner, _)
             | Expr::Move(inner)
             | Expr::Await(inner)
+            | Expr::Unwrap(inner)
             | Expr::BoxNew(inner) => {
                 self.scan_expr(inner);
             }
@@ -583,6 +612,8 @@ pub struct Codegen {
         std::rc::Rc<std::cell::RefCell<std::collections::BTreeMap<String, String>>>,
     pub is_parallel_runtime: bool,
     pub parallel_worker_count: usize,
+    pub inline_closure_blk: Option<String>,
+    pub inline_closure_params: HashSet<String>,
 }
 
 impl Codegen {
@@ -649,7 +680,74 @@ impl Codegen {
             )),
             is_parallel_runtime: false,
             parallel_worker_count: 0,
+            inline_closure_blk: None,
+            inline_closure_params: HashSet::new(),
         }
+    }
+
+    pub fn type_from_name_static(name: &str) -> Type {
+        match name {
+            "i8" => Type::I8,
+            "u8" => Type::U8,
+            "i16" => Type::I16,
+            "u16" => Type::U16,
+            "i32" => Type::I32,
+            "u32" => Type::U32,
+            "i64" => Type::I64,
+            "u64" => Type::U64,
+            "isize" => Type::ISize,
+            "usize" => Type::USize,
+            "f32" => Type::F32,
+            "f64" => Type::F64,
+            "bool" => Type::Bool,
+            "string" => Type::String,
+            _ => Type::Ref(Ident {
+                sym: name.to_string(),
+                span: Span { start: 0, end: 0 },
+            }),
+        }
+    }
+
+    pub fn block_returns_value(body: &[Stmt]) -> bool {
+        for s in body {
+            match s {
+                Stmt::Return(r) => {
+                    if r.arg.is_some() {
+                        return true;
+                    }
+                }
+                Stmt::If(if_stmt) => {
+                    let then_has = if let Stmt::Block(b) = &*if_stmt.cons {
+                        Self::block_returns_value(&b.body)
+                    } else if let Stmt::Return(r) = &*if_stmt.cons {
+                        r.arg.is_some()
+                    } else {
+                        false
+                    };
+                    let else_has = if let Some(alt) = &if_stmt.alt {
+                        if let Stmt::Block(b) = &**alt {
+                            Self::block_returns_value(&b.body)
+                        } else if let Stmt::Return(r) = &**alt {
+                            r.arg.is_some()
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if then_has || else_has {
+                        return true;
+                    }
+                }
+                Stmt::Block(b) => {
+                    if Self::block_returns_value(&b.body) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     pub fn fnv1a_type_id(name: &str) -> u64 {
@@ -731,19 +829,22 @@ impl Codegen {
                 if let Some(cls) = self.class_defs.get(&id.sym) {
                     cls.methods.iter().any(|m| m.ident.sym == "release")
                 } else {
-                    matches!(
-                        id.sym.as_str(),
-                        "Map"
-                            | "Dict"
-                            | "Set"
-                            | "HashMap"
-                            | "HashSet"
-                            | "VecDeque"
-                            | "BinaryHeap"
-                            | "BTreeMap"
-                            | "BTreeSet"
-                            | "RegExp"
-                    )
+                    id.sym.starts_with("LockGuard")
+                        || id.sym.starts_with("ReadGuard")
+                        || id.sym.starts_with("WriteGuard")
+                        || matches!(
+                            id.sym.as_str(),
+                            "Map"
+                                | "Dict"
+                                | "Set"
+                                | "HashMap"
+                                | "HashSet"
+                                | "VecDeque"
+                                | "BinaryHeap"
+                                | "BTreeMap"
+                                | "BTreeSet"
+                                | "RegExp"
+                        )
                 }
             }
             Type::BoxDyn(_) => true,
@@ -1502,6 +1603,13 @@ impl Codegen {
         self.globals.insert("TypeInfo".to_string());
         self.globals.insert("FieldInfo".to_string());
         self.globals.insert("MethodInfo".to_string());
+        self.globals.insert("Mutex".to_string());
+        self.globals.insert("RwLock".to_string());
+        self.globals.insert("Atomic".to_string());
+        self.globals.insert("Shared".to_string());
+        self.globals.insert("LockGuard".to_string());
+        self.globals.insert("ReadGuard".to_string());
+        self.globals.insert("WriteGuard".to_string());
 
         self.writeln("// Generated by CP Compiler (RFC-002 Production SDK)");
         self.writeln("const std = @import(\"std\");");
@@ -1545,7 +1653,7 @@ impl Codegen {
             );
             self.writeln("}");
         }
-        if features.needs_opt_chaining {
+        if features.needs_opt_chaining || features.needs_sync {
             self.writeln("fn CpOptType(comptime T: type) type {");
             self.writeln("    if (@typeInfo(T) == .optional) return T;");
             self.writeln("    return ?T;");
@@ -2237,6 +2345,166 @@ impl Codegen {
             self.writeln("const PID = struct { node_id: u32, local_id: u32 };");
         }
 
+        if features.needs_sync {
+            self.writeln("// --- Multithreading Synchronization Primitives (cap:sync) ---");
+            self.writeln("const NativeMutex = struct {");
+            self.writeln("    state: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),");
+            self.writeln("    pub fn lock(self: *NativeMutex) void {");
+            self.writeln("        var spin: usize = 0;");
+            self.writeln("        while (true) {");
+            self.writeln("            if (self.state.cmpxchgWeak(0, 1, .acquire, .monotonic) == null) return;");
+            self.writeln("            if (spin < 100) { std.atomic.spinLoopHint(); spin += 1; } else { std.Thread.yield() catch {}; }");
+            self.writeln("        }");
+            self.writeln("    }");
+            self.writeln("    pub fn unlock(self: *NativeMutex) void { _ = self.state.swap(0, .release); }");
+            self.writeln("    pub fn tryLock(self: *NativeMutex) bool { return self.state.cmpxchgWeak(0, 1, .acquire, .monotonic) == null; }");
+            self.writeln("    pub fn isLocked(self: *NativeMutex) bool { return self.state.load(.monotonic) != 0; }");
+            self.writeln("};");
+            self.writeln("");
+            self.writeln("const NativeRwLock = struct {");
+            self.writeln("    state: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),");
+            self.writeln("    const WRITER_BIT: u32 = 1 << 31;");
+            self.writeln("    const READER_MASK: u32 = ~WRITER_BIT;");
+            self.writeln("    pub fn lockShared(self: *NativeRwLock) void {");
+            self.writeln("        var spin: usize = 0;");
+            self.writeln("        while (true) {");
+            self.writeln("            const current = self.state.load(.monotonic);");
+            self.writeln("            if ((current & WRITER_BIT) == 0) { if (self.state.cmpxchgWeak(current, current + 1, .acquire, .monotonic) == null) return; }");
+            self.writeln("            if (spin < 100) { std.atomic.spinLoopHint(); spin += 1; } else { std.Thread.yield() catch {}; }");
+            self.writeln("        }");
+            self.writeln("    }");
+            self.writeln("    pub fn unlockShared(self: *NativeRwLock) void {");
+            self.writeln("        while (true) {");
+            self.writeln("            const current = self.state.load(.monotonic);");
+            self.writeln("            const count = current & READER_MASK;");
+            self.writeln("            if (count == 0) return;");
+            self.writeln("            if (self.state.cmpxchgWeak(current, current - 1, .release, .monotonic) == null) return;");
+            self.writeln("        }");
+            self.writeln("    }");
+            self.writeln("    pub fn tryLockShared(self: *NativeRwLock) bool { const current = self.state.load(.monotonic); if ((current & WRITER_BIT) != 0) return false; return self.state.cmpxchgWeak(current, current + 1, .acquire, .monotonic) == null; }");
+            self.writeln("    pub fn lockExclusive(self: *NativeRwLock) void {");
+            self.writeln("        var spin: usize = 0;");
+            self.writeln("        while (true) {");
+            self.writeln("            if (self.state.cmpxchgWeak(0, WRITER_BIT, .acquire, .monotonic) == null) return;");
+            self.writeln("            if (spin < 100) { std.atomic.spinLoopHint(); spin += 1; } else { std.Thread.yield() catch {}; }");
+            self.writeln("        }");
+            self.writeln("    }");
+            self.writeln("    pub fn unlockExclusive(self: *NativeRwLock) void { _ = self.state.cmpxchgStrong(WRITER_BIT, 0, .release, .monotonic); }");
+            self.writeln("    pub fn tryLockExclusive(self: *NativeRwLock) bool { return self.state.cmpxchgWeak(0, WRITER_BIT, .acquire, .monotonic) == null; }");
+            self.writeln("    pub fn isReadLocked(self: *NativeRwLock) bool { return (self.state.load(.monotonic) & READER_MASK) > 0; }");
+            self.writeln("    pub fn isWriteLocked(self: *NativeRwLock) bool { return (self.state.load(.monotonic) & WRITER_BIT) != 0; }");
+            self.writeln("};");
+            self.writeln("");
+            self.writeln("const CpBareMutex = struct {");
+            self.writeln("    raw: NativeMutex = .{},");
+            self.writeln("    pub fn lock(self: *CpBareMutex) void { self.raw.lock(); }");
+            self.writeln("    pub fn unlock(self: *CpBareMutex) void { self.raw.unlock(); }");
+            self.writeln("    pub fn tryLock(self: *CpBareMutex) bool { return self.raw.tryLock(); }");
+            self.writeln("    pub fn isLocked(self: *CpBareMutex) bool { return self.raw.isLocked(); }");
+            self.writeln("};");
+            self.writeln("");
+            self.writeln("const CpBareRwLock = struct {");
+            self.writeln("    raw: NativeRwLock = .{},");
+            self.writeln("    pub fn lock(self: *CpBareRwLock) void { self.raw.lockExclusive(); }");
+            self.writeln("    pub fn unlock(self: *CpBareRwLock) void { self.raw.unlockExclusive(); }");
+            self.writeln("    pub fn lockShared(self: *CpBareRwLock) void { self.raw.lockShared(); }");
+            self.writeln("    pub fn unlockShared(self: *CpBareRwLock) void { self.raw.unlockShared(); }");
+            self.writeln("    pub fn read(self: *CpBareRwLock) void { self.raw.lockShared(); }");
+            self.writeln("    pub fn write(self: *CpBareRwLock) void { self.raw.lockExclusive(); }");
+            self.writeln("    pub fn tryLock(self: *CpBareRwLock) bool { return self.raw.tryLockExclusive(); }");
+            self.writeln("    pub fn tryLockShared(self: *CpBareRwLock) bool { return self.raw.tryLockShared(); }");
+            self.writeln("    pub fn tryRead(self: *CpBareRwLock) bool { return self.raw.tryLockShared(); }");
+            self.writeln("    pub fn tryWrite(self: *CpBareRwLock) bool { return self.raw.tryLockExclusive(); }");
+            self.writeln("    pub fn isReadLocked(self: *CpBareRwLock) bool { return self.raw.isReadLocked(); }");
+            self.writeln("    pub fn isWriteLocked(self: *CpBareRwLock) bool { return self.raw.isWriteLocked(); }");
+            self.writeln("};");
+            self.writeln("");
+            self.writeln("fn LockGuard(comptime T: type) type {");
+            self.writeln("    return struct {");
+            self.writeln("        const Self = @This();");
+            self.writeln("        mutex: *CpMutex(T),");
+            self.writeln("        data: *T,");
+            self.writeln("        pub fn release(self: Self) void { self.mutex.raw.unlock(); }");
+            self.writeln("        pub fn unlock(self: Self) void { self.release(); }");
+            self.writeln("    };");
+            self.writeln("}");
+            self.writeln("");
+            self.writeln("fn ReadGuard(comptime T: type) type {");
+            self.writeln("    return struct {");
+            self.writeln("        const Self = @This();");
+            self.writeln("        rwlock: *CpRwLock(T),");
+            self.writeln("        data: *const T,");
+            self.writeln("        pub fn release(self: Self) void { self.rwlock.raw.unlockShared(); }");
+            self.writeln("        pub fn unlock(self: Self) void { self.release(); }");
+            self.writeln("    };");
+            self.writeln("}");
+            self.writeln("");
+            self.writeln("fn WriteGuard(comptime T: type) type {");
+            self.writeln("    return struct {");
+            self.writeln("        const Self = @This();");
+            self.writeln("        rwlock: *CpRwLock(T),");
+            self.writeln("        data: *T,");
+            self.writeln("        pub fn release(self: Self) void { self.rwlock.raw.unlockExclusive(); }");
+            self.writeln("        pub fn unlock(self: Self) void { self.release(); }");
+            self.writeln("    };");
+            self.writeln("}");
+            self.writeln("");
+            self.writeln("fn CpMutex(comptime T: type) type {");
+            self.writeln("    return struct {");
+            self.writeln("        const Self = @This();");
+            self.writeln("        raw: NativeMutex = .{},");
+            self.writeln("        data: T,");
+            self.writeln("        pub fn init(val: T) Self { return .{ .data = val }; }");
+            self.writeln("        pub fn lock(self: *Self) LockGuard(T) { self.raw.lock(); return .{ .mutex = self, .data = &self.data }; }");
+            self.writeln("        pub fn tryLock(self: *Self) ?LockGuard(T) { if (self.raw.tryLock()) { return LockGuard(T){ .mutex = self, .data = &self.data }; } return null; }");
+            self.writeln("        pub fn isLocked(self: *Self) bool { return self.raw.isLocked(); }");
+            self.writeln("    };");
+            self.writeln("}");
+            self.writeln("");
+            self.writeln("fn CpRwLock(comptime T: type) type {");
+            self.writeln("    return struct {");
+            self.writeln("        const Self = @This();");
+            self.writeln("        raw: NativeRwLock = .{},");
+            self.writeln("        data: T,");
+            self.writeln("        pub fn init(val: T) Self { return .{ .data = val }; }");
+            self.writeln("        pub fn read(self: *Self) ReadGuard(T) { self.raw.lockShared(); return .{ .rwlock = self, .data = &self.data }; }");
+            self.writeln("        pub fn tryRead(self: *Self) ?ReadGuard(T) { if (self.raw.tryLockShared()) { return ReadGuard(T){ .rwlock = self, .data = &self.data }; } return null; }");
+            self.writeln("        pub fn write(self: *Self) WriteGuard(T) { self.raw.lockExclusive(); return .{ .rwlock = self, .data = &self.data }; }");
+            self.writeln("        pub fn tryWrite(self: *Self) ?WriteGuard(T) { if (self.raw.tryLockExclusive()) { return WriteGuard(T){ .rwlock = self, .data = &self.data }; } return null; }");
+            self.writeln("        pub fn isReadLocked(self: *Self) bool { return self.raw.isReadLocked(); }");
+            self.writeln("        pub fn isWriteLocked(self: *Self) bool { return self.raw.isWriteLocked(); }");
+            self.writeln("    };");
+            self.writeln("}");
+            self.writeln("");
+            self.writeln("fn CpAtomic(comptime T: type) type {");
+            self.writeln("    return struct {");
+            self.writeln("        const Self = @This();");
+            self.writeln("        raw: std.atomic.Value(T),");
+            self.writeln("        pub fn init(val: T) Self { return .{ .raw = std.atomic.Value(T).init(val) }; }");
+            self.writeln("        pub fn load(self: *const Self) T { return self.raw.load(.seq_cst); }");
+            self.writeln("        pub fn store(self: *Self, val: T) void { self.raw.store(val, .seq_cst); }");
+            self.writeln("        pub fn swap(self: *Self, val: T) T { return self.raw.swap(val, .seq_cst); }");
+            self.writeln("        pub fn cas(self: *Self, expected: T, desired: T) bool { return self.raw.cmpxchgStrong(expected, desired, .seq_cst, .seq_cst) == null; }");
+            self.writeln("        pub fn compareAndSwap(self: *Self, expected: T, desired: T) bool { return self.cas(expected, desired); }");
+            self.writeln("        pub fn add(self: *Self, delta: T) T { return self.raw.fetchAdd(delta, .seq_cst); }");
+            self.writeln("        pub fn sub(self: *Self, delta: T) T { return self.raw.fetchSub(delta, .seq_cst); }");
+            self.writeln("        pub fn inc(self: *Self) T { return self.add(1); }");
+            self.writeln("        pub fn dec(self: *Self) T { return self.sub(1); }");
+            self.writeln("        pub fn @\"and\"(self: *Self, mask: T) T { return self.raw.fetchAnd(mask, .seq_cst); }");
+            self.writeln("        pub fn @\"or\"(self: *Self, mask: T) T { return self.raw.fetchOr(mask, .seq_cst); }");
+            self.writeln("        pub fn @\"xor\"(self: *Self, mask: T) T { return self.raw.fetchXor(mask, .seq_cst); }");
+            self.writeln("        pub fn testAndSet(self: *Self) bool { if (comptime T == bool) { return self.raw.swap(true, .seq_cst); } else { return self.raw.swap(1, .seq_cst) != 0; } }");
+            self.writeln("        pub fn clear(self: *Self) void { if (comptime T == bool) { self.raw.store(false, .seq_cst); } else { self.raw.store(0, .seq_cst); } }");
+            self.writeln("    };");
+            self.writeln("}");
+            self.writeln("");
+            self.writeln("fn cp_make_mutex(val: anytype) CpMutex(@TypeOf(val)) { return CpMutex(@TypeOf(val)).init(val); }");
+            self.writeln("fn cp_make_rwlock(val: anytype) CpRwLock(@TypeOf(val)) { return CpRwLock(@TypeOf(val)).init(val); }");
+            self.writeln("fn CpAtomicConcreteType(comptime T: type) type { if (T == comptime_int) return i32; if (T == comptime_float) return f32; return T; }");
+            self.writeln("fn cp_make_atomic(val: anytype) CpAtomic(CpAtomicConcreteType(@TypeOf(val))) { const T = CpAtomicConcreteType(@TypeOf(val)); return CpAtomic(T).init(@as(T, val)); }");
+            self.writeln("");
+        }
+
         if features.needs_collections || features.needs_actors {
             self.writeln("fn CpIndexReturnType(comptime T: type) type {");
             self.writeln("    if (@typeInfo(T) == .pointer) {");
@@ -2574,6 +2842,32 @@ impl Codegen {
         self.writeln("");
 
         for item in &module.body {
+            if let ModuleItem::Import(imp) = item {
+                let zig_source = if imp.source.ends_with(".cp") {
+                    format!("{}.zig", &imp.source[..imp.source.len() - 3])
+                } else {
+                    imp.source.clone()
+                };
+                if let Some(def) = &imp.default_specifier {
+                    self.globals.insert(def.sym.clone());
+                    self.value_classes.insert(def.sym.clone());
+                    self.writeln(&format!(
+                        "pub const {} = @import(\"{}\");",
+                        def.sym, zig_source
+                    ));
+                }
+                for s in &imp.specifiers {
+                    self.globals.insert(s.sym.clone());
+                    self.value_classes.insert(s.sym.clone());
+                    self.writeln(&format!(
+                        "pub const {0} = @import(\"{1}\").{0};",
+                        s.sym, zig_source
+                    ));
+                }
+            }
+        }
+
+        for item in &module.body {
             if let ModuleItem::Decl(Decl::Trait(t)) = item {
                 self.generate_trait(t);
             }
@@ -2734,23 +3028,11 @@ impl Codegen {
                 }
                 ModuleItem::Decl(Decl::Dec(_)) => {}
                 ModuleItem::Decl(Decl::Macro(_)) => {}
-                ModuleItem::Import(imp) => {
-                    let mut specs = String::new();
-                    for (v_idx, s) in imp.specifiers.iter().enumerate() {
-                        self.globals.insert(s.sym.clone());
-                        specs.push_str(&s.sym);
-                        if v_idx < imp.specifiers.len() - 1 {
-                            specs.push_str(", ");
-                        }
-                    }
-                    self.writeln(&format!(
-                        "// import {{ {} }} from \"{}\"",
-                        specs, imp.source
-                    ));
-                }
+                ModuleItem::Import(_) => {}
                 _ => {}
             }
         }
+
 
         for f in &self.lambda_funcs {
             self.output.push_str(f);
@@ -3159,6 +3441,7 @@ impl Codegen {
         let type_id = Self::fnv1a_type_id(&class.ident.sym);
         let is_packed = class.meta.iter().find(|m| m.name.sym == "packed");
         let is_extern = class.meta.iter().any(|m| m.name.sym == "extern");
+        let is_opaque = class.meta.iter().any(|m| m.name.sym == "opaque");
         let struct_kind = if let Some(p) = is_packed {
             if let Some(arg) = p.args.first() {
                 let expr = match arg {
@@ -3171,6 +3454,8 @@ impl Codegen {
             }
         } else if is_extern {
             "extern struct".to_string()
+        } else if is_opaque {
+            "opaque".to_string()
         } else {
             "struct".to_string()
         };
@@ -3189,25 +3474,43 @@ impl Codegen {
         if class.implements.iter().any(|i| i.sym == "Agent") {
             self.writeln("id: u32 = 0,");
         }
-        for f in &class.fields {
-            let default_init = if let Some(def) = &f.default {
-                format!(" = {},", self.generate_expr(def))
-            } else {
-                ",".to_string()
-            };
-            self.writeln(&format!(
-                "{}: {}{}",
-                f.ident.sym,
-                self.map_type(&f.ty),
-                default_init
-            ));
-        }
-        if !class
-            .meta
-            .iter()
-            .any(|m| m.name.sym == "value" || m.name.sym == "packed" || m.name.sym == "extern")
-        {
-            self.writeln(&format!("\npub fn _create(allocator: std.mem.Allocator) !*{} {{ const self_ptr = try allocator.create({}); self_ptr.* = undefined; return self_ptr; }}", class.ident.sym, class.ident.sym));
+        if class.is_static {
+            for f in &class.fields {
+                let default_init = if let Some(def) = &f.default {
+                    format!(" = {}", self.generate_expr(def))
+                } else {
+                    " = undefined".to_string()
+                };
+                let pub_prefix = if f.is_pub { "pub " } else { "" };
+                self.writeln(&format!(
+                    "{}var {}: {}{};",
+                    pub_prefix,
+                    f.ident.sym,
+                    self.map_type(&f.ty),
+                    default_init
+                ));
+            }
+        } else {
+            for f in &class.fields {
+                let default_init = if let Some(def) = &f.default {
+                    format!(" = {},", self.generate_expr(def))
+                } else {
+                    ",".to_string()
+                };
+                self.writeln(&format!(
+                    "{}: {}{}",
+                    f.ident.sym,
+                    self.map_type(&f.ty),
+                    default_init
+                ));
+            }
+            if !class
+                .meta
+                .iter()
+                .any(|m| m.name.sym == "value" || m.name.sym == "packed" || m.name.sym == "extern" || m.name.sym == "opaque")
+            {
+                self.writeln(&format!("\npub fn _create(allocator: std.mem.Allocator) !*{} {{ const self_ptr = try allocator.create({}); self_ptr.* = undefined; return self_ptr; }}", class.ident.sym, class.ident.sym));
+            }
         }
         if needs_trait_infra {
             self.writeln(&format!(
@@ -3832,7 +4135,7 @@ impl Codegen {
                 }
                 self.check_mutation_allowed(&mem.obj, op_desc);
             }
-            Expr::Deref(inner) => {
+            Expr::Deref(inner) | Expr::Unwrap(inner) => {
                 self.check_mutation_allowed(inner, op_desc);
             }
             Expr::Index { obj, .. } => {
@@ -3870,6 +4173,7 @@ impl Codegen {
                 (vec![], *is_mut, false)
             }
             Expr::Question(inner)
+            | Expr::Unwrap(inner)
             | Expr::QuestionFallback { expr: inner, .. }
             | Expr::NullCoalesce { left: inner, .. }
             | Expr::Catch { expr: inner, .. } => self.extract_expr_borrow_info(inner),
@@ -4313,6 +4617,36 @@ impl Codegen {
                             sym: "Error".to_string(),
                         }));
                     }
+                    if fid.sym == "Mutex" {
+                        if c.args.is_empty() {
+                            return Some(Type::Ref(Ident { sym: "Mutex".to_string(), span: fid.span }));
+                        } else {
+                            let inner = self.infer_cp_type_with_mock(&c.args[0], mock_types).unwrap_or(Type::I32);
+                            return Some(Type::Ref(Ident { sym: format!("Mutex<{}>", type_to_display_string(&inner)), span: fid.span }));
+                        }
+                    }
+                    if fid.sym == "RwLock" {
+                        if c.args.is_empty() {
+                            return Some(Type::Ref(Ident { sym: "RwLock".to_string(), span: fid.span }));
+                        } else {
+                            let inner = self.infer_cp_type_with_mock(&c.args[0], mock_types).unwrap_or(Type::I32);
+                            return Some(Type::Ref(Ident { sym: format!("RwLock<{}>", type_to_display_string(&inner)), span: fid.span }));
+                        }
+                    }
+                    if fid.sym == "Atomic" {
+                        let inner = if !c.args.is_empty() {
+                            self.infer_cp_type_with_mock(&c.args[0], mock_types).unwrap_or(Type::I32)
+                        } else {
+                            Type::I32
+                        };
+                        return Some(Type::Ref(Ident { sym: format!("Atomic<{}>", type_to_display_string(&inner)), span: fid.span }));
+                    }
+                    if fid.sym == "Shared" {
+                        if !c.args.is_empty() {
+                            let inner = self.infer_cp_type_with_mock(&c.args[0], mock_types).unwrap_or(Type::I32);
+                            return Some(Type::Shared(Box::new(inner)));
+                        }
+                    }
                     if let Some(sig) = self.fn_sigs.get(&fid.sym) {
                         if let Some(rt) = &sig.return_type {
                             if self.in_try_region {
@@ -4333,6 +4667,121 @@ impl Codegen {
                         }
                     }
                 } else if let Expr::Member(mem) = &*c.callee {
+                    if let Some(mut oty) = self.infer_cp_type_with_mock(&mem.obj, mock_types) {
+                        while let Type::BorrowType { inner, .. } = oty {
+                            oty = *inner;
+                        }
+                        while let Type::Shared(inner) = oty {
+                            oty = *inner;
+                        }
+                        while let Type::RawPtr { inner, .. } = oty {
+                            oty = *inner;
+                        }
+                        if let Type::Ref(id) = &oty {
+                            let prop = mem.prop.sym.as_str();
+                            if id.sym.starts_with("Mutex<") {
+                                let inner_sym = &id.sym[6..id.sym.len() - 1];
+                                if prop == "lock" {
+                                    return Some(Type::Ref(Ident { sym: format!("LockGuard<{}>", inner_sym), span: mem.prop.span }));
+                                }
+                                if prop == "tryLock" {
+                                    return Some(Type::Optional(Box::new(Type::Ref(Ident { sym: format!("LockGuard<{}>", inner_sym), span: mem.prop.span }))));
+                                }
+                                if prop == "isLocked" {
+                                    return Some(Type::Bool);
+                                }
+                                if prop == "withLock" && !c.args.is_empty() {
+                                    if let Expr::Arrow(arr) = &c.args[0] {
+                                        let mut sub_mock = mock_types.clone();
+                                        if !arr.params.is_empty() {
+                                            if let Pattern::Ident(pid) = &arr.params[0] {
+                                                sub_mock.insert(pid.sym.clone(), Self::type_from_name_static(inner_sym));
+                                            }
+                                        }
+                                        match &*arr.body {
+                                            ArrowBody::Expr(e) => return self.infer_cp_type_with_mock(e, &sub_mock),
+                                            ArrowBody::Block(b) => {
+                                                if let Some(Stmt::Return(r)) = b.body.last() {
+                                                    if let Some(a) = &r.arg {
+                                                        return self.infer_cp_type_with_mock(a, &sub_mock);
+                                                    }
+                                                }
+                                                return Some(Type::Void);
+                                            }
+                                        }
+                                    }
+                                }
+                            } else if id.sym == "Mutex" {
+                                if prop == "tryLock" || prop == "isLocked" {
+                                    return Some(Type::Bool);
+                                }
+                                if prop == "lock" || prop == "unlock" {
+                                    return Some(Type::Void);
+                                }
+                            } else if id.sym.starts_with("RwLock<") {
+                                let inner_sym = &id.sym[7..id.sym.len() - 1];
+                                if prop == "read" {
+                                    return Some(Type::Ref(Ident { sym: format!("ReadGuard<{}>", inner_sym), span: mem.prop.span }));
+                                }
+                                if prop == "tryRead" {
+                                    return Some(Type::Optional(Box::new(Type::Ref(Ident { sym: format!("ReadGuard<{}>", inner_sym), span: mem.prop.span }))));
+                                }
+                                if prop == "write" {
+                                    return Some(Type::Ref(Ident { sym: format!("WriteGuard<{}>", inner_sym), span: mem.prop.span }));
+                                }
+                                if prop == "tryWrite" {
+                                    return Some(Type::Optional(Box::new(Type::Ref(Ident { sym: format!("WriteGuard<{}>", inner_sym), span: mem.prop.span }))));
+                                }
+                                if prop == "isReadLocked" || prop == "isWriteLocked" {
+                                    return Some(Type::Bool);
+                                }
+                                if (prop == "withRead" || prop == "withWrite") && !c.args.is_empty() {
+                                    if let Expr::Arrow(arr) = &c.args[0] {
+                                        let mut sub_mock = mock_types.clone();
+                                        if !arr.params.is_empty() {
+                                            if let Pattern::Ident(pid) = &arr.params[0] {
+                                                sub_mock.insert(pid.sym.clone(), Self::type_from_name_static(inner_sym));
+                                            }
+                                        }
+                                        match &*arr.body {
+                                            ArrowBody::Expr(e) => return self.infer_cp_type_with_mock(e, &sub_mock),
+                                            ArrowBody::Block(b) => {
+                                                if let Some(Stmt::Return(r)) = b.body.last() {
+                                                    if let Some(a) = &r.arg {
+                                                        return self.infer_cp_type_with_mock(a, &sub_mock);
+                                                    }
+                                                }
+                                                return Some(Type::Void);
+                                            }
+                                        }
+                                    }
+                                }
+                            } else if id.sym == "RwLock" {
+                                if prop == "tryLock" || prop == "tryLockShared" || prop == "isReadLocked" || prop == "isWriteLocked" {
+                                    return Some(Type::Bool);
+                                }
+                                if prop == "lock" || prop == "unlock" || prop == "lockShared" || prop == "unlockShared" {
+                                    return Some(Type::Void);
+                                }
+                            } else if id.sym.starts_with("Atomic<") {
+                                let inner_sym = &id.sym[7..id.sym.len() - 1];
+                                let inner_ty = Self::type_from_name_static(inner_sym);
+                                if prop == "load" || prop == "swap" || prop == "add" || prop == "sub" || prop == "inc" || prop == "dec" || prop == "and" || prop == "or" || prop == "xor" {
+                                    return Some(inner_ty);
+                                }
+                                if prop == "cas" || prop == "compareAndSwap" || prop == "testAndSet" {
+                                    return Some(Type::Bool);
+                                }
+                                if prop == "store" || prop == "clear" {
+                                    return Some(Type::Void);
+                                }
+                            } else if id.sym.starts_with("LockGuard<") || id.sym.starts_with("ReadGuard<") || id.sym.starts_with("WriteGuard<") {
+                                if prop == "release" || prop == "unlock" {
+                                    return Some(Type::Void);
+                                }
+                            }
+                        }
+                    }
                     if let Expr::Ident(oid) = &*mem.obj {
                         if oid.sym == "spawn" && mem.prop.sym == "cpu" {
                             return Some(Type::Ref(Ident {
@@ -4433,6 +4882,9 @@ impl Codegen {
                     while let Type::RawPtr { inner, .. } = obj_ty {
                         obj_ty = *inner;
                     }
+                    while let Type::Shared(inner) = obj_ty {
+                        obj_ty = *inner;
+                    }
                     if mem.prop.sym == "size"
                         && matches!(obj_ty, Type::Map(_, _) | Type::Dict(_, _) | Type::Set(_))
                     {
@@ -4445,6 +4897,22 @@ impl Codegen {
                     }
                     if let Type::Ref(id) = &obj_ty {
                         let tname = &id.sym;
+                        let guard_inner = if tname.starts_with("LockGuard<") {
+                            Some(&tname[10..tname.len() - 1])
+                        } else if tname.starts_with("ReadGuard<") {
+                            Some(&tname[10..tname.len() - 1])
+                        } else if tname.starts_with("WriteGuard<") {
+                            Some(&tname[11..tname.len() - 1])
+                        } else {
+                            None
+                        };
+                        if let Some(inner_cls) = guard_inner {
+                            if let Some(cls) = self.class_defs.get(inner_cls) {
+                                if let Some(f) = cls.fields.iter().find(|f| f.ident.sym == mem.prop.sym) {
+                                    return Some(f.ty.clone());
+                                }
+                            }
+                        }
                         if let Some(cls) = self.class_defs.get(tname) {
                             if let Some(f) = cls.fields.iter().find(|f| f.ident.sym == mem.prop.sym)
                             {
@@ -4538,6 +5006,11 @@ impl Codegen {
                             if let Some(f) = fields.iter().find(|f| f.ident.sym == mem.prop.sym) {
                                 return Some(f.ty.clone());
                             }
+                        }
+                    }
+                    if let Some(cls) = self.class_defs.get(&oid.sym) {
+                        if let Some(f) = cls.fields.iter().find(|f| f.ident.sym == mem.prop.sym) {
+                            return Some(f.ty.clone());
                         }
                     }
                     if self.enum_defs.contains_key(&oid.sym)
@@ -4845,6 +5318,7 @@ impl Codegen {
                             meta: Vec::new(),
                             default: None,
                             is_pub: true,
+                            is_static: false,
                         };
                         if let Some(pos) =
                             fs.iter().position(|existing| existing.ident.sym == k.sym)
@@ -4928,6 +5402,13 @@ impl Codegen {
                     }
                 }
                 Some(Type::Void)
+            }
+            Expr::Unwrap(inner) => {
+                let inner_ty = self.infer_cp_type_with_mock(inner, mock_types);
+                match inner_ty {
+                    Some(Type::Optional(unwrapped)) => Some(*unwrapped),
+                    other => other,
+                }
             }
             _ => None,
         }
@@ -5192,6 +5673,7 @@ impl Codegen {
                 _ => {}
             }
         }
+
     }
 
     pub fn escape_zig_string(s: &str) -> String {
@@ -8374,6 +8856,15 @@ impl Codegen {
                 self.uninitialized_vars.extend(uninit_body);
             }
             Stmt::Return(ret) => {
+                if let Some(blk_lbl) = self.inline_closure_blk.clone() {
+                    if let Some(arg) = &ret.arg {
+                        let e = self.generate_expr(arg);
+                        self.write_to_case(&format!("break :{} {};", blk_lbl, e));
+                    } else {
+                        self.write_to_case(&format!("break :{} {{}};", blk_lbl));
+                    }
+                    return;
+                }
                 if let Some(arg) = &ret.arg {
                     let is_null_ret = matches!(arg, Expr::Lit(Lit::Null))
                         || matches!(arg, Expr::Ident(id) if id.sym == "null");
@@ -8802,7 +9293,7 @@ impl Codegen {
                 {
                     i.sym.clone()
                 } else if self.locals.contains_key(&i.sym) {
-                    let base = if self.is_state_machine {
+                    let base = if self.is_state_machine && !self.inline_closure_params.contains(&i.sym) {
                         format!("ctx.{}", i.sym)
                     } else {
                         i.sym.clone()
@@ -8864,7 +9355,9 @@ impl Codegen {
                     }
                 }
                 let inner_code = self.generate_expr(inner);
-                let already_ptr = if let Expr::Ident(id) = &**inner {
+                let already_ptr = if matches!(&**inner, Expr::Member(_) | Expr::Index { .. }) {
+                    false
+                } else if let Expr::Ident(id) = &**inner {
                     if let Some(zig_ty) = self.locals.get(&id.sym) {
                         zig_ty.starts_with('*')
                     } else if let Some(ty) = self.var_cp_types.get(&id.sym) {
@@ -9083,24 +9576,194 @@ impl Codegen {
             Expr::Call(call) => {
                 if let Expr::Member(mem) = &*call.callee {
                     let prop = mem.prop.sym.as_str();
-                    let mut raw_obj_ty = self.infer_cp_type(&mem.obj);
-                    while let Some(Type::BorrowType { inner, .. }) = raw_obj_ty {
-                        raw_obj_ty = Some(*inner);
+
+                    if let Expr::Ident(id) = &*mem.obj {
+                        if id.sym == "Shared" && prop == "new" && !call.args.is_empty() {
+                            let arg = self.generate_expr(&call.args[0]);
+                            return format!(
+                                "(blk: {{ const _val = {}; const _T = @TypeOf(_val); if (comptime @typeInfo(_T) == .pointer) break :blk _val else {{ const _p = std.heap.page_allocator.create(_T) catch unreachable; _p.* = _val; break :blk _p; }} }})",
+                                arg
+                            );
+                        }
+                        if id.sym == "Mutex" && prop == "new" {
+                            if call.args.is_empty() {
+                                return "CpBareMutex{}".to_string();
+                            } else {
+                                let arg = self.generate_expr(&call.args[0]);
+                                return format!("cp_make_mutex({})", arg);
+                            }
+                        }
+                        if id.sym == "RwLock" && prop == "new" {
+                            if call.args.is_empty() {
+                                return "CpBareRwLock{}".to_string();
+                            } else {
+                                let arg = self.generate_expr(&call.args[0]);
+                                return format!("cp_make_rwlock({})", arg);
+                            }
+                        }
+                        if id.sym == "Atomic" && prop == "new" {
+                            if call.args.is_empty() {
+                                return "cp_make_atomic(@as(i32, 0))".to_string();
+                            } else {
+                                let arg = self.generate_expr(&call.args[0]);
+                                return format!("cp_make_atomic({})", arg);
+                            }
+                        }
                     }
-                    let is_builtin_container = matches!(
+
+                    let mut raw_obj_ty = self.infer_cp_type(&mem.obj);
+                    loop {
+                        match raw_obj_ty {
+                            Some(Type::Optional(inner))
+                            | Some(Type::BorrowType { inner, .. })
+                            | Some(Type::Shared(inner))
+                            | Some(Type::RawPtr { inner, .. }) => {
+                                raw_obj_ty = Some(*inner);
+                            }
+                            _ => break,
+                        }
+                    }
+
+                    if (prop == "withLock" || prop == "withRead" || prop == "withWrite") && !call.args.is_empty() {
+                        let obj_code = self.generate_expr(&mem.obj);
+                        let blk_id = self.lambda_counter;
+                        self.lambda_counter += 1;
+                        let (lock_fn, unlock_fn) = match prop {
+                            "withLock" => ("lock", "unlock"),
+                            "withRead" => ("lockShared", "unlockShared"),
+                            "withWrite" => ("lockExclusive", "unlockExclusive"),
+                            _ => unreachable!(),
+                        };
+                        if let Expr::Arrow(arrow) = &call.args[0] {
+                            let mut param_bind = String::new();
+                            let mut saved_local = None;
+                            let mut saved_cp_ty = None;
+                            let mut param_ident = None;
+                            if !arrow.params.is_empty() {
+                                if let Pattern::Ident(pid) = &arrow.params[0] {
+                                    let pname = pid.sym.clone();
+                                    param_ident = Some(pname.clone());
+                                    self.inline_closure_params.insert(pname.clone());
+                                    param_bind = format!("    const {0} = &(_target.data); _ = &{0};\n", pname);
+                                    saved_local = self.locals.get(&pname).cloned();
+                                    saved_cp_ty = self.var_cp_types.get(&pname).cloned();
+                                    if let Some(Type::Ref(id)) = &raw_obj_ty {
+                                        let inner_sym = if id.sym.starts_with("Mutex<") {
+                                            &id.sym[6..id.sym.len() - 1]
+                                        } else if id.sym.starts_with("RwLock<") {
+                                            &id.sym[7..id.sym.len() - 1]
+                                        } else {
+                                            ""
+                                        };
+                                        if !inner_sym.is_empty() {
+                                            self.locals.insert(pname.clone(), format!("*{}", inner_sym));
+                                            self.var_cp_types.insert(
+                                                pname.clone(),
+                                                Type::BorrowType {
+                                                    inner: Box::new(Self::type_from_name_static(inner_sym)),
+                                                    is_mut: prop != "withRead",
+                                                    lifetimes: vec![],
+                                                },
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+
+                            let res = match &*arrow.body {
+                                ArrowBody::Expr(e) => {
+                                    let body_expr = self.generate_expr(e);
+                                    format!(
+                                        "(blk_sync_{0}: {{\n    const _target = if (comptime @typeInfo(@TypeOf({1})) == .pointer) ({1}) else &({1});\n    _target.raw.{2}();\n    defer _target.raw.{3}();\n{4}    break :blk_sync_{0} {5};\n}})",
+                                        blk_id, obj_code, lock_fn, unlock_fn, param_bind, body_expr
+                                    )
+                                }
+                                ArrowBody::Block(b) => {
+                                    let old_blk = self.inline_closure_blk.clone();
+                                    self.inline_closure_blk = Some(format!("blk_sync_{}", blk_id));
+                                    let saved_content = self.current_case_content.clone();
+                                    self.current_case_content.clear();
+
+                                    for s in &b.body {
+                                        self.generate_stmt(s);
+                                    }
+                                    if !Self::block_returns_value(&b.body) {
+                                        self.write_to_case(&format!("break :blk_sync_{} {{}};", blk_id));
+                                    }
+
+                                    let body_stmts = self.current_case_content.clone();
+                                    self.current_case_content = saved_content;
+                                    self.inline_closure_blk = old_blk;
+
+                                    format!(
+                                        "(blk_sync_{0}: {{\n    const _target = if (comptime @typeInfo(@TypeOf({1})) == .pointer) ({1}) else &({1});\n    _target.raw.{2}();\n    defer _target.raw.{3}();\n{4}{5}\n}})",
+                                        blk_id, obj_code, lock_fn, unlock_fn, param_bind, body_stmts
+                                    )
+                                }
+                            };
+
+                            if let Some(pname) = param_ident {
+                                self.inline_closure_params.remove(&pname);
+                                if let Some(l) = saved_local {
+                                    self.locals.insert(pname.clone(), l);
+                                } else {
+                                    self.locals.remove(&pname);
+                                }
+                                if let Some(t) = saved_cp_ty {
+                                    self.var_cp_types.insert(pname, t);
+                                } else {
+                                    self.var_cp_types.remove(&pname);
+                                }
+                            }
+                            return res;
+                        }
+                    }
+
+                    let is_sync_type = matches!(&raw_obj_ty, Some(Type::Ref(id)) if id.sym == "Mutex" || id.sym.starts_with("Mutex<") || id.sym == "RwLock" || id.sym.starts_with("RwLock<") || id.sym == "Atomic" || id.sym.starts_with("Atomic<") || id.sym.starts_with("LockGuard<") || id.sym.starts_with("ReadGuard<") || id.sym.starts_with("WriteGuard<"));
+                    if is_sync_type || matches!(prop, "cas" | "compareAndSwap" | "testAndSet" | "tryLock" | "isLocked" | "tryRead" | "tryWrite" | "isReadLocked" | "isWriteLocked" | "release") {
+                        let obj_raw = self.generate_expr(&mem.obj);
+                        let obj_ty = self.infer_zig_type(None, Some(&mem.obj));
+                        let obj = if obj_ty.starts_with('?') {
+                            format!("({}).?", obj_raw)
+                        } else {
+                            obj_raw
+                        };
+                        if prop == "and" || prop == "or" || prop == "xor" {
+                            let arg = self.generate_expr(&call.args[0]);
+                            return format!("(if (comptime @typeInfo(@TypeOf({0})) == .pointer) ({0}) else &({0})).@\"{1}\"({2})", obj, prop, arg);
+                        }
+                        if prop == "cas" || prop == "compareAndSwap" {
+                            let arg0 = self.generate_expr(&call.args[0]);
+                            let arg1 = self.generate_expr(&call.args[1]);
+                            return format!("(if (comptime @typeInfo(@TypeOf({0})) == .pointer) ({0}) else &({0})).cas({1}, {2})", obj, arg0, arg1);
+                        }
+                        if matches!(prop, "load" | "store" | "swap" | "add" | "sub" | "inc" | "dec" | "testAndSet" | "clear") {
+                            let mut args_code = Vec::new();
+                            for a in &call.args {
+                                args_code.push(self.generate_expr(a));
+                            }
+                            return format!("(if (comptime @typeInfo(@TypeOf({0})) == .pointer) ({0}) else &({0})).{1}({2})", obj, prop, args_code.join(", "));
+                        }
+                        if matches!(prop, "lock" | "unlock" | "tryLock" | "isLocked" | "read" | "write" | "tryRead" | "tryWrite" | "isReadLocked" | "isWriteLocked" | "release") {
+                            return format!("(if (comptime @typeInfo(@TypeOf({0})) == .pointer) ({0}) else &({0})).{1}()", obj, prop);
+                        }
+                    }
+
+                    let _is_builtin_container = matches!(
                         raw_obj_ty,
-                        Some(Type::Ref(id)) if id.sym == "BinaryHeap" || id.sym == "VecDeque" || id.sym == "BTreeMap" || id.sym == "BTreeSet" || id.sym == "Map" || id.sym == "Set" || id.sym == "HashMap" || id.sym == "HashSet"
+                        Some(Type::Ref(ref id)) if id.sym == "BinaryHeap" || id.sym == "VecDeque" || id.sym == "BTreeMap" || id.sym == "BTreeSet" || id.sym == "Map" || id.sym == "Set" || id.sym == "HashMap" || id.sym == "HashSet"
                     );
-                    if prop == "push" && !is_builtin_container {
+                    let is_array_type = matches!(raw_obj_ty, Some(Type::Array(_)));
+                    if prop == "push" && is_array_type {
                         self.check_mutation_allowed(&mem.obj, "container method 'push'");
                         let obj = self.generate_expr(&mem.obj);
                         let arg = self.generate_expr(&call.args[0]);
                         return format!("cp_array_push(&{}, {})", obj, arg);
-                    } else if prop == "pop" && !is_builtin_container {
+                    } else if prop == "pop" && is_array_type {
                         self.check_mutation_allowed(&mem.obj, "container method 'pop'");
                         let obj = self.generate_expr(&mem.obj);
                         return format!("cp_array_pop(&{})", obj);
-                    } else if prop == "clear" && !is_builtin_container {
+                    } else if prop == "clear" && is_array_type {
                         self.check_mutation_allowed(&mem.obj, "container method 'clear'");
                         let obj = self.generate_expr(&mem.obj);
                         return format!("cp_container_clear(&{})", obj);
@@ -9797,6 +10460,37 @@ impl Codegen {
                     }
                     return format!("(blk: {{ _ = global_active_tasks.fetchAdd(1, .acquire); const arena_ptr = std.heap.page_allocator.create(std.heap.ArenaAllocator) catch unreachable; arena_ptr.* = std.heap.ArenaAllocator.init(std.heap.page_allocator); const task_ptr = arena_ptr.allocator().create(CpTask) catch unreachable; task_ptr.* = .{{ .arena = arena_ptr }}; const sub_ctx = arena_ptr.allocator().create({0}_Context) catch unreachable; sub_ctx.* = undefined; sub_ctx.pc = 0; sub_ctx.arena = arena_ptr; sub_ctx._parent = @ptrCast(task_ptr); sub_ctx._parent_fn = @ptrCast(&__cp_task_bridge); {1} const p = PID{{ .node_id = current_node_id, .local_id = next_local_id }}; next_local_id += 1; sub_ctx._self = p; schedule(@ptrCast(&{0}), @ptrCast(sub_ctx)); break :blk task_ptr; }})", task_fn, captures);
                 }
+                if callee == "Shared" && !call.args.is_empty() {
+                    let arg = self.generate_expr(&call.args[0]);
+                    return format!(
+                        "(blk: {{ const _val = {}; const _T = @TypeOf(_val); if (comptime @typeInfo(_T) == .pointer) break :blk _val else {{ const _p = std.heap.page_allocator.create(_T) catch unreachable; _p.* = _val; break :blk _p; }} }})",
+                        arg
+                    );
+                }
+                if callee == "Mutex" {
+                    if call.args.is_empty() {
+                        return "CpBareMutex{}".to_string();
+                    } else {
+                        let arg = self.generate_expr(&call.args[0]);
+                        return format!("cp_make_mutex({})", arg);
+                    }
+                }
+                if callee == "RwLock" {
+                    if call.args.is_empty() {
+                        return "CpBareRwLock{}".to_string();
+                    } else {
+                        let arg = self.generate_expr(&call.args[0]);
+                        return format!("cp_make_rwlock({})", arg);
+                    }
+                }
+                if callee == "Atomic" {
+                    if call.args.is_empty() {
+                        return "cp_make_atomic(@as(i32, 0))".to_string();
+                    } else {
+                        let arg = self.generate_expr(&call.args[0]);
+                        return format!("cp_make_atomic({})", arg);
+                    }
+                }
                 if callee == "Error" {
                     let code = if !call.args.is_empty() {
                         self.generate_expr(&call.args[0])
@@ -10413,6 +11107,11 @@ impl Codegen {
                 let tuple_slice = ei.tuple_args.as_deref().unwrap_or(&[]);
                 if ei.variant_name.sym.is_empty() && !ei.enum_name.sym.is_empty() {
                     let cls_opt = self.class_defs.get(&ei.enum_name.sym).cloned();
+                    if let Some(ref cls) = cls_opt {
+                        if cls.is_static {
+                            panic!("CP Compile Error: Cannot instantiate static class or struct '{}'", ei.enum_name.sym);
+                        }
+                    }
                     let mut s = format!("{}{{ ", ei.enum_name.sym);
                     for (idx, f) in fields_slice.iter().enumerate() {
                         let old_array_elem = self.expected_array_elem_type.clone();
@@ -10605,6 +11304,11 @@ impl Codegen {
                     Expr::Ident(id) => id.sym.clone(),
                     _ => "Unknown".to_string(),
                 };
+                if let Some(cls) = self.class_defs.get(&class_name) {
+                    if cls.is_static {
+                        panic!("CP Compile Error: Cannot instantiate static class or struct '{}' with 'new'", class_name);
+                    }
+                }
                 if class_name == "Error" {
                     let code = if !call.args.is_empty() {
                         self.generate_expr(&call.args[0])
@@ -10855,7 +11559,16 @@ impl Codegen {
                 };
                 let prop = prop_str.as_str();
                 let obj_ty = self.infer_zig_type(None, Some(&member.obj));
-                if obj_ty.starts_with('?') {
+                let is_guard = obj_ty.contains("LockGuard(")
+                    || obj_ty.contains("ReadGuard(")
+                    || obj_ty.contains("WriteGuard(");
+                if is_guard && prop != "release" && prop != "unlock" {
+                    if obj_ty.starts_with('?') {
+                        format!("({}).?.data.{}", obj, prop)
+                    } else {
+                        format!("{}.data.{}", obj, prop)
+                    }
+                } else if obj_ty.starts_with('?') {
                     format!("cp_opt_unwrap({}).{}", obj, prop)
                 } else if obj_ty.starts_with("*[]") {
                     format!("{}.*.{}", obj, prop)
@@ -11714,6 +12427,14 @@ impl Codegen {
                     format!("({}).*", inner_code)
                 }
             }
+            Expr::Unwrap(inner) => {
+                let inner_code = self.generate_expr(inner);
+                if matches!(&**inner, Expr::Ident(_) | Expr::Member(_) | Expr::Deref(_)) {
+                    format!("{}.?", inner_code)
+                } else {
+                    format!("({}).?", inner_code)
+                }
+            }
             Expr::Unsafe(b) => {
                 let saved = self.current_case_content.clone();
                 self.current_case_content.clear();
@@ -12531,6 +13252,7 @@ impl Codegen {
                 _ => {}
             }
         }
+
     }
 
     fn extract_local_vars_to_str(&mut self, block: &BlockStmt, output: &mut String) {
@@ -12726,6 +13448,7 @@ impl Codegen {
                 _ => {}
             }
         }
+
     }
 
     fn extract_local_vars(&mut self, _block: &BlockStmt) {
@@ -12747,6 +13470,39 @@ impl Codegen {
                 self.writeln(&format!("{}: bool = false,", name));
             } else {
                 self.writeln(&format!("{}: {} = undefined,", name, ty_str));
+            }
+        }
+    }
+
+    fn map_type_name(&self, name: &str) -> String {
+        match name {
+            "i8" => "i8".to_string(),
+            "u8" => "u8".to_string(),
+            "i16" => "i16".to_string(),
+            "u16" => "u16".to_string(),
+            "i32" => "i32".to_string(),
+            "u32" => "u32".to_string(),
+            "i64" => "i64".to_string(),
+            "u64" => "u64".to_string(),
+            "isize" => "isize".to_string(),
+            "usize" => "usize".to_string(),
+            "f32" => "f32".to_string(),
+            "f64" => "f64".to_string(),
+            "bool" => "bool".to_string(),
+            "string" => "[]const u8".to_string(),
+            _ => {
+                if name.starts_with("Mutex<") {
+                    let inner = &name[6..name.len() - 1];
+                    format!("CpMutex({})", self.map_type_name(inner))
+                } else if name.starts_with("RwLock<") {
+                    let inner = &name[7..name.len() - 1];
+                    format!("CpRwLock({})", self.map_type_name(inner))
+                } else if name.starts_with("Atomic<") {
+                    let inner = &name[7..name.len() - 1];
+                    format!("CpAtomic({})", self.map_type_name(inner))
+                } else {
+                    name.to_string()
+                }
             }
         }
     }
@@ -12782,6 +13538,39 @@ impl Codegen {
                 if ident.sym == "TypeInfo" {
                     return "*const TypeInfo".to_string();
                 }
+                if ident.sym.starts_with("Mutex<") {
+                    let inner = &ident.sym[6..ident.sym.len() - 1];
+                    return format!("CpMutex({})", self.map_type_name(inner));
+                }
+                if ident.sym == "Mutex" {
+                    return "CpBareMutex".to_string();
+                }
+                if ident.sym.starts_with("RwLock<") {
+                    let inner = &ident.sym[7..ident.sym.len() - 1];
+                    return format!("CpRwLock({})", self.map_type_name(inner));
+                }
+                if ident.sym == "RwLock" {
+                    return "CpBareRwLock".to_string();
+                }
+                if ident.sym.starts_with("Atomic<") {
+                    let inner = &ident.sym[7..ident.sym.len() - 1];
+                    return format!("CpAtomic({})", self.map_type_name(inner));
+                }
+                if ident.sym == "Atomic" {
+                    return "CpAtomic(i32)".to_string();
+                }
+                if ident.sym.starts_with("LockGuard<") {
+                    let inner = &ident.sym[10..ident.sym.len() - 1];
+                    return format!("LockGuard({})", self.map_type_name(inner));
+                }
+                if ident.sym.starts_with("ReadGuard<") {
+                    let inner = &ident.sym[10..ident.sym.len() - 1];
+                    return format!("ReadGuard({})", self.map_type_name(inner));
+                }
+                if ident.sym.starts_with("WriteGuard<") {
+                    let inner = &ident.sym[11..ident.sym.len() - 1];
+                    return format!("WriteGuard({})", self.map_type_name(inner));
+                }
                 if ident.sym == "FieldInfo" || ident.sym == "MethodInfo" {
                     return ident.sym.clone();
                 }
@@ -12794,19 +13583,25 @@ impl Codegen {
                 if is_custom_int {
                     return ident.sym.clone();
                 }
+                let base_name = ident.sym.split('(').next().unwrap_or(&ident.sym);
                 if ident.sym == "PID"
                     || ident.sym == "Message"
                     || ident.sym == "Error"
                     || ident.sym == "anytype"
+                    || ident.sym == "anyopaque"
                     || ident.sym == "type"
                     || ident.sym == "anyerror"
+                    || ident.sym == "noreturn"
+                    || (!ident.sym.is_empty() && ident.sym.chars().all(|c| c.is_ascii_uppercase()))
                     || ident.sym.starts_with("c_")
                     || ident.sym.starts_with("Many")
                     || ident.sym.contains('.')
+                    || ident.sym.contains('(')
                     || ident.sym.starts_with("__AnonErr_")
                     || ident.sym.starts_with("__UnionErr_")
                     || self.ref_classes.contains(&ident.sym)
                     || self.value_classes.contains(&ident.sym)
+                    || self.value_classes.contains(base_name)
                     || self.enum_defs.contains_key(&ident.sym)
                     || self.error_sets.contains_key(&ident.sym)
                     || self.trait_defs.contains_key(&ident.sym)
@@ -12816,6 +13611,16 @@ impl Codegen {
                 format!("*{}", ident.sym)
             }
             Type::BorrowType { inner, is_mut, .. } => {
+                if !*is_mut {
+                    if let Type::Optional(opt_inner) = &**inner {
+                        let opt_zig = self.map_type(opt_inner);
+                        let clean_opt = if opt_zig.starts_with('*') { &opt_zig[1..] } else { &opt_zig };
+                        return format!("?*const {}", clean_opt);
+                    }
+                    let inner_zig = self.map_type(inner);
+                    let clean_inner = if inner_zig.starts_with('*') { &inner_zig[1..] } else { &inner_zig };
+                    return format!("*const {}", clean_inner);
+                }
                 if *is_mut {
                     if let Type::Array(elem) = &**inner {
                         return format!("[]{}", self.map_type(elem));
@@ -12852,7 +13657,14 @@ impl Codegen {
                     format!("*{}", inner_zig)
                 }
             }
-            Type::Shared(inner) => self.map_type(inner),
+            Type::Shared(inner) => {
+                let inner_zig = self.map_type(inner);
+                if inner_zig.starts_with('*') {
+                    inner_zig
+                } else {
+                    format!("*{}", inner_zig)
+                }
+            }
             Type::Optional(inner) => format!("?{}", self.map_type(inner)),
             Type::ErrorUnion(inner) => {
                 if self.is_lib_mode {

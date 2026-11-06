@@ -2545,6 +2545,159 @@ Bun AGY 在推进 Bun 基础算法库（如 `wyhash`、`base64`）转译过程�
 3. **正式版本回归跑测**：
    - 运行 `./cap/bin/cap run cap/test/test_struct_and_enum_payload_errors.cp`：正式版 `cpc` 转译耗时仅 4ms，全部 9 项测试一次性全绿通过。
 
+---
+
+## 2026-11-06 - 并发线程同步原语架构落地：Mutex<T>、RwLock<T> 与 Atomic<T>
+
+### 1. 任务背景与核心架构诉求
+在 CP 语言的并发体系中，Actor 消息传递是跨隔离堆的首选通信模型。然而在高性能场景下（如全局共享配置、多线程共享张量缓存、高频无锁计数探针），需要配合底层原子操作与互斥保护以实现毫秒级零拷贝与无死锁数据共享：
+1. **统一 TS 优雅驼峰 API 风格**：
+   - 摒弃 Rust 下划线风格（如 `try_lock`、`is_locked`、`compare_exchange`），全面对齐现代 TS 开发者心智：`withLock`、`lock`、`tryLock`、`isLocked`、`withRead`、`withWrite`、`read`、`write`、`tryRead`、`tryWrite`、`isReadLocked`、`isWriteLocked`、`compareAndSwap`、`cas`、`load`、`store`、`swap`、`add`、`sub`、`inc`、`dec`、`and`、`or`、`xor`、`testAndSet`、`clear`。
+2. **`Shared(val)` 极简构造与内部可变性（Interior Mutability）范式**：
+   - 支持 TS 简洁函数式构造 `let config = Shared(ModelConfig { ... })` 代替生硬的 `Shared.new(...)`；
+   - 确立 `Shared(Mutex(data))` 与 `Shared(RwLock(data))` 范式：外层 `Shared<T>` 提供线程安全只读共享与跨协程/线程零拷贝句柄，内层 `Mutex<T>` / `RwLock<T>` 在必要发生并发写入时提供动态避让互斥锁，兼顾语法安全与运行时灵活性。
+3. **带载荷与裸锁双重支持**：
+   - 带载荷容器：`Mutex(data)`、`RwLock(data)`，受保护数据与锁强绑定，守卫自动解包透明访问字段；
+   - 无载荷裸锁：`Mutex()`、`RwLock()`，支持跨多个独立数据结构的手动原子同步。
+
+### 2. 攻坚攻克的关键技术瓶颈与解法
+1. **`withLock` / `withRead` / `withWrite` 内联闭包的状态机上下文穿透问题**：
+   - **痛点**：在异步或状态机上下文中调用 `mu.withLock((*s) => { s.count += 1; })` 时，闭包形参 `s` 在代码生成阶段会被误当成状态机上下文成员（生成 `ctx.s`），导致 Zig 编译报 `no field named 's' in struct 'lambda_0_Context'`；
+   - **解法**：在 `Codegen` 中引入 `inline_closure_params: HashSet<String>`，将内联闭包形参注册为白名单。在生成 Ident 表达式时优先检查该白名单，直接发射局部变量名 `s`，杜绝上下文污染。
+2. **闭包形参的局部类型推断与自动解引**：
+   - **痛点**：在 `infer_cp_type_with_mock` 中，评估 `mu.withLock((*s) => s.count)` 的返回值类型时，`s` 尚未绑定具体结构体类型，导致 `s.count` 退化为 `*anyopaque`；
+   - **解法**：在分析 `withLock` 时，根据宿主对象 `Mutex<T>` 提取内层目标类型 `T`，构建包含 `s: *T` 的局部 mock 类型上下文，精准推断闭包返回值类型为 `i32`。
+3. **Zig 0.17 下 `comptime_int` 传入 `std.atomic.Value` 的限制**：
+   - **痛点**：Zig 的 `std.atomic.Value(T)` 要求 `T` 必须为具名具宽度的整数类型。当在 CP 中编写 `Atomic(0)` 时，字面量默认推导为 Zig 的 `comptime_int`，导致 Zig 编译失败；
+   - **解法**：设计 Zig 辅助元函数 `CpAtomicConcreteType(comptime T)`，在编译期将 `comptime_int` 自动归一化为 `i32`，`comptime_float` 归一化为 `f32`，彻底消除泛型推断失败。
+4. **Guard 守卫透明属性访问与可选链解包**：
+   - 针对 `let guard = mu.lock(); guard.count += 1;`，在 `Expr::Member` 生成阶段探测到目标为 Guard 类型或 `Guard?` 可选类型时，自动将字段访问穿透映射为 `guard.data.count` 或 `guard.?.data.count`。
+5. **双缓冲沙盒同步与 CAS 并线**：
+   - 严格遵循 `GEMINI.md` 规范，在 `cpc_dev` 中完成开发并跑测；
+   - 探测到主干 `cpc/src` 存在 Bun 迁移智能体提交的 `Expr::Unwrap`（`.?` 运算符）及 `parse_postfix_type_modifiers` 增量变更；
+   - 立即将主干改动无损合并入 `cpc_dev`，重新构建并通过全部回归测试。
+
+### 3. 测试与验证
+1. 测试套件：[`cap/test/test_mutex_atomic.cp`](file:///data/dev/cp/cap/test/test_mutex_atomic.cp) 覆盖 7 项高强度并发用例：
+   - `Mutex<T>`：`withLock` 闭包安全修改、`lock()` RAII 守卫访问、`tryLock()` 抢锁与 `isLocked()` 探测；
+   - 无载荷裸互斥锁 `Mutex()`：`lock()`、`unlock()`、`tryLock()`、`isLocked()`；
+   - `RwLock<T>`：`withRead` 只读访问、`withWrite` 独占写访问、`read()`、`write()`；
+   - 无载荷裸读写锁 `RwLock()`：`read()`、`write()`、`unlock()`、`unlockShared()`；
+   - `Atomic<i32>`：算术增减（`add`、`sub`、`inc`、`dec`）、原子位运算（`and`、`or`、`xor`）、原子交换（`swap`）与比较交换 CAS（`cas`、`compareAndSwap`）；
+   - `Atomic<bool>`：测试并置位 `testAndSet()` 与清除 `clear()`；
+   - `Shared(Mutex(T))`：内部可变性标准范式（只读句柄包装内部受锁保护的局部可变数据）。
+2. 执行 `./cap/bin/cap cap/test/test_mutex_atomic.cp`：
+   - Debug 编译器秒级转译（8ms），Native 运行 7/7 项测试 100% 绿色全过，覆盖率 100%！
+
+---
+
+## 2026-11-06 - 架构深度剖析：Bun 新特性、Shared 共享边界与四国并发模型权衡
+
+### 1. Bun 迁移智能体最新三项特性的原理与技术背景
+1. **`Expr::Unwrap` (`.?` 强制解包操作符)**：
+   - **背景**：在 Bun.js 迁移与底层 C/Zig 交互中，大量底层系统函数返回可空指针或可选类型 `?T`。此前 CP 需要通过 `switch (v) { null => ... }` 或海象语法 `if (v := opt)` 处理。
+   - **实现**：新增词法模式 `. ?` 识别，AST 引入 `Expr::Unwrap(Box<Expr>)`，Zig 发射层 1:1 转译为 `({obj}).?`。在断言非空场景下达成零堆栈开销、纳秒级解包。
+2. **`*const T` (只读裸借用/不可变底层指针)**：
+   - **背景**：CP 原生指针 `*T` 默认假定为可变指针（`is_mut: true`）。在对接操作系统系统调用（如只读内存缓冲区 `*const u8`、字符串字面量常量指针 `*const c_char`）时，缺乏只读约束会导致类型不匹配或潜在的数据污染风险。
+   - **实现**：在 `parse_base_type` 中识别 `*const`，设置 `is_mut = false`，与可变裸借用 `*T` 形成完整的类型对称。
+3. **`parse_postfix_type_modifiers` (统一类型后缀修饰符解析器)**：
+   - **背景**：此前类型的后缀操作符（`?` 可选、`[]` 动态切片、`[N]` 固定数组）只能附加在基础标识符类型后。复杂类型如裸指针 `*T`、借用 `&T`、元组 `[i32, string]` 或定长数组 `[N]T` 无法链式修饰。
+   - **实现**：抽取通用的后缀修饰符状态机，在所有复合类型解析路径返回前统一执行后缀链式解析，使得 `*const u8?`（可空只读指针）、`[i32; 4]?`（可选定长数组）等高维复合类型完全正交合法。
+
+### 2. 为什么只读借用 `&T` 无法替代 `Shared<T>`？
+1. **物理栈帧 vs 全局堆生命周期脱节**：
+   - `&T` 是**零所有权**的栈绑定视图（Stack-Bound View）。原数据的所有权绑定在宿主函数的栈帧上。若允许把 `&T` 跨线程传递或跨协程发送，由于线程执行异步不可预测，宿主函数随时会 return 弹出栈帧，导致接收方线程发生 Use-After-Free 严重悬垂段错误。
+   - `Shared<T>` 是**共同拥有所有权**的全局共享句柄，内建原子引用计数。只要还有任何线程持有该句柄，数据物理内存永不被释放；最后一个持有者退出作用域时自动析构，从根源上保障多线程内存安全。
+2. **CPS 状态机切分与 `await` 跨越**：
+   - CP 函数在遇到 `await` 时会切断函数栈并转为挂起状态。栈上局部借用 `&T` 无法跨越切分点；而 `Shared<T>` 拥有独立生命周期，能自包含地随 Context 一同挂起与唤醒。
+3. **彻底消灭 `<'a>` 生命周期病毒**：
+   - 依赖借用构建长期对象会导致所有类和方法被泛型生命周期参数 `<'a, 'b>` 病毒式传染。`Shared<T>` 提供了类似 TS 引用的自由度，同时在编译期强制保持只读安全。
+
+### 3. CP 多线程数据保护与 Rust / Go / Zig 深度对比
+- **vs Rust**：消灭了嵌套冗长的 `Arc::new(Mutex::new(...))` 与全链路 `.lock().unwrap()`，提供开箱即用的 TS 风格 API（`Shared(Mutex(data))`）与属性透明穿透；但 Rust 借助编译期借用检查器能做到完全无锁证明。
+- **vs Go**：解决了 Go 锁与数据脱节（裸锁易漏加锁引发竞态）和 GC 停顿问题。CP 采用强绑定容器锁 `Mutex(data)` 与自动 RAII 解锁，且零 GC；Go 的优势在于 runtime 深度优化的自适应 Futex 队列。
+- **vs Zig**：Zig 完全无生命周期与借用保护，需要手动管理内存与锁分配；CP 提供了高层类型系统安全防护（编译期拦截跨线程裸写）和极佳的 DX。
+
+---
+
+## 2026-11-06 - 静态类与静态结构体（static class / static struct）实装与并发内存模型深度规范
+
+### 1. 任务背景与核心架构诉求
+1. **纯静态容器需求**：
+   - 在系统与智能体工具链开发中，存在大量数学函数库、字符串工具、系统常量集或硬件命名空间；
+   - 传统 TS 需要在每个成员前冗余声明 `static`，且类依然允许被错误实例化；Rust / Go 缺乏专用 `static class`；
+   - CP 引入一等公民的 `static class` 与 `static struct`：全员自动静态、彻底免除实例生命周期（`init` / `release`）、严禁实例接收者（`_` / `this`）、严禁误实例化（`new`）、严禁类继承（`extends`）。
+2. **并发与内存模型核心疑问解答**：
+   - 针对 `Shared<T>` 的 clone 触发时机（同线程无需 clone，跨线程必须 clone）、原子引用计数增减与为 0 时零 GC 确定性释放；
+   - 区分 O(1) 引用浅克隆与高昂 O(N) 深拷贝 `mut()`；
+   - 裸互斥锁 `let busLock = Mutex();` 的死锁防范与 RAII 优势；
+   - 编译期逃逸分析拦截 `&T` / `*T` / `ref struct` 跨线程；
+   - `move` 独占所有权转移实现物理零竞态；
+   - 对标 Rust `Send` / `Sync` 的极简结构化内存模型；
+   - Trait 静态契约（关联构造函数）与现代语言（Zig、Rust、CP）数据行为解耦哲学。
+
+### 2. 攻坚攻克的关键技术瓶颈与解法（cpc_dev 沙盒）
+1. **AST 与词法扩展**：
+   - 在 `ast::Class` 与 `ast::Field` 中新增 `is_static: bool` 标识；
+   - 在 `parser.rs` 的 `parse_decl` 中拦截 `Token::Static` 后接 `Class` / `Struct` / `Ref`，路由至 `parse_class(..., is_static = true)`；
+   - 自动将类内所有字段与方法标记为 `is_static = true`。
+2. **Parser 级四重防御拦截**：
+   - 拦截继承：`if is_static && self.eat(&Token::Extends)` 立即抛出语法错误；
+   - 拦截接收者：`is_static` 类的方法参数中若出现 `this`、`_`、`*_`、`move _`，立即抛出解析错误；
+   - 拦截生命周期方法：`is_static` 类若声明 `fn init(...)` 或 `fn release(...)`，立即抛出解析错误；
+   - 兼容支持类内字段 `let` 与 `const` 声明前缀。
+3. **Sema 级宏展开与实例化拦截**：
+   - **痛点**：`sema.rs` 之前会为任何拥有字段但没有显式构造函数的类自动生成 `init(self: *Class, fields...)` 实例构造方法，导致生成的 Zig 代码产生参数遮蔽报错；
+   - **解法**：在 `expand_macros` 中增加 `!cls.is_static` 条件豁免，严禁为静态容器自动注入实例 `init`；
+   - 新增 `SemaError::CannotInstantiateStatic(String, Span)`，在遍历 `Expr::New` 时若目标为静态类/结构体，直接报错拦截。
+4. **Codegen 原生容器级代码生成**：
+   - 静态类转译为 Zig 原生容器结构体，字段直接发射为 `pub var field: type = default;`（常量发射为 `pub const`），无需分配内存；
+   - 豁免生成 `_create` 堆分配函数；
+   - 在 `infer_cp_type_with_mock` 中增加静态类静态字段访问（`Expr::Member`）的类型检索支持；
+   - 在 `Expr::New` 与 `Expr::EnumInit` 生成阶段进行双重编译期硬断言拦截。
+
+### 3. 测试与验证
+1. 正向功能测试用例 [`cap/test/test_static_class.cp`](file:///data/dev/cp/cap/test/test_static_class.cp)：
+   - `static class MathUtils`：`pub const PI`、`pub let call_count`、静态方法 `add`、`max`；
+   - `static struct StringHelper`：`pub const TAG`、静态方法 `is_empty`、`format_pair`；
+   - 执行 `./cap/bin/cap cap/test/test_static_class.cp`：转译耗时 9ms，2/2 项测试 100% 绿色全过，覆盖率 100%！
+2. 负向编译期错误验证：
+   - `new MathUtils()` -> 编译期精准拦截：`Cannot instantiate static class or struct 'MathUtils'`；
+   - `fn bad(this)` -> 解析期精准拦截：`cannot declare instance method 'bad' with receiver 'this' or '_'`；
+   - `fn init()` -> 解析期精准拦截：`cannot declare instance lifecycle method 'init'`；
+   - `extends Base` -> 解析期精准拦截：`cannot extend another class`。
+3. 系统长期回归验证：
+   - 重新执行 `./cap/bin/cap cap/test/test_mutex_atomic.cp`：7/7 项高强度并发测试 100% 全绿通过，零回归破坏。
+
+### 4. 官方规范同步（四线闭环）
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)：
+  - 第 5.15 节：新增《静态类与静态结构体（static class 与 static struct）》完整设计哲学、语法规范与跨语言（C#、Rust、Go、TS、Python）横向对比；
+  - 第 7.6 节：新增《Trait 静态契约与关联构造函数（Trait Static Contracts）》；
+  - 第 7.7 节：新增《现代系统语言的方法容器与数据解耦演进（CP vs Rust vs Zig vs TS）》（结构体默认 pub、类默认 priv 原理）；
+  - 第 10.5.9 节：新增《并发与多线程内存模型权威问答（Concurrency & Memory Model FAQ）》（涵盖 7 大核心并发与内存问题）。
+
+---
+
+## 2026-11-06 - 生产版本正式合并与 Release 发布（Production Merge & Release Verification）
+
+### 1. 合并背景与执行流程
+在沙盒目录 `cpc_dev` 中完成 `Mutex<T>`、`RwLock<T>`、`Atomic<T>` 并发原语及 `static class` / `static struct` 的全量实现与测试验证后，严格遵循《双智能体并行工作流与 `cpc_dev` 构建规范》执行生产合并：
+1. **代码一致性核对与合并**：
+   - 检查 `cpc_dev/src` 与 `cpc/src`，确认主干中 Bun 迁移智能体提交的特性（`Expr::Unwrap`、`*const` 裸借用、`parse_postfix_type_modifiers` 等）已被完整保留无损；
+   - 将沙盒中的全部 AST 扩展、解析器防御性拦截、语义检查豁免与 Zig 代码生成能力同步完整合入正式目录 `cpc/src/`。
+2. **正式 Release 编译与构建**：
+   - 执行 `cargo build --release --manifest-path /data/dev/cp/cpc/Cargo.toml`；
+   - 历时 35.85s 完成 LLVM 深度优化编译，产出高性能原生可执行文件；
+   - 同步更新至生产分发路径：`cp /data/dev/cp/cpc/target/release/cpc /data/dev/cp/cap/bin/cpc`。
+3. **正式端到端编译与回归测试验证**：
+   - 清理旧测试缓存，使用全新生产 Release 版二进制执行实测：
+     - `./cap/bin/cap cap/test/test_static_class.cp`：转译耗时 5ms，2/2 项测试 100% 绿灯；
+     - `./cap/bin/cap cap/test/test_mutex_atomic.cp`：转译耗时 8ms，7/7 项测试 100% 绿灯；
+   - 验证表明正式编译器工作稳定，性能极高，转译无任何警告与回归缺陷。
+
+
+
+
 
 
 

@@ -1366,19 +1366,36 @@ print(u.get_id());
 
 #### 5.12.2 类与结构体层级（Class / Struct Methods & Fields）
 
-在 `class` 与 `struct` 内部，**属性与方法默认均为 `priv` 私有封装**。只有显式标注 `pub`（或 `export`）的成员才对外公开访问：
+在 CP 语言中，依据“数据与行为解耦、纯数据透明与面向对象强封装”的设计哲学，`struct` 与 `class` 的成员默认可见性进行了明确且符合工程直觉的分流设计：
 
-| 修饰符与成员       | 示例                                              | 作用与访问权限行为                                                                                         |
-| ------------------ | ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| **pub 属性**       | `class User { pub name: string; }`                | 公开属性：类外部可自由通过 `user.name` 读取/写入。                                                         |
-| **默认/priv 属性** | `class User { priv balance: i64; }` 或 `id: u64;` | 私有属性（默认）：仅允许类自身方法内通过 `this.balance` / `_.balance` 访问，外部访问被编译器静态拦截报错。 |
-| **pub 方法**       | `pub fn get_balance(): i64 {}`                    | 公开方法：外部持有该实例的调用方均可调用：`user.get_balance()`。                                           |
-| **默认/priv 方法** | `priv fn check_limit() {}` 或 `fn helper() {}`    | 私有方法（默认）：仅允许类内部通过 `_.check_limit()` 或 `this.check_limit()` 调用，外部调用编译报错。      |
+1. **`struct`（纯数据容器 / DTO）**：
+   - **默认全员 `pub` 公开**：作为纯值类型与系统内存布局容器，结构体字段与方法默认全为 `pub`，外部可直接透明访问，无需手写繁琐的 `pub` 样板代码；
+   - 若个别内部辅助方法需隐藏，可显式标注 `priv`。
+2. **`class`（面向对象 / 业务状态机）**：
+   - **默认全员 `priv` 私有封装**：作为持有状态与生命周期的业务类，内部字段与方法默认均为 `priv`，外部访问将被编译器静态拦截；
+   - 只有显式标注 `pub`（或 `export`）的字段与方法才对外公开暴露。
+3. **`static class` / `static struct`（纯静态命名空间）**：
+   - **全员自动静态**：内部成员全部自动为静态成员，无需每个成员手写 `static`，且严禁实例化。
+
+| 容器类型                   | 成员默认可见性       | 显式修饰符支持 | 设计目的与典型场景                                           |
+| :------------------------- | :------------------- | :------------- | :----------------------------------------------------------- |
+| **`struct`**               | **`pub` 公开（默认）** | `priv` / `pub` | 纯数据模型、C ABI 互操作、高效网络 DTO，透明访问零摩擦       |
+| **`class`**                | **`priv` 私有（默认）** | `pub` / `priv` | 面向对象封装、防卫性状态管理、内部不变量保护                 |
+| **`static class/struct`**  | **全员自动静态**     | `pub` / `priv` | 纯工具函数库、全局数学常量、硬件命名空间，彻底杜绝实例与开销 |
 
 > **生命周期方法豁免**：
 > `init` 构造器、`release` 析构器以及编译器底层内部方法（`_create`、`__*`）属于对象的生命周期管理特权函数，不受外部私有属性/方法拦截限制。
 
 ```typescript
+// 1. struct 默认所有成员 pub
+struct Point {
+    x: f64; // 默认 pub
+    y: f64; // 默认 pub
+}
+let p = Point { x: 10.0, y: 20.0 };
+print(p.x); // ✅ 直接访问合法
+
+// 2. class 默认所有成员 priv
 class BankAccount {
     pub owner: string;       // 显式 pub：外部可读
     priv balance: i64;       // 显式 priv：私有安全
@@ -1479,6 +1496,82 @@ class Account {
     fn save(): void ! IOError  // 或简写为 fn save() ! IOError
     fn find(): User ?! DBError
     ```
+
+---
+
+### 5.15 静态类与静态结构体（static class 与 static struct）
+
+#### 5.15.1 设计定位与工程价值
+
+在系统与应用工程中，大量业务需要组织**纯工具函数库、全局数学常量、硬件命名空间或纯静态状态管理器**。在这些场景下，我们只需要一个纯净的代码与数据命名空间，而不需要堆分配、虚表寻址，更不需要对象实例化。
+
+在传统语言中：
+- **TypeScript / JavaScript**：虽然支持 `class`，但必须在每一个字段和方法前重复手写 `static` 关键字；若不小心写了普通方法，实例化后会产生原型链与内存开销；
+- **C#**：引入了专用的 `static class` 关键字，被编译器严格限制为纯静态容器，无法实例化，非常严谨优雅；
+- **Rust**：没有 `class` 关键字，通常使用 `struct` 加 `impl`（不带 `&self` 接收者的方法作为关联函数），或使用 `mod utils { pub fn ... }` 模块；
+- **Go**：没有 `class` 也不支持类静态成员，只能通过包级导出函数（如 `utils.Add()`）；
+- **Python**：通过模块级函数或在类中使用 `@staticmethod` / `@classmethod` 装饰器。
+
+CP 语言汲取了现代语言设计的精髓，引入一等公民的 **`static class`** 与 **`static struct`**：
+1. **全员自动静态**：类/结构体内部的所有字段（`let` / `const`）和方法（`fn`）**默认全为静态成员**，开发者无需且不应在每个成员前冗余手写 `static` 关键字。
+2. **免除生命周期与实例负担**：纯静态容器在概念上没有实例概念，因此**彻底无需也不允许声明 `init` 构造函数与 `release` 析构函数**。
+3. **彻底杜绝误实例化**：编译期强力拦截 `new StaticClass()` 以及结构体实例化表达式，违规调用直接报编译硬错误。
+4. **禁止类继承**：`static class` 严禁使用 `extends` 继承或被继承，语义绝对纯粹。
+5. **严禁实例接收者**：所有方法内部没有实例上下文，严禁声明带 `_`、`*_`、`move _` 或 `this` 的方法接收者。
+
+#### 5.15.2 语法规范与使用示例
+
+```typescript
+// 1. 静态类：纯工具方法与全局只读常量
+static class MathUtils {
+    // 字段自动成为静态成员，支持 const 常量与 let 可变状态
+    pub const PI: f64 = 3.141592653589793;
+    pub const E: f64 = 2.718281828459045;
+    pub let call_count: i32 = 0;
+
+    // 方法自动成为静态方法，无需接收者 _ / this
+    pub fn add(a: i32, b: i32): i32 {
+        call_count += 1;
+        return a + b;
+    }
+
+    pub fn max(a: f64, b: f64): f64 {
+        if a > b {
+            return a;
+        }
+        return b;
+    }
+}
+
+// 2. 静态结构体：用于底层命名空间与无实例辅助容器
+static struct StringHelper {
+    pub const TAG: string = "StringHelper";
+
+    pub fn is_empty(s: string): bool {
+        return s.len == 0;
+    }
+}
+
+// 调用方式：通过 类型名.成员名 直接访问
+let sum = MathUtils.add(10, 20);
+let pi = MathUtils.PI;
+let empty = StringHelper.is_empty("");
+```
+
+#### 5.15.3 编译期五重硬拦截法则
+
+编译器前端（Parser、Sema 与 Codegen）对 `static class` / `static struct` 构建了五重防御校验：
+1. **拦截实例化**：
+   - 表达式 `new MathUtils(...)` -> `CP Compile Error: Cannot instantiate static class or struct 'MathUtils'`
+   - 表达式 `StringHelper { ... }` -> `CP Compile Error: Cannot instantiate static class or struct 'StringHelper'`
+2. **拦截实例接收者**：
+   - 声明 `pub fn foo(this, a: i32)` 或 `pub fn foo(*_, a: i32)` -> `CP Parser Error: Static class or struct 'MathUtils' cannot declare instance method 'foo' with receiver 'this' or '_'`
+3. **拦截实例生命周期钩子**：
+   - 声明 `pub fn init(...)` 或 `pub fn release(...)` -> `CP Parser Error: Static class or struct 'MathUtils' cannot declare instance lifecycle method 'init'`
+4. **拦截类继承**：
+   - 声明 `static class Foo extends Bar` -> `CP Parser Error: Static class or struct 'Foo' cannot extend another class`
+5. **豁免实例内存分配**：
+   - 代码生成阶段，编译器自动豁免生成底层的 `_create` 堆分配器函数与实例字段内存布局，直接转译为 Zig 原生容器级的纯净命名空间，零运行时内存开销。
 
 ---
 
@@ -1681,6 +1774,14 @@ fn bad() -> &i32 {
 1. **普通结构体 / 类（可自由逃逸、跨协程传递）**：
    - 字段只允许存储**拥有所有权的数据（Move 传入）**或**共享所有权句柄 `Shared<T>`**。
    - **`Shared<T>`（对标 Rust `Arc<T>` / Nest `Refc Binary`）**：基于原子引用计数与全局共享堆，支持零拷贝跨函数逃逸、跨 Actor 传递。为杜绝数据竞争与循环引用，**`Shared<T>` 默认只读不可变**。
+   - **极简函数式构造语法**：废除繁琐怪异的 `Shared.new(...)`，直接采用 TS 风格一等公民构造写法：
+     ```typescript
+     let config = Shared(ModelConfig {
+         hidden_size: 4096,
+         num_heads: 32,
+     });
+     ```
+   - **多线程可变共享与内部可变性（Interior Mutability）**：若需跨物理线程共享可变状态，CP 推荐采用与操作系统锁协作的内部可变性模式 `Shared(Mutex(data))` 或 `Shared(RwLock(data))`，在多线程同抢碰撞时通过硬件与操作系统级自适应避让保证原子排他安全（详见第 10.5 节）。
 2. **栈绑定借用视图（借鉴 C# `ref struct`，零开销局部借用，干掉最后 1% 缺陷）**：
    - 支持显式声明 `ref class` / `ref struct`，或者当一个类/结构体的字段中包含裸借用（如只读借用 `data: &Tensor` 或可变借用 `data: *Tensor`）时，编译器自动将其推导为 **栈绑定视图（Stack-Bound View）**。
    - **零开销优势**：无需原子引用计数，直接持有裸指针/切片，支持原地可变借用视图（`*T`），性能与手写 C/Rust 100% 一致，且**依然无需编写 `<'a>` 泛型**！
@@ -1783,9 +1884,12 @@ switch(some_user) {
 CP 彻底废除传统的 `interface` 混合模型，实现彻底解耦：
 
 - **`struct` / `class`**：仅用于定义纯内存布局容器（Memory Layout Container），无任何虚表指针额外开销；
-- **`@packed` / `@extern`**：底层系统级布局注解：
+- **`@packed` / `@extern` / `@opaque` / `@value`**：底层系统级布局与类型注解：
   - `@packed struct Foo { ... }`：紧凑位内存布局，禁止填充对齐，不自动生成默认 `init` 构造函数；
-  - `@extern struct Bar { ... }`：严格遵循 C ABI 内存对齐布局，用于无缝对接 C 头文件结构体。
+  - `@extern struct Bar { ... }`：严格遵循 C ABI 内存对齐布局，用于无缝对接 C 头文件结构体；
+  - `@opaque class Baz { ... }`：不透明类型声明（转译映射为 Zig 原生 `pub const Baz = opaque { ... };`），专用于 C/C++ 动态库返回的抽象指针或无确定静态尺寸句柄类型（如套接字底层 `us_socket_t`、`udp.Socket`）。编译器自动豁免堆分配器 `_create` 实例构造，支持挂载只读借用（`this`）与独占可变借用（`*this`）方法，并确保在标准库 `{p}` 格式化打印时按指针安全输出；
+  - `@value class Qux { ... }`：值语义类，作为连续内存直接嵌入栈上或父结构体内部，豁免堆指针封装与间接寻址开销；
+  - `@extern @value class Quux { ... }`：C ABI 兼容的值语义类。
 - **`trait`**：声明纯行为契约与默认实现；
 - **`impl Trait for Target`**：独立实现契约，支持零侵入地为已有第三方结构体实现新行为。
 
@@ -1883,6 +1987,64 @@ for handler of handlers {
     }
 }
 ```
+
+---
+
+### 7.6 Trait 静态契约与关联构造函数（Trait Static Contracts）
+
+在面向契约和泛型编程中，大量经典设计模式需要**无实例接收者的静态工厂函数**（例如类似 Rust 的 `Default::default()`，或类似泛型反序列化 `FromStr::from_str`）。
+
+CP 的 `trait` 不仅支持实例方法（首参含 `_` / `*_` / `move _`），也一流支持**静态方法契约（Static Associated Functions）**：
+
+```typescript
+// 声明含有静态构造契约的 Trait
+trait Factory<T> {
+    // 静态契约：无 _ 或 this 接收者
+    static fn create(name: string): T;
+    
+    // 亦支持省略 static 前缀的无接收者抽象方法声明（由编译器根据无 _ 接收者推导）
+    fn default_instance(): T;
+}
+
+// 为具体类型实现 Trait 静态契约
+class User {
+    pub name: string;
+    pub fn init(*_, name: string) {
+        _.name = name;
+    }
+}
+
+impl Factory<User> for User {
+    static fn create(name: string): User {
+        return new User(name);
+    }
+
+    fn default_instance(): User {
+        return new User("Guest");
+    }
+}
+
+// 泛型调用静态工厂
+fn create_entity<T: Factory<T>>(name: string): T {
+    return T.create(name);
+}
+```
+
+---
+
+### 7.7 现代系统语言的方法容器与数据解耦演进（CP vs Rust vs Zig vs TS）
+
+#### 7.7.1 为什么 Zig 与 Rust 彻底废除了 class 和继承？
+
+在系统级编程和高并发架构演进中，面向对象的“单根继承（Inheritance）”与“数据行为强耦合（Class）”被现代工业界证实是产生内存膨胀、虚表间接寻址开销以及复杂死锁的重灾区：
+
+- **Rust 的选择**：彻底废除 `class` 与继承。只保留纯数据结构体 `struct`（定义纯内存布局，零虚表开销），通过 `impl Struct` 挂载方法，通过 `trait` 声明行为契约，通过 `impl Trait for Struct` 声明后向实现。这实现了“数据容器与行为契约的彻底解耦”。
+- **Zig 的选择**：Zig 更加纯粹，不仅没有 `class`，甚至没有 `trait` 和接口语法。Zig 中的 `struct` 本质上就是一个**强类型的命名空间（Namespace）**。任何以 `self: *Self` 或 `self: Self` 作为首参的函数都可以通过 `instance.method()` 语法糖调用；若首参没有 `self`，则自动成为静态函数，通过 `StructName.method()` 调用。
+- **CP 的统一融合之道**：
+  1. **纯数据容器（`struct`）**：作为纯值类型容器，零堆分配、零 GC，内存布局直通 C ABI / Zig 原生。`struct` **默认成员全部为 `pub`**（公开透明数据契约），符合数据传输对象（DTO）和系统级编程直觉；
+  2. **面向对象与封装边界（`class`）**：保留单继承 `class` 专用于高层业务建模与状态机封装。`class` **默认成员为 `priv`**（私有封装，必须显式标注 `pub` 导出），提供严谨的封装安全；
+  3. **行为契约（`trait`）**：全面采用强大灵活的 `trait` 代替 TS 的 `interface`，支持默认方法、泛型约束与动态分发胖指针 `Box<dyn Trait>`；
+  4. **纯静态容器（`static class` / `static struct`）**：提供一等公民的静态容器，全员自动静态，兼顾 TS 的优雅书写与 Zig 原生命名空间的零开销。
 
 ---
 
@@ -2524,7 +2686,520 @@ fn debug_main() {
 
 ---
 
-### 10.5 异步任务流与事件循环
+### 10.5 多线程并发同步与原子原语：Mutex、RwLock 与 Atomic (内置标准库 cap:sync)
+
+在多核物理线程并发（`spawn.cpu`）场景下，各线程对共享状态的同抢碰撞时机具有动态不确定性。仅靠编译期纯语法检查无法替代运行期的互斥与原子避让。CP 语言借鉴 Rust、Go、Zig 与 TypeScript 的精髓，在标准库 `cap:sync` 中提供了原生多线程同步原语 **`Mutex`（互斥锁）**、**`RwLock`（读写锁）** 与 **`Atomic`（原子操作）**。
+
+#### 10.5.1 设计哲学与命名规范（TS-Style camelCase）
+
+1. **全面采用 TS/JS 风格的小驼峰命名（camelCase）**：彻底告别下划线蛇形命名，使用 `tryLock()`、`isLocked()`、`withLock()`、`withRead()`、`withWrite()`、`tryRead()`、`tryWrite()`、`testAndSet()`，保持语言整体风格的统一与优美简洁。
+2. **容器型（包装数据）与裸锁对称支持**：
+   - `Mutex(data)` / `RwLock(data)`：数据与锁强绑定，外部无法绕过锁直接访问被保护数据；
+   - `Mutex()` / `RwLock()`：裸排他锁，用于纯流程临界区同步与保护外部异构资源。
+3. **双模式访问能力**：
+   - **闭包模式（推荐，最优美）**：`withLock((s) => { ... })`、`withRead`、`withWrite`，编译期直接内联为零运行时开销的底层 RAII 临界区代码块，自动获取锁并在退出时通过 `defer` 绝对安全释放锁。
+   - **守卫模式（RAII Guard）**：`lock()` 返回 `LockGuard<T>`，`read()` 返回 `ReadGuard<T>`，`write()` 返回 `WriteGuard<T>`。守卫对象支持透明字段解包，生命周期结束时由编译器自动织入 `defer guard.release()` 兜底解锁，亦可显式调用 `guard.release()` / `guard.unlock()` 提前释放。
+4. **非阻塞与健康探测**：提供 `tryLock()` / `tryRead()` / `tryWrite()`（返回可选类型 `Guard?`，拿不到锁立即返回 `null`，绝不卡死线程）以及 `isLocked()` / `isReadLocked()` / `isWriteLocked()`（状态探测）。
+
+```typescript
+import { Mutex, RwLock, Atomic } from "cap:sync";
+```
+
+---
+
+#### 10.5.2 互斥锁 Mutex：数据包装锁 `Mutex<T>` 与 裸锁 `Mutex()`
+
+##### 1. API 接口规范
+
+| 类别               | 方法签名                                    | 说明                                                         |
+| :----------------- | :------------------------------------------ | :----------------------------------------------------------- |
+| **推荐闭包**       | `withLock<R>(fn: (*T) -> R): R`             | 执行闭包，进入前自动加锁，退出（含早退、异常）即刻释放锁     |
+| **RAII 阻塞加锁**  | `lock(): LockGuard<T>`                      | 阻塞直到获取锁，返回守卫对象，作用域结束自动释放锁           |
+| **非阻塞尝试拿锁** | `tryLock(): LockGuard<T>?`                  | 非阻塞尝试获取锁；成功返回守卫，失败立即返回 `null`          |
+| **状态探测**       | `isLocked(): bool`                          | 探测锁当前是否已被任何线程持有（探针与调试监控用）           |
+| **裸锁手动解锁**   | `unlock(): void` _(仅裸锁 `Mutex()` 提供)_ | 手动释放当前持有的锁                                         |
+
+##### 2. 代码示例
+
+```typescript
+import { Mutex } from "cap:sync";
+
+struct CounterState {
+    count: i32;
+    tag: string;
+}
+
+// 1. 包装数据的容器互斥锁
+let state = Mutex(CounterState { count: 0, tag: "worker" });
+
+// 方式 A：withLock 闭包（推荐：最优雅，自动 RAII）
+state.withLock((s) => {
+    s.count += 1;
+});
+
+// 方式 B：lock() 阻塞获取守卫
+{
+    let guard = state.lock();
+    guard.count += 10; // 支持透明字段访问
+    print(`Current count: ${guard.count}`);
+    // 离开大括号作用域时，编译器自动 defer guard.release() 解锁
+}
+
+// 方式 C：tryLock() 非阻塞尝试（配合海象解包）
+if (guard := state.tryLock()) {
+    guard.count += 1;
+    // 亦可显式提前解锁
+    guard.release();
+} else {
+    print("Lock contention detected, skipping current frame.");
+}
+
+// 2. 裸互斥锁 Mutex()
+let rawMu = Mutex();
+rawMu.lock();
+if (rawMu.isLocked()) {
+    print("Locked!");
+}
+rawMu.unlock();
+```
+
+---
+
+#### 10.5.3 读写锁 RwLock：数据包装读写锁 `RwLock<T>` 与 裸读写锁 `RwLock()`
+
+##### 1. API 接口规范
+
+| 类别             | 方法签名                                     | 说明                                                         |
+| :--------------- | :------------------------------------------- | :----------------------------------------------------------- |
+| **推荐只读闭包** | `withRead<R>(fn: (&T) -> R): R`              | 多读并发：获取共享读锁并执行闭包，退出时自动释放读锁         |
+| **推荐独占闭包** | `withWrite<R>(fn: (*T) -> R): R`             | 单写排他：获取独占写锁并执行闭包，退出时自动释放写锁         |
+| **共享读加锁**   | `read(): ReadGuard<T>`                       | 阻塞获取共享读锁，返回只读守卫，离开作用域自动释放           |
+| **独占写加锁**   | `write(): WriteGuard<T>`                     | 阻塞获取独占写锁，返回可变写守卫，离开作用域自动释放         |
+| **非阻塞尝试读** | `tryRead(): ReadGuard<T>?`                   | 非阻塞尝试获取读锁；成功返回只读守卫，冲突立即返回 `null`    |
+| **非阻塞尝试写** | `tryWrite(): WriteGuard<T>?`                 | 非阻塞尝试获取写锁；成功返回写守卫，冲突立即返回 `null`      |
+| **读锁状态探测** | `isReadLocked(): bool`                       | 探测当前是否有活跃的读者线程                                 |
+| **写锁状态探测** | `isWriteLocked(): bool`                      | 探测当前是否被写者独占持有                                   |
+
+##### 2. 代码示例
+
+```typescript
+import { RwLock } from "cap:sync";
+
+struct CacheData {
+    version: i32;
+    content: string;
+}
+
+let cache = RwLock(CacheData { version: 1, content: "Initial" });
+
+// 多读并发：withRead 闭包
+cache.withRead((c) => {
+    print(`Version: ${c.version}, Content: ${c.content}`);
+});
+
+// 单写独占：withWrite 闭包
+cache.withWrite((c) => {
+    c.version += 1;
+    c.content = "Updated";
+});
+
+// 守卫式读写与非阻塞尝试
+if (r := cache.tryRead()) {
+    print(`Read version: ${r.version}`);
+}
+```
+
+---
+
+#### 10.5.4 原子操作原语 Atomic<T>
+
+`Atomic<T>` 直通 CPU 底层硬件级原子指令（如 x86 `LOCK CMPXCHG`、ARM64 `LDADD` / `CAS`），支持 `i32`、`u32`、`i64`、`u64`、`usize`、`bool` 等基础类型，具备纳秒级绝对并发安全：
+
+##### 1. API 接口规范
+
+| 方法签名                                    | 说明                                                         |
+| :------------------------------------------ | :----------------------------------------------------------- |
+| `load(): T`                                 | 以顺序一致性（SeqCst）原子读取当前值                         |
+| `store(val: T): void`                       | 以顺序一致性原子写入新值                                     |
+| `swap(val: T): T`                           | 原子写入新值并返回旧值（Exchange）                           |
+| `cas(expected: T, desired: T): bool`        | 极简 CAS：若当前等于 `expected` 则写入 `desired` 并返回 `true`，否则返回 `false` |
+| `compareAndSwap(exp: T, des: T): bool`      | 全称 CAS 别名，与 `cas` 完全等价                             |
+| `add(delta: T): T`                          | 原子加法，返回操作前的旧值（FetchAdd）                       |
+| `sub(delta: T): T`                          | 原子减法，返回操作前的旧值（FetchSub）                       |
+| `inc(): T`                                  | 原子自增 1，返回操作前的旧值                                 |
+| `dec(): T`                                  | 原子自减 1，返回操作前的旧值                                 |
+| `and(mask: T): T`                           | 按位与（FetchAnd），返回旧值                                 |
+| `or(mask: T): T`                            | 按位或（FetchOr），返回旧值                                  |
+| `xor(mask: T): T`                           | 按位异或（FetchXor），返回旧值                               |
+| `testAndSet(): bool`                        | 布尔原子原语：原子设为 `true` 并返回之前的值（TAS）          |
+| `clear(): void`                             | 布尔原子原语：原子复位为 `false`（或数值 0）                 |
+
+##### 2. 代码示例
+
+```typescript
+import { Atomic } from "cap:sync";
+
+let counter = Atomic(0);       // 自动单态化为 Atomic<i32>
+let flag = Atomic(false);      // 自动单态化为 Atomic<bool>
+
+// 原子自增与算术
+counter.inc();                 // 0 -> 1
+counter.add(10);               // 1 -> 11
+
+// 原子 CAS（Compare-And-Swap）
+let ok = counter.cas(11, 20);  // 若当前为 11 则替换为 20，返回 true
+let ok2 = counter.compareAndSwap(20, 30);
+
+// 布尔原子操作
+let wasActive = flag.testAndSet(); // 设为 true 并返回先前状态
+flag.clear();                      // 设为 false
+```
+
+---
+
+#### 10.5.5 多线程共享模式：`Shared` + `Mutex` / `RwLock` 协同实战
+
+在多核并行 Worker（`spawn.cpu`）之间共享并可变修改复杂对象时，采用 `Shared(Mutex(data))` 实现安全的内部可变性（Interior Mutability）：
+
+```typescript
+import { Mutex } from "cap:sync";
+
+struct SharedMetrics {
+    totalRequests: i32;
+    activeConnections: i32;
+}
+
+let metrics = Shared(Mutex(SharedMetrics {
+    totalRequests: 0,
+    activeConnections: 0,
+}));
+
+let m1 = metrics.clone();
+let t1 = spawn.cpu(() => {
+    for i of 0..1000 {
+        m1.withLock((m) => {
+            m.totalRequests += 1;
+        });
+    }
+});
+
+let m2 = metrics.clone();
+let t2 = spawn.cpu(() => {
+    for i of 0..1000 {
+        m2.withLock((m) => {
+            m.totalRequests += 1;
+        });
+    }
+});
+
+join(t1);
+join(t2);
+
+metrics.withLock((m) => {
+    print(`Final Total Requests: ${m.totalRequests}`); // 严格等于 2000
+});
+```
+
+---
+
+#### 10.5.6 内存边界对比：为什么跨线程/跨协程必须用 `Shared<T>` 而不能用 `&T`？
+
+很多初学者容易混淆“只读借用 `&T`”与“共享所有权句柄 `Shared<T>`”，误以为两者都是只读，应该可以通用。在 CP 语言的设计哲学中，两者的底层物理布局与生命周期安全边界有着**质的差别**：
+
+##### 1. 核心差异全景对比表
+
+| 维度             | 栈绑定只读借用 (`&T`)                                 | 共享所有权句柄 (`Shared<T>`)                               |
+| :--------------- | :---------------------------------------------------- | :--------------------------------------------------------- |
+| **本质属性**     | 栈绑定的临时引用视图（Stack-Bound View）              | 全局共享堆上的原子引用计数句柄（Shared Ownership）         |
+| **所有权归属**   | **零所有权**。完全依赖原宿主变量在外部栈帧中活着       | **共同所有权**。每个持有句柄的线程/协程都是合法所有者     |
+| **生命周期**     | 严格绑定在当前局部作用域内，**绝对禁止逃逸**          | 动态生命周期（Dynamic Escape），最后一个持有者退出时才释放 |
+| **内存开销**     | **绝对零开销**（底层就是裸指针，无堆分配，无计数）    | **极轻量**（堆分配一次 + 每次拷贝句柄原子引用计数 `+1`）   |
+| **跨线程/Actor** | ❌ **编译期绝对拦截**（防止宿主函数栈销毁产生悬垂指针） | ✅ **无畏并发传递**（各线程安全零拷贝访问）                 |
+| **跨越 `await`** | ❌ **禁止跨越状态机**（切分后当前函数栈帧不复存在）    | ✅ **安全穿透**（句柄安全保存在异步 Context 中）           |
+| **语法泛型负担** | 零 `<'a>` 生命周期标注，由编译器做 NLL 局部推导      | 零 `<'a>` 生命周期标注，享受 TS 引用般的自如              |
+
+##### 2. 代码对比：借用逃逸拦截 vs Shared 零拷贝跨线程
+
+```typescript
+// ❌ 错误示范：试图把栈绑定的局部借用 &data 传递给跨线程任务（编译期精准拦截！）
+fn launch_worker_invalid() {
+    let local_cfg = ModelConfig { hidden_size: 4096 };
+    let cfg_borrow: &ModelConfig = &local_cfg; // 栈绑定只读借用
+
+    // ❌ CP 编译期报错拦截：Cannot move or pass stack-bound borrow '&local_cfg' across thread/spawn boundary!
+    // 原因：launch_worker_invalid 随时可能 return 并销毁栈帧，若允许传给异步线程，将产生 Use-After-Free 严重崩溃！
+    spawn.cpu(() => {
+        print(`Hidden size: ${cfg_borrow.hidden_size}`);
+    });
+}
+
+// ✅ 正确示范：使用 Shared(T) 建立零拷贝共享所有权（安全跨线程/协程并发）
+fn launch_worker_valid() {
+    let shared_cfg = Shared(ModelConfig { hidden_size: 4096 }); // 堆分配 + 原子引用计数
+
+    let cfg_handle = shared_cfg.clone(); // 仅增加原子引用计数，零内存拷贝
+    spawn.cpu(() => {
+        // ✅ 即使 launch_worker_valid 函数退出销毁了外层栈，shared_cfg 的引用计数仍 >= 1
+        // 底层内存依然安全存活，直到该后台线程运行完毕解构 cfg_handle 时才安全释放！
+        print(`Worker read hidden size: ${cfg_handle.hidden_size}`);
+    });
+}
+```
+
+---
+
+#### 10.5.7 多线程数据保护机制全景对比（CP vs Rust vs Go vs Zig）
+
+| 语言     | 共享并发数据保护方案                    | 优势与亮点                                                    | 痛点与开发心智负担                                           |
+| :------- | :-------------------------------------- | :------------------------------------------------------------ | :----------------------------------------------------------- |
+| **CP**   | **`Shared<T>` + `Mutex<T>` / `RwLock`** | • **TS 极简语法**：`Shared(Mutex(data))` 一键构造<br>• **数据与锁强绑定**：必须通过 `withLock` 或守卫访问数据<br>• **自动 RAII 解锁**：守卫属性透明访问，离开块即释放<br>• **零 GC 停顿**：直接编译为 Zig 原生状态机 | • 目前自适应锁基于高性能原子自旋与调度让步，重度长临界区仍需配合 OS 级 futex 调度优化 |
+| **Rust** | `Arc<Mutex<T>>` / `Arc<RwLock<T>>`      | • 编译期 Borrow Checker 证明无数据竞态<br>• 静态类型系统完备  | • **语法繁重冗长**：`Arc::new(Mutex::new(...))` 嵌套深<br>• **到处 unwrap**：每次锁操作必须 `.lock().unwrap()`<br>• **生命周期心智地狱**：结构体字段嵌套借用引发 `<'a>` 病毒式传染 |
+| **Go**   | `sync.Mutex` + `sync/atomic`            | • 语言内置关键字轻量，上手极快                                | • **数据与锁脱节（裸锁）**：锁是独立变量，程序员极易忘记加锁直接访问数据，引发未定义竞态<br>• **手动 defer 容易泄露**：循环体内 `defer` 不释放<br>• **GC STW 噩梦**：高并发海量对象引发显著 GC 停顿 |
+| **Zig**  | `std.Thread.Mutex` + `std.atomic.Value` | • 绝对底层、零隐藏开销、透明可控                              | • **无语言级并发安全屏障**：没有所有权和借用检查，全靠程序员自律<br>• **缺少容器锁封装**：无泛型 `Mutex(T)` 数据绑定容器，必须人肉手写包装与内存释放 |
+
+---
+
+#### 10.5.8 工业级并发实战指南：5 大经典并发场景代码示例
+
+##### 场景一：只读全局配置/大型张量在多线程之间零拷贝共享
+
+```typescript
+import { Shared } from "cap:sync";
+
+struct AppConfig {
+    pub maxClients: i32;
+    pub apiEndpoint: string;
+}
+
+// 1. 创建只读共享全局配置
+let globalConfig = Shared(AppConfig {
+    maxClients: 10000,
+    apiEndpoint: "https://api.cp-lang.org/v1",
+});
+
+// 2. 派发给多个并行 Worker（零物理拷贝，仅复制原子引用句柄）
+let w1 = spawn.cpu(() => {
+    let cfg = globalConfig.clone();
+    print(`Worker 1 using endpoint: ${cfg.apiEndpoint}`);
+});
+
+let w2 = spawn.cpu(() => {
+    let cfg = globalConfig.clone();
+    print(`Worker 2 max clients: ${cfg.maxClients}`);
+});
+
+join(w1);
+join(w2);
+```
+
+##### 场景二：多线程高频写入与内部可变性（`Shared(Mutex(T))`）
+
+```typescript
+import { Mutex, Shared } from "cap:sync";
+
+struct WorkerTaskPool {
+    pub activeWorkers: i32;
+    pub completedTasks: i32;
+}
+
+// 内部可变性模式：外层 Shared 提供线程间安全共享句柄，内层 Mutex 提供可变修改互斥保护
+let pool = Shared(Mutex(WorkerTaskPool {
+    activeWorkers: 0,
+    completedTasks: 0,
+}));
+
+let p1 = pool.clone();
+let worker1 = spawn.cpu(() => {
+    // 推荐模式：withLock 自动加锁与即刻解锁
+    p1.withLock((p) => {
+        p.activeWorkers += 1;
+    });
+
+    // 模拟业务处理...
+
+    p1.withLock((p) => {
+        p.completedTasks += 1;
+        p.activeWorkers -= 1;
+    });
+});
+
+let p2 = pool.clone();
+let worker2 = spawn.cpu(() => {
+    // 守卫模式：lock() 阻塞拿锁，离开当前大括号作用域自动释放锁
+    {
+        let guard = p2.lock();
+        guard.completedTasks += 5; // 透明字段访问，无需额外解引用
+    }
+});
+
+join(worker1);
+join(worker2);
+
+pool.withLock((p) => {
+    print(`Final Completed Tasks: ${p.completedTasks}`);
+});
+```
+
+##### 场景三：读多写少高并发缓存系统（`Shared(RwLock(T))`）
+
+```typescript
+import { RwLock, Shared } from "cap:sync";
+
+struct UserCache {
+    pub sessionToken: string;
+    pub refreshCount: i32;
+}
+
+let cache = Shared(RwLock(UserCache {
+    sessionToken: "initial-token-12345",
+    refreshCount: 0,
+}));
+
+// 并发读：派发前 clone 独立句柄给后台线程，通过 withRead 获取共享读锁
+let readerCache = cache.clone();
+let reader = spawn.cpu(() => {
+    // withRead 内部直接借用受保护数据，零 clone、零引用计数变化
+    readerCache.withRead((c) => {
+        print(`Session Token: ${c.sessionToken}`);
+    });
+});
+
+// 排他写：派发前 clone 独立句柄给后台线程，通过 withWrite 获取独占写锁
+let writerCache = cache.clone();
+let writer = spawn.cpu(() => {
+    // withWrite 内部直接借用受保护数据进行可变写入，零 clone、零引用计数变化
+    writerCache.withWrite((c) => {
+        c.sessionToken = "new-token-99999";
+        c.refreshCount += 1;
+    });
+});
+
+join(reader);
+join(writer);
+```
+
+##### 场景四：无锁高性能计数器与探针（`Atomic<T>`）
+
+```typescript
+import { Atomic } from "cap:sync";
+
+// 纳秒级无锁原子变量：适合指标统计、限流计数器与状态位标记
+let qpsCounter = Atomic(0);
+let serverRunning = Atomic(true);
+
+// 1. 原子自增与算术
+qpsCounter.inc();         // 0 -> 1
+qpsCounter.add(10);       // 1 -> 11
+
+// 2. 原子比较交换 CAS（Compare-And-Swap）
+let exchanged = qpsCounter.cas(11, 20); // 若当前为 11 则原子置为 20，返回 true
+if (exchanged) {
+    print("CAS Successfully updated counter to 20");
+}
+
+// 3. 布尔状态探测与清除（Test-And-Set）
+if (serverRunning.load()) {
+    let previousState = serverRunning.testAndSet(); // 原子设为 true 并返回先前状态
+    serverRunning.clear(); // 优雅下线：原子复位为 false
+}
+```
+
+##### 场景五：多资源协同与无载荷裸锁（`Mutex()` / `RwLock()`）
+
+```typescript
+import { Mutex } from "cap:sync";
+
+// 无载荷裸互斥锁：适用于跨多个独立数据结构或硬件外设的原子编排
+let busLock = Mutex();
+
+busLock.lock();
+// 探测锁状态
+if (busLock.isLocked()) {
+    print("Hardware bus locked, transferring frame...");
+}
+// 执行硬件总线或跨结构操作...
+busLock.unlock(); // 手动释放裸锁
+```
+
+---
+
+#### 10.5.9 并发与多线程内存模型权威问答（Concurrency & Memory Model FAQ）
+
+针对程序员在多线程并发与系统级编程中普遍关注的核心问题，本节系统阐述 CP 语言的底层内存模型、引用计数机制与线程安全边界。
+
+##### 1. `Shared<T>` 的 Clone 触发时机：何时必须 Clone，何时无需 Clone？
+
+很多初学者容易将“跨线程派发句柄”与“锁临界区读写数据”混为一谈，甚至误以为 `withLock` / `withRead` 会自动 clone 数据。CP 的物理模型界限极其明确：
+
+- **`withLock` / `withRead` / `withWrite` 会自动 Clone 吗？会增加引用计数吗？**
+  - **绝对不会！零 Clone、零深拷贝、零引用计数变化！**
+  - 它的底层实现是**零成本数据借用（Borrowing）**：
+    1. 获取锁（阻塞或自旋）；
+    2. 注册 `defer unlock()` 确保退出（含异常）即刻释放锁；
+    3. **直接将锁内部真实受保护数据的裸指针借用（`*T` 或 `&T`）传递给闭包形参**；
+    4. 闭包直接就地读写该内存，全程不调用任何 clone，不修改任何引用计数器。
+- **那为什么多线程代码中会看到 `let p1 = pool.clone()`？**
+  - **关键辨析**：`clone` 是因为 **`spawn.cpu`（跨物理线程）**，而**绝不是因为 `withLock`**！
+  - 当你把 `pool` 派发给一个新的后台 OS 线程时，为了让后台线程在父线程提前退出时仍能安全存活（防止 Use-After-Free），必须在进入线程前调用 `let p1 = pool.clone()` 给新线程赋予一份**独立的原子句柄所有权**（此时句柄原子计数 +1，但包裹的数据依然零拷贝）。
+  - 后台线程启动后，在线程内部调用 `p1.withLock((p) => ...)` 时，**完全不发生任何 clone，`p` 是受保护数据的直接引用**！
+- **无需 Clone 的场景（同线程 / 同协程内零拷贝共享）**：
+  在同一个物理线程或协程内部调用函数时，直接传递只读借用参数（如 `fn inspect(cfg: &AppConfig)`），编译器直接传递底层指针，**绝对无需调用 `.clone()`**，开销为纯粹的 0。在 `withLock`、`withRead`、`withWrite` 闭包内部访问受保护的数据时，闭包参数直接绑定到受保护数据，同样无需执行任何 clone。
+- **必须 Clone 的场景（跨线程 / 跨协程派发所有权句柄）**：
+  当需要将一个共享变量派发给后台物理线程（`spawn.cpu`）或独立协程（`spawn`）时，**必须在派发前调用 `let handle = shared.clone();` 并将 `handle` 传入闭包**。因为子线程拥有独立的执行生命周期，如果不传递独立持有的原子所有权句柄，当派发方外层函数提前返回并退出时，子线程将面临 Use-After-Free 悬垂指针风险。此外，当需要将共享对象持久化存入堆容器（如全局 Map、线程池任务队列）时，也必须克隆句柄。
+
+##### 2. `Shared<T>` 原子引用计数的增减机制与运行期行为
+
+- **原子引用计数增加（+1）的时机**：
+  - 显式调用 `shared.clone()` 产生新句柄时；
+  - 闭包捕获共享句柄并逃逸派发到 `spawn` / `spawn.cpu` 任务时；
+  - 跨信箱将句柄作为消息发送给另一个 Actor 协程时；
+  - 将句柄插入到 `Array`、`Map`、`Set` 等堆容器中时。
+- **原子引用计数减少（-1）的时机**：
+  - 持有句柄的局部变量离开自身作用域时（编译器自动织入 `defer shared.release()`）；
+  - 变量被重新赋值时（旧句柄引用计数即刻 -1）；
+  - 容器执行 `pop()`、`delete()` 或容器自身被销毁清空时。
+- **引用计数归零与即刻确定性释放**：
+  **当原子引用计数降为 0 的瞬间，变量所占用的内存会即刻释放！** 底层会立即执行用户析构钩子并调用分配器回收内存（`allocator.destroy`），完全由当前最后释放句柄的线程就地同步完成，**彻底杜绝垃圾回收器（No GC），绝对零 STW 停顿**。
+
+##### 3. 引用克隆 vs 深拷贝：`clone()` 为什么只是 O(1) 原子引用 +1 而非 O(N) 深拷贝？
+
+- **`shared.clone()` 是 O(1) 浅拷贝**：它仅仅在当前堆对象头部的原子计数器字段上执行一次 CPU 硬件级的 `std.atomic.fetch_add`（纳秒级开销），内部包裹的数据（哪怕是数千兆字节的大模型权重或大型张量）**物理内存绝对不发生任何字节搬移**。
+- **深拷贝 `mut()` / `deepClone()` 的高昂代价与谨慎使用**：
+  真正的深拷贝会沿着指针层层递归，把所有嵌套字段、动态数组和子对象完全在堆上新分配一份，这是极度消耗 CPU 算力与堆内存的 O(N) 繁重操作。在 CP 的高并发哲学中，**深拷贝只在极少数“必须彻底物理隔离、且需要对全量树形结构进行无锁独立可变修改”的场景下才谨慎使用**。日常并发与跨线程共享一律使用 `Shared(T)` 的 O(1) 引用克隆。
+
+##### 4. 裸互斥锁 `let busLock = Mutex();` 的生命周期与遗漏 unlock 的死锁防范
+
+- **裸锁的手动释放隐患**：裸锁 `Mutex()` 不包裹具体数据，调用 `busLock.lock()` 时不会生成守卫对象，如果程序员在后续代码分支、早退（`return`）、条件 `break` 或错误冒泡（`?`）时遗漏了 `busLock.unlock()`，锁将**永久处于持有态**，后续任何试图获取该锁的物理线程都会**无限卡死（死锁 Deadlock）**。
+- **最佳工程实践**：
+  1. 只要存在需要保护的数据，**永远优先使用容器互斥锁 `Mutex(data)`**，利用 `withLock` 闭包或 RAII 守卫；
+  2. 若因硬件总线或流程编排必须使用裸锁 `Mutex()`，**务必在加锁后紧跟 `defer busLock.unlock()`**，确保无论函数是正常返回还是异常中断，锁都会由编译期确定的 `defer` 绝对安全释放。
+
+##### 5. 编译期并发逃逸分析（Escape Analysis）：拦截只读/可变借用跨越线程边界
+
+- **拦截跨线程借用的物理原因**：
+  局部只读借用（`&T`）和可变借用（`*T`）在底层是指向**当前线程调用栈**的裸指针。一旦后台物理线程启动，父线程函数随时可能返回并销毁栈帧，若允许栈指针逃逸到后台线程，后台线程的并发解引用将直接沦为灾难性的 **Use-After-Free (UAF)**。
+- **编译期静态屏障**：
+  CP 编译器在语法分析和类型检查阶段内置了逃逸分析（Escape Analysis）。任何传入 `spawn` 或 `spawn.cpu` 的闭包，一旦捕获了局部借用 `&T`、`*T` 或栈绑定视图 `ref struct`，编译器**在编译期直接硬错误拦截并拒绝生成可执行文件**，从物理上杜绝悬垂指针与跨线程数据竞态。
+
+##### 6. 所有权转移（Move）在多线程下的零竞态保证（Single Ownership）
+
+- **单所有者铁律（Single Ownership）**：
+  当使用 `spawn.cpu(() => process(move data));` 将所有权转移给新线程时，原线程中的 `data` 变量在编译期被即刻标记为**已失效（Moved / Dead）**。后续任何代码试图读取或写入 `data` 都会触发编译期硬错误：`CP Compile Error: Use of moved value`。
+- **物理零竞态（Zero Race Conditions）**：
+  由于在任何一个物理时间切片内，该数据块**有且仅有一个线程拥有独占访问权**，因此即便不使用任何 `Mutex` 互斥锁，也不会产生哪怕一个字节的数据同抢，实现了零同步开销的极致性能。
+
+##### 7. Rust `Send` / `Sync` 机制在 CP 中的极简实现对比
+
+- **Rust 的机制**：Rust 依赖两个内置的自动标记 Trait——`Send`（表示所有权可安全跨线程转移）和 `Sync`（表示不可变引用可安全在多线程间共享，即 `&T: Send`）。若类型包含裸指针 `*const T` 或非线程安全容器（如 `Rc<T>`、`RefCell<T>`），编译器自动移除其 `Send` / `Sync` 实现，禁止跨线程派发。
+- **CP 的极简结构化方案**：
+  CP 保留了 Rust 100% 的并发安全性，但**彻底摒弃了复杂的标记 Trait 与泛型病毒式传染**：
+  1. **值类型与 Move 所有权一等合法**：基础标量、纯数据 `struct` 以及具有独立所有权的对象，天然支持跨线程 `move`（等价于自动满足 `Send`）；
+  2. **`Shared<T>` 与内部可变性容器一等合法**：`Shared<T>`（T 为只读）与 `Shared(Mutex(T))` / `Shared(RwLock(T))` 天然支持跨线程安全派发（等价于自动满足 `Send + Sync`）；
+  3. **借用与 Unsafe 指针绝对拦截**：栈绑定借用 `&T` / `*T`、栈视图 `ref struct`、以及 Unsafe 裸指针 `*T!` 受到编译期结构化逃逸分析的严格限制，**物理上严禁跨越 `spawn` / `spawn.cpu` 边界**。开发人员无需编写冗余的 Trait 约束，编译器根据物理内存结构直接完成秒级静态判定！
+
+---
+
+### 10.6 异步任务流与事件循环
 
 ```typescript
 // 并发聚合协调器
@@ -2540,7 +3215,7 @@ bus.emit("agent_death", 1002);
 
 ---
 
-### 10.6 Nest 智能体容器（Nest Agent Container / Nest Runtime）
+### 10.7 Nest 智能体容器（Nest Agent Container / Nest Runtime）
 
 CP 语言是 **Nest 智能体容器** 的原生执行体：
 
@@ -3883,6 +4558,33 @@ pub fn onHskDone(qs: *quic.Socket, ok: c_int): void {
   }
   ```
 - **消除逃逸**：无需为了实现 C 回调而将整个回调函数被迫写进 `zig { ... }` 块中，使底层协议回调完全可以用 CP 现代语法书写。
+
+#### 11.8.13 不透明类装饰器（`@opaque class`）与底层系统句柄引用语义
+
+在对接操作系统底层资源、第三方 C/C++ 不透明句柄或宿主运行时内核对象（如 uWebSockets 的 `App`、`Loop`、`us_socket_t`、`ListenSocket`）时，CP 语言提供了专有的 `@opaque` 类级装饰器：
+
+```typescript
+export @opaque class App {
+    static fn create(ssl: bool, config: SocketContextOptions): App? {
+        // ...
+    }
+}
+```
+
+- **语义与映射**：修饰类在转译为 Zig 时直接发射为 `pub const App = opaque { ... };`；
+- **引用语义自动适配**：`@opaque class` 本质上代表指针引用类型。编译器代码生成器自动豁免实例构造器 `_create` 堆分配逻辑，并在类型标注为 `App` 时生成 `*App`，返回可选类型 `App?` 时生成 `?*App`，彻底杜绝指针双重取址（`?**App`）；
+- **标准库格式化兼容**：原生适配 Zig 0.15 泛型 Writer 的 `{p}` 指针格式化，消除对不透明类型解引用的编译错误。
+
+#### 11.8.14 私有哈希前缀标识符（`#identifier`）与泛型参数多字符全大写规范
+
+在系统级面向对象与网络协议状态机重构中，兼顾 ECMAScript 现代语法与复杂泛型推导：
+
+1. **私有哈希标识符（`#identifier`）**：
+   - 词法解析器原生支持 `#` 前缀标识符（如 `#ext: *anyopaque`）；
+   - 支持类内部声明硬隔离私有字段，彻底杜绝与外部文件作用域同名符号或模块级函数的冲突。
+2. **泛型类型参数多字符全大写识别规范**：
+   - 在泛型类、方法或函数中，凡是全由 ASCII 大写字母组成的标识符（如 `T`、`UD`、`CTX`、`SOCKET` 等任意长度大写符号），代码生成器智能将其判定为泛型类型占位符；
+   - 发射时保留原始符号名（如 `ud: UD`），杜绝误将其当成普通对象类型而强制追加指针前缀（如错误生成 `ud: *UD`），确保跨层泛型特化与参数传递 100% 精准保真。
 
 ---
 

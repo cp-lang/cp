@@ -72,7 +72,16 @@ fn compile_file(
     let mut all_items = Vec::new();
     let mut processed_sources = HashSet::new();
 
-    resolve_imports(input, include, &mut all_items, &mut processed_sources)?;
+    if lib {
+        let code = fs::read_to_string(input)?;
+        let mut parser = CPParser::new(&code);
+        let parsed_module = parser
+            .parse_module()
+            .map_err(|e| anyhow::anyhow!("Parse Error in {:?}: {}", input, e))?;
+        all_items = parsed_module.body;
+    } else {
+        resolve_imports(input, include, &mut all_items, &mut processed_sources)?;
+    }
 
     let mut module = Module {
         span: cpc::Span { start: 0, end: 0 },
