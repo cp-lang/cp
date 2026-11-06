@@ -514,6 +514,12 @@ import App, { start } from "./app.cp";
 import {default as App, start } from "./app.cp";
 ```
 
+#### 1.1 内置标准库 `cap:*` 协议映射规则
+- 所有的内置官方标准库统一通过 `cap:<module>` 协议通道导入（如 `cap:io`、`cap:fs`、`cap:http`、`cap:net`）；
+- 编译器解析器（`resolver.rs`）在解析时自动剥离 `cap:` 前缀，直接在纯正唯一的官方标准库根目录 `lib/` 下精准检索：
+  - **单文件标准模块**（如 `cap:io`、`cap:fs`）：秒级命中 `lib/io.cp`、`lib/fs.cp`；
+  - **复合目录标准模块**（如 `cap:http`、`cap:net`、`cap:crypto`）：自动识别目录并优先检索 `lib/http/index.cp`、`lib/net/index.cp`、`lib/crypto/index.cp`，兼顾模块内部的高内聚分文件拆分。
+
 #### 2. 禁止行为
 
 1. 没有 `use`，禁止写 `use xxx;`。

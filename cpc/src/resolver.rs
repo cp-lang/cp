@@ -5,19 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub fn resolve_file_or_dir(base: &Path) -> Option<PathBuf> {
-    // 1. Check <base>.d.cp
-    let dcp_file = base.with_extension("d.cp");
-    if dcp_file.exists() {
-        return Some(dcp_file);
-    }
-    // 2. Check <base>.cp
-    let cp_file = base.with_extension("cp");
-    if cp_file.exists() {
-        return Some(cp_file);
-    }
-
     if base.is_dir() {
-        // 3. Check for pre-compiled types in bin/ (for dependencies)
+        // 1. Check for pre-compiled types in bin/ (for dependencies)
         if let Some(name) = base.file_name().and_then(|n| n.to_str()) {
             let bin_dcp = base.join("bin").join(format!("{}.d.cp", name));
             if bin_dcp.exists() {
@@ -25,7 +14,7 @@ pub fn resolve_file_or_dir(base: &Path) -> Option<PathBuf> {
             }
         }
 
-        // 4. Check directory defaults
+        // 2. Check directory defaults
         let checks = vec!["index.d.cp", "index.cp", "main.d.cp", "main.cp"];
         for check in checks {
             let p = base.join(check);
@@ -34,7 +23,7 @@ pub fn resolve_file_or_dir(base: &Path) -> Option<PathBuf> {
             }
         }
 
-        // 5. Check cap.json main
+        // 3. Check cap.json main
         let cap_json = base.join("cap.json");
         if cap_json.exists() {
             if let Ok(content) = fs::read_to_string(&cap_json) {
@@ -58,6 +47,18 @@ pub fn resolve_file_or_dir(base: &Path) -> Option<PathBuf> {
             }
         }
     }
+
+    // 4. Check <base>.d.cp
+    let dcp_file = base.with_extension("d.cp");
+    if dcp_file.exists() {
+        return Some(dcp_file);
+    }
+    // 5. Check <base>.cp
+    let cp_file = base.with_extension("cp");
+    if cp_file.exists() {
+        return Some(cp_file);
+    }
+
     None
 }
 
@@ -80,16 +81,33 @@ pub fn resolve_dependencies(
         match item {
             ModuleItem::Import(imp) => {
                 let mut search_source = imp.source.clone();
-                if let Some(stripped) = search_source.strip_prefix("cap:") {
-                    search_source = format!("cap/{}", stripped);
-                }
+                let is_cap_builtin = if let Some(stripped) = search_source.strip_prefix("cap:") {
+                    search_source = stripped.to_string();
+                    true
+                } else {
+                    false
+                };
 
                 let mut resolved_path = None;
 
-                if search_source.starts_with("./")
+                if is_cap_builtin {
+                    // cap: 前缀直接剥离后，在 lib/ 根目录下（通过 include_paths 传入）查找目标模块
+                    for inc in include_paths {
+                        let p = inc.join(&search_source);
+                        if let Some(res) = resolve_file_or_dir(&p) {
+                            resolved_path = Some(res);
+                            break;
+                        }
+                    }
+                    if resolved_path.is_none() {
+                        let default_lib = PathBuf::from("/data/dev/cp/lib").join(&search_source);
+                        if let Some(res) = resolve_file_or_dir(&default_lib) {
+                            resolved_path = Some(res);
+                        }
+                    }
+                } else if search_source.starts_with("./")
                     || search_source.starts_with("../")
                     || search_source.starts_with("/")
-                    || search_source.starts_with("cap/")
                 {
                     let base_path = path.parent().unwrap().join(&search_source);
                     resolved_path = resolve_file_or_dir(&base_path);
@@ -164,18 +182,35 @@ pub fn resolve_imports(
         match item {
             ModuleItem::Import(imp) => {
                 let mut search_source = imp.source.clone();
-                if let Some(stripped) = search_source.strip_prefix("cap:") {
-                    search_source = format!("cap/{}", stripped);
-                }
+                let is_cap_builtin = if let Some(stripped) = search_source.strip_prefix("cap:") {
+                    search_source = stripped.to_string();
+                    true
+                } else {
+                    false
+                };
 
                 let mut resolved_path = None;
 
-                if search_source.starts_with("./")
+                if is_cap_builtin {
+                    // cap: 前缀直接剥离后，在 lib/ 根目录下（通过 include_paths 传入）查找目标模块
+                    for inc in include_paths {
+                        let p = inc.join(&search_source);
+                        if let Some(res) = resolve_file_or_dir(&p) {
+                            resolved_path = Some(res);
+                            break;
+                        }
+                    }
+                    if resolved_path.is_none() {
+                        let default_lib = PathBuf::from("/data/dev/cp/lib").join(&search_source);
+                        if let Some(res) = resolve_file_or_dir(&default_lib) {
+                            resolved_path = Some(res);
+                        }
+                    }
+                } else if search_source.starts_with("./")
                     || search_source.starts_with("../")
                     || search_source.starts_with("/")
-                    || search_source.starts_with("cap/")
                 {
-                    // Relative, absolute or cap: import
+                    // Relative or absolute import
                     let base_path = path.parent().unwrap().join(&search_source);
                     resolved_path = resolve_file_or_dir(&base_path);
 

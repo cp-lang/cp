@@ -1862,3 +1862,26 @@
 - [`cap/test/test_usockets_picohttp.cp`](file:///data/dev/cp/cap/test/test_usockets_picohttp.cp):
   - 升级为 `@c struct phr_header` 与 `@fix struct phr_fix_sample`；
   - 运行 `/data/dev/cp/cap/bin/cap cap/test/test_usockets_picohttp.cp` 一键运行秒级通过验证（转译 6ms，链接 646ms，测试 100% PASS）。
+
+---
+
+## 2026-11-07 标准库目录拓扑重构与解析器升级 (Lib Directory Flattening & Compiler Resolver)
+
+### 标准库拓扑重构 (Standard Library Layout Flattened)
+- 彻底清理移除了历史冗余目录 `lib/cap/`；
+- 将原 `lib/cap/*` 的全部标准库文件（`actor.cp`, `events.cp`, `fs.cp`, `io.cp`, `json.cp`, `mem.cp`, `net.cp`, `parallel.cp`, `reflect.cp`, `regex.cp`, `sqlite.cp`, `test.cp`, `worker.cp` 等）直接平铺移入唯一官方标准库根目录 [`lib/`](file:///data/dev/cp/lib/)；
+- 保留并完善子系统模块目录（如 `lib/crypto/`、`lib/http/`、`lib/net/`）。
+
+### 编译器模块解析引擎升级 (Resolver Overhaul)
+- [`cpc_dev/src/resolver.rs`](file:///data/dev/cp/cpc_dev/src/resolver.rs) & [`cpc/src/resolver.rs`](file:///data/dev/cp/cpc/src/resolver.rs):
+  - `resolve_dependencies` 与 `resolve_imports` 中，直接剥离 `cap:` 前缀，优先通过 `include_paths` 在官方标准库根目录 `lib/` 下检索目标模块；
+  - 增强 `resolve_file_or_dir`：若目标路径为目录，优先匹配检索目录入口（`index.d.cp`, `index.cp`, `main.d.cp`, `main.cp`），确保复合目录标准模块（如 `cap:http` 对应 `lib/http/index.cp`）秒级命中；若非目录则按单文件匹配 `lib/<name>.cp`；
+  - 成功完成 Release 优化构建（耗时 36.44s），更新部署至 [`cap/bin/cpc`](file:///data/dev/cp/cap/bin/cpc)。
+
+### 设计规范更新 (Specification Updated)
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 第 2.5 节新增 1.1 小节《内置标准库 `cap:*` 协议映射规则》，正式规范 `cap:*` 直通 `lib/` 根目录单文件与复合目录入口的设计标准。
+
+### 回归验证通过 (Verified)
+- 新增 [`cap/test/test_lib_reorg.cp`](file:///data/dev/cp/cap/test/test_lib_reorg.cp)，验证 `import { print } from "cap:io"` 与 `import { json } from "cap:json"` 秒级命中并正常执行通过；
+- 既有测试用例全量兼容通过。

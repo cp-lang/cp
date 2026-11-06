@@ -308,3 +308,45 @@ export CPC_BIN=/data/dev/cp/cap/bin/cpc
 7. **完成交付并恢复并行**：
 
 - 汇报正式版 `cpc` 更新完毕，供用户恢复 Bun 迁移项目继续执行任务。
+
+### 4. 库文件扁平设计
+
+使用统一的 下划线 _ 命名约定：
+
+- _ 开头的文件：代表底层、私有、包含直接 C 操作的内部声明文件（外部不可见）；
+- 普通文件：代表 100% 现代、面向对象、具备借用检查和 RAII 内存安全的对外标准库 API。
+
+整个标准库将变得不可思议的扁平与清爽：
+
+```text
+    lib/
+    ├── crypto/                       # 密码学库 (cap:crypto)
+    │   ├── _boringssl.zig            # 👈 唯一的 Zig 垫片 (1.9万行全套密码学绑定)
+    │   ├── hash.cp                   #    面向用户的 Hash (SHA256, MD5)
+    │   ├── cipher.cp                 #    面向用户的 AES/ChaCha 加密
+    │   ├── random.cp                 #    面向用户的安全随机数 / UUID
+    │   └── index.cp                  #    模块对外统一出口
+    │
+    ├── net/                          # 网络核心库 (cap:net)
+    │   ├── _usockets.cp              # 👈 纯 CP 写的 @c { ... } uSockets 声明 (仅几十行)
+    │   ├── socket.cp                 #    带 RAII 自动释放的 SafeSocket
+    │   ├── tcp_stream.cp             #    TCP 连接抽象
+    │   ├── tcp_server.cp             #    TCP 服务端
+    │   └── index.cp
+    │
+    ├── http/                         # HTTP 库 (cap:http)
+    │   ├── _picohttp.cp              # 👈 纯 CP 写的 @c { ... } picohttpparser 声明 (仅十几行)
+    │   ├── request.cp                #    HttpRequest
+    │   ├── response.cp               #    HttpResponse
+    │   ├── server.cp                 #    HttpServer
+    │   └── index.cp
+    │
+    └── event_loop/                   # 事件循环库 (cap:event_loop)
+        ├── timer.cp                  #    侵入式二叉最小堆定时器 (纯 CP)
+        ├── concurrent_task.cp        #    16 字节无锁跨线程任务 (纯 CP)
+        ├── file_poll.cp              #    系统描述符监听 (纯 CP)
+        ├── loop.cp                   #    统一 EventLoop 封装
+        └── index.cp
+```
+
+---

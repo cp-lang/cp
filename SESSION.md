@@ -5710,3 +5710,71 @@ git 提交
    - 测试套件：`cap/test/test_usockets_picohttp.cp`、`cap/test/test_if_null_narrowing.cp`、`cap/test/test_unsafe_pass.cp`；
    - 第三方原生库与头文件：`vendor/`；
    - 官方四线文档与工程记录：`cp_ref.md`、`CHANGELOG.md`、`DEVLOG.md`、`SESSION.md`、`GEMINI.md`、`TASK.md`、`PROGRESS.md`、`.gitignore`。
+
+---
+
+### 用户指令 (User Input)
+重构 lib 库目录结构
+ 1. 移动文件并清理目录：
+      • 把 lib/cap/* 全部移动到 lib/；
+      • 删除已经清空的 lib/cap/ 目录。
+  2. 编译器解析修改（修改 cpc/src/resolver.rs）：
+      • 将 cap: 前缀直接剥离后，在 lib/ 根目录下查找目标模块；
+      • 这样无论是 import from "cap:io" 还是 import from "cap:http"，都能直接、秒级且优雅地命中！
+cp lib 库目录结构如下:
+ ### 二、统一移入 lib/ 后的终极全景（极其清爽！）
+
+  把 lib/cap/* 全部移动到 lib/ 并删掉空目录 cap 后，整个 CP 标准库将达到顶级系统语言的纯粹与工整：
+
+    /data/dev/cp/lib/                 # 👈 纯正唯一的 CP 官方标准库根目录
+    ├── fs.cp                         # cap:fs (文件系统)
+    ├── io.cp                         # cap:io (基础流式IO)
+    ├── json.cp                       # cap:json
+    ├── actor.cp                      # cap:actor
+    ├── events.cp                     # cap:events
+    ├── reflect.cp                    # cap:reflect
+    │
+    ├── http/                         # cap:http (工业级高并发 HTTP)
+    │   ├── _picohttp.cp
+    │   ├── server.cp
+    │   └── index.cp
+    │
+    ├── net/                          # cap:net (基于 uSockets 的高性能 Socket)
+    │   ├── _usockets.cp
+    │   ├── socket.cp
+    │   └── index.cp
+    │
+    ├── crypto/                       # cap:crypto (全套工业级密码学)
+    │   ├── _boringssl.zig
+    │   ├── hash.cp
+    │   └── index.cp
+
+### 执行汇报 (Execution Report)
+1. **移动标准库文件并清理目录**：
+   - 将原 `lib/cap/*` 的全部标准库文件平铺移动至官方唯一标准库根目录 [`lib/`](file:///data/dev/cp/lib/)；
+   - 彻底删除已清空的 `lib/cap/` 目录；
+   - 确认 `lib/` 根目录直接包含 `actor.cp`、`events.cp`、`fs.cp`、`io.cp`、`json.cp`、`mem.cp`、`net.cp`、`reflect.cp`、`sqlite.cp` 等文件及子系统目录 `crypto/`。
+2. **编译器模块解析引擎升级（修改 `cpc/src/resolver.rs` & `cpc_dev/src/resolver.rs`）**：
+   - 剥离 `cap:` 前缀：针对 `cap:<module>` 导入通道，自动剥离前缀后直接在标准库根目录 `lib/`（通过 `include_paths` 传入）下精准检索目标模块；
+   - 智能目录入口探测：升级 `resolve_file_or_dir`，若匹配到目录则优先探测 `index.cp` / `index.d.cp` / `main.cp`，若匹配到文件则探测 `<name>.cp`，实现单文件与复合目录模块的秒级命中；
+   - 编译正式 Release 优化版本并部署覆盖至 [`cap/bin/cpc`](file:///data/dev/cp/cap/bin/cpc)；
+   - 将 `.cap/cpc_bin` 切换回正式版二进制路径。
+3. **端到端验证通过**：
+   - 新增 [`cap/test/test_lib_reorg.cp`](file:///data/dev/cp/cap/test/test_lib_reorg.cp)，验证 `import { print } from "cap:io"` 与 `import { json } from "cap:json"` 秒级命中并正常执行通过；
+   - 既有测试用例（`test_usockets_picohttp.cp`、`test_unsafe_pass.cp`、`test_if_null_narrowing.cp`）100% 绿灯全通。
+4. **设计规范手册 `cp_ref.md` 同步更新**：
+   - 第 2.5 节新增 1.1 小节《内置标准库 `cap:*` 协议映射规则》，规范 `cap:*` 映射到 `lib/` 根目录的单文件与目录规范。
+
+---
+
+### 用户指令 (User Input)
+git 提交
+
+### 执行汇报 (Execution Report)
+1. **完成 Git 提交记录确认**：
+   - 本次提交范围：
+     - 标准库平铺：删除 `lib/cap/`，将全部标准库文件平移入 `lib/` 根目录；
+     - 编译器解析引擎：`cpc/src/resolver.rs`、`cpc_dev/src/resolver.rs` 剥离 `cap:` 前缀直通 `lib/`，优化目录与单文件匹配优先级；
+     - 测试套件：新增 `cap/test/test_lib_reorg.cp` 端到端测试；
+     - 官方设计规范与四线文档：`cp_ref.md`、`CHANGELOG.md`、`DEVLOG.md`、`SESSION.md`。
+2. **一次性暂存并提交**：执行单步 `git add .` 与单步 `git commit`。
