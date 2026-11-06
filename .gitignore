@@ -9,7 +9,7 @@ cap/**/*.zig.bk
 cap/*.cp.zig
 cap/.con-build/
 cap/zig-out/
-#zig-out/
+zig-out/
 .zig-cache/
 bin/
 build/

@@ -459,9 +459,7 @@ impl ModuleFeatures {
                         "slice" | "substring" if !c.args.is_empty() => {
                             self.needs_iter_helpers = true
                         }
-                        "withLock" | "withRead" | "withWrite" | "lock" | "tryLock" | "unlock"
-                        | "read" | "tryRead" | "write" | "tryWrite" | "isLocked"
-                        | "isReadLocked" | "isWriteLocked" => self.needs_sync = true,
+                        "withLock" | "withRead" | "withWrite" => self.needs_sync = true,
                         _ => {}
                     }
                 }
@@ -634,6 +632,7 @@ pub struct Codegen {
     pub inline_closure_blk: Option<String>,
     pub inline_closure_params: HashSet<String>,
     pub type_aliases: HashMap<String, TypeAliasDecl>,
+    pub narrowed_null_vars: HashSet<String>,
 }
 
 impl Codegen {
@@ -703,7 +702,100 @@ impl Codegen {
             inline_closure_blk: None,
             inline_closure_params: HashSet::new(),
             type_aliases: HashMap::new(),
+            narrowed_null_vars: HashSet::new(),
         }
+    }
+
+    pub fn unwrap_optional_type(ty: &Type) -> Type {
+        match ty {
+            Type::Optional(inner) => *inner.clone(),
+            Type::BorrowType {
+                inner,
+                is_mut,
+                lifetimes,
+            } => {
+                if let Type::Optional(opt_inner) = &**inner {
+                    Type::BorrowType {
+                        inner: opt_inner.clone(),
+                        is_mut: *is_mut,
+                        lifetimes: lifetimes.clone(),
+                    }
+                } else {
+                    ty.clone()
+                }
+            }
+            _ => ty.clone(),
+        }
+    }
+
+    pub fn extract_not_null_vars(expr: &Expr) -> Vec<String> {
+        let mut vars = Vec::new();
+        match expr {
+            Expr::Bin(bin) => {
+                if bin.op == BinaryOp::NotEq {
+                    if matches!(&*bin.right, Expr::Lit(Lit::Null))
+                        || matches!(&*bin.right, Expr::Ident(id) if id.sym == "null")
+                    {
+                        if let Expr::Ident(id) = &*bin.left {
+                            if id.sym != "null" && id.sym != "undefined" {
+                                vars.push(id.sym.clone());
+                            }
+                        }
+                    } else if matches!(&*bin.left, Expr::Lit(Lit::Null))
+                        || matches!(&*bin.left, Expr::Ident(id) if id.sym == "null")
+                    {
+                        if let Expr::Ident(id) = &*bin.right {
+                            if id.sym != "null" && id.sym != "undefined" {
+                                vars.push(id.sym.clone());
+                            }
+                        }
+                    }
+                } else if bin.op == BinaryOp::LogicalAnd {
+                    vars.extend(Self::extract_not_null_vars(&bin.left));
+                    vars.extend(Self::extract_not_null_vars(&bin.right));
+                }
+            }
+            Expr::Builtin(call) if call.name == "@not" && call.args.len() == 1 => {
+                vars.extend(Self::extract_is_null_vars(&call.args[0]));
+            }
+            _ => {}
+        }
+        vars
+    }
+
+    pub fn extract_is_null_vars(expr: &Expr) -> Vec<String> {
+        let mut vars = Vec::new();
+        match expr {
+            Expr::Bin(bin) => {
+                if bin.op == BinaryOp::Eq {
+                    if matches!(&*bin.right, Expr::Lit(Lit::Null))
+                        || matches!(&*bin.right, Expr::Ident(id) if id.sym == "null")
+                    {
+                        if let Expr::Ident(id) = &*bin.left {
+                            if id.sym != "null" && id.sym != "undefined" {
+                                vars.push(id.sym.clone());
+                            }
+                        }
+                    } else if matches!(&*bin.left, Expr::Lit(Lit::Null))
+                        || matches!(&*bin.left, Expr::Ident(id) if id.sym == "null")
+                    {
+                        if let Expr::Ident(id) = &*bin.right {
+                            if id.sym != "null" && id.sym != "undefined" {
+                                vars.push(id.sym.clone());
+                            }
+                        }
+                    }
+                } else if bin.op == BinaryOp::LogicalOr {
+                    vars.extend(Self::extract_is_null_vars(&bin.left));
+                    vars.extend(Self::extract_is_null_vars(&bin.right));
+                }
+            }
+            Expr::Builtin(call) if call.name == "@not" && call.args.len() == 1 => {
+                vars.extend(Self::extract_not_null_vars(&call.args[0]));
+            }
+            _ => {}
+        }
+        vars
     }
 
     pub fn type_from_name_static(name: &str) -> Type {
@@ -1678,7 +1770,7 @@ impl Codegen {
             );
             self.writeln("}");
         }
-        if features.needs_opt_chaining || features.needs_sync {
+        if true {
             self.writeln("fn CpOptType(comptime T: type) type {");
             self.writeln("    if (@typeInfo(T) == .optional) return T;");
             self.writeln("    return ?T;");
@@ -2650,7 +2742,7 @@ impl Codegen {
             self.writeln("}");
         }
 
-        if features.needs_string_helpers {
+        if features.needs_string_helpers || features.needs_unpack {
             self.writeln("fn is_string_like(comptime T: type) bool { if (T == []const u8 or T == []u8) return true; if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }");
             self.writeln("fn to_string_slice(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime (T == []const u8 or T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }");
             self.writeln("fn CpValType(comptime T: type) type { if (is_string_like(T)) return []const u8; if (T == comptime_int) return i32; if (T == comptime_float) return f32; return T; }");
@@ -2885,6 +2977,10 @@ impl Codegen {
             self.writeln("pub fn cp_msg_to_val(m: Message) []const u8 { return cp_fmt(m); }");
         }
         if features.needs_unpack {
+            if !features.needs_collections && !features.needs_actors {
+                self.writeln("const Message = anyopaque;");
+                self.writeln("fn cp_msg_to_val(_: anytype) []const u8 { return \"\"; }");
+            }
             self.writeln("pub fn CpUnpackElemType(comptime T: type, comptime idx: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; return @FieldType(T, std.fmt.comptimePrint(\"{d}\", .{idx})); }");
             self.writeln("pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return \"\"; } else if (comptime T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return \"\"; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(T) == .array)) { return v[idx]; } else { return @field(v, std.fmt.comptimePrint(\"{d}\", .{idx})); } }");
             self.writeln("pub fn CpUnpackTailType(comptime T: type, comptime offset_from_end: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; const n = @typeInfo(T).@\"struct\".fields.len; return @FieldType(T, std.fmt.comptimePrint(\"{d}\", .{n - offset_from_end})); }");
@@ -3503,7 +3599,7 @@ impl Codegen {
         }
         let type_id = Self::fnv1a_type_id(&class.ident.sym);
         let is_packed = class.meta.iter().find(|m| m.name.sym == "packed");
-        let is_extern = class.meta.iter().any(|m| m.name.sym == "extern");
+        let is_extern = class.meta.iter().any(|m| m.name.sym == "extern" || m.name.sym == "c" || m.name.sym == "fix");
         let is_opaque = class.meta.iter().any(|m| m.name.sym == "opaque");
         let struct_kind = if let Some(p) = is_packed {
             if let Some(arg) = p.args.first() {
@@ -4624,7 +4720,13 @@ impl Codegen {
                         }
                     }
                 }
-                self.var_cp_types.get(&id.sym).cloned()
+                if let Some(t) = self.var_cp_types.get(&id.sym) {
+                    if self.narrowed_null_vars.contains(&id.sym) {
+                        return Some(Self::unwrap_optional_type(t));
+                    }
+                    return Some(t.clone());
+                }
+                None
             }
             Expr::New(nc) => {
                 if let Expr::Ident(cid) = &*nc.callee {
@@ -8407,6 +8509,7 @@ impl Codegen {
                         || matches!(&*bin.right, Expr::Ident(id) if id.sym == "null");
                     if is_null_rhs {
                         if let Expr::Ident(lhs_id) = &*bin.left {
+                            self.narrowed_null_vars.remove(&lhs_id.sym);
                             if let Some(t) = self.var_cp_types.get(&lhs_id.sym) {
                                 if !matches!(t, Type::Optional(_)) {
                                     panic!(
@@ -8481,7 +8584,12 @@ impl Codegen {
                             if lhs_id.sym == "_" {
                                 "_".to_string()
                             } else {
-                                self.generate_expr(&bin.left)
+                                let was = self.narrowed_null_vars.remove(&lhs_id.sym);
+                                let code = self.generate_expr(&bin.left);
+                                if was && !is_null_rhs {
+                                    self.narrowed_null_vars.insert(lhs_id.sym.clone());
+                                }
+                                code
                             }
                         } else {
                             self.generate_expr(&bin.left)
@@ -8559,10 +8667,14 @@ impl Codegen {
                 self.write_to_case("}");
             }
             Stmt::If(i) => {
+                let not_null_vars = Self::extract_not_null_vars(&i.test);
+                let is_null_vars = Self::extract_is_null_vars(&i.test);
                 if i.is_comptime {
                     let test = self.generate_expr(&i.test);
                     self.write_to_case(&format!("if (comptime {}) {{", test));
                     self.indent();
+                    let old_narrowed = self.narrowed_null_vars.clone();
+                    self.narrowed_null_vars.extend(not_null_vars);
                     if let Stmt::Block(b) = &*i.cons {
                         for s in &b.body {
                             self.generate_stmt(s);
@@ -8570,10 +8682,12 @@ impl Codegen {
                     } else {
                         self.generate_stmt(&i.cons);
                     }
+                    self.narrowed_null_vars = old_narrowed.clone();
                     self.dedent();
                     if let Some(alt) = &i.alt {
                         self.write_to_case("} else {");
                         self.indent();
+                        self.narrowed_null_vars.extend(is_null_vars);
                         if let Stmt::Block(b) = &**alt {
                             for s in &b.body {
                                 self.generate_stmt(s);
@@ -8581,6 +8695,7 @@ impl Codegen {
                         } else {
                             self.generate_stmt(alt);
                         }
+                        self.narrowed_null_vars = old_narrowed;
                         self.dedent();
                     }
                     self.write_to_case("}");
@@ -8588,27 +8703,33 @@ impl Codegen {
                 }
                 let test = self.generate_expr(&i.test);
                 let old_uninit = self.uninitialized_vars.clone();
+                let old_narrowed = self.narrowed_null_vars.clone();
                 if test == "true" && i.capture.is_none() {
+                    self.narrowed_null_vars.extend(not_null_vars);
                     self.generate_stmt(&i.cons);
+                    self.narrowed_null_vars = old_narrowed;
                 } else if test == "false" && i.capture.is_none() {
                     if let Some(alt) = &i.alt {
+                        self.narrowed_null_vars.extend(is_null_vars);
                         self.generate_stmt(alt);
+                        self.narrowed_null_vars = old_narrowed;
                     }
                 } else {
-                    if let Some(cap) = &i.capture {
+                    let saved_cap_local = if let Some(cap) = &i.capture {
                         self.var_scope_depth
                             .insert(cap.sym.clone(), self.current_scope_depth + 1);
                         self.write_to_case(&format!("if ({}) |{}| {{", test, cap.sym));
+                        self.locals.insert(cap.sym.clone(), "anytype".to_string())
                     } else {
                         self.write_to_case(&format!("if ({}) {{", test));
-                    }
+                        None
+                    };
                     self.indent();
                     if let Some(cap) = &i.capture {
-                        if !self.last_use_map.contains_key(&cap.sym) {
-                            self.write_to_case(&format!("_ = &{};", cap.sym));
-                        }
+                        self.write_to_case(&format!("_ = &{};", cap.sym));
                     }
                     self.current_scope_depth += 1;
+                    self.narrowed_null_vars.extend(not_null_vars);
                     if let Stmt::Block(b) = &*i.cons {
                         for s in &b.body {
                             self.generate_stmt(s);
@@ -8616,6 +8737,14 @@ impl Codegen {
                     } else {
                         self.generate_stmt(&i.cons);
                     }
+                    if let Some(cap) = &i.capture {
+                        if let Some(prev) = saved_cap_local {
+                            self.locals.insert(cap.sym.clone(), prev);
+                        } else {
+                            self.locals.remove(&cap.sym);
+                        }
+                    }
+                    self.narrowed_null_vars = old_narrowed.clone();
                     self.current_scope_depth -= 1;
                     self.dedent();
                     let uninit_cons = self.uninitialized_vars.clone();
@@ -8625,6 +8754,7 @@ impl Codegen {
                         self.write_to_case("} else {");
                         self.indent();
                         self.current_scope_depth += 1;
+                        self.narrowed_null_vars.extend(is_null_vars);
                         if let Stmt::Block(b) = &**alt {
                             for s in &b.body {
                                 self.generate_stmt(s);
@@ -8632,6 +8762,7 @@ impl Codegen {
                         } else {
                             self.generate_stmt(alt);
                         }
+                        self.narrowed_null_vars = old_narrowed;
                         self.current_scope_depth -= 1;
                         self.dedent();
                         let uninit_alt = self.uninitialized_vars.clone();
@@ -8649,8 +8780,10 @@ impl Codegen {
                 }
             }
             Stmt::While(w) => {
+                let not_null_vars = Self::extract_not_null_vars(&w.test);
                 let test = self.generate_expr(&w.test);
                 let old_uninit = self.uninitialized_vars.clone();
+                let old_narrowed = self.narrowed_null_vars.clone();
                 if let Some(cap) = &w.capture {
                     self.var_scope_depth
                         .insert(cap.sym.clone(), self.current_scope_depth + 1);
@@ -8665,6 +8798,7 @@ impl Codegen {
                     }
                 }
                 self.current_scope_depth += 1;
+                self.narrowed_null_vars.extend(not_null_vars);
                 if let Stmt::Block(b) = &*w.body {
                     for s in &b.body {
                         self.generate_stmt(s);
@@ -8672,6 +8806,7 @@ impl Codegen {
                 } else {
                     self.generate_stmt(&w.body);
                 }
+                self.narrowed_null_vars = old_narrowed;
                 self.current_scope_depth -= 1;
                 self.dedent();
                 self.write_to_case("}");
@@ -9582,6 +9717,8 @@ impl Codegen {
                     };
                     if self.mut_borrow_loop_vars.contains(&i.sym) {
                         format!("({}.*)", base)
+                    } else if self.narrowed_null_vars.contains(&i.sym) {
+                        format!("({}.?)", base)
                     } else {
                         base
                     }
@@ -9592,13 +9729,20 @@ impl Codegen {
                             i.sym
                         );
                     }
-                    if self.is_state_machine {
+                    let base = if self.is_state_machine {
                         format!("ctx.self.{}", i.sym)
                     } else {
                         format!("self.{}", i.sym)
+                    };
+                    if self.narrowed_null_vars.contains(&i.sym) {
+                        format!("({}.?)", base)
+                    } else {
+                        base
                     }
                 } else if self.mut_borrow_loop_vars.contains(&i.sym) {
                     format!("({}.*)", i.sym)
+                } else if self.narrowed_null_vars.contains(&i.sym) {
+                    format!("({}.?)", i.sym)
                 } else {
                     i.sym.clone()
                 }
@@ -9641,9 +9785,19 @@ impl Codegen {
                     false
                 } else if let Expr::Ident(id) = &**inner {
                     if let Some(zig_ty) = self.locals.get(&id.sym) {
-                        zig_ty.starts_with('*')
+                        let clean_zig_ty = if self.narrowed_null_vars.contains(&id.sym) {
+                            zig_ty.trim_start_matches('?')
+                        } else {
+                            zig_ty.as_str()
+                        };
+                        clean_zig_ty.starts_with('*')
                     } else if let Some(ty) = self.var_cp_types.get(&id.sym) {
-                        self.is_zig_heap_ptr_type(ty)
+                        let clean_ty = if self.narrowed_null_vars.contains(&id.sym) {
+                            Self::unwrap_optional_type(ty)
+                        } else {
+                            ty.clone()
+                        };
+                        self.is_zig_heap_ptr_type(&clean_ty)
                     } else {
                         false
                     }
@@ -9707,10 +9861,65 @@ impl Codegen {
                 if bin.op == BinaryOp::Assign {
                     if let Expr::Ident(id) = &*bin.left {
                         self.uninitialized_vars.remove(&id.sym);
+                        if matches!(&*bin.right, Expr::Lit(Lit::Null))
+                            || matches!(&*bin.right, Expr::Ident(rid) if rid.sym == "null")
+                        {
+                            self.narrowed_null_vars.remove(&id.sym);
+                        }
                     }
                 }
-                let l = self.generate_expr(&bin.left);
-                let r = self.generate_expr(&bin.right);
+                let is_null_cmp = matches!(&*bin.left, Expr::Lit(Lit::Null))
+                    || matches!(&*bin.right, Expr::Lit(Lit::Null))
+                    || matches!(&*bin.left, Expr::Ident(id) if id.sym == "null")
+                    || matches!(&*bin.right, Expr::Ident(id) if id.sym == "null");
+                let l = if bin.op == BinaryOp::Assign {
+                    if let Expr::Ident(id) = &*bin.left {
+                        let was = self.narrowed_null_vars.remove(&id.sym);
+                        let code = self.generate_expr(&bin.left);
+                        if was {
+                            self.narrowed_null_vars.insert(id.sym.clone());
+                        }
+                        code
+                    } else {
+                        self.generate_expr(&bin.left)
+                    }
+                } else if is_null_cmp {
+                    let l_id = if let Expr::Ident(id) = &*bin.left {
+                        Some(id.sym.clone())
+                    } else {
+                        None
+                    };
+                    let was_l = l_id.as_ref().map_or(false, |s| self.narrowed_null_vars.remove(s));
+                    let code = self.generate_expr(&bin.left);
+                    if was_l {
+                        self.narrowed_null_vars.insert(l_id.unwrap());
+                    }
+                    code
+                } else {
+                    self.generate_expr(&bin.left)
+                };
+                let r = if is_null_cmp {
+                    let r_id = if let Expr::Ident(id) = &*bin.right {
+                        Some(id.sym.clone())
+                    } else {
+                        None
+                    };
+                    let was_r = r_id.as_ref().map_or(false, |s| self.narrowed_null_vars.remove(s));
+                    let code = self.generate_expr(&bin.right);
+                    if was_r {
+                        self.narrowed_null_vars.insert(r_id.unwrap());
+                    }
+                    code
+                } else if bin.op == BinaryOp::LogicalAnd {
+                    let not_null_vars = Self::extract_not_null_vars(&bin.left);
+                    let old_narrowed = self.narrowed_null_vars.clone();
+                    self.narrowed_null_vars.extend(not_null_vars);
+                    let code = self.generate_expr(&bin.right);
+                    self.narrowed_null_vars = old_narrowed;
+                    code
+                } else {
+                    self.generate_expr(&bin.right)
+                };
                 let l_ty = self.infer_cp_type(&bin.left);
                 let r_ty = self.infer_cp_type(&bin.right);
                 let are_both_numeric = match (&l_ty, &r_ty) {
@@ -11222,7 +11431,9 @@ impl Codegen {
                             code
                         } else {
                             let ec = self.generate_expr(e);
-                            if let Some(ty_str) = &target_payload_ty {
+                            if ec.starts_with("@panic") || ec.starts_with("@compileError") {
+                                format!("{};", ec)
+                            } else if let Some(ty_str) = &target_payload_ty {
                                 format!("break :{} @as({}, {});", blk_label, ty_str, ec)
                             } else if self.is_lib_mode {
                                 format!("break :{} {};", blk_label, ec)
@@ -11267,7 +11478,9 @@ impl Codegen {
                                         continue;
                                     }
                                     let ec = self.generate_expr(e);
-                                    if let Some(ty_str) = &target_payload_ty {
+                                    if ec.starts_with("@panic") || ec.starts_with("@compileError") {
+                                        self.write_to_case(&format!("{};", ec));
+                                    } else if let Some(ty_str) = &target_payload_ty {
                                         self.write_to_case(&format!(
                                             "break :{} @as({}, {});",
                                             blk_label, ty_str, ec
@@ -11309,7 +11522,7 @@ impl Codegen {
 
                 if matches!(inner_ty, Some(Type::ErrorUnion(_))) || self.is_lib_mode || inner_ty.is_none() {
                     return format!(
-                        "({blk_label}: {{ break :{blk_label} ({exp}) catch |{err_bind}| {{ _ = &{err_bind}; {catch_arm_body} }}; }})"
+                        "({blk_label}: {{ break :{blk_label} (({exp}) catch |{err_bind}| {{ _ = &{err_bind}; {catch_arm_body} }}); }})"
                     );
                 }
 
@@ -11619,10 +11832,18 @@ impl Codegen {
                 is_comptime,
                 ..
             } => {
+                let not_null_vars = Self::extract_not_null_vars(test);
+                let is_null_vars = Self::extract_is_null_vars(test);
                 let test_s = self.generate_expr(test);
+                let old_narrowed = self.narrowed_null_vars.clone();
+                self.narrowed_null_vars.extend(not_null_vars);
                 let cons_s = self.generate_expr(cons);
+                self.narrowed_null_vars = old_narrowed.clone();
                 let alt_s = if let Some(a) = alt {
-                    self.generate_expr(a)
+                    self.narrowed_null_vars.extend(is_null_vars);
+                    let res = self.generate_expr(a);
+                    self.narrowed_null_vars = old_narrowed;
+                    res
                 } else {
                     "null".to_string()
                 };
@@ -12631,6 +12852,9 @@ impl Codegen {
                 target_ty,
                 span,
             } => {
+                if let Expr::Ident(id) = &**expr {
+                    self.uninitialized_vars.remove(&id.sym);
+                }
                 let resolved_ty = if let Type::RawPtr { inner, .. } = target_ty {
                     if **inner == Type::Any {
                         self.infer_cp_type(&Expr::Cast {
@@ -12762,6 +12986,8 @@ impl Codegen {
                                 || self.locals.get(&inner_code).map_or(false, |l| l.starts_with('['))
                             {
                                 format!("@as({}, @ptrCast(&({})))", target_zig_ty, inner_code)
+                            } else if matches!(src_ty, Some(Type::String)) {
+                                format!("@as({}, @ptrCast({}.ptr))", target_zig_ty, inner_code)
                             } else {
                                 format!(
                                     "@as({}, @ptrCast(@alignCast({})))",
@@ -12794,6 +13020,20 @@ impl Codegen {
                 }
             }
             Expr::Unwrap(inner) => {
+                if let Expr::Ident(id) = &**inner {
+                    if self.narrowed_null_vars.contains(&id.sym) {
+                        let was = self.narrowed_null_vars.remove(&id.sym);
+                        let inner_code = self.generate_expr(inner);
+                        if was {
+                            self.narrowed_null_vars.insert(id.sym.clone());
+                        }
+                        return if matches!(&**inner, Expr::Ident(_) | Expr::Member(_) | Expr::Deref(_)) {
+                            format!("{}.?", inner_code)
+                        } else {
+                            format!("({}).?", inner_code)
+                        };
+                    }
+                }
                 let inner_code = self.generate_expr(inner);
                 if matches!(&**inner, Expr::Ident(_) | Expr::Member(_) | Expr::Deref(_)) {
                     format!("{}.?", inner_code)
@@ -13303,6 +13543,9 @@ impl Codegen {
                         }
                     }
                     if let Some(t) = self.locals.get(&id.sym) {
+                        if self.narrowed_null_vars.contains(&id.sym) && t.starts_with('?') {
+                            return t[1..].to_string();
+                        }
                         return t.clone();
                     }
                     if let Some(c_name) = &self.current_class_name {
@@ -13814,9 +14057,40 @@ impl Codegen {
                     }
                 }
                 Stmt::Block(b) | Stmt::UnsafeBlock(b) => self.extract_local_vars_to_str(b, output),
+                Stmt::If(i) => {
+                    match &*i.cons {
+                        Stmt::Block(b) | Stmt::UnsafeBlock(b) => self.extract_local_vars_to_str(b, output),
+                        _ => {}
+                    }
+                    if let Some(alt) = &i.alt {
+                        match &**alt {
+                            Stmt::Block(b) | Stmt::UnsafeBlock(b) => self.extract_local_vars_to_str(b, output),
+                            _ => {}
+                        }
+                    }
+                }
+                Stmt::While(w) => {
+                    match &*w.body {
+                        Stmt::Block(b) | Stmt::UnsafeBlock(b) => self.extract_local_vars_to_str(b, output),
+                        _ => {}
+                    }
+                }
                 Stmt::For(f) => {
                     if let Stmt::Block(b) = &*f.body {
                         self.extract_local_vars_to_str(b, output);
+                    }
+                }
+                Stmt::TryCatch {
+                    try_block,
+                    catch_body,
+                    ..
+                } => {
+                    self.extract_local_vars_to_str(try_block, output);
+                    if let Some(cb) = catch_body {
+                        match &**cb {
+                            Stmt::Block(b) | Stmt::UnsafeBlock(b) => self.extract_local_vars_to_str(b, output),
+                            _ => {}
+                        }
                     }
                 }
                 _ => {}

@@ -3758,3 +3758,9 @@ return VTable {
 1. 零新增生僻关键字：不引入 extern、不引入 [*c]；
 2. 完全符合 TS/ES 直觉：采用小驼峰 reflect.has / reflect.hasMethod，变量读写统一走 const / let；
 3. 底层能力 100% 直达硬件：@align(16)、App<const ssl: bool>、[*]T! *any! 完美支撑最苛刻的操作系统级系统编程。
+
+agyr --json | jq -r '.[].id'
+640a7490-6bcb-4d2f-a6af-60d7b8d6c522 最早
+8bef6f4a-c26e-465d-92a9-5acea965ca44 v
+1cbf7ce8-4f03-449e-9336-1386a194b3cb c
+root@beam-01:/data/dev/bun# agy --conversation=

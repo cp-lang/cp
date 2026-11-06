@@ -550,6 +550,38 @@ impl Analyzer {
                     self.define(f.ident.sym.clone(), kind.clone(), f.ident.span)?;
                     self.symbol_map.insert(f.ident.span, kind);
                 }
+                ModuleItem::Decl(Decl::TypeAlias(ta)) => {
+                    let _ = self.define(
+                        ta.ident.sym.clone(),
+                        SymbolKind::Var {
+                            ty: Type::Any,
+                            kind: VarDeclKind::Const,
+                        },
+                        ta.ident.span,
+                    );
+                }
+                ModuleItem::Import(imp) => {
+                    if let Some(def_spec) = &imp.default_specifier {
+                        let _ = self.define(
+                            def_spec.sym.clone(),
+                            SymbolKind::Var {
+                                ty: Type::Any,
+                                kind: VarDeclKind::Const,
+                            },
+                            def_spec.span,
+                        );
+                    }
+                    for spec in &imp.specifiers {
+                        let _ = self.define(
+                            spec.sym.clone(),
+                            SymbolKind::Var {
+                                ty: Type::Any,
+                                kind: VarDeclKind::Const,
+                            },
+                            spec.span,
+                        );
+                    }
+                }
                 _ => {}
             }
         }
@@ -2163,6 +2195,8 @@ impl Analyzer {
             Stmt::If(i) => {
                 self.infer_type(&i.test)?;
                 self.analyze_expr(&i.test)?;
+                let not_null_vars = Self::extract_not_null_vars(&i.test);
+                let is_null_vars = Self::extract_is_null_vars(&i.test);
                 if let Some(cap) = &i.capture {
                     self.enter_scope();
                     self.define(
@@ -2175,16 +2209,53 @@ impl Analyzer {
                     )?;
                     self.analyze_stmt(&i.cons)?;
                     self.exit_scope();
+                } else if !not_null_vars.is_empty() {
+                    self.enter_scope();
+                    for v in &not_null_vars {
+                        if let Some(SymbolKind::Var { ty, kind }) = self.resolve(v).cloned() {
+                            let unwrapped = Self::unwrap_optional_type(&ty);
+                            self.define(
+                                v.clone(),
+                                SymbolKind::Var {
+                                    ty: unwrapped,
+                                    kind,
+                                },
+                                i.span,
+                            )?;
+                        }
+                    }
+                    self.analyze_stmt(&i.cons)?;
+                    self.exit_scope();
                 } else {
                     self.analyze_stmt(&i.cons)?;
                 }
                 if let Some(alt) = &i.alt {
-                    self.analyze_stmt(alt)?;
+                    if !is_null_vars.is_empty() {
+                        self.enter_scope();
+                        for v in &is_null_vars {
+                            if let Some(SymbolKind::Var { ty, kind }) = self.resolve(v).cloned() {
+                                let unwrapped = Self::unwrap_optional_type(&ty);
+                                self.define(
+                                    v.clone(),
+                                    SymbolKind::Var {
+                                        ty: unwrapped,
+                                        kind,
+                                    },
+                                    i.span,
+                                )?;
+                            }
+                        }
+                        self.analyze_stmt(alt)?;
+                        self.exit_scope();
+                    } else {
+                        self.analyze_stmt(alt)?;
+                    }
                 }
             }
             Stmt::While(w) => {
                 self.infer_type(&w.test)?;
                 self.analyze_expr(&w.test)?;
+                let not_null_vars = Self::extract_not_null_vars(&w.test);
                 if let Some(cap) = &w.capture {
                     self.enter_scope();
                     self.define(
@@ -2195,6 +2266,23 @@ impl Analyzer {
                         },
                         cap.span,
                     )?;
+                    self.analyze_stmt(&w.body)?;
+                    self.exit_scope();
+                } else if !not_null_vars.is_empty() {
+                    self.enter_scope();
+                    for v in &not_null_vars {
+                        if let Some(SymbolKind::Var { ty, kind }) = self.resolve(v).cloned() {
+                            let unwrapped = Self::unwrap_optional_type(&ty);
+                            self.define(
+                                v.clone(),
+                                SymbolKind::Var {
+                                    ty: unwrapped,
+                                    kind,
+                                },
+                                w.span,
+                            )?;
+                        }
+                    }
                     self.analyze_stmt(&w.body)?;
                     self.exit_scope();
                 } else {
@@ -2336,6 +2424,28 @@ impl Analyzer {
                 if bin.op == BinaryOp::Pipe {
                     let transformed = transform_pipeline_rhs(&bin.right, "__pipe_mock");
                     self.analyze_expr(&transformed)?;
+                } else if bin.op == BinaryOp::LogicalAnd {
+                    let not_null_vars = Self::extract_not_null_vars(&bin.left);
+                    if !not_null_vars.is_empty() {
+                        self.enter_scope();
+                        for v in &not_null_vars {
+                            if let Some(SymbolKind::Var { ty, kind }) = self.resolve(v).cloned() {
+                                let unwrapped = Self::unwrap_optional_type(&ty);
+                                let _ = self.define(
+                                    v.clone(),
+                                    SymbolKind::Var {
+                                        ty: unwrapped,
+                                        kind,
+                                    },
+                                    bin.span,
+                                );
+                            }
+                        }
+                        self.analyze_expr(&bin.right)?;
+                        self.exit_scope();
+                    } else {
+                        self.analyze_expr(&bin.right)?;
+                    }
                 } else {
                     self.analyze_expr(&bin.right)?;
                 }
@@ -2681,9 +2791,49 @@ impl Analyzer {
                 test, cons, alt, ..
             } => {
                 self.analyze_expr(test)?;
-                self.analyze_expr(cons)?;
+                let not_null_vars = Self::extract_not_null_vars(test);
+                let is_null_vars = Self::extract_is_null_vars(test);
+                if !not_null_vars.is_empty() {
+                    self.enter_scope();
+                    for v in &not_null_vars {
+                        if let Some(SymbolKind::Var { ty, kind }) = self.resolve(v).cloned() {
+                            let unwrapped = Self::unwrap_optional_type(&ty);
+                            let _ = self.define(
+                                v.clone(),
+                                SymbolKind::Var {
+                                    ty: unwrapped,
+                                    kind,
+                                },
+                                Span { start: 0, end: 0 },
+                            );
+                        }
+                    }
+                    self.analyze_expr(cons)?;
+                    self.exit_scope();
+                } else {
+                    self.analyze_expr(cons)?;
+                }
                 if let Some(a) = alt {
-                    self.analyze_expr(a)?;
+                    if !is_null_vars.is_empty() {
+                        self.enter_scope();
+                        for v in &is_null_vars {
+                            if let Some(SymbolKind::Var { ty, kind }) = self.resolve(v).cloned() {
+                                let unwrapped = Self::unwrap_optional_type(&ty);
+                                let _ = self.define(
+                                    v.clone(),
+                                    SymbolKind::Var {
+                                        ty: unwrapped,
+                                        kind,
+                                    },
+                                    Span { start: 0, end: 0 },
+                                );
+                            }
+                        }
+                        self.analyze_expr(a)?;
+                        self.exit_scope();
+                    } else {
+                        self.analyze_expr(a)?;
+                    }
                 }
             }
             _ => {}
@@ -2711,6 +2861,98 @@ impl Analyzer {
             }
         }
         None
+    }
+
+    pub fn unwrap_optional_type(ty: &Type) -> Type {
+        match ty {
+            Type::Optional(inner) => *inner.clone(),
+            Type::BorrowType {
+                inner,
+                is_mut,
+                lifetimes,
+            } => {
+                if let Type::Optional(opt_inner) = &**inner {
+                    Type::BorrowType {
+                        inner: opt_inner.clone(),
+                        is_mut: *is_mut,
+                        lifetimes: lifetimes.clone(),
+                    }
+                } else {
+                    ty.clone()
+                }
+            }
+            _ => ty.clone(),
+        }
+    }
+
+    pub fn extract_not_null_vars(expr: &Expr) -> Vec<String> {
+        let mut vars = Vec::new();
+        match expr {
+            Expr::Bin(bin) => {
+                if bin.op == BinaryOp::NotEq {
+                    if matches!(&*bin.right, Expr::Lit(Lit::Null))
+                        || matches!(&*bin.right, Expr::Ident(id) if id.sym == "null")
+                    {
+                        if let Expr::Ident(id) = &*bin.left {
+                            if id.sym != "null" && id.sym != "undefined" {
+                                vars.push(id.sym.clone());
+                            }
+                        }
+                    } else if matches!(&*bin.left, Expr::Lit(Lit::Null))
+                        || matches!(&*bin.left, Expr::Ident(id) if id.sym == "null")
+                    {
+                        if let Expr::Ident(id) = &*bin.right {
+                            if id.sym != "null" && id.sym != "undefined" {
+                                vars.push(id.sym.clone());
+                            }
+                        }
+                    }
+                } else if bin.op == BinaryOp::LogicalAnd {
+                    vars.extend(Self::extract_not_null_vars(&bin.left));
+                    vars.extend(Self::extract_not_null_vars(&bin.right));
+                }
+            }
+            Expr::Builtin(call) if call.name == "@not" && call.args.len() == 1 => {
+                vars.extend(Self::extract_is_null_vars(&call.args[0]));
+            }
+            _ => {}
+        }
+        vars
+    }
+
+    pub fn extract_is_null_vars(expr: &Expr) -> Vec<String> {
+        let mut vars = Vec::new();
+        match expr {
+            Expr::Bin(bin) => {
+                if bin.op == BinaryOp::Eq {
+                    if matches!(&*bin.right, Expr::Lit(Lit::Null))
+                        || matches!(&*bin.right, Expr::Ident(id) if id.sym == "null")
+                    {
+                        if let Expr::Ident(id) = &*bin.left {
+                            if id.sym != "null" && id.sym != "undefined" {
+                                vars.push(id.sym.clone());
+                            }
+                        }
+                    } else if matches!(&*bin.left, Expr::Lit(Lit::Null))
+                        || matches!(&*bin.left, Expr::Ident(id) if id.sym == "null")
+                    {
+                        if let Expr::Ident(id) = &*bin.right {
+                            if id.sym != "null" && id.sym != "undefined" {
+                                vars.push(id.sym.clone());
+                            }
+                        }
+                    }
+                } else if bin.op == BinaryOp::LogicalOr {
+                    vars.extend(Self::extract_is_null_vars(&bin.left));
+                    vars.extend(Self::extract_is_null_vars(&bin.right));
+                }
+            }
+            Expr::Builtin(call) if call.name == "@not" && call.args.len() == 1 => {
+                vars.extend(Self::extract_not_null_vars(&call.args[0]));
+            }
+            _ => {}
+        }
+        vars
     }
 
     fn is_int_type(t: &Type) -> bool {
@@ -2922,6 +3164,11 @@ impl Analyzer {
                             return true;
                         }
                     }
+                    Lit::Str(_) => {
+                        if matches!(target, Type::CStr) {
+                            return true;
+                        }
+                    }
                     _ => {}
                 },
                 Expr::NullCoalesce { right, .. } => {
@@ -2971,6 +3218,10 @@ impl Analyzer {
                     return true;
                 }
             }
+        }
+
+        if matches!(target, Type::CStr) && matches!(src, Type::String) {
+            return true;
         }
 
         // Layer 1.3: Structural wrapping (Optional, ErrorUnion, ResultType)
@@ -3470,7 +3721,7 @@ impl Analyzer {
         Ok(())
     }
 
-    fn infer_type(&self, expr: &Expr) -> SemaResult<Type> {
+    fn infer_type(&mut self, expr: &Expr) -> SemaResult<Type> {
         match expr {
             Expr::Lit(lit) => match lit {
                 Lit::Int(_) => Ok(Type::I32),
@@ -3540,7 +3791,32 @@ impl Analyzer {
                     return self.infer_type(&transformed);
                 }
                 let left = self.infer_type(&bin.left)?;
-                let right = self.infer_type(&bin.right)?;
+                let right = if bin.op == BinaryOp::LogicalAnd {
+                    let not_null_vars = Self::extract_not_null_vars(&bin.left);
+                    if !not_null_vars.is_empty() {
+                        self.enter_scope();
+                        for v in &not_null_vars {
+                            if let Some(SymbolKind::Var { ty, kind }) = self.resolve(v).cloned() {
+                                let unwrapped = Self::unwrap_optional_type(&ty);
+                                let _ = self.define(
+                                    v.clone(),
+                                    SymbolKind::Var {
+                                        ty: unwrapped,
+                                        kind,
+                                    },
+                                    bin.span,
+                                );
+                            }
+                        }
+                        let r = self.infer_type(&bin.right)?;
+                        self.exit_scope();
+                        r
+                    } else {
+                        self.infer_type(&bin.right)?
+                    }
+                } else {
+                    self.infer_type(&bin.right)?
+                };
                 if bin.op == BinaryOp::Assign {
                     if let Expr::Ident(ident) = &*bin.left {
                         if let Some(SymbolKind::Var {
@@ -3979,10 +4255,54 @@ impl Analyzer {
                 }
                 Ok(Type::Any)
             }
-            Expr::If { cons, alt, .. } => {
-                let cons_ty = self.infer_type(cons)?;
+            Expr::If {
+                test, cons, alt, ..
+            } => {
+                let not_null_vars = Self::extract_not_null_vars(test);
+                let is_null_vars = Self::extract_is_null_vars(test);
+                let cons_ty = if !not_null_vars.is_empty() {
+                    self.enter_scope();
+                    for v in &not_null_vars {
+                        if let Some(SymbolKind::Var { ty, kind }) = self.resolve(v).cloned() {
+                            let unwrapped = Self::unwrap_optional_type(&ty);
+                            let _ = self.define(
+                                v.clone(),
+                                SymbolKind::Var {
+                                    ty: unwrapped,
+                                    kind,
+                                },
+                                Span { start: 0, end: 0 },
+                            );
+                        }
+                    }
+                    let res = self.infer_type(cons)?;
+                    self.exit_scope();
+                    res
+                } else {
+                    self.infer_type(cons)?
+                };
                 if let Some(a) = alt {
-                    let alt_ty = self.infer_type(a)?;
+                    let alt_ty = if !is_null_vars.is_empty() {
+                        self.enter_scope();
+                        for v in &is_null_vars {
+                            if let Some(SymbolKind::Var { ty, kind }) = self.resolve(v).cloned() {
+                                let unwrapped = Self::unwrap_optional_type(&ty);
+                                let _ = self.define(
+                                    v.clone(),
+                                    SymbolKind::Var {
+                                        ty: unwrapped,
+                                        kind,
+                                    },
+                                    Span { start: 0, end: 0 },
+                                );
+                            }
+                        }
+                        let res = self.infer_type(a)?;
+                        self.exit_scope();
+                        res
+                    } else {
+                        self.infer_type(a)?
+                    };
                     if cons_ty == alt_ty {
                         Ok(cons_ty)
                     } else {

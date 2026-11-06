@@ -610,8 +610,25 @@ fn runFileWithOpt(allocator: std.mem.Allocator, filename: []const u8, opt_mode: 
     defer allocator.free(emit_bin_arg);
     fs_shim.cwd().createDirPath(global_io, ".cap/zig-cache") catch {};
 
-    const build_args = &[_][]const u8{ "zig", "build-exe", zig_file, emit_bin_arg, "--cache-dir", ".cap/zig-cache", "-O", opt_mode, "-lc" };
-    var build_child = try std.process.spawn(global_io, .{ .argv = build_args });
+    var build_args_buf: [32][]const u8 = undefined;
+    var build_argc: usize = 0;
+    build_args_buf[build_argc] = "zig"; build_argc += 1;
+    build_args_buf[build_argc] = "build-exe"; build_argc += 1;
+    build_args_buf[build_argc] = zig_file; build_argc += 1;
+    build_args_buf[build_argc] = emit_bin_arg; build_argc += 1;
+    build_args_buf[build_argc] = "--cache-dir"; build_argc += 1;
+    build_args_buf[build_argc] = ".cap/zig-cache"; build_argc += 1;
+    build_args_buf[build_argc] = "-O"; build_argc += 1;
+    build_args_buf[build_argc] = opt_mode; build_argc += 1;
+    build_args_buf[build_argc] = "-lc"; build_argc += 1;
+
+    // 自动检测并链接底层 C 静态库 (如 uSockets 与 picohttpparser)
+    if (fs_shim.cwd().statFile("zig-out/lib/libusockets.a") catch null != null) {
+        build_args_buf[build_argc] = "-Lzig-out/lib"; build_argc += 1;
+        build_args_buf[build_argc] = "-lusockets"; build_argc += 1;
+    }
+
+    var build_child = try std.process.spawn(global_io, .{ .argv = build_args_buf[0..build_argc] });
     const build_res = try build_child.wait(global_io);
     if (build_res.exited != 0) return error.BuildFailed;
 

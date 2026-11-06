@@ -1258,6 +1258,7 @@ impl<'a> Parser<'a> {
                     | Some(Token::Pipe)
                     | Some(Token::Pipeline)
                     | Some(Token::Greater)
+                    | Some(Token::Question)
                     | None => true,
                     _ => false,
                 };
@@ -4661,6 +4662,7 @@ impl<'a> Parser<'a> {
             Token::Unsafe => "unsafe".to_string(),
             Token::Of => "of".to_string(),
             Token::In => "in".to_string(),
+            Token::TypeKw => "type".to_string(),
             _ => {
                 return Err(ParseError::ExpectedToken(
                     Token::Ident("Ident".to_string()),

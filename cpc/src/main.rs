@@ -138,7 +138,24 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 let mut parser = CPParser::new(&code);
                 let mut module = parser
                     .parse_module()
-                    .map_err(|e| anyhow::anyhow!("Parse Error in {:?}: {}", input, e))?;
+                    .map_err(|e| {
+                        let span = match &e {
+                            cpc::parser::ParseError::UnexpectedToken(_, s) => Some(*s),
+                            cpc::parser::ParseError::ExpectedToken(_, _, s) => Some(*s),
+                            cpc::parser::ParseError::Generic(_, s) => Some(*s),
+                            _ => None,
+                        };
+                        let loc = if let Some(s) = span {
+                            let before = &code[..s.start.min(code.len())];
+                            let line = before.lines().count();
+                            let col = before.lines().last().map(|l| l.len() + 1).unwrap_or(1);
+                            let snippet = code[s.start.min(code.len())..].lines().next().unwrap_or("");
+                            format!(" at line {}:{} (snippet: '{}')", line, col, snippet)
+                        } else {
+                            String::new()
+                        };
+                        anyhow::anyhow!("Parse Error in {:?}: {}{}", input, e, loc)
+                    })?;
                 let mut analyzer = Analyzer::new();
                 analyzer.analyze_module(&mut module)?;
                 println!("Check successful");

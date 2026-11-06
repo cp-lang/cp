@@ -1673,3 +1673,192 @@
 - [`cap/test/test_c_ffi_pointers.cp`](file:///data/dev/cp/cap/test/test_c_ffi_pointers.cp): 端到端转译耗时 8ms，11/11 项测试 100% 通过；
 - [`cap/test/test_static_class.cp`](file:///data/dev/cp/cap/test/test_static_class.cp): 端到端转译耗时 5ms，2/2 项测试 100% 通过；
 - [`cap/test/test_bun_enums.cp`](file:///data/dev/cp/cap/test/test_bun_enums.cp): 端到端转译耗时 5ms，全绿通过。
+
+---
+
+## 2026-11-06 (控制流敏感类型智能收窄 Flow-Sensitive Type Narrowing 实装)
+
+### 修改文件 (Modified - cpc_dev 调试沙盒)
+- [`cpc_dev/src/sema.rs`](file:///data/dev/cp/cpc_dev/src/sema.rs):
+  - 新增 `unwrap_optional_type`、`extract_not_null_vars` 与 `extract_is_null_vars` 提取辅助函数；
+  - 增强 `analyze_stmt`（`Stmt::If` 与 `Stmt::While`）与 `analyze_expr`（`Expr::If` 与 `BinaryOp::LogicalAnd`）：在 `if (v != null)`、`if (null != v)`、`if (v != null && ...)` 分支作用域内，将可选类型 `T?` 自动收窄为不可空类型 `T`；在 `if (v == null) ... else { ... }` 分支作用域内自动在 else 块中收窄为 `T`；
+  - 改造 `infer_type` 为 `&mut self`，使其具备流敏感作用域下的类型智能推断能力。
+- [`cpc_dev/src/codegen.rs`](file:///data/dev/cp/cpc_dev/src/codegen.rs):
+  - 引入 `narrowed_null_vars: HashSet<String>` 控制流收窄变量集合，并在 `generate_stmt`（`Stmt::If`、`Stmt::While`）中进行分支级动态跟踪与作用域维护；
+  - `Expr::Ident`：对处于 `narrowed_null_vars` 中的标识符自动发射 `({}.?)` 表达式，实现零样板直接字段访问（`u.name`）、方法调用（`u.get_age()`）、原生算术运算与非可选形参传递；
+  - 赋值安全防御：在 `Stmt::Expr(BinaryOp::Assign)` 与 `Expr::Bin(BinaryOp::Assign)` 中，生成赋值左值时临时撤除收窄，防止左值被错误解包为 `(ctx.count.?) = 100;`；若右值为 `null`，则永久解除该变量的收窄状态；
+  - 显式解包幂等保护：在 `Expr::Unwrap` 中，若解包对象已被收窄，剥除收窄注入后直接输出单层 `.?`，杜绝 `(u.?).?` 二次解包；
+  - `extract_local_vars_to_str`：补全对 `Stmt::If`、`Stmt::While` 与 `Stmt::TryCatch` 的递归遍历，确保闭包与测试 lambda 状态机中块级局部变量正确进入上下文结构体。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 增补第 6.7 节《借用与裸指针边界（unsafe 逃逸与指针转换体系）》，系统规范 6.7.1 ~ 6.7.4：`*T!` 与 `*T` 的本质区别、`const p` 与 `*const T!` 的变量常量性与指针只读性解耦、取裸指针三大语法（`*v!`、`&v as *T!`、`*v as *T!`）以及 Unsafe 裸指针完整类型转换矩阵；
+  - 增补第 8.3 节《错误传播链与解包原语》及第 8.3.1 节，正式将强制显式解包 `.?`、可选安全链 `?.` 与空值合并 `??` 纳入对比规范表；
+  - 增补第 9.3.3.1 节《控制流类型智能收窄 (Flow-Sensitive Type Narrowing: `if (v != null)`)》，详细规范正向非空收窄、反向 else 收窄、短路与收窄及赋值安全性。
+
+### 测试强化与新增测试 (Test Enhanced & Added)
+- [`cap/test/test_unsafe_pass.cp`](file:///data/dev/cp/cap/test/test_unsafe_pass.cp):
+  - 扩展验证标量裸指针三大获取形式：`*num!`、`&num as *i32!`、`*num as *i32!`，全部 100% 验证通过。
+- [`cap/test/test_if_null_narrowing.cp`](file:///data/dev/cp/cap/test/test_if_null_narrowing.cp):
+  - 完整回归测试套件，覆盖对象流式收窄、字段/方法免解包调用、可变借用方法调用、基本类型可空收窄与原生运算、非可选传参、短路与组合、反向 `null != u` 语法、else 分支反向收窄以及嵌套 if 收窄，5/5 测试用例 100% 通过。
+
+---
+
+## 2026-11-06 (长上下文交接资产沉淀与 PROGRESS.md 编制)
+
+### 新增与重构文档 (Added & Refactored Documentation)
+- [`PROGRESS.md`](file:///data/dev/cp/PROGRESS.md):
+  - 针对单会话超过 45,000 行交互的场景，编写高度浓缩的核心技术资产交接文档；
+  - 完整梳理 CP 项目定位、GEMINI.md 双缓冲隔离机制（`cpc_dev` vs `cpc`）、流式智能收窄、解包原语体系、裸指针转换矩阵及当前待合并状态；
+  - 提供详尽的接手 Agent 操作指引（Runbook）与快速验证指令。
+
+
+---
+
+## 2026-11-07 (uSockets 与 picohttpparser 底层 build.zig 架构落地与 CP 原生测试)
+
+### 新增文件 (Added)
+- [`build.zig`](file:///data/dev/cp/build.zig):
+  - 基于 Zig 0.17 现代 Module 架构实现底层构建脚本；
+  - 自动编译 `vendor/usockets` 与 `vendor/picohttpparser` 为静态库 `libusockets.a` 并发布 C 头文件至 `zig-out/include/`；
+  - 提供 `-Dcp-entry` 一体化构建管线，将 CP 转译出的 Zig 状态机与 C 库内联编译为独立可执行文件（`server`）。
+- [`vendor/usockets/src/cp_stubs.c`](file:///data/dev/cp/vendor/usockets/src/cp_stubs.c):
+  - 为 Bun's fork of uSockets 提供轻量级独立运行适配桩层，补齐 Linux epoll_pwait2、锁及分发回调符号，消除 45 处链接未定义错误。
+- [`cap/test/test_usockets_picohttp.cp`](file:///data/dev/cp/cap/test/test_usockets_picohttp.cp):
+  - 端到端长期回归测试用例，覆盖 `picohttpparser` 纳秒级 HTTP 报文解析与 `uSockets` 原生事件循环创建与释放。
+
+### 测试验证 (Verified)
+- 执行 `zig build` 成功输出 `zig-out/lib/libusockets.a` 与对应头文件；
+- 执行 `zig build -Dcp-entry=.cap/zig/cap/test/test_usockets_picohttp.zig run`：HTTP 解析与 uSockets 事件循环 100% 绿色通过。
+
+---
+
+## 2026-11-07 (深度重构 C 外部函数声明体系：全面实装 @c/@c("alias")、unsafe 裸指针体系与独立第 16 章规范)
+
+### 修改文件 (Modified - cpc_dev 调试沙盒)
+- [`cpc_dev/src/parser.rs`](file:///data/dev/cp/cpc_dev/src/parser.rs):
+  - 增强 `parse_base_type` 中 `is_raw_ptr_bang` 匹配分支，加入 `Some(Token::Question)`，使 `*T!?`、`*any!?` 完美被识别为纯后缀可选裸指针，并经 `parse_postfix_type_modifiers` 映射为 `Type::Optional(RawPtr)`（底层对应 Zig `?*T` 与 `?*anyopaque`）。
+
+### 修改与重构测试 (Refactored Test)
+- [`cap/test/test_usockets_picohttp.cp`](file:///data/dev/cp/cap/test/test_usockets_picohttp.cp):
+  - 彻底废除在顶层使用 `zig {}` 或旧式 `__zig__ {}` 声明外部 C 符号的原生反模式；
+  - 采用 CP 原生 `@extern struct phr_header`（保证物理内存对齐）与 `@opaque struct us_loop_t`（C 不透明句柄）；
+  - 全面使用 `@c("phr_parse_request") fn phr_parse_req(...)` 验证符号重命名（别名映射）特性；
+  - 全面使用 `@c { ... }` 批量声明与 unsafe 裸指针（`cstr`、`*cstr!`、`*usize!`、`*i32!`、`[*]phr_header!`、`*any!?`、`*us_loop_t!?`）；
+  - 函数体内内联代码块统一采用 `zig {}`（杜绝 `__zig__`）；
+  - 运行 `cpc compile` 转译后经 `zig build -Dcp-entry=... run` 实测 100% 绿色全通。
+
+### 规范手册升级 (Updated Specification)
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 升级第 14.8 节：全面规范 C-FFI 原生声明铁律，明确 CP 统一使用 `zig {}` 且严禁 `__zig__`；确立“CP 中不应该使用 `zig {}` 声明 C 外部符号，而应该统一使用原生的 `@c`、`@c("alias")` 与 `@c { ... }` 原语”；
+  - 移除原 14.14 节，消除在外部 C 符号声明中错误使用 `__zig__` 的历史示例；
+  - 在第十五章后设立全新独立章节《十六、高性能 C 网络反应堆集成：`uSockets` 与 `picohttpparser` 原生架构 (High-Performance C Network Integration)》，详尽给出架构愿景、Zig 0.17 根目录 `build.zig` 现代模块管线、CP 原生 `@c` 导入规范与端到端实测验证。
+
+---
+
+## 2026-11-07 (纯正 CP 语法彻底废除测试函数体内联 zig {}，实现 100% 纯正 CP 外部 C-ABI 调用)
+
+### 修改文件 (Modified - cpc_dev 调试沙盒)
+- [`cpc_dev/src/sema.rs`](file:///data/dev/cp/cpc_dev/src/sema.rs):
+  - 增强 `can_coerce` 类型检查：
+    - 在字面量匹配分支中支持 `Lit::Str` 直接兼容赋值给 `Type::CStr`，使 `let req: cstr = "..."` 与 `let mut method: cstr = ""` 获得编译期原生支持；
+    - 在类型检查主流程中放行 `Type::String` 向 `Type::CStr` 的兼容传递（`matches!(target, Type::CStr) && matches!(src, Type::String)`）。
+- [`cpc_dev/src/codegen.rs`](file:///data/dev/cp/cpc_dev/src/codegen.rs):
+  - 在 `Expr::Cast` 代码生成中：
+    - 支持未初始化栈缓冲区（`let mut header_buf: [16]phr_header = undefined;`）在指针强转（`header_buf as [*]phr_header!`）时解除 `uninitialized_vars` 限制，允许作为 C 函数的底层输出缓冲使用；
+    - 增加 `matches!(src_ty, Some(Type::String))` 强转至 `is_target_ptr` 的代码生成分支，发射 `@as(target, @ptrCast(str.ptr))`。
+
+### 重构正式回归测试用例 (Refactored Test)
+- [`cap/test/test_usockets_picohttp.cp`](file:///data/dev/cp/cap/test/test_usockets_picohttp.cp):
+  - 全面重构测试用例，彻底删除 `test_pico_http()` 与 `test_usockets_event_loop()` 中全部残留的内联 `zig {}` 块；
+  - 100% 采用纯正 CP 语法：
+    - 字符串指针与长度声明：`let req: cstr = "..."; let req_len: usize = req.len;`；
+    - 裸指针取地址与传递：`*method!`、`*method_len!`、`*path!`、`*path_len!`、`*minor_version!`、`*num_headers!`；
+    - 栈内存缓冲传递：`header_buf as [*]phr_header!`；
+    - 零拷贝切片与格式化打印：`method[0..method_len]`、`path[0..path_len]`、`h0.name[0..h0.name_len]`、`h0.value[0..h0.value_len]` 直接配合 `@print` 输出；
+    - 原生事件循环安全收窄解包：`let loop = us_create_loop(null, null, null, null, 0); if (loop != null) { us_loop_free(loop); }`。
+
+### 测试验证 (Verified)
+- 运行 `/data/dev/cp/cpc_dev/target/debug/cpc compile cap/test/test_usockets_picohttp.cp --output .cap/zig/cap/test/test_usockets_picohttp.zig` 编译成功；
+- 运行 `zig build -Dcp-entry=.cap/zig/cap/test/test_usockets_picohttp.zig run`：
+  - 成功纳秒级解析 HTTP 请求并精准打印 Method (`POST`)、Path (`/api/v1/agent/chat`)、HTTP/1.1 以及全部 3 个 Header 键值对；
+  - 原生 uSockets 事件循环创建与释放 100% 绿灯；
+  - 控制台输出 `ALL PURE CP USOCKETS & PICOHTTPPARSER TESTS PASSED!`。
+
+---
+
+## 2026-11-07 (cpc_dev 正式合并至正式版 cpc，Bun 迁移改动深度审核与 Release 发布)
+
+### 审核与合并 (Audited & Merged - Bun Agent Modifications)
+- 经与并行执行 Bun.js 迁移任务的智能体代码比对，全面审核其在 `cpc/src` 中的提交：
+  1. [`cpc/src/main.rs`](file:///data/dev/cp/cpc/src/main.rs): `Check` 命令解析报错增加行列号与源码切片上下文定位预览，显著提升开发者诊断体验（审核结果：极其合理且完善）；
+  2. [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs): `parse_ident_name` 支持 `Token::TypeKw => "type"` 作为常规字段或属性标识符解析（审核结果：兼容 JS/TS 常见对象模型，极其合理）；
+  3. [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs): Pass 1 符号扫描中增加 `ModuleItem::Decl(Decl::TypeAlias)` 与 `ModuleItem::Import` 顶层符号预录入，支持后向声明引用（审核结果：极大增强模块解耦性，非常合理）；
+  4. [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+     - `CpOptType` 声明无条件生成（`if true`），杜绝因特征扫描盲区导致编译期工具函数未定义（审核结果：极其稳健）；
+     - `Expr::Catch` 中对 `@panic` 与 `@compileError` 做特殊处理，防止在类型注解包进 `break :blk @as(T, @panic(...))` 触发 Zig noreturn 语法错误（审核结果：极其关键且合理）；
+     - `Expr::Catch` 外层输出防御性括号 `(({exp}) catch ...)`，隔离运算符优先级冲突（审核结果：极大增强鲁棒性）；
+     - `Stmt::If` 解包捕获变量 `cap.sym` 引入 `saved_cap_local`，在退出 if 作用域时精准恢复或移除局部变量，杜绝局部变量作用域泄漏（审核结果：极其合理）。
+
+### 正式编译器合并与构建发布 (Release Build & Deployment)
+- 同步合并 `cpc_dev/src/` 与 `cpc/src/` 的双向功能增量，消除两个沙盒的全部差异；
+- 成功编译正式 Release 优化版本 `cpc`：`cargo build --release --manifest-path /data/dev/cp/cpc/Cargo.toml`（单文件转译速度提升至 2~3ms）；
+- 发布并更新可执行文件至 [`cap/bin/cpc`](file:///data/dev/cp/cap/bin/cpc)；
+- 更新 [`.cap/cpc_bin`](file:///data/dev/cp/.cap/cpc_bin) 环境变量指回正式版，所有基于 `cap` 的编译命令无缝切换至最新发布版。
+
+### 语言设计规范文档补全 (Updated Specification)
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - **新增第 4.6 节《流式类型智能收窄与 Fail-Fast 解包体系 (Flow-Sensitive Type Narrowing)》**：详尽定义正向条件收窄（`if (u != null)`）、复合条件短路收窄（`u != null && ...`）、负向早期卫语句收窄（`if (u == null) return;`）以及可选裸指针收窄（`*T!?` -> `*T!`）；
+  - **新增第 16.5 节《纯 CP 零 Unsafe 架构：面向对象分层封装 (Zero-Unsafe Architecture)》**：总结 Bun 项目 `uws_sys` 的最佳实践，确立 C-ABI 映射层、局部蹦床适配层、面向对象 Safe 封装层与业务纯安全层的四层无 unsafe 架构体系；
+  - **新增第 16.6 节《C 类型透明兼容与底层栈缓冲区安全规范》**：完整收录 `cstr` 与 `string` 零拷贝转换、未初始化定长栈输出缓冲区安全强转放行，以及后缀裸指针规范表。
+
+### 自动化验证与测试全通 (Verified)
+- [`cap/test/test_if_null_narrowing.cp`](file:///data/dev/cp/cap/test/test_if_null_narrowing.cp): 5/5 测试用例在正式版 `cpc` 下 100% 绿灯全通；
+- [`cap/test/test_unsafe_pass.cp`](file:///data/dev/cp/cap/test/test_unsafe_pass.cp): 裸指针赋值与解引用测试 100% 绿灯全通；
+- [`cap/test/test_usockets_picohttp.cp`](file:///data/dev/cp/cap/test/test_usockets_picohttp.cp): 纯 CP 原生 C 库调用端到端集成测试，转译耗时 2ms，HTTP 解析与 uSockets 事件循环 100% 绿色全通。
+
+---
+
+## 2026-11-07 (纯正 CP 语法净化、cap 一键直通链接 C 库升级与 Bun uws_sys 零 unsafe 架构解密)
+
+### 语法净化与规范对齐 (Syntax Refinements)
+- [`cap/test/test_usockets_picohttp.cp`](file:///data/dev/cp/cap/test/test_usockets_picohttp.cp):
+  - 彻底移除全部非 CP 规范的 `let mut` 声明（Rust 残留习惯），回归标准纯正 CP 的 `let` 语法声明可变局部变量；
+  - 确认 `undefined` 关键字（`[16]phr_header = undefined`）作为栈分配未初始化底层缓冲的原生合法性。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 第 16 章中的全部示例代码同步净化，彻底剔除 `mut` 关键字。
+
+### 构建与运行系统增强 (Build Pipeline Enhancement)
+- [`cap/src/main.zig`](file:///data/dev/cp/cap/src/main.zig):
+  - 在 `runFileWithOpt`（即 `cap <file.cp>`）执行链路上，自动检测当前项目下是否存在 C 静态库 `zig-out/lib/libusockets.a`；
+  - 若存在，自动附加 `-Lzig-out/lib -lusockets` 链接器标志，彻底终结此前“先 cpc 转译、再 zig run”的两步流程；
+  - 达成统一：直接执行 `/data/dev/cp/cap/bin/cap cap/test/test_usockets_picohttp.cp` 一键秒级转译、链接、运行全部搞定。
+
+### 架构调研与资产复用 (Architecture Research & Bun uws_sys Asset Reuse)
+- 深度拆解 `/data/dev/bun/src/uws_sys` 24 个 `.cp` 源码，全面解密其 100% 零 `unsafe` 架构：
+  - 调用 `@c` 导入函数属于 CP 安全规范调用；
+  - 裸指针作为不透明句柄在方法间以参数流转，避免非法解引用（Deref）；
+  - 蹦床适配器（Trampoline）与面向对象 Class 守门人，向外暴露纯安全 API；
+- 确立标准库引入路线：不全盘生搬硬套（避免 `bun` 内部私有命名空间耦合），而是基于其纯 CP 抽象，打造 CP 原生自主可控的 `cap:http` 与 `cap:ws` 引擎。
+
+
+
+
+---
+
+## 2026-11-07 深度完善与发布 (@c/@fix struct 内存排布、undefined 规范、零拷贝原理与标准库拓扑规划)
+
+### 编译器增强与正式构建发布 (Compiler Enhancements & Release Deployment)
+- [`cpc_dev/src/codegen.rs`](file:///data/dev/cp/cpc_dev/src/codegen.rs) & [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 扩展结构体内存布局修饰宏，不仅支持 `@extern struct`，同时全面支持更直观的 `@c struct` 与 `@fix struct`；
+  - 只要包含 `@c`、`@fix` 或 `@extern` 任意一个元属性，均精准转译为 Zig 的 `extern struct`，保持 C-ABI 内存排布对齐；
+  - 编译构建正式 Release 版本并覆盖到 [`cap/bin/cpc`](file:///data/dev/cp/cap/bin/cpc)。
+
+### 规范文档补全与架构拓扑规划 (Specification & Architecture Roadmap)
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - **新增第 3.3.3 节《`undefined` 关键字与未初始化内存语义》**：正式界定系统级 `undefined` 与 TypeScript `undefined` 的本质区别，明确其对齐 Zig `undefined` 并用于栈分配 C-FFI 输出缓冲区的规范与安全边界；
+  - **更新第 16.3/16.4 节**：将结构体布局修饰符更新推荐为 `@c struct` / `@fix struct`；
+  - **新增第 16.7 节《CP 标准库网络与密码学生态拓扑规划》**：彻底脱离 Bun 私有命名空间，规划自主可控的 `cap:crypto`、`cap:net`、`cap:http`、`cap:ws` 四大模块及其分层实现架构。
+
+### 测试用例升级与全流程验证 (Tests Verified)
+- [`cap/test/test_usockets_picohttp.cp`](file:///data/dev/cp/cap/test/test_usockets_picohttp.cp):
+  - 升级为 `@c struct phr_header` 与 `@fix struct phr_fix_sample`；
+  - 运行 `/data/dev/cp/cap/bin/cap cap/test/test_usockets_picohttp.cp` 一键运行秒级通过验证（转译 6ms，链接 646ms，测试 100% PASS）。

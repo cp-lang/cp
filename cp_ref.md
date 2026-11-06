@@ -756,7 +756,39 @@ let vec = queue.into();
 
 ---
 
-#### 3.3.3 类型系统禁止行为
+#### 3.3.3 `undefined` 关键字与未初始化内存语义（对齐 Zig 原生与 C-FFI）
+
+在 CP 语言中，`undefined` 是一个**底层的系统级关键字**，其语义与 JavaScript / TypeScript 的 `undefined` 有着本质的区别：
+
+- **TypeScript 的 `undefined`**：代表“变量尚未赋值或属性不存在”的高级动态值（属于 JavaScript 运行时的一种类型）；
+- **CP 语言的 `undefined`**：直接继承并映射为 Zig 的 `undefined`，代表**“该内存区域保留未初始化状态（物理上包含随机脏数据），禁止编译器生成多余的零填充指令（Zero-initialization）”**。
+
+##### 1. 核心设计目的与工程价值
+在系统编程与 C-FFI 互操作场景中，许多高性能 C 库（如 `picohttpparser`、`epoll`、`read/recv` 等）要求调用方在栈上预分配一块数组或结构体作为**输出缓冲区（Out Parameter）**。
+若编译器强制对这块即刻被覆写的内存执行 `memset(0)`，会造成昂贵的 CPU 周期浪费与内存带宽抖动。
+通过 `undefined`，开发者可以明确指示编译器：“**请为我开辟栈空间，但跳过清零指令，稍后底层 C 函数会直接填充数据**”。
+
+```typescript
+// 1. 在栈上分配未初始化的定长数组缓冲区（零 memset 开销）
+let header_buf: [16]phr_header = undefined;
+
+// 2. 作为输出参数传入底层 C 解析函数直接填充
+phr_parse_req(req, req_len, ..., header_buf as [*]phr_header!, ...);
+```
+
+##### 2. 使用边界与安全约束
+1. **未初始化变量检查器（Definite Assignment Checker）**：
+   在 Safe 作用域中，严禁在未向 `undefined` 缓冲区写入有效数据前直接读取其内容。若在安全代码中直接读取未写入的 `undefined` 变量，将触发未定义行为（UB）。在 Debug 模式下，底层 Zig 会自动填充 `0xaa` 调试字节以侦测非法读取。
+2. **适用场景**：
+   - 底层 C-FFI 输出数组与结构体缓冲区：`let buf: [1024]u8 = undefined;`
+   - 与 `as [*]T!` 联合使用作为底层接口实参。
+3. **禁止场景**：
+   - 严禁将业务状态对象初始化为 `undefined`；
+   - 业务逻辑中的“空”必须使用安全的可选类型 `T?` 与 `null`，严禁滥用 `undefined`。
+
+---
+
+#### 3.3.4 类型系统禁止行为
 
 1. 禁止隐式把 `T` 提升为 `T?` 或者 `T!E`；必须显式标记。
 2. 禁止 `??` 捕获错误（`??` 只管 null）。
@@ -1027,6 +1059,75 @@ switch (worker) {
 
 > [!NOTE] 语法精简与废弃说明
 > CP 已彻底移除旧版 Zig 风格的 `|fields|` 管道捕获语法。在模式匹配中，变量捕获统一使用标准解构（`{ batch }`, `[x, y]`）、单载荷直捕（`.Text text`）、海象绑定（`ident := subpat`）与类型匹配（`ident: Type`）。
+
+---
+
+### 4.6 流式类型智能收窄与 Fail-Fast 解包体系 (Flow-Sensitive Type Narrowing)
+
+在现代高并发 Agent 与系统编程中，空值与指针校验是极其高频的代码路径。传统低级语言往往要求开发者在完成判空后依然繁琐地手工解包（如 Rust 的 `val.unwrap()` 或 Zig 的 `val.?`），带来冗余的心智负担。
+
+CP 编译器内建了工业级**流式类型智能收窄机制（Flow-Sensitive Type Narrowing）**，使得类型系统具备感知程序控制流的能力：
+
+#### 4.6.1 正向条件收窄（Positive Narrowing）
+
+在 `if (v != null)`、`while (v != null)` 或 `if (null != v)` 的条件真值作用域内，任何可空类型（如 `?T`、`*T!?`、`?User`）会被编译器自动收窄为确定非空类型（`T`、`*T!`、`User`）：
+
+```typescript
+struct User {
+    name: string,
+    age: i32,
+}
+
+fn render(u: ?User): void {
+    if (u != null) {
+        // 智能收窄生效：在当前作用域内，u 直接被视为 User 类型
+        // 彻底免除 u.?.name 或 u!?.age 冗余写法
+        print(`Name: ${u.name}, Age: ${u.age}`);
+    }
+}
+```
+
+#### 4.6.2 复合条件短路收窄（Short-Circuit Narrowing）
+
+在逻辑与 `&&` 表达式中，左侧的判空条件会立刻收窄右侧表达式的类型上下文：
+
+```typescript
+fn check_user(u: ?User): bool {
+    // && 右侧的 u.age 直接享受左侧 u != null 的智能类型收窄
+    if (u != null && u.age >= 18) {
+        return true;
+    }
+    return false;
+}
+```
+
+#### 4.6.3 负向分支与 Fail-Fast 早期返回收窄（Early-Return Guard Narrowing）
+
+CP 完美支持现代工程中推崇的卫语句（Guard Clauses）模式：
+
+```typescript
+fn process_handle(loop: *us_loop_t!?): void {
+    // 1. 负向分支匹配：else 分支内自动收窄为非空
+    if (loop == null) {
+        @panic("Loop is null");
+    } else {
+        // 此处 loop 自动收窄为 *us_loop_t!
+        us_loop_run(loop);
+    }
+}
+
+fn process_user_guard(u: ?User): void {
+    // 2. 卫语句早期返回：return 后的作用域自动推导为非空
+    if (u == null) return;
+
+    // 此处继续执行的代码中，u 已被证明绝对非空，类型直接收窄为 User
+    print(`Processing valid user: ${u.name}`);
+}
+```
+
+#### 4.6.4 后缀可选裸指针收窄（`*T!?` -> `*T!`）
+
+当对接底层的 C-ABI 或 FFI 时，外部函数返回的裸指针可能为 null（表示为 `*T!?`）。在完成 `ptr != null` 校验后，该指针在分支内自动收窄为可安全解引用的非空裸指针 `*T!`，保证了低级系统编程中与现代高级语言一致的优雅流畅体验。
 
 ---
 
@@ -1377,11 +1478,11 @@ print(u.get_id());
 3. **`static class` / `static struct`（纯静态命名空间）**：
    - **全员自动静态**：内部成员全部自动为静态成员，无需每个成员手写 `static`，且严禁实例化。
 
-| 容器类型                   | 成员默认可见性       | 显式修饰符支持 | 设计目的与典型场景                                           |
-| :------------------------- | :------------------- | :------------- | :----------------------------------------------------------- |
-| **`struct`**               | **`pub` 公开（默认）** | `priv` / `pub` | 纯数据模型、C ABI 互操作、高效网络 DTO，透明访问零摩擦       |
-| **`class`**                | **`priv` 私有（默认）** | `pub` / `priv` | 面向对象封装、防卫性状态管理、内部不变量保护                 |
-| **`static class/struct`**  | **全员自动静态**     | `pub` / `priv` | 纯工具函数库、全局数学常量、硬件命名空间，彻底杜绝实例与开销 |
+| 容器类型                  | 成员默认可见性          | 显式修饰符支持 | 设计目的与典型场景                                           |
+| :------------------------ | :---------------------- | :------------- | :----------------------------------------------------------- |
+| **`struct`**              | **`pub` 公开（默认）**  | `priv` / `pub` | 纯数据模型、C ABI 互操作、高效网络 DTO，透明访问零摩擦       |
+| **`class`**               | **`priv` 私有（默认）** | `pub` / `priv` | 面向对象封装、防卫性状态管理、内部不变量保护                 |
+| **`static class/struct`** | **全员自动静态**        | `pub` / `priv` | 纯工具函数库、全局数学常量、硬件命名空间，彻底杜绝实例与开销 |
 
 > **生命周期方法豁免**：
 > `init` 构造器、`release` 析构器以及编译器底层内部方法（`_create`、`__*`）属于对象的生命周期管理特权函数，不受外部私有属性/方法拦截限制。
@@ -1506,6 +1607,7 @@ class Account {
 在系统与应用工程中，大量业务需要组织**纯工具函数库、全局数学常量、硬件命名空间或纯静态状态管理器**。在这些场景下，我们只需要一个纯净的代码与数据命名空间，而不需要堆分配、虚表寻址，更不需要对象实例化。
 
 在传统语言中：
+
 - **TypeScript / JavaScript**：虽然支持 `class`，但必须在每一个字段和方法前重复手写 `static` 关键字；若不小心写了普通方法，实例化后会产生原型链与内存开销；
 - **C#**：引入了专用的 `static class` 关键字，被编译器严格限制为纯静态容器，无法实例化，非常严谨优雅；
 - **Rust**：没有 `class` 关键字，通常使用 `struct` 加 `impl`（不带 `&self` 接收者的方法作为关联函数），或使用 `mod utils { pub fn ... }` 模块；
@@ -1513,6 +1615,7 @@ class Account {
 - **Python**：通过模块级函数或在类中使用 `@staticmethod` / `@classmethod` 装饰器。
 
 CP 语言汲取了现代语言设计的精髓，引入一等公民的 **`static class`** 与 **`static struct`**：
+
 1. **全员自动静态**：类/结构体内部的所有字段（`let` / `const`）和方法（`fn`）**默认全为静态成员**，开发者无需且不应在每个成员前冗余手写 `static` 关键字。
 2. **免除生命周期与实例负担**：纯静态容器在概念上没有实例概念，因此**彻底无需也不允许声明 `init` 构造函数与 `release` 析构函数**。
 3. **彻底杜绝误实例化**：编译期强力拦截 `new StaticClass()` 以及结构体实例化表达式，违规调用直接报编译硬错误。
@@ -1561,6 +1664,7 @@ let empty = StringHelper.is_empty("");
 #### 5.15.3 编译期五重硬拦截法则
 
 编译器前端（Parser、Sema 与 Codegen）对 `static class` / `static struct` 构建了五重防御校验：
+
 1. **拦截实例化**：
    - 表达式 `new MathUtils(...)` -> `CP Compile Error: Cannot instantiate static class or struct 'MathUtils'`
    - 表达式 `StringHelper { ... }` -> `CP Compile Error: Cannot instantiate static class or struct 'StringHelper'`
@@ -1696,26 +1800,103 @@ switch(maybe) {
 }
 ```
 
-### 6.7 借用与裸指针边界（unsafe逃逸）
+### 6.7 借用与裸指针边界（unsafe逃逸与指针转换体系）
 
-> 裸指针 `*T!` / `**T!` 不属于借用体系，**不受借用检查器保护**，仅能在 `unsafe {}` 块内使用。
+> 裸指针 `*T!` / `**T!` / `*const T!` / `[*]T!` / `*any!` 不属于借用体系，**不受借用检查器（Sema）生命周期保护**，仅能在 `unsafe {}` 块内使用。
 
-关键区分：
+#### 6.7.1 核心区分：安全借用 (`*T`) vs 底层裸指针 (`*T!`)
 
-- `*T`：可变借用，安全体系内，受借用检查、生命周期约束；
-- `*T!`：裸指针，unsafe专属，没有安全检查，野指针风险由开发者自行负责。
+- **`*T`（无尾置感叹号）**：**安全可变借用**，属于编译器安全体系，严格受借用检查器（Sema）、读写互斥与非词法生命周期（NLL）约束；
+- **`*T!`（尾置感叹号）**：**底层可变裸指针**，映射至 C/Zig 单项指针，用于底层系统级编程与 C-ABI 交互；
+- **`*const T!`**：**底层只读裸指针**，映射至 Zig `*const T`，禁止写入操作；
+- **`[*]T!`**：**未定长多项连续裸指针**，映射至 Zig `[*]T`，支持下标 `ptr[i]` 与切片 `ptr[a..b]` 操作；
+- **`*any!`**：**通用非类型化裸指针**，映射至 Zig `*anyopaque`（即 C 语言的 `void*`）。
 
-转换规则：
+---
 
-1. 安全借用 `&T` / `*T` 可以在unsafe块内，通过 `as` 显式转换为裸指针 `*T!`；
-2. 裸指针转回借用，必须unsafe + as，并且**开发者自行保证不违反借用规则**，编译器不再校验；
-3. 安全代码域不允许出现裸指针类型。
+#### 6.7.2 变量常量性与指针只读性的正交解耦
 
-```cp
-let v = 10;
-let mut_ref: *i32 = *v;
+在 CP 中，“变量本身的重新赋值约束”与“指针指向的内存数据只读性”是两个完全解耦的维度：
+
+1. **`const p: *T! = ...;`（指针自身不可变，指向的内存可写）**：
+   - `const` 约束的是变量 `p` 自身，不能让 `p` 重新指向别的地址（禁止 `p = other;`）；
+   - 但指针类型为 `*T!`，开发者依然可以通过 `p.* = val` 修改目标内存中的值。
+2. **`let p: *const T! = ...;`（指针自身可变，指向的内存只读）**：
+   - 类型为 `*const T!`，编译器在静态语义期**硬性拦截任何修改操作**（写入 `p.* = val` 抛出编译错误：`Cannot mutate through read-only pointer`）；
+   - 但因为声明为 `let`，变量 `p` 可以被重新赋值指向另一个目标对象（允许 `p = other;`）。
+3. **`const p: *const T! = ...;`（双重不可变）**：
+   - 指针不可换，指向的内存数据亦绝对只读。
+
+---
+
+#### 6.7.3 获取变量裸指针的标准方式
+
+在 CP 中，获取变量的底层裸指针支持以下三种标准方式（均须在 `unsafe` 上下文中进行）：
+
+##### 方式一：直接裸指针字面语法（`*v!` 与 `**v!`）
+CP 提供了前置 `*` 与尾置 `!` 的对称取指针语法，前置星号数量表示指针层级：
+```typescript
+let mut num: i32 = 100;
+
 unsafe {
-    let ptr: *i32! = mut_ref as *i32!; // 借用转裸指针
+    // 1. 获取一级裸指针 (*num!)
+    let p: *i32! = *num!;
+    p.* = 200; // num 变为 200
+
+    // 2. 获取二级裸指针 (**p!)
+    let mut p_copy: *i32! = p;
+    let pp: **i32! = **p_copy!;
+    pp.*.* = 300; // num 变为 300
+}
+```
+
+##### 方式二：通过安全借用显式转换（`&v as *T!` 与 `*v as *T!`）
+通过安全域的只读借用（`&v`）或可变借用（`*v`），在 `unsafe` 块内使用 `as` 显式转换为目标裸指针：
+```typescript
+let mut v: i32 = 42;
+
+unsafe {
+    // 1. 从只读借用 &v 转换为只读裸指针 *const i32!
+    let p_ro: *const i32! = &v as *const i32!;
+
+    // 2. 从只读借用 &v 转换为可变裸指针 *i32! (底层强制升级，需由开发者负责)
+    let p_rw: *i32! = &v as *i32!;
+
+    // 3. 从可变借用 *v 转换为可变裸指针 *i32!
+    let p_mut: *i32! = *v as *i32!;
+    p_mut.* = 88; // v 变为 88
+}
+```
+
+---
+
+#### 6.7.4 完整裸指针类型转换矩阵 (Type Casting Matrix in Unsafe)
+
+所有涉及裸指针的类型转换均须在 `unsafe` 块内通过 `as` 完成：
+
+```typescript
+unsafe {
+    let mut num: i32 = 1000;
+    let p: *i32! = *num!;
+
+    // 1. 裸指针按位重解释（指针类型互转）
+    let p_u8: *u8! = p as *u8!;
+
+    // 2. 裸指针转换为物理内存整型地址 (usize)
+    let addr: usize = p as usize;
+
+    // 3. 物理内存整型地址还原为强类型裸指针
+    let p_restored: *i32! = addr as *i32!;
+    print(p_restored.*); // 1000
+
+    // 4. 裸指针转换为通用非类型化指针 (*any!，等价 C void*)
+    let generic: *any! = p as *any!;
+    let back: *i32! = generic as *i32!;
+
+    // 5. 数组切转为未定长多项裸指针 ([*]T!)
+    let buf: [4]u8 = [1, 2, 3, 4];
+    let many: [*]u8! = buf as [*]u8!;
+    let val = many[0]; // 1
 }
 ```
 
@@ -2001,7 +2182,7 @@ CP 的 `trait` 不仅支持实例方法（首参含 `_` / `*_` / `move _`），�
 trait Factory<T> {
     // 静态契约：无 _ 或 this 接收者
     static fn create(name: string): T;
-    
+
     // 亦支持省略 static 前缀的无接收者抽象方法声明（由编译器根据无 _ 接收者推导）
     fn default_instance(): T;
 }
@@ -2286,14 +2467,14 @@ switch (res) {
 
 在 CP 语言中，`struct` 与 `class` 均可作为强类型错误直接返回（通过 `return err(...)`）：
 
-| 特性维度                 | 结构体错误（`struct`）                         | 类错误（`class`）                                    |
-| ------------------------ | --------------------------------------------- | --------------------------------------------------- |
-| **内存语义**             | **值类型（Value Type）**                      | **引用类型（Reference Type）**                      |
-| **分配位置**             | 纯栈上分配 / 内联值复制，**零堆分配、零 GC**  | 通过 `new` 在堆上分配，传递对象指针（`*ClassName`） |
-| **适用场景**             | 高频、高性能、高吞吐的轻量纯数据错误          | 富上下文业务错误诊断、错误链回溯、支持继承与多态    |
-| **函数返回签名**         | `fn foo(): T ! MyStructError`                 | `fn foo(): T ! MyClassError`                        |
-| **自动转统一 `Err`**     | 自动读取 `code`、`msg`/`message` 拷贝至 `Err` | 自动提取 `code`、`msg`，**并将指针自动挂载到 `cause`** |
-| **downcast 运行时还原**  | 值类型直接在 `switch` 中进行模式解构匹配      | 可通过 `err(e: MyClassError)` 或 `err(er := MyClassError)` 完美还原 |
+| 特性维度                | 结构体错误（`struct`）                        | 类错误（`class`）                                                   |
+| ----------------------- | --------------------------------------------- | ------------------------------------------------------------------- |
+| **内存语义**            | **值类型（Value Type）**                      | **引用类型（Reference Type）**                                      |
+| **分配位置**            | 纯栈上分配 / 内联值复制，**零堆分配、零 GC**  | 通过 `new` 在堆上分配，传递对象指针（`*ClassName`）                 |
+| **适用场景**            | 高频、高性能、高吞吐的轻量纯数据错误          | 富上下文业务错误诊断、错误链回溯、支持继承与多态                    |
+| **函数返回签名**        | `fn foo(): T ! MyStructError`                 | `fn foo(): T ! MyClassError`                                        |
+| **自动转统一 `Err`**    | 自动读取 `code`、`msg`/`message` 拷贝至 `Err` | 自动提取 `code`、`msg`，**并将指针自动挂载到 `cause`**              |
+| **downcast 运行时还原** | 值类型直接在 `switch` 中进行模式解构匹配      | 可通过 `err(e: MyClassError)` 或 `err(er := MyClassError)` 完美还原 |
 
 ```typescript
 // 1. 结构体错误：纯值类型，零堆内存分配
@@ -2416,7 +2597,19 @@ let safe_res = ping("bad.host") ? "FALLBACK_HOST";
 // 遇到 null 时回退
 let opt_val: string? = null;
 let text = opt_val ?? "default_text";
+
+// 4. 可选类型强制显式解包操作符 (.?)
+// 断言目标必不为空并将 T? 解包为 T；若遇到 null 则立即触发 Fail-Fast 断言中断 (Panic)
+let hard_val: string = opt_val.?;
 ```
+
+#### 8.3.1 解包原语 (`.?`)、可选链 (`?.`) 与空值合并 (`??`) 对比规范
+
+| 操作符 | 语法形态 | 类型变换 | 遇 null 行为 | 核心哲学与适用场景 |
+| :--- | :--- | :--- | :--- | :--- |
+| **`u.?`** | 后置点号问号 | `T?` → **`T`** | **立即中断 (Panic)** | **断言非空**：用于测试断言、启动硬依赖、程序员铁律保证非空的场景 |
+| **`u?.`** | 属性前置问号点 | `T?` → **`U?`** | **短路返回 `null`** | **安全导航**：多层级可能为空的安全属性读取与调用 |
+| **`u ?? def`**| 双问号中缀 | `T?` → **`T`** | **降级返回 `def`** | **优雅降级**：业务层存在合理默认值的场景 |
 
 ---
 
@@ -2588,6 +2781,38 @@ if (user := find_user_by_id(user_id)) {
 
 ---
 
+#### 9.3.3.1 控制流类型智能收窄 (Flow-Sensitive Type Narrowing: `if (v != null)`)
+
+除了海象操作符声明新绑定的解包方式外，CP 编译器全面支持**控制流敏感的变量类型智能收窄（Flow-Sensitive Type Narrowing）**。当对已有可选变量（如 `v: T?`）进行非空判断时，在对应的分支块内，该变量自动由 `T?` 收窄为不可空类型 `T`，无需显式解包（无需书写 `v.?`）：
+
+```typescript
+let u: User? = find_user(10);
+
+if (u != null) {
+    // 1. 直接访问字段与方法，无需 u.?
+    print(u.name);
+    u.have_birthday();
+
+    // 2. 直接参与算术或传参给要求非可选类型的函数
+    save_user(u); // 参数类型为 User，自动匹配
+
+    // 3. 兼容显式解包写法（杜绝二次重复解包）
+    let unwrapped = u.?;
+} else {
+    // 此分支内 u 保持 null
+}
+```
+
+- **全面支持的分支与判断形式**：
+  - 正向非空收窄：`if (v != null)`、`if (null != v)`、`if (v != null && cond)`
+  - 反向分支收窄：`if (v == null) { ... } else { /* 此处 v 自动收窄为 T */ }`
+  - 循环守卫：`while (v != null) { ... }`
+- **变量赋值安全与状态维护**：
+  - 在收窄作用域内对被收窄变量重新赋值时（如 `count = 100`），左值保持变量原始内存槽，不会错误注入解包；
+  - 若重新赋予 `null`（如 `count = null`），编译器自动解除该变量的收窄状态。
+
+---
+
 #### 9.3.4 原生类型标识符作为调用实参 (Native Type Tokens as Arguments)
 
 CP 允许原生类型标识符（如 `u8`、`i32`、`usize` 等）直接作为泛型函数或标准库函数的实参传递，无缝契合系统级与标准库接口（如 `std.mem.trim(u8, ...)`、`std.mem.eql(u8, ...)`）：
@@ -2711,13 +2936,13 @@ import { Mutex, RwLock, Atomic } from "cap:sync";
 
 ##### 1. API 接口规范
 
-| 类别               | 方法签名                                    | 说明                                                         |
-| :----------------- | :------------------------------------------ | :----------------------------------------------------------- |
-| **推荐闭包**       | `withLock<R>(fn: (*T) -> R): R`             | 执行闭包，进入前自动加锁，退出（含早退、异常）即刻释放锁     |
-| **RAII 阻塞加锁**  | `lock(): LockGuard<T>`                      | 阻塞直到获取锁，返回守卫对象，作用域结束自动释放锁           |
-| **非阻塞尝试拿锁** | `tryLock(): LockGuard<T>?`                  | 非阻塞尝试获取锁；成功返回守卫，失败立即返回 `null`          |
-| **状态探测**       | `isLocked(): bool`                          | 探测锁当前是否已被任何线程持有（探针与调试监控用）           |
-| **裸锁手动解锁**   | `unlock(): void` _(仅裸锁 `Mutex()` 提供)_ | 手动释放当前持有的锁                                         |
+| 类别               | 方法签名                                   | 说明                                                     |
+| :----------------- | :----------------------------------------- | :------------------------------------------------------- |
+| **推荐闭包**       | `withLock<R>(fn: (*T) -> R): R`            | 执行闭包，进入前自动加锁，退出（含早退、异常）即刻释放锁 |
+| **RAII 阻塞加锁**  | `lock(): LockGuard<T>`                     | 阻塞直到获取锁，返回守卫对象，作用域结束自动释放锁       |
+| **非阻塞尝试拿锁** | `tryLock(): LockGuard<T>?`                 | 非阻塞尝试获取锁；成功返回守卫，失败立即返回 `null`      |
+| **状态探测**       | `isLocked(): bool`                         | 探测锁当前是否已被任何线程持有（探针与调试监控用）       |
+| **裸锁手动解锁**   | `unlock(): void` _(仅裸锁 `Mutex()` 提供)_ | 手动释放当前持有的锁                                     |
 
 ##### 2. 代码示例
 
@@ -2769,16 +2994,16 @@ rawMu.unlock();
 
 ##### 1. API 接口规范
 
-| 类别             | 方法签名                                     | 说明                                                         |
-| :--------------- | :------------------------------------------- | :----------------------------------------------------------- |
-| **推荐只读闭包** | `withRead<R>(fn: (&T) -> R): R`              | 多读并发：获取共享读锁并执行闭包，退出时自动释放读锁         |
-| **推荐独占闭包** | `withWrite<R>(fn: (*T) -> R): R`             | 单写排他：获取独占写锁并执行闭包，退出时自动释放写锁         |
-| **共享读加锁**   | `read(): ReadGuard<T>`                       | 阻塞获取共享读锁，返回只读守卫，离开作用域自动释放           |
-| **独占写加锁**   | `write(): WriteGuard<T>`                     | 阻塞获取独占写锁，返回可变写守卫，离开作用域自动释放         |
-| **非阻塞尝试读** | `tryRead(): ReadGuard<T>?`                   | 非阻塞尝试获取读锁；成功返回只读守卫，冲突立即返回 `null`    |
-| **非阻塞尝试写** | `tryWrite(): WriteGuard<T>?`                 | 非阻塞尝试获取写锁；成功返回写守卫，冲突立即返回 `null`      |
-| **读锁状态探测** | `isReadLocked(): bool`                       | 探测当前是否有活跃的读者线程                                 |
-| **写锁状态探测** | `isWriteLocked(): bool`                      | 探测当前是否被写者独占持有                                   |
+| 类别             | 方法签名                         | 说明                                                      |
+| :--------------- | :------------------------------- | :-------------------------------------------------------- |
+| **推荐只读闭包** | `withRead<R>(fn: (&T) -> R): R`  | 多读并发：获取共享读锁并执行闭包，退出时自动释放读锁      |
+| **推荐独占闭包** | `withWrite<R>(fn: (*T) -> R): R` | 单写排他：获取独占写锁并执行闭包，退出时自动释放写锁      |
+| **共享读加锁**   | `read(): ReadGuard<T>`           | 阻塞获取共享读锁，返回只读守卫，离开作用域自动释放        |
+| **独占写加锁**   | `write(): WriteGuard<T>`         | 阻塞获取独占写锁，返回可变写守卫，离开作用域自动释放      |
+| **非阻塞尝试读** | `tryRead(): ReadGuard<T>?`       | 非阻塞尝试获取读锁；成功返回只读守卫，冲突立即返回 `null` |
+| **非阻塞尝试写** | `tryWrite(): WriteGuard<T>?`     | 非阻塞尝试获取写锁；成功返回写守卫，冲突立即返回 `null`   |
+| **读锁状态探测** | `isReadLocked(): bool`           | 探测当前是否有活跃的读者线程                              |
+| **写锁状态探测** | `isWriteLocked(): bool`          | 探测当前是否被写者独占持有                                |
 
 ##### 2. 代码示例
 
@@ -2817,42 +3042,42 @@ if (r := cache.tryRead()) {
 
 ##### 1. API 接口规范
 
-| 方法签名                                    | 说明                                                         |
-| :------------------------------------------ | :----------------------------------------------------------- |
-| `load(): T`                                 | 以顺序一致性（SeqCst）原子读取当前值                         |
-| `store(val: T): void`                       | 以顺序一致性原子写入新值                                     |
-| `swap(val: T): T`                           | 原子写入新值并返回旧值（Exchange）                           |
-| `cas(expected: T, desired: T): bool`        | 极简 CAS：若当前等于 `expected` 则写入 `desired` 并返回 `true`，否则返回 `false` |
-| `compareAndSwap(exp: T, des: T): bool`      | 全称 CAS 别名，与 `cas` 完全等价                             |
-| `add(delta: T): T`                          | 原子加法，返回操作前的旧值（FetchAdd）                       |
-| `sub(delta: T): T`                          | 原子减法，返回操作前的旧值（FetchSub）                       |
-| `inc(): T`                                  | 原子自增 1，返回操作前的旧值                                 |
-| `dec(): T`                                  | 原子自减 1，返回操作前的旧值                                 |
-| `and(mask: T): T`                           | 按位与（FetchAnd），返回旧值                                 |
-| `or(mask: T): T`                            | 按位或（FetchOr），返回旧值                                  |
-| `xor(mask: T): T`                           | 按位异或（FetchXor），返回旧值                               |
-| `testAndSet(): bool`                        | 布尔原子原语：原子设为 `true` 并返回之前的值（TAS）          |
-| `clear(): void`                             | 布尔原子原语：原子复位为 `false`（或数值 0）                 |
+| 方法签名                               | 说明                                                                             |
+| :------------------------------------- | :------------------------------------------------------------------------------- |
+| `load(): T`                            | 以顺序一致性（SeqCst）原子读取当前值                                             |
+| `store(val: T): void`                  | 以顺序一致性原子写入新值                                                         |
+| `swap(val: T): T`                      | 原子写入新值并返回旧值（Exchange）                                               |
+| `cas(expected: T, desired: T): bool`   | 极简 CAS：若当前等于 `expected` 则写入 `desired` 并返回 `true`，否则返回 `false` |
+| `compareAndSwap(exp: T, des: T): bool` | 全称 CAS 别名，与 `cas` 完全等价                                                 |
+| `add(delta: T): T`                     | 原子加法，返回操作前的旧值（FetchAdd）                                           |
+| `sub(delta: T): T`                     | 原子减法，返回操作前的旧值（FetchSub）                                           |
+| `inc(): T`                             | 原子自增 1，返回操作前的旧值                                                     |
+| `dec(): T`                             | 原子自减 1，返回操作前的旧值                                                     |
+| `and(mask: T): T`                      | 按位与（FetchAnd），返回旧值                                                     |
+| `or(mask: T): T`                       | 按位或（FetchOr），返回旧值                                                      |
+| `xor(mask: T): T`                      | 按位异或（FetchXor），返回旧值                                                   |
+| `testAndSet(): bool`                   | 布尔原子原语：原子设为 `true` 并返回之前的值（TAS）                              |
+| `clear(): void`                        | 布尔原子原语：原子复位为 `false`（或数值 0）                                     |
 
 ##### 2. 代码示例
 
 ```typescript
 import { Atomic } from "cap:sync";
 
-let counter = Atomic(0);       // 自动单态化为 Atomic<i32>
-let flag = Atomic(false);      // 自动单态化为 Atomic<bool>
+let counter = Atomic(0); // 自动单态化为 Atomic<i32>
+let flag = Atomic(false); // 自动单态化为 Atomic<bool>
 
 // 原子自增与算术
-counter.inc();                 // 0 -> 1
-counter.add(10);               // 1 -> 11
+counter.inc(); // 0 -> 1
+counter.add(10); // 1 -> 11
 
 // 原子 CAS（Compare-And-Swap）
-let ok = counter.cas(11, 20);  // 若当前为 11 则替换为 20，返回 true
+let ok = counter.cas(11, 20); // 若当前为 11 则替换为 20，返回 true
 let ok2 = counter.compareAndSwap(20, 30);
 
 // 布尔原子操作
 let wasActive = flag.testAndSet(); // 设为 true 并返回先前状态
-flag.clear();                      // 设为 false
+flag.clear(); // 设为 false
 ```
 
 ---
@@ -2908,15 +3133,15 @@ metrics.withLock((m) => {
 
 ##### 1. 核心差异全景对比表
 
-| 维度             | 栈绑定只读借用 (`&T`)                                 | 共享所有权句柄 (`Shared<T>`)                               |
-| :--------------- | :---------------------------------------------------- | :--------------------------------------------------------- |
-| **本质属性**     | 栈绑定的临时引用视图（Stack-Bound View）              | 全局共享堆上的原子引用计数句柄（Shared Ownership）         |
-| **所有权归属**   | **零所有权**。完全依赖原宿主变量在外部栈帧中活着       | **共同所有权**。每个持有句柄的线程/协程都是合法所有者     |
-| **生命周期**     | 严格绑定在当前局部作用域内，**绝对禁止逃逸**          | 动态生命周期（Dynamic Escape），最后一个持有者退出时才释放 |
-| **内存开销**     | **绝对零开销**（底层就是裸指针，无堆分配，无计数）    | **极轻量**（堆分配一次 + 每次拷贝句柄原子引用计数 `+1`）   |
-| **跨线程/Actor** | ❌ **编译期绝对拦截**（防止宿主函数栈销毁产生悬垂指针） | ✅ **无畏并发传递**（各线程安全零拷贝访问）                 |
-| **跨越 `await`** | ❌ **禁止跨越状态机**（切分后当前函数栈帧不复存在）    | ✅ **安全穿透**（句柄安全保存在异步 Context 中）           |
-| **语法泛型负担** | 零 `<'a>` 生命周期标注，由编译器做 NLL 局部推导      | 零 `<'a>` 生命周期标注，享受 TS 引用般的自如              |
+| 维度             | 栈绑定只读借用 (`&T`)                                   | 共享所有权句柄 (`Shared<T>`)                               |
+| :--------------- | :------------------------------------------------------ | :--------------------------------------------------------- |
+| **本质属性**     | 栈绑定的临时引用视图（Stack-Bound View）                | 全局共享堆上的原子引用计数句柄（Shared Ownership）         |
+| **所有权归属**   | **零所有权**。完全依赖原宿主变量在外部栈帧中活着        | **共同所有权**。每个持有句柄的线程/协程都是合法所有者      |
+| **生命周期**     | 严格绑定在当前局部作用域内，**绝对禁止逃逸**            | 动态生命周期（Dynamic Escape），最后一个持有者退出时才释放 |
+| **内存开销**     | **绝对零开销**（底层就是裸指针，无堆分配，无计数）      | **极轻量**（堆分配一次 + 每次拷贝句柄原子引用计数 `+1`）   |
+| **跨线程/Actor** | ❌ **编译期绝对拦截**（防止宿主函数栈销毁产生悬垂指针） | ✅ **无畏并发传递**（各线程安全零拷贝访问）                |
+| **跨越 `await`** | ❌ **禁止跨越状态机**（切分后当前函数栈帧不复存在）     | ✅ **安全穿透**（句柄安全保存在异步 Context 中）           |
+| **语法泛型负担** | 零 `<'a>` 生命周期标注，由编译器做 NLL 局部推导         | 零 `<'a>` 生命周期标注，享受 TS 引用般的自如               |
 
 ##### 2. 代码对比：借用逃逸拦截 vs Shared 零拷贝跨线程
 
@@ -2950,12 +3175,12 @@ fn launch_worker_valid() {
 
 #### 10.5.7 多线程数据保护机制全景对比（CP vs Rust vs Go vs Zig）
 
-| 语言     | 共享并发数据保护方案                    | 优势与亮点                                                    | 痛点与开发心智负担                                           |
-| :------- | :-------------------------------------- | :------------------------------------------------------------ | :----------------------------------------------------------- |
-| **CP**   | **`Shared<T>` + `Mutex<T>` / `RwLock`** | • **TS 极简语法**：`Shared(Mutex(data))` 一键构造<br>• **数据与锁强绑定**：必须通过 `withLock` 或守卫访问数据<br>• **自动 RAII 解锁**：守卫属性透明访问，离开块即释放<br>• **零 GC 停顿**：直接编译为 Zig 原生状态机 | • 目前自适应锁基于高性能原子自旋与调度让步，重度长临界区仍需配合 OS 级 futex 调度优化 |
-| **Rust** | `Arc<Mutex<T>>` / `Arc<RwLock<T>>`      | • 编译期 Borrow Checker 证明无数据竞态<br>• 静态类型系统完备  | • **语法繁重冗长**：`Arc::new(Mutex::new(...))` 嵌套深<br>• **到处 unwrap**：每次锁操作必须 `.lock().unwrap()`<br>• **生命周期心智地狱**：结构体字段嵌套借用引发 `<'a>` 病毒式传染 |
-| **Go**   | `sync.Mutex` + `sync/atomic`            | • 语言内置关键字轻量，上手极快                                | • **数据与锁脱节（裸锁）**：锁是独立变量，程序员极易忘记加锁直接访问数据，引发未定义竞态<br>• **手动 defer 容易泄露**：循环体内 `defer` 不释放<br>• **GC STW 噩梦**：高并发海量对象引发显著 GC 停顿 |
-| **Zig**  | `std.Thread.Mutex` + `std.atomic.Value` | • 绝对底层、零隐藏开销、透明可控                              | • **无语言级并发安全屏障**：没有所有权和借用检查，全靠程序员自律<br>• **缺少容器锁封装**：无泛型 `Mutex(T)` 数据绑定容器，必须人肉手写包装与内存释放 |
+| 语言     | 共享并发数据保护方案                    | 优势与亮点                                                                                                                                                                                                           | 痛点与开发心智负担                                                                                                                                                                                  |
+| :------- | :-------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **CP**   | **`Shared<T>` + `Mutex<T>` / `RwLock`** | • **TS 极简语法**：`Shared(Mutex(data))` 一键构造<br>• **数据与锁强绑定**：必须通过 `withLock` 或守卫访问数据<br>• **自动 RAII 解锁**：守卫属性透明访问，离开块即释放<br>• **零 GC 停顿**：直接编译为 Zig 原生状态机 | • 目前自适应锁基于高性能原子自旋与调度让步，重度长临界区仍需配合 OS 级 futex 调度优化                                                                                                               |
+| **Rust** | `Arc<Mutex<T>>` / `Arc<RwLock<T>>`      | • 编译期 Borrow Checker 证明无数据竞态<br>• 静态类型系统完备                                                                                                                                                         | • **语法繁重冗长**：`Arc::new(Mutex::new(...))` 嵌套深<br>• **到处 unwrap**：每次锁操作必须 `.lock().unwrap()`<br>• **生命周期心智地狱**：结构体字段嵌套借用引发 `<'a>` 病毒式传染                  |
+| **Go**   | `sync.Mutex` + `sync/atomic`            | • 语言内置关键字轻量，上手极快                                                                                                                                                                                       | • **数据与锁脱节（裸锁）**：锁是独立变量，程序员极易忘记加锁直接访问数据，引发未定义竞态<br>• **手动 defer 容易泄露**：循环体内 `defer` 不释放<br>• **GC STW 噩梦**：高并发海量对象引发显著 GC 停顿 |
+| **Zig**  | `std.Thread.Mutex` + `std.atomic.Value` | • 绝对底层、零隐藏开销、透明可控                                                                                                                                                                                     | • **无语言级并发安全屏障**：没有所有权和借用检查，全靠程序员自律<br>• **缺少容器锁封装**：无泛型 `Mutex(T)` 数据绑定容器，必须人肉手写包装与内存释放                                                |
 
 ---
 
@@ -3088,19 +3313,19 @@ let qpsCounter = Atomic(0);
 let serverRunning = Atomic(true);
 
 // 1. 原子自增与算术
-qpsCounter.inc();         // 0 -> 1
-qpsCounter.add(10);       // 1 -> 11
+qpsCounter.inc(); // 0 -> 1
+qpsCounter.add(10); // 1 -> 11
 
 // 2. 原子比较交换 CAS（Compare-And-Swap）
 let exchanged = qpsCounter.cas(11, 20); // 若当前为 11 则原子置为 20，返回 true
 if (exchanged) {
-    print("CAS Successfully updated counter to 20");
+  print("CAS Successfully updated counter to 20");
 }
 
 // 3. 布尔状态探测与清除（Test-And-Set）
 if (serverRunning.load()) {
-    let previousState = serverRunning.testAndSet(); // 原子设为 true 并返回先前状态
-    serverRunning.clear(); // 优雅下线：原子复位为 false
+  let previousState = serverRunning.testAndSet(); // 原子设为 true 并返回先前状态
+  serverRunning.clear(); // 优雅下线：原子复位为 false
 }
 ```
 
@@ -3115,7 +3340,7 @@ let busLock = Mutex();
 busLock.lock();
 // 探测锁状态
 if (busLock.isLocked()) {
-    print("Hardware bus locked, transferring frame...");
+  print("Hardware bus locked, transferring frame...");
 }
 // 执行硬件总线或跨结构操作...
 busLock.unlock(); // 手动释放裸锁
@@ -4652,15 +4877,16 @@ export class VTable {
 
 为了根除 C 语言隐式类型转换与宽松指针带来的内存越界与悬垂野指针隐患，CP 确立了清晰严谨的专用指针体系：
 
-| CP 原生系统指针 | 对应 Zig 底层类型 | 语义与安全保证 | 核心应用场景 |
-| :--- | :--- | :--- | :--- |
-| **`cstr` / `cstr?`** | `[*:0]const u8` (const) / `[*:0]u8` (let) | **0 结尾 C 字符串**。可变性由 `let`（可变内容 `[*:0]u8`）与 `const`（不可变内容 `[*:0]const u8`）严格区分。 | 传递以 null 结尾的文件路径、主机名、环境变量。 |
-| **`[*]T!` / `[*]T?!`** | `[*]T` / `?[*]T` | **未定长多项指针 (Many-Item Pointer)**。表示连续内存缓冲，支持切片与下标算术，提供非空与可空（`?`）双轨。 | 接收底层的 raw packet payload、IOVEC 缓冲区。 |
-| **`*any!` / `*any?!`** | `*anyopaque` / `?*anyopaque` | **通用非类型化系统裸指针 (Universal Raw Pointer)**。对齐 C 语言 `void*`，彻底废除 `anyopaque` 冗余关键字。 | 跨语言不透明句柄、用户自定义指针 `user_data`。 |
-| **`*T!` / `*T?!`** | `*T` / `?*T` | **单对象强类型裸指针**。在 unsafe 作用域下直接映射为 C-ABI 单对象指针，**严格禁止下标操作（如 `p[i]` 编译报错）**。 | 指向具体的单一 C 结构体实例（如 `*quic.Socket!`）。 |
+| CP 原生系统指针        | 对应 Zig 底层类型                         | 语义与安全保证                                                                                                      | 核心应用场景                                        |
+| :--------------------- | :---------------------------------------- | :------------------------------------------------------------------------------------------------------------------ | :-------------------------------------------------- |
+| **`cstr` / `cstr?`**   | `[*:0]const u8` (const) / `[*:0]u8` (let) | **0 结尾 C 字符串**。可变性由 `let`（可变内容 `[*:0]u8`）与 `const`（不可变内容 `[*:0]const u8`）严格区分。         | 传递以 null 结尾的文件路径、主机名、环境变量。      |
+| **`[*]T!` / `[*]T?!`** | `[*]T` / `?[*]T`                          | **未定长多项指针 (Many-Item Pointer)**。表示连续内存缓冲，支持切片与下标算术，提供非空与可空（`?`）双轨。           | 接收底层的 raw packet payload、IOVEC 缓冲区。       |
+| **`*any!` / `*any?!`** | `*anyopaque` / `?*anyopaque`              | **通用非类型化系统裸指针 (Universal Raw Pointer)**。对齐 C 语言 `void*`，彻底废除 `anyopaque` 冗余关键字。          | 跨语言不透明句柄、用户自定义指针 `user_data`。      |
+| **`*T!` / `*T?!`**     | `*T` / `?*T`                              | **单对象强类型裸指针**。在 unsafe 作用域下直接映射为 C-ABI 单对象指针，**严格禁止下标操作（如 `p[i]` 编译报错）**。 | 指向具体的单一 C 结构体实例（如 `*quic.Socket!`）。 |
 
 > [!CAUTION]
 > **绝对杜绝宽松指针 `[*c]` 与单对象越界下标**：
+>
 > 1. CP 坚决不引入 C 语言的 `[*c]` 宽松可空不确定指针。所有的可空性必须通过 `?` 显式显化，所有的数组遍历必须通过 `[*]` 显式显化，禁止任何隐式可空与隐式降级转换！
 > 2. `*T!` 仅代表单个对象的裸指针，不支持下标访问 `p[i]`；若需要进行连续内存数组访问，必须明确使用 `[*]T!` 或切片 `[]T`。
 
@@ -5080,7 +5306,7 @@ cpc emit-types src/url.cp -o src/url.d.cp
 | 语法        | 用途规范                                 |
 | ----------- | ---------------------------------------- |
 | `unsafe {}` | 安全逃逸块：关闭借用检查，允许裸指针操作 |
-| `@c {}`     | C-ABI 声明块：声明外部 C 符号与库函数     |
+| `@c {}`     | C-ABI 声明块：声明外部 C 符号与库函数    |
 | `zig {}`    | 原生Zig内嵌块：直接编写原生Zig代码       |
 | `//`        | 单行注释                                 |
 | `/* */`     | 多行块注释                               |
@@ -5093,10 +5319,10 @@ cpc emit-types src/url.cp -o src/url.d.cp
 | `*T`            | 可变借用，独占修改（主推；`&mut T` 保留为兼容备选，不推荐） |
 | `*T!`           | 一级裸指针类型，仅在 unsafe 内合法                          |
 | `**T!`          | 二级裸指针类型，仅在 unsafe 内合法                          |
-| `*any!`         | 通用非类型化裸指针 (映射至 `*anyopaque`)                     |
-| `*any?!`        | 可空通用非类型化裸指针 (映射至 `?*anyopaque`)                |
-| `[*]T!`         | 未定长多项指针 (映射至 Zig `[*]T`)                           |
-| `cstr`          | 0 结尾 C 字符串 (映射至 `[*:0]const u8`)                     |
+| `*any!`         | 通用非类型化裸指针 (映射至 `*anyopaque`)                    |
+| `*any?!`        | 可空通用非类型化裸指针 (映射至 `?*anyopaque`)               |
+| `[*]T!`         | 未定长多项指针 (映射至 Zig `[*]T`)                          |
+| `cstr`          | 0 结尾 C 字符串 (映射至 `[*:0]const u8`)                    |
 | `cstr?`         | 可空 0 结尾 C 字符串 (映射至 `?[*:0]const u8`)              |
 | `T!E`           | 错误联合类型：正常为 T，错误为 E                            |
 | `Err(...)`      | 构造错误值，用于返回、switch 错误分支匹配                   |
@@ -5105,20 +5331,20 @@ cpc emit-types src/url.cp -o src/url.d.cp
 
 ### 14.5 类型与泛型符号
 
-| 符号  | 用途                |
-| ----- | ------------------- |
-| `<T>` | 泛型类型参数包裹        |
+| 符号              | 用途                              |
+| ----------------- | --------------------------------- |
+| `<T>`             | 泛型类型参数包裹                  |
 | `<const name: T>` | 常量泛型参数包裹 (编译期值单态化) |
-| `[]`  | 动态数组 / 切片类型 |
+| `[]`              | 动态数组 / 切片类型               |
 
 ### 14.6 编译期、装饰器、注解
 
-| 符号写法 | 用途                          |
-| -------- | ----------------------------- |
-| `@name`  | 注解、装饰器 / 编译期函数调用 |
-| `@c`     | C-ABI 函数导出与函数指针类型修饰符 |
-| `@align(N)` | 字段级物理内存字节对齐注解   |
-| `@[...]` | 聚合                          |
+| 符号写法    | 用途                               |
+| ----------- | ---------------------------------- |
+| `@name`     | 注解、装饰器 / 编译期函数调用      |
+| `@c`        | C-ABI 函数导出与函数指针类型修饰符 |
+| `@align(N)` | 字段级物理内存字节对齐注解         |
+| `@[...]`    | 聚合                               |
 
 ---
 
@@ -5139,43 +5365,84 @@ cpc emit-types src/url.cp -o src/url.d.cp
 
 ### 14.8 C-FFI 声明与 C 指针原生映射规范
 
-#### 1. 极简 C 符号声明 `@c`
-通过 `@c` 消除多重关键字冗余，直接对应 C ABI 调用约定：
+> [!IMPORTANT]
+> **外部 C 函数声明与引用铁律**：
+> 1. CP 语言中原生内嵌 Zig 代码块必须使用 `zig {}`，**严禁使用带有下划线前缀的 `__zig__ {}`**；
+> 2. **CP 中不应该使用 `zig {}` 声明外部 C 函数**，而应该直接使用原生的 `@c`、`@c("alias")` 与 `@c { ... }` 原语；
+> 3. `@c` 具备强大的符号重命名功能，可在导入时直接赋予符合 CP 命名规范的别名；
+> 4. CP 中的 unsafe 裸指针（`*T!`、`[*]T!`、`cstr`、`*any!`、`*T!?`）专门用于 C 原生指针体系的高性能无损映射。
+
+#### 1. 极简 C 符号声明 `@c` 与别名重命名
+
+通过 `@c` 消除多重关键字冗余，直接对应 C-ABI 调用约定与外部链接：
+
 ```typescript
-// 单个外部 C 函数声明
+// 1. 单个外部 C 函数声明（无别名）
 @c fn getpid(): i32;
 
-// 带别名的 C 库符号重命名
-@c("abs") fn c_abs(n: i32): i32;
+// 2. 带别名的 C 库符号重命名：C 符号原名为 phr_parse_request，在 CP 中重命名为 parse_http_request
+@c("phr_parse_request")
+fn parse_http_request(
+    buf: cstr,
+    len: usize,
+    method: *cstr!,
+    method_len: *usize!,
+    path: *cstr!,
+    path_len: *usize!,
+    minor_version: *i32!,
+    headers: [*]phr_header!,
+    num_headers: *usize!,
+    last_len: usize,
+): i32;
 
-// 批量 C 符号声明块
+// 3. 批量 C 符号声明块 @c { ... }
 @c {
     fn malloc(size: usize): *any!;
-    fn free(ptr: *any!): void;
+    fn free(ptr: *any!?): void;
+    fn us_create_loop(hint: *any!?, wakeup_cb: *any!?, pre_cb: *any!?, post_cb: *any!?, ext_size: u32): *us_loop_t!?;
+    fn us_loop_free(loop: *us_loop_t!?): void;
 }
 
-// 导出为 C ABI 函数供宿主或外部链接
+// 4. 导出为 C-ABI 函数供外部或宿主链接
 @c export fn cp_add_three(x: i32): i32 {
     return x + 3;
 }
 ```
 
-#### 2. C 函数指针类型
-在虚表（VTable）或回调参数中，支持携带 `@c` 调用约定的函数签名类型：
+#### 2. C 内存布局结构体与不透明类型声明
+
+与 C 库交互时，数据布局必须与 C 原生 ABI 严格一致，CP 提供原生的 `@extern struct` 与 `@opaque struct`：
+
 ```typescript
-struct VTable {
-    on_data: (@c fn(ctx: *any!, code: i32): void)?,
-    on_close: @c fn(code: i32): void,
+// 1. 声明严格遵循 C ABI 内存布局的外部结构体（直接发射为 extern struct）
+@c struct phr_header {
+    name: cstr,
+    name_len: usize,
+    value: cstr,
+    value_len: usize,
 }
+
+// 2. 声明 C 内部隐藏不透明句柄类型（直接发射为 opaque {}）
+@opaque struct us_loop_t {}
 ```
 
-#### 3. C 原生指针体系映射
-- `cstr`：只读以 `\0` 结尾的 C 字符串指针，映射至底层 `[*:0]const u8`。支持 `.len` 属性获取实际字符长度，可无开销转换为 `string`。
-- `[*]T!`：未定长连续数组多项裸指针，映射至 Zig 原生 `[*]T`。支持下标索引 `ptr[i]` 与切片操作 `ptr[start..end]`。
-- `*any!`：通用非类型化裸指针，映射至 `*anyopaque`。
-- `*T!` 安全约束：单项裸指针代表单一对象实例，编译期拦截加减指针算术操作（如 `p + 1` 触发编译期拦截：`Cannot perform pointer arithmetic on single-item pointer '*T!'; use '[*]T!' instead`）。
+#### 3. C 原生指针体系映射与安全铁律
+
+CP 设计了一套与 C/Zig 物理 ABI 100% 对齐的 unsafe 裸指针体系，且严格遵循纯后缀链式修饰：
+
+| CP 裸指针类型 | 底层物理映射 (Zig) | 语义说明与安全约束                                                  |
+| :------------ | :----------------- | :------------------------------------------------------------------ |
+| `cstr`        | `[*:0]const u8`    | 以 `\0` 结尾的只读 C 字符串指针。支持 `.len`，可零开销转 `string`   |
+| `cstr?`       | `?[*:0]const u8`   | 可空 C 字符串指针                                                   |
+| `*T!`         | `*T`               | 一级 C 裸指针（仅在 unsafe/FFI 中合法，**严禁指针算术**，杜绝越界） |
+| `**T!`        | `**T`              | 二级 C 裸指针                                                       |
+| `[*]T!`       | `[*]T`             | 未定长连续内存多项指针，支持下标 `ptr[i]` 与切片 `ptr[a..b]`        |
+| `*any!`       | `*anyopaque`       | 通用非类型化裸指针（等价于 C 的 `void*`）                           |
+| `*T!?`        | `?*T`              | 可空一级 C 裸指针（等价于 C 中可为 NULL 的句柄指针）                |
+| `*any!?`      | `?*anyopaque`      | 可空通用非类型化裸指针（等价于 C 的 nullable `void*`）              |
 
 ```typescript
+// 示例：裸指针切片与转换
 let cs: cstr = "hello cp";
 let n: usize = cs.len; // 8
 let s: string = string.from(cs); // "hello cp"
@@ -5191,6 +5458,7 @@ let slice = many[1..3]; // []u8, len = 2
 ### 14.9 物理内存对齐注解 `@align(N)`
 
 支持在结构体/类级别以及字段级别直接指定物理内存字节对齐边界：
+
 ```typescript
 @align(16)
 struct AlignedBlock {
@@ -5204,6 +5472,7 @@ struct AlignedBlock {
 ### 14.10 常量泛型类与类型别名
 
 支持在类/结构体定义中引入常量泛型参数（Const Generics），编译器自动在编译期将其展开为单态化（Monomorphize）特化展开类型，彻底消灭动态类型生成逃逸舱：
+
 ```typescript
 class App<const ssl: bool> {
     is_ssl: bool = ssl;
@@ -5226,6 +5495,7 @@ let ssl_app: AppSSL = AppSSL{};
 ### 14.11 编译期反射探测与 `@if` 表达式
 
 支持在编译期直接探测类型的方法与字段存在性，配合 `@if` 编译期三元表达式完成静态跳板函数与适配：
+
 ```typescript
 // 探测类型是否存在指定方法或字段
 let has_open = reflect.hasMethod(Handler, "onOpen"); // true / false
@@ -5241,27 +5511,30 @@ let branch = @if (reflect.hasMethod(Handler, "onOpen")) 100 else 200;
 ### 14.12 枚举内省与双向类型转换
 
 #### 1. 内置内省属性
+
 枚举变量或变体直接支持 `.name` 与 `.value`：
+
 - `e.name`：获取变体的字面量名称字符串（发射为 Zig `@tagName(e)`）。
 - `e.value`：获取枚举的数值（发射为 Zig `@intFromEnum(e)`）。
 
 #### 2. 枚举双向转换
+
 - 数值转枚举：支持构造器语法 `TaskState(2)` 或强制转换 `1 as TaskState`。
 - 字符串转枚举：支持静态方法 `TaskState.fromName("Idle")`，返回可选类型 `TaskState?`。
 
 ```typescript
 enum TaskState {
-    Idle = 0,
-    Running = 1,
-    Completed = 2,
+  Idle = 0,
+  Running = 1,
+  Completed = 2,
 }
 
 let st = TaskState.Running;
-let name = st.name;   // "Running"
-let val = st.value;   // 1
+let name = st.name; // "Running"
+let val = st.value; // 1
 
-let from_int = TaskState(2);             // TaskState.Completed
-let from_as = 1 as TaskState;            // TaskState.Running
+let from_int = TaskState(2); // TaskState.Completed
+let from_as = 1 as TaskState; // TaskState.Running
 let from_str = TaskState.fromName("Idle"); // ?TaskState, .? 为 TaskState.Idle
 ```
 
@@ -5270,11 +5543,12 @@ let from_str = TaskState.fromName("Idle"); // ?TaskState, .? 为 TaskState.Idle
 ### 14.13 多态字符串转换 `string.from(val)`
 
 提供通用的强类型多态字符串转换原语 `string.from(...)`，统一处理 `cstr`、`enum`、`bool`、数字与带 `toString()` 对象的字符串化转换：
+
 ```typescript
 let s1 = string.from(TaskState.Running); // "Running"
-let s2 = string.from(cs);                // cstr -> string
-let s3 = string.from(true);              // "true"
-let s4 = string.from(12345);             // "12345"
+let s2 = string.from(cs); // cstr -> string
+let s3 = string.from(true); // "true"
+let s4 = string.from(12345); // "12345"
 ```
 
 ---
@@ -5363,7 +5637,466 @@ let s4 = string.from(12345);             // "12345"
 > 为未来扩展预留，现在不实现，但同样属于保留字，不能作为标识符
 
 - `yield`
-- `where`
+
+---
+
+## 十六、高性能 C 网络反应堆集成：`uSockets` 与 `picohttpparser` 原生架构 (High-Performance C Network Integration)
+
+### 16.1 架构愿景与 Bun.js 级性能底座
+
+CP 语言定位于专为 AI Agent 与海量并发设计的高性能系统语言。在网络 I/O 底层，CP 借鉴了 Bun.js 的极致性能哲学：**废弃庞大笨拙的通用网络抽象，直接在底层集成最顶级的工业级 C 语言网络反应堆与协议解析内核**：
+
+1. **`uSockets`**：超轻量、极速异步事件循环库（uWebSockets 底层内核，也是 Bun.js 网络驱动的核心）。单机可支撑百万级长连接，内存开销比 libuv 更轻、延迟更低；
+2. **`picohttpparser`**：基于 SIMD 向量化指令优化的超高速 HTTP/1.x 协议解析器，单核每秒解析超百万次 HTTP 请求，零动态内存分配（Zero Allocation）。
+
+```mermaid
+flowchart TD
+    subgraph CP_App_Layer ["CP 业务与 Agent 层"]
+        CP_Agent["AI Agent / HTTP Service"]
+    end
+
+    subgraph CP_FFI_Bridge ["CP 原生 C-ABI 映射层 (零抽象开销)"]
+        AtC["@c('phr_parse_request') & @c { ... }"]
+        Pointers["*T! / [*]T! / cstr / *any!? (纯后缀裸指针)"]
+        ExternStruct["@extern struct phr_header & @opaque struct us_loop_t"]
+    end
+
+    subgraph Native_C_Core ["底层 C 原生静态库 (zig-out/lib/libusockets.a)"]
+        uSockets["uSockets (Loop / Socket / Epoll)"]
+        PicoHTTP["picohttpparser (SIMD HTTP Parser)"]
+        Stubs["cp_stubs.c (Bun 原生适配桩)"]
+    end
+
+    CP_Agent --> CP_FFI_Bridge
+    CP_FFI_Bridge --> Native_C_Core
+```
+
+---
+
+### 16.2 Zig 0.17 现代构建管线：根目录 `build.zig` 配置规范
+
+为了让 Zig 构建系统完全掌控底层 C 编译管线，CP 在项目根目录下提供现代化的 `build.zig`，适配 Zig 0.17 的 Module 构建规范：
+
+```zig
+// build.zig (放置在项目根目录)
+const std = @import("std");
+
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+
+    // 1. 创建底层 C 静态模块
+    const usockets_mod = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+    });
+    usockets_mod.addIncludePath(b.path("vendor/usockets/src"));
+    usockets_mod.addIncludePath(b.path("vendor/picohttpparser"));
+    usockets_mod.addCSourceFiles(.{
+        .files = &.{
+            "vendor/usockets/src/bsd.c",
+            "vendor/usockets/src/context.c",
+            "vendor/usockets/src/loop.c",
+            "vendor/usockets/src/socket.c",
+            "vendor/usockets/src/eventing/epoll_kqueue.c",
+            "vendor/usockets/src/cp_stubs.c", // 消除 Bun 运行时钩子未定义符号
+            "vendor/picohttpparser/picohttpparser.c",
+        },
+        .flags = &.{
+            "-DLIBUS_NO_SSL",
+            "-O3",
+            "-fno-exceptions",
+        },
+    });
+
+    // 2. 构建并安装静态库 libusockets.a 与 C 头文件
+    const lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = "usockets",
+        .root_module = usockets_mod,
+    });
+    lib.linkLibC();
+    b.installArtifact(lib);
+    b.installFile("vendor/usockets/src/libusockets.h", "include/libusockets.h");
+    b.installFile("vendor/picohttpparser/picohttpparser.h", "include/picohttpparser.h");
+
+    // 3. 支持 -Dcp-entry 快速编译运行 CP 转译产物
+    const cp_entry = b.option([]const u8, "cp-entry", "Path to CP transpiled Zig entry file");
+    if (cp_entry) |entry_path| {
+        const exe_mod = b.createModule(.{
+            .root_source_file = b.path(entry_path),
+            .target = target,
+            .optimize = optimize,
+        });
+        exe_mod.addIncludePath(b.path("vendor/usockets/src"));
+        exe_mod.addIncludePath(b.path("vendor/picohttpparser"));
+
+        const exe = b.addExecutable(.{
+            .name = "cp_app",
+            .root_module = exe_mod,
+        });
+        exe.linkLibrary(lib);
+        exe.linkLibC();
+
+        const run_cmd = b.addRunArtifact(exe);
+        if (b.args) |args| run_cmd.addArgs(args);
+        const run_step = b.step("run", "Run the CP executable with uSockets");
+        run_step.dependOn(&run_cmd.step);
+    }
+}
+```
+
+---
+
+### 16.3 CP 原生 `@c` 导入规范（彻底废除 `zig {}` 声明外部 C 符号）
+
+> [!IMPORTANT]
+> **语法规范铁律**：
+> 1. **严禁在 CP 中使用 `zig {}` 声明外部 C 符号与函数原型**；
+> 2. **严禁使用 `__zig__`**；
+> 3. 所有 C 函数原型必须使用 CP 原生 `@c`、`@c("alias")` 或批量 `@c { ... }` 导入；
+> 4. 使用 `@c struct`（或语义等价的 `@fix struct`，向下兼容 `@extern struct`）保证与 C 物理结构体对齐，使用 `@opaque struct` 保证不透明句柄安全；
+> 5. 统一使用 CP unsafe 裸指针（`*T!`、`[*]T!`、`cstr`、`*any!`、`*T!?`、`*any!?`）完成精准映射。
+
+#### 1. 结构体与 C 不透明类型声明
+
+- **`@c struct`**：直观声明该结构体严格遵循 C-ABI 内存物理对齐规则（映射为 Zig 的 `extern struct`）；
+- **`@fix struct`**：等价别名，突出“固定内存排布、禁止重排（Fixed Layout）”语义；
+- **`@extern struct`**：完全保留向下兼容；
+- **`@opaque struct`**：用于声明 C 原生指针所指向的无大小不透明结构体（映射为 Zig 的 `opaque {}`）。
+
+```typescript
+// C 内存对齐外部结构体（推荐使用 @c struct 或 @fix struct）
+@c struct phr_header {
+    name: cstr,
+    name_len: usize,
+    value: cstr,
+    value_len: usize,
+}
+
+// C 不透明事件循环句柄 (opaque {})
+@opaque struct us_loop_t {}
+```
+
+#### 2. C 函数原生导入与符号重命名
+
+```typescript
+// 1. 通过 @c("alias") 导入并赋予 CP 风格别名：
+// C 链接符号为 phr_parse_request，在 CP 中直接调用 phr_parse_req
+@c("phr_parse_request")
+fn phr_parse_req(
+    buf: cstr,
+    len: usize,
+    method: *cstr!,
+    method_len: *usize!,
+    path: *cstr!,
+    path_len: *usize!,
+    minor_version: *i32!,
+    headers: [*]phr_header!,
+    num_headers: *usize!,
+    last_len: usize,
+): i32;
+
+// 2. 通过 @c { ... } 批量导入 C 函数原型（参数使用后缀可选裸指针 *T!?）
+@c {
+    fn us_create_loop(
+        hint: *any!?,
+        wakeup_cb: *any!?,
+        pre_cb: *any!?,
+        post_cb: *any!?,
+        ext_size: u32,
+    ): *us_loop_t!?;
+
+    fn us_loop_free(loop: *us_loop_t!?): void;
+}
+```
+
+---
+
+### 16.4 工业级端到端集成测试（`cap/test/test_usockets_picohttp.cp`）
+
+```typescript
+// cap/test/test_usockets_picohttp.cp
+// 端到端验证 CP 原生 @c / @c("alias") 与 unsafe 裸指针互操作体系
+
+@c struct phr_header {
+    name: cstr,
+    name_len: usize,
+    value: cstr,
+    value_len: usize,
+}
+
+@opaque struct us_loop_t {}
+
+@c("phr_parse_request")
+fn phr_parse_req(
+    buf: cstr,
+    len: usize,
+    method: *cstr!,
+    method_len: *usize!,
+    path: *cstr!,
+    path_len: *usize!,
+    minor_version: *i32!,
+    headers: [*]phr_header!,
+    num_headers: *usize!,
+    last_len: usize,
+): i32;
+
+@c {
+    fn us_create_loop(
+        hint: *any!?,
+        wakeup_cb: *any!?,
+        pre_cb: *any!?,
+        post_cb: *any!?,
+        ext_size: u32,
+    ): *us_loop_t!?;
+
+    fn us_loop_free(loop: *us_loop_t!?): void;
+}
+
+fn test_pico_http(): void {
+    @print("Testing picohttpparser HTTP parsing in pure CP via @c(\"phr_parse_request\")...");
+    let req: cstr = "POST /api/v1/agent/chat HTTP/1.1\r\nHost: 127.0.0.1:8080\r\nContent-Type: application/json\r\nContent-Length: 18\r\n\r\n{\"message\":\"ping\"}";
+    let req_len: usize = req.len;
+
+    unsafe {
+        let method: cstr = "";
+        let method_len: usize = 0;
+        let path: cstr = "";
+        let path_len: usize = 0;
+        let minor_version: i32 = 0;
+        let header_buf: [16]phr_header = undefined;
+        let num_headers: usize = 16;
+
+        let consumed = phr_parse_req(
+            req,
+            req_len,
+            *method!,
+            *method_len!,
+            *path!,
+            *path_len!,
+            *minor_version!,
+            header_buf as [*]phr_header!,
+            *num_headers!,
+            0,
+        );
+
+        if (consumed > 0) {
+            @print("  ✓ Parse success! Consumed: {d} bytes", consumed);
+            @print("  ✓ Method: {s}", method[0..method_len]);
+            @print("  ✓ Path: {s}", path[0..path_len]);
+            @print("  ✓ Version: HTTP/1.{d}", minor_version);
+            @print("  ✓ Headers parsed: {d}", num_headers);
+            let h0 = header_buf[0];
+            @print("  ✓ Header[0]: {s}: {s}", h0.name[0..h0.name_len], h0.value[0..h0.value_len]);
+        } else {
+            @panic("phr_parse_req failed");
+        }
+    }
+}
+
+fn test_usockets_event_loop(): void {
+    @print("Testing uSockets Event Loop in pure CP via @c block...");
+    let loop = us_create_loop(null, null, null, null, 0);
+    if (loop != null) {
+        @print("  ✓ Native uSockets event loop created successfully!");
+        us_loop_free(loop);
+        @print("  ✓ Native uSockets event loop freed successfully!");
+    } else {
+        @panic("us_create_loop returned null");
+    }
+}
+
+export fn main(): void {
+    test_pico_http();
+    test_usockets_event_loop();
+    @print("ALL PURE CP USOCKETS & PICOHTTPPARSER TESTS PASSED!");
+}
+```
+
+#### 编译与执行验证
+
+```bash
+# 步骤 1：使用 CP 编译器转译为 Zig
+cpc compile cap/test/test_usockets_picohttp.cp --output .cap/zig/cap/test/test_usockets_picohttp.zig
+
+# 步骤 2：通过 Zig 根构建管线内联静态库编译并执行
+zig build -Dcp-entry=.cap/zig/cap/test/test_usockets_picohttp.zig run
+```
+
+---
+
+### 16.5 纯 CP 零 Unsafe 架构：面向对象分层封装（Zero-Unsafe Architecture）
+
+在底层系统编程中，直接暴露裸指针和 `unsafe {}` 块不仅侵蚀语言的安全保证，还会增加业务团队的心智负担。借鉴 Bun 项目底层 `uws_sys` 的成熟工程实践，CP 推荐采用**四层架构**实现纯 Safe 的网络系统构建：
+
+```mermaid
+flowchart TD
+    A["① C-ABI 映射层 (@c, @c struct, @opaque)"] --> B["② 局部蹦床适配层 (Trampoline Adapters)"]
+    B --> C["③ 面向对象 Safe 封装层 (class App, class WebSocket)"]
+    C --> D["④ 纯 Safe 业务与 Agent 逻辑层 (100% 零 unsafe)"]
+```
+
+1. **第 ① 层：C-ABI 映射层**：
+   通过 `@c { ... }` 导入纯净的 C 函数原型；通过 `@opaque struct` 声明不透明外部句柄（如 `us_loop_t`、`us_socket_t`）；通过 `@c struct` / `@fix struct`（兼容 `@extern struct`）精确映射 C 结构体内存对齐。
+2. **第 ② 层：局部蹦床适配层（Trampoline Adapters）**：
+   在 C 回调（C Callback）处定义轻量私有静态适配器，将 C 风格的裸指针参数转换为 CP 强类型参数，集中处理指针边界判定。
+3. **第 ③ 层：面向对象 Safe 封装层**：
+   将底层句柄私有封装进安全的 `class`，例如 `class WebSocket` 或 `class HttpServer`。资源获取与释放绑定到类的生命周期，对外部暴露纯 Safe 的事件回调与方法。
+4. **第 ④ 层：业务与 Agent 应用层**：
+   业务与 AI Agent 逻辑只需使用标准的面向对象 API，在整个上层应用开发中 **100% 零 `unsafe {}` 块**，享受绝对的内存安全与舒适编码体验。
+
+#### 16.5.1 局部蹦床函数（Trampoline）深度剖析：为何能消除 `unsafe`？
+
+许多开发者常困惑：“底层明明是 C 原生回调与裸指针，为什么放进局部结构体中就能做到纯 Safe？”
+
+##### 1. 痛点：C 语言回调与高级闭包的物理矛盾
+- C 语言的事件循环（例如 uSockets 的 `on_data` 回调）底层仅接受一个**纯函数指针（`void (*)(us_socket_t*, char*, int)`）**；
+- 高级语言中的回调通常是**带有外部上下文环境的动态闭包（Fat Pointer）**。C 语言根本无法识别闭包的内存结构，直接将动态闭包传给 C 必然崩溃。
+
+##### 2. 解决方案：局部结构体充当“安全隔离舱”
+在底层封装库内部，我们在函数内声明一个无实例的局部结构体，并将其静态方法冠以 `@c` 属性：
+
+```typescript
+// 位于底层网络库封装层内部（对业务开发者完全不可见）：
+struct Trampoline {
+    @c pub fn on_socket_data(socket: *us_socket_t!, buf: [*]u8!, len: usize) void {
+        // 1. C 语言通过 user_data 通道将绑定的面向对象实例安全还回
+        let server = us_socket_context(socket) as *HttpServer!;
+        
+        // 2. 原地将裸字节指针重构为 Safe 的 string 切片（零拷贝）
+        let chunk: string = buf[0..len];
+        
+        // 3. 分发给 Safe 的面向对象实例事件处理器
+        server.dispatch_data(chunk);
+    }
+}
+```
+
+##### 3. 为何业务层 100% 零 `unsafe`？
+- **纯原生 C 签名**：`Trampoline.on_socket_data` 是一个不携带任何外部捕获环境的纯原生 C 函数指针，其物理签名与 C-ABI 完全契合；
+- **安全隔离封口**：所有的裸指针类型转换均在局部结构体内部完成封闭，业务开发者最终调用的 API 是完全受所有权和借用检查保护的 `server.on("data", (chunk: string) => { ... })`；
+- **架构哲学**：**“底层封装库在隔离舱内负重前行，上层业务逻辑岁月静好”**。
+
+---
+
+### 16.6 C 类型透明兼容与底层栈缓冲区安全规范
+
+为了在维持严格内存安全的前提下，提供与原生 C 库媲美的极限性能与易用性，CP 编译器在底层放行了以下语义与代码生成模式：
+
+#### 16.6.1 `cstr` 与 `string` 零拷贝转换物理真相
+
+> **物理本质**：UTF-8 编码的底层物理格式，本身就是无符号字节序列（`u8 bytes`）。
+
+许多开发者以为 UTF-8 类似于 UTF-16 或某种紧凑压缩包，需要“解压转换”。但在物理内存中：
+1. **ASCII 字符（0~127，如 HTTP 动词 `GET`、`POST`、标头字段）**：
+   其 UTF-8 编码值与传统 ASCII **100% 绝对一致**，每个字符占用 1 字节（`0x00`~`0x7F`），高位固定为 0；
+2. **多字节字符（如中文“你好”）**：
+   在 UTF-8 中被编码为 2 到 4 个字节，每个字节的值均在 `128`~`255`（`0x80`~`0xFF`）之间；
+3. **物理铁律：多字节 UTF-8 序列中绝对永远不可能出现 `0x00`（NUL 字节）！**
+4. **C 语言字符串对文本的真实处理方式**：
+   C 语言的 `const char*` 根本不管也不校验字符编码。在 C 语言看来，`char` 就是裸字节（byte），C 语言唯一认定的规则是：**从首地址向后顺序扫描，直到遇到数值为 `0` 的字节（`0x00`，即 `\0`）为止**。
+   因为 UTF-8 的所有字符字节均大于 0，直接把 UTF-8 字节流传给 C 语言，C 语言不仅不会提前截断，还能原封不动地进行网络发送与哈希计算。
+
+##### 零拷贝转换机制：
+- **CP `string` -> C `cstr`（零开销传参）**：
+  CP 字符串字面量（如 `"POST /api/chat HTTP/1.1\r\n"`）存放在二进制文件的 `.rodata` 只读数据段中，末尾天然自带 `\0` 字节。向 C 函数传递时，编译器底层直接传递其首地址指针（`.ptr`），耗时 0 纳秒，拷贝 0 字节；
+- **C `cstr` -> CP `string`（零开销重构）**：
+  当 C 函数返回 `(ptr, len)`（如 picohttpparser 解析出的 method、path），CP 直接通过内存切片语法 `ptr[0..len]` 原地组装为双字长胖指针 `{ ptr, len }`。该操作仅在 CPU 寄存器中完成赋值，**底层指向的依然是 C 缓冲区同一块物理内存**，拷贝 0 字节数据！
+
+#### 16.6.2 未初始化栈输出缓冲区传递（Stack Output Buffer Pattern）
+
+许多高性能 C 库（如 `picohttpparser`）要求调用者在栈上预分配一块数组内存作为输出缓冲区（Output Parameter）：
+
+```typescript
+// 1. 在栈上声明未初始化的定长数组缓冲区
+let header_buf: [16]phr_header = undefined;
+let num_headers: usize = 16;
+
+// 2. 通过 header_buf as [*]phr_header! 强转为多项裸指针传递给 C
+let consumed = phr_parse_req(
+    req, req_len,
+    *method!, *method_len!,
+    *path!, *path_len!,
+    *minor_version!,
+    header_buf as [*]phr_header!,
+    *num_headers!,
+    0,
+);
+```
+
+CP 编译器的未初始化变量检查器（Definite Assignment Checker）针对此类强制转换为 `[*]T!` 的标识符进行了特殊放行识别：**允许作为未初始化底层 C 输出缓冲安全传参，避免了运行期强制填充零字节带来的多余 CPU 内存开销**。
+
+#### 16.6.3 统一后缀裸指针与可选裸指针规范表
+
+| 指针类型  | 含义与底层映射                        | 允许的操作与适用场景                          |
+| :-------- | :------------------------------------ | :-------------------------------------------- |
+| `*T!`     | 确定非空单对象裸指针 (`*T`)           | 必须在 `unsafe` 中解引用或赋值，不可为 null   |
+| `[*]T!`   | 确定非空多元素连续缓冲指针 (`[*]T`)   | 支持索引访问 `ptr[i]` 与切片操作              |
+| `*any!`   | 确定非空泛型不透明指针 (`*anyopaque`) | 等价于 C 的 `void*`                           |
+| `*T!?`    | 后选可空裸指针 (`?*T`)                | 可赋值为 `null`；经 `if != null` 收窄为 `*T!` |
+| `*any!?`  | 后选可空泛型指针 (`?*anyopaque`)      | 适合接受可选 context 的 C API 回调参数        |
+| `cstr`    | C 风格以 0 结尾字符串 (`[*:0]const u8`)| 直接与 C 字符串接口无缝对接                   |
+
+---
+
+### 16.7 CP 标准库网络与密码学生态拓扑规划（自主可控 cap:* 体系）
+
+为了让 CP 具备完整的网络通信能力（底层 I/O、TLS 加密、HTTP 解析、WebSocket、高并发事件循环），同时摆脱对 Bun 内部私有命名空间（如 `bun.BoringSSL`、`bun.sha`、`bun.uws`）的耦合，CP 标准库（`cp/lib`）设立了以下四大网络与密码学顶层子系统：
+
+```mermaid
+flowchart TD
+    subgraph CP_Stdlib ["CP 官方原生标准库体系 (cap:*)"]
+        subgraph CryptoModule ["cap:crypto (密码与传输层安全)"]
+            BoringSSL["lib/cap/crypto/boringssl.cp<br/>(BoringSSL C 原生绑定)"]
+            Hash["lib/cap/crypto/hash.cp<br/>(SHA-1/256/512 / HMAC)"]
+            TLS["lib/cap/crypto/tls.cp<br/>(TLSContext / TLSSocket)"]
+        end
+        subgraph NetModule ["cap:net (网络驱动与事件循环)"]
+            Loop["lib/cap/net/loop.cp<br/>(uSockets EventLoop 封装)"]
+            Socket["lib/cap/net/socket.cp<br/>(Non-blocking Socket / TcpServer)"]
+        end
+        subgraph HttpModule ["cap:http (高性能超文本服务)"]
+            Pico["lib/cap/http/parser.cp<br/>(picohttpparser 极速解析)"]
+            HttpServ["lib/cap/http/server.cp<br/>(HttpServer / Request / Response)"]
+        end
+        subgraph WsModule ["cap:ws (实时双向通信与广播)"]
+            WS["lib/cap/ws/websocket.cp<br/>(WebSocketClient / WebSocketServer / PubSub)"]
+        end
+    end
+```
+
+#### 16.7.1 模块职责与目录结构矩阵
+
+| 导入命名空间   | 物理源码路径          | 底层依赖 C/Zig 引擎         | 职责与对外暴露核心能力                                                      |
+| :------------- | :-------------------- | :-------------------------- | :-------------------------------------------------------------------------- |
+| **`cap:crypto`** | `lib/cap/crypto/`     | `vendor/boringssl`          | 提供 `SHA256`、`Hmac`、数字签名，以及面向对象的 `TLSContext` 与 `TLSSocket` 证书加密通道 |
+| **`cap:net`**    | `lib/cap/net/`        | `vendor/uSockets`           | 提供原生异步事件驱动 `EventLoop`、非阻塞 `Socket`、`TcpServer` 与 DNS 解析   |
+| **`cap:http`**   | `lib/cap/http/`       | `vendor/picohttpparser` + uSockets | 提供微秒级零拷贝 HTTP 解析器、流式 `HttpServer`、`Request` 与 `Response` 封装 |
+| **`cap:ws`**     | `lib/cap/ws/`         | `vendor/uSockets`           | 提供符合 RFC 6455 规范的 `WebSocket` 服务端/客户端，支持 Pub/Sub 主题广播  |
+
+#### 16.7.2 纯 Safe 业务调用体验示例
+
+上层业务开发者与 AI Agent 无需关心底层 uSockets 裸指针或 C 语言回调，直接享受 100% 纯 Safe 的现代 TypeScript 风格编程体验：
+
+```typescript
+import { HttpServer, Request, Response } from "cap:http";
+import { SHA256 } from "cap:crypto";
+
+const server = new HttpServer({ port: 8080 });
+
+server.post("/api/v1/agent/chat", (req: Request, res: Response) => {
+    let body = req.body_string();
+    let digest = SHA256.digest(body);
+    res.json({
+        status: "ok",
+        hash: digest.to_hex(),
+        reply: "Hello from Pure Safe CP!"
+    });
+});
+
+server.listen();
+```
 
 ---
 

@@ -53,11 +53,19 @@ fn main() {
         modifyViaDoublePtr(pp, 45);
         @print("User age after modifyViaDoublePtr: {d}", user.age);
 
-        // 3. Scalar raw pointer (*num!)
+        // 3. Scalar raw pointer (*num!, &num as *i32!, *num as *i32!)
         let mut num: i32 = 100;
         let pnum: *i32! = *num!;
         setScalar(pnum, 200);
         @print("Scalar num after setScalar: {d}", num);
+
+        let p_from_ref: *i32! = &num as *i32!;
+        setScalar(p_from_ref, 300);
+        @print("Scalar num after &num as *i32!: {d}", num);
+
+        let p_from_mut: *i32! = *num as *i32!;
+        setScalar(p_from_mut, 400);
+        @print("Scalar num after *num as *i32!: {d}", num);
 
         // 4. Fallible raw pointer return
         let res = getFalliblePtr(false);
