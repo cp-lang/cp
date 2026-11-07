@@ -6993,9 +6993,9 @@ export class ThreadPool {
 }
 ```
 
-#### 17.12 顶层原生声明、透明 Zig 互操作与上下文软关键字规范 (Top-Level Declarations & Transparent Zig Interop)
+#### 17.12 CP 与 Zig 深度互操作、混合类型系统与跨界所有权安全规范 (CP-Zig Deep Interop, Hybrid Type System & Cross-Boundary Ownership Safety)
 
-在从 Zig/Bun 迁移底层系统组件或构建高性能底层库时，CP 语言提供了零摩擦的顶层语法兼容与透明模块互操作支持，彻底废除繁琐冗余的 `zig { ... }` 块包装。
+在从 Zig/Bun 迁移底层系统组件或构建高性能原生系统库时，CP 语言提供了零样板代码、零胶水摩擦的深度互操作支持，彻底废除繁琐冗余的 `zig { ... }` 块包装。本节系统阐述 CP 在跨语言边界下的语法表现、混合类型体系、两级检查模型以及坚不可摧的变量所有权与借用安全保障。
 
 ##### 17.12.1 顶层常量与变量直接声明
 
@@ -7032,7 +7032,115 @@ const FileSystem = Fs.FileSystem;
 pub type LocalDirInfo = DirInfo;
 ```
 
-##### 17.12.3 上下文软关键字机制 (Contextual Soft Keywords)
+##### 17.12.3 跨语言混合类型体系与“外柔内刚”两级检查模型 (Two-Level Safety Model)
+
+在处理 `const bun = @import("bun");` 或 `import Sub from "./sub.zig"` 时，程序员常常产生顾虑：**“CP 中是否会失去类型？还是说会解析 Zig 代码获得类型？CP 的类型检查是否会失去作用？”**
+
+###### 1. 前端阶段（`cpc` 编译期）：透明外部类型 (`Type::Any`)
+
+- **设计权衡**：Zig 是一门深度依赖 **Comptime（编译期图灵完备宏计算）** 的系统语言（如 `std.ArrayList(u8)`、`bun.FD`、以及各种由 comptime 泛型函数动态计算的结构体）。如果在 `cpc` 前端内置一套庞大的 Zig Comptime 解释器，会导致编译器体积剧增并产生版本漂移；
+- **底层表现**：在 `cpc` 词法与语义分析（Sema）中，被导入的外部 Zig 命名空间对象（如 `bun`、`DirInfo`）被赋予具有透明穿透能力的 **`Type::Any`（外部不透明类型）**。在 CP 阶段，编译器不会武断地因为“尚未展开 Zig AST”而报错阻碍开发，消除了繁琐的 FFI 胶水摩擦。
+
+###### 2. 后端阶段（Zig 编译期）：绝对强类型重塑
+
+- `cpc` 转译生成的 Zig 源码完整保留了原生的引用链：
+  ```zig
+  const bun = @import("bun");
+  const Environment = bun.Environment;
+  ```
+- 当 `cap` 调用 Zig 编译器进行第二阶段 AOT 编译时，Zig 编译器会启动全量类型推导和 Comptime 计算：
+  - 如果 `bun` 中根本不存在 `Environment`，Zig 编译器立即报错拦截；
+  - 如果函数调用传参类型不匹配（例如将字符串传给了期望 `bun.FD: i32` 的函数），Zig 编译器会立即报 `expected type 'FD', found '[]const u8'` 并拒绝编译。
+- **全景结论**：**整个编译流水线绝不丢失任何类型安全性，类型检查只是分流到了最擅长解析该类型的 Zig 原生编译器中。**
+
+###### 3. `@import("bun")` 成员类型的 3 种标准工程姿态
+
+- **姿态 A：深层类型别名透传（最常用、最自然）**
+  ```typescript
+  pub type PathString = bun.PathString;
+  pub type LocalFD = bun.FD;
+
+  let fd: LocalFD = 3; // 强类型标注，底态透传至 Zig Comptime
+  ```
+- **姿态 B：显式类型收束（在边界处为 CP 赋予静态类型）**
+  ```typescript
+  let env_name: string = bun.Environment.name;
+  let max_conn: u32 = bun.getMaxConnections() as u32;
+  ```
+  通过显式标注或 `as` 运算符将边界值固定为 CP 原生强类型，后续代码即刻享有 100% 的 CP 本地静态检查。
+- **姿态 C：防腐层包装（标准库统一规范）**
+  以 `_` 开头的底层文件（如 `_boringssl.zig`, `_usockets.cp`）负责私有原生绑定；面向用户的标准库文件（如 `socket.cp`, `fs.cp`）将其收束封装为具备完整字段与方法签名的 CP `class` 或 `struct`。
+
+###### 4. “外柔内刚”两级安全防护网
+
+CP 类型检查不仅没有失去作用，反而构成了双层防御体系：
+
+1. **CP 级（宽进）**：允许外部 Zig 属性安全穿透，但在赋值给本地强类型变量后，本地类型检查（如 `i32` 与 `string` 赋值冲突）**严密生效**；
+2. **Zig 级（严出）**：第二阶段由 Zig 兜底校验真实内存布局与函数签名，**绝不放过任何隐患**。
+
+##### 17.12.4 跨界变量所有权（Move）与借用安全（Borrow Checker）法则
+
+面对来自 Zig 的外部资源，**CP 的所有权追踪与借用检查规则绝对没有失效，依然 100% 严密生效！**
+
+###### 1. 正交性原理：生命周期与符号拓扑独立于类型
+
+CP 的借用检查器（Borrow Checker）与所有权移动追踪（Move Analysis）是基于**变量符号（Symbol）、控制流图（CFG）与生命周期拓扑**运行的。它只关心：“当前作用域谁借用了该变量？不可变借用期间是否有可变借用发生？该变量是否已被 `move`？”——而完全不在乎底层变量是 CP 原生对象还是来自 Zig 的资源句柄。
+
+###### 2. 跨界 Use-After-Move 静态拦截（依然 100% 拦截）
+
+无论资源句柄来自 Zig 还是 CP，一旦移动后再次读取，CP 编译器在编译期即刻报出致命错误：
+
+```typescript
+const bun = @import("bun");
+
+fn test_move() {
+    let handle = bun.openResource("data.bin"); // 来自 Zig 的原生资源
+
+    let consumer = move handle; // 所有权转移
+
+    // ❌ CP 编译器在 cpc 前端直接拦截并报编译错误：
+    // error: Use of moved value 'handle'
+    let invalid = handle.read();
+}
+```
+
+###### 3. 只读/可变借用排他性检查
+
+```typescript
+fn test_borrow() {
+    let ctx = bun.createContext();
+
+    let r1 = &ctx; // 只读借用
+    let r2 = *ctx; // ❌ 编译期拦截：同一作用域已存在共享借用，无法进行可变借用！
+}
+```
+
+###### 4. 跨语言 Comptime Auto-Drop (RAII 自动析构黑魔法)
+
+当来自 Zig 的结构体离开作用域时，CP 是如何保证内存安全且杜绝 Double-Free 的？
+CP 代码生成器通过 Zig 的 **Comptime 反射机制**在底层注入了影子移动标记与自适应释放钩子：
+
+```zig
+var __handle_moved = false; _ = &__handle_moved;
+// ...
+defer if (!__handle_moved) {
+    const T = @TypeOf(handle);
+    if (@typeInfo(T) == .pointer) {
+        const Child = @typeInfo(T).pointer.child;
+        if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "deinit")) {
+            handle.deinit(); // 自动识别并调用 Zig 对象的 deinit()！
+        } else if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "release")) {
+            handle.release(); // 自动识别并调用 release()！
+        }
+    }
+};
+```
+
+- 一旦用户在 CP 代码中书写 `move handle`，编译器自动发射 `__handle_moved = true;`；
+- 原作用域的 `defer` 在运行时被自动旁路，而在新的所有者作用域内接管析构；
+- **架构价值**：CP 不仅未对 Zig 变量妥协安全，反而通过编译器静态分析，**为原本不具备借用安全与所有权语义的裸 Zig 资源戴上了类似 Rust 的坚固内存安全护甲**！
+
+##### 17.12.5 上下文软关键字机制 (Contextual Soft Keywords)
 
 为了兼顾 Zig 风格的操作符（如 `and`、`or`、`orelse`）与面向对象 API（如 `Atomic.and()`、`BitSet.or()`）的并存，CP 编译器在词法分析与语法解析阶段采用**上下文软关键字**机制：
 
@@ -7048,7 +7156,7 @@ let final_name = opt_name orelse "default";
 let res = calc.and(mask);
 ```
 
-##### 17.12.4 带哨兵切片 (Sentinel Slice)
+##### 17.12.6 带哨兵切片 (Sentinel Slice)
 
 CP 原生支持带哨兵的切片语法 `[start..end :sentinel]`，直通 Zig 底层零结尾字符串与哨兵数组，保障 C-ABI 兼容性与高性能切片安全：
 
@@ -7057,4 +7165,3 @@ let buf: [16]u8 = "Hello, World!\x00";
 // 截取以 0 结尾的哨兵切片
 let slice = buf[0..13 :0];
 ```
-

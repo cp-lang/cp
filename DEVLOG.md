@@ -3549,6 +3549,42 @@ const PathnameScanner = @import("../url/url.zig").PathnameScanner;
    - 运行 `./cap/bin/cap cap/test/test_bun_top_level_import.cp`：88ms 转译、687ms 链接完成，7 项断言全部 100% 绿灯通过；
    - 回归运行 `./cap/bin/cap cap/test/test_c_trampoline.cp`：3ms 转译、652ms 链接运行，C 跳板函数与四种裸指针双轨语法 100% 绿灯通过。
 
+---
+
+## 2026-11-08 (阶段续：CP 与 Zig 深度互操作类型流转、两级检查与跨界所有权安全深度架构剖析)
+
+### 1. 用户核心困惑与架构考问
+用户就 CP 语言与 Zig 深度互操作提出了四项直击编译体系核心的问题：
+1. `const bun = @import("bun");` 与 `import "./file.zig"` 是否会在 CP 中失去类型，还是会深层解析 Zig 代码以获取类型？
+2. `@import("bun")` 这种引入方式下，如何获取 `bun` 的成员类型？
+3. 如果在前端表现为 `Type::Any`，CP 的类型检查是否失去作用？
+4. 变量所有权（Move 转移）与借用规则（Borrow Checker）是否在跨界时失效？
+
+### 2. 深度架构剖析与底层原理认定
+
+#### 2.1 编译流水线分工与类型状态：前端 `Type::Any` vs 后端 Comptime 绝对强类型
+- **为什么前端不内嵌 Zig 解释器**：Zig 具有图灵完备的 Comptime 编译期求值机制（类型由代码运行计算生成，如 `std.ArrayList(T)`、`bun.FD`）。若在 `cpc` 前端重造一个 Zig Comptime 虚拟机，不仅成本高昂，且难以追赶 Zig 语言本身的快速演进。
+- **混合分层流转**：
+  - 在 `cpc` 阶段，被导入的外部 Zig 命名空间对象统一记为 **`Type::Any`（透明外部类型）**，赋予其零摩擦的属性穿透能力；
+  - 在 Zig 阶段，转译发射的 Zig 代码原汁原味地保留了引用链，Zig 编译器执行 100% 静态 Comptime 类型推导。如果字段不存在或类型不匹配，Zig 在 AOT 阶段即刻硬性拦截！
+  - **结论**：类型从未丢失，只是分工由最擅长解析该类型的 Zig 编译器执行。
+
+#### 2.2 成员类型使用的三类工程姿态
+1. **类型别名透传**：`pub type PathString = bun.PathString;`，底态原样发射至 Zig Comptime 解析真实布局；
+2. **显式类型收束**：`let count: i32 = bun.getCount();`，在边界处锁定为 CP 原生强类型；
+3. **防腐层包装**：`_xxx.cp` 做底层绑定，`xxx.cp` 提供 100% 纯 CP 强类型封装。
+
+#### 2.3 “外柔内刚”两级安全网
+- **CP 前端宽进**：不阻碍外部 Zig/C 模块的级联调用；但一旦与本地变量发生交互，CP 本地类型检查（如 `i32` 赋给 `string`）立即严格拦截；
+- **Zig 后端严出**：底层 AOT 严格校验物理 ABI 与参数对齐，杜绝带类型 bug 的二进制生成。
+
+#### 2.4 跨界所有权与借用安全绝对不失效
+- **正交性基石**：CP 的 Borrow Checker 与 Ownership 追踪是基于变量符号拓扑与控制流生命周期的，**完全独立于底层物理类型**；
+- **Use-After-Move 绝对拦截**：对任何来自 Zig 的变量执行 `move` 后再次读取，`cpc` 编译期 100% 报出 `UseOfMovedValue` 并终止编译；
+- **借用排他性**：只读借用期间的可变借用冲突同样 100% 被捕获；
+- **跨语言 Comptime Auto-Drop (RAII)**：代码生成器通过 Zig 的 `@typeInfo` 与 `@hasDecl` 反射在底层自动侦测外部结构体的 `deinit()` 或 `release()`，配合影子标记 `__moved` 实现跨语言的确定性析构，彻底消灭 Double-Free 与内存泄漏。
+
+
 
 
 

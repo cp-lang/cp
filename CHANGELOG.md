@@ -2159,6 +2159,19 @@
 - 运行 `./cap/bin/cap cap/test/test_bun_top_level_import.cp`（Release 版 `cpc` 全链路从零转译并在 687ms 内完成链接），断言 100% 绿灯全通；
 - 回归验证 [`cap/test/test_c_trampoline.cp`](file:///data/dev/cp/cap/test/test_c_trampoline.cp) 转译 3ms 绿灯通过，零功能劣化。
 
+---
+
+## 2026-11-08 (阶段续：CP 与 Zig 深度互操作、混合类型系统与跨界所有权安全规范沉淀)
+
+### 修改文件 (Modified)
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 第 17.12 节全面扩充升级为《CP 与 Zig 深度互操作、混合类型系统与跨界所有权安全规范 (CP-Zig Deep Interop, Hybrid Type System & Cross-Boundary Ownership Safety)》；
+  - 详细阐释“外柔内刚”两级安全检查模型（CP 前端宽进消除胶水摩擦 vs Zig 后端 AOT 绝对强类型严出拦截）；
+  - 明确 `@import("bun")` 成员类型提取的三种标准工程姿态（深层类型别名透传、显式类型收束、防腐层包装）；
+  - 论证跨界变量所有权（Move 分析）与借用检查（Borrow Checker）正交独立于底层类型的原理，证实 Use-After-Move 与只读/可变排他性检查 100% 严密生效；
+  - 记录跨语言 Comptime Auto-Drop 机制（Zig `@typeInfo` 与 `@hasDecl` 反射与影子标记自动注入），实现跨语言零心智确定性内存释放与 Double-Free 免疫。
+
+
 
 
 

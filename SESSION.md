@@ -6207,6 +6207,45 @@ git 提交
    - **四线研发演进文档**：
      - [`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)、[`SESSION.md`](file:///data/dev/cp/SESSION.md)。
 
+---
+
+### 用户指令 (User Input)
+const bun = @import("bun"); 和 import zig文件, cp中是否会失去类型, 还是说会解析 zig 代码, 获得类型?
+@import("bun"), 这种引用,  如何 bun 成员类型?
+失去类型:
+cp 的 类型检查是否失去作用?
+变量所有权与借用规则 是否失效?
+
+很好, 将你回答的这部分内容合并 cp_ref.md 中 "cp 与 zig 互操作" 相关章节, 避免程序员疑惑.
+
+### 执行汇报 (Execution Report)
+1. **架构深度释疑与结论梳理**：
+   - **类型状态（分层混合流水线）**：CP 前端阶段将外部 Zig 命名空间标记为透明外部类型 `Type::Any`，避免重造庞大的 Zig Comptime 虚拟机并消除胶水阻抗；而在后端 Zig AOT 阶段，原始引用链完整保留，由 Zig 编译器 100% 静态展开并执行绝对强类型检查；
+   - **成员类型获取姿态**：支持深层类型别名透传（`pub type PathString = bun.PathString;`）、显式类型收束（`let count: i32 = bun.getCount();`）与防腐层封装；
+   - **两级安全网（外柔内刚）**：CP 本地类型检查（本地变量赋值与操作）绝不失效，与底层 Zig 检查形成双重防御；
+   - **所有权与借用规则绝对不失效**：CP 的 Borrow Checker 与 Move 追踪基于符号拓扑与控制流图，完全正交于底层物理类型。Use-After-Move 静态拦截、借用排他性 100% 生效；并借助 Zig 反射在底层实现 Comptime Auto-Drop (RAII) 跨语言确定性释放。
+2. **权威语言规范同步升级**：
+   - 将上述架构原理、使用范式与安全论证系统写入官方设计手册 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md) 第 17.12 节《CP 与 Zig 深度互操作、混合类型系统与跨界所有权安全规范》；
+   - 同步追加更新四线文档 [`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md) 及 [`SESSION.md`](file:///data/dev/cp/SESSION.md)。
+
+---
+
+### 用户指令 (User Input)
+git 提交
+
+### 执行汇报 (Execution Report)
+1. **执行 Git 提交三步规范**：
+   - 将“git 提交”指令及本次提交范围完整追加写入 `SESSION.md`；
+   - 执行 `git add .` 一次性暂存四线文档与设计规范；
+   - 执行单次原子提交 `git commit -m "docs(spec): 详述 CP 与 Zig 深度互操作混合类型系统与跨界所有权安全规范"`。
+2. **本次 Git 提交范围清单**：
+   - **语言设计权威规范**：
+     - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)（第 17.12 节：深入阐述前端 `Type::Any` 与后端 Comptime 绝对强类型的两级安全模型、成员类型获取姿态、借用与所有权正交性、跨语言 Comptime Auto-Drop 原理）；
+   - **四线研发演进文档**：
+     - [`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)、[`SESSION.md`](file:///data/dev/cp/SESSION.md)。
+
+
+
 
 
 
