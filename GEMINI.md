@@ -100,7 +100,7 @@ Bash 终端仅用于编译构建、运行测试与 Git 版本管理，请勿用�
 
 ### 授权直通声明（编译器自愈权限）
 
-- **权限开放**：下目录 `/data/dev/bun` 对你完全开放**读取权限**，不开发**修改、删除权限**！
+- **权限开放**：下目录 `/data/dev/bun` 对你完全开放**读取权限**，不开放**修改、删除权限**！
 
 ## 二、 CP 语言架构总览与设计规范
 
@@ -153,20 +153,63 @@ CP 采用“脑、神经、肌肉、血液”四位一体机制，专为百万�
 ### 1. `cp-lang/cp` 主仓库目录结构
 
 ```text
-cp-lang/cp
-├── _ref/swc/         # SWC 源码参考区
-├── cpc/              # CP 编译器前端正式目录 (Rust) [包含 lexer, parser, ast, sema, codegen, lsp]
-├── cpc_dev/          # CP 编译器并行开发调试沙盒目录 (Rust) [与 Bun 迁移项目隔离并行开发]
-├── cap/              # 包管理器与构建工具 (Zig)
-│   └── test/         # 正式回归测试用例目录 (test_*.cp)
-├── temp/             # 临时探测与实验目录 (已被 .gitignore 忽略)
-├── cp_ref.md         # CP 语言官方权威设计规范手册
-├── .gitignore
-└── cap.json          # 根目录全局配置
+data/dev/cp
+    ├── _ref/swc/         # SWC 源码参考区
+    ├── cpc/              # CP 编译器前端正式目录 (Rust) [包含 lexer, parser, ast, sema, codegen, lsp]
+    ├── cpc_dev/          # CP 编译器并行开发调试沙盒目录 (Rust) [与 Bun 迁移项目隔离并行开发]
+    ├── cap/              # 包管理器与构建工具 (Zig)
+    │   └── test/         # 正式回归测试用例目录 (test_*.cp)
+    ├── temp/             # 临时探测与实验目录 (已被 .gitignore 忽略)
+    ├── cp_ref.md         # CP 语言官方权威设计规范手册
+    ├── .gitignore
+    └── cap.json          # 根目录全局配置
 
 ```
 
-### 2. `cap` 跨平台应用工程目录规范（以 `hello/` 为例）
+### 2. 库文件扁平设计
+
+使用统一的 下划线 _ 命名约定：
+
+- _ 开头的文件：代表底层、私有、包含直接 C 操作的内部声明文件（外部不可见）；
+- 普通文件：代表 100% 现代、面向对象、具备借用检查和 RAII 内存安全的对外标准库 API。
+
+整个标准库将变得不可思议的扁平与清爽：
+
+```text
+data/dev/cp
+    lib/
+    ├── crypto/                       # 密码学库 (cap:crypto)
+    │   ├── _boringssl.zig            # 👈 唯一的 Zig 垫片 (1.9万行全套密码学绑定)
+    │   ├── hash.cp                   #    面向用户的 Hash (SHA256, MD5)
+    │   ├── cipher.cp                 #    面向用户的 AES/ChaCha 加密
+    │   ├── random.cp                 #    面向用户的安全随机数 / UUID
+    │   └── index.cp                  #    模块对外统一出口
+    │
+    ├── net/                          # 网络核心库 (cap:net)
+    │   ├── _usockets.cp              # 👈 纯 CP 写的 @c { ... } uSockets 声明 (仅几十行)
+    │   ├── socket.cp                 #    带 RAII 自动释放的 SafeSocket
+    │   ├── tcp_stream.cp             #    TCP 连接抽象
+    │   ├── tcp_server.cp             #    TCP 服务端
+    │   └── index.cp
+    │
+    ├── http/                         # HTTP 库 (cap:http)
+    │   ├── _picohttp.cp              # 👈 纯 CP 写的 @c { ... } picohttpparser 声明 (仅十几行)
+    │   ├── request.cp                #    HttpRequest
+    │   ├── response.cp               #    HttpResponse
+    │   ├── server.cp                 #    HttpServer
+    │   └── index.cp
+    │
+    └── event_loop/                   # 事件循环库 (cap:event_loop)
+        ├── timer.cp                  #    侵入式二叉最小堆定时器 (纯 CP)
+        ├── concurrent_task.cp        #    16 字节无锁跨线程任务 (纯 CP)
+        ├── file_poll.cp              #    系统描述符监听 (纯 CP)
+        ├── loop.cp                   #    统一 EventLoop 封装
+        └── index.cp
+```
+
+---
+
+### 3. `cap` 跨平台应用工程目录规范（以 `hello/` 为例）
 
 ```text
 hello/
@@ -194,6 +237,47 @@ hello/
 ```
 
 ---
+
+### 4. CP 编译器（Rust）提速与 Debug / Release 选型
+
+- **先用 `cargo check` 秒级验证**：修改 `cpc_dev/src` 代码时，先运行 `cargo check`（仅需 1~2 秒）排查语法与借用问题。
+- **并行合并读写调用**：集中读取目标区域并一次性批量完成 `edit_file`，减少工具往返轮次。
+- **Debug 与 Release 对比选型**：
+- **Debug 模式（`cargo build`）**：编译仅需 **1~2 秒**，单文件转译耗时约 10~15ms，且保留完整 panic 调用栈（Backtrace）与断言，排查编译器内部问题极快。**日常在 `cpc_dev` 中改动与高频跑测时，只构建 Debug 版。**
+- **Release 模式（`cargo build --release`）**：编译需 **25~35 秒**（LLVM 深度优化），单文件转译耗时约 3~5ms。**仅在全部测试通过、合并入正式 `cpc/` 目录发布时构建一次 Release 版。**
+
+### 5. `cpc` 编译器必须“AI-First 智能诊断提示
+
+- **错误提示AI友好**：cpc check 和编译出错提示，必须对ai 友好，不仅带编译出错信息，还应提供修正方法, 方便 agy 等智能体快速识别错误，进行修正, 而不是一筹莫展, 需要查看 cpc 源代码来解决。
+
+- 编译器报错将从冷冰冰的 Syntax Error 升级为三段式可自愈诊断（参考 Rustc 与 TypeScript Compiler）：
+
+```text
+  error[E0105]: ambiguous condition in control flow statement
+    --> src/boringssl/boringssl.cp:58:24
+     |
+  58 |     if addr_str.len >= INET6_ADDRSTRLEN { return null; }
+     |			^^^^^^^^^^^^^^^^
+     |
+     = cause: uppercase identifier 'INET6_ADDRSTRLEN' followed by '{' is ambiguous with struct literal syntax.
+     = help: in CP, control flow conditions should be enclosed in parentheses.
+     = suggestion: wrap the condition in parentheses:
+     |
+  58 |     if (addr_str.len >= INET6_ADDRSTRLEN) { return null; }
+     |        +                                +
+```
+
+#### 5.1 典型场景的智能自愈提示规则：
+
+1. 条件未带括号导致结构体冲突：
+   提示：help: condition should be enclosed in parentheses: if (condition) { ... }；
+2. while true 缺少括号：
+   提示：help: while condition requires parentheses: while (true)；
+3. 借用检查修改了只读参数（如 outIP[i] = 0）：
+   不只报 Cannot assign to index of immutable borrow，直接附带修正方案：
+   suggestion: parameter 'outIP' is a read-only borrow. Add '*' to declare it as mutable borrow: '*outIP: OutIPBuf'。
+
+工程价值：AI Agent 看到带有 suggestion 的报错后，耗时 0 秒，单轮对话直接采纳建议自动修复！
 
 ## 四、 角色定位、文档记录与 Git 提交规范
 
@@ -237,48 +321,7 @@ hello/
 
 - **日常开发与调试一律在 `cpc_dev/` 目录中进行**，与正式目录 `cpc/` 保持隔离，待测试全部通过后再按流程合并至 `cpc/`。
 
-### 2. CP 编译器（Rust）提速与 Debug / Release 选型及错误提示
-
-- **先用 `cargo check` 秒级验证**：修改 `cpc_dev/src` 代码时，先运行 `cargo check`（仅需 1~2 秒）排查语法与借用问题。
-- **并行合并读写调用**：集中读取目标区域并一次性批量完成 `edit_file`，减少工具往返轮次。
-- **Debug 与 Release 对比选型**：
-- **Debug 模式（`cargo build`）**：编译仅需 **1~2 秒**，单文件转译耗时约 10~15ms，且保留完整 panic 调用栈（Backtrace）与断言，排查编译器内部问题极快。**日常在 `cpc_dev` 中改动与高频跑测时，只构建 Debug 版。**
-- **Release 模式（`cargo build --release`）**：编译需 **25~35 秒**（LLVM 深度优化），单文件转译耗时约 3~5ms。**仅在全部测试通过、合并入正式 `cpc/` 目录发布时构建一次 Release 版。**
-
-### 3. cpc 编译器必须“AI-First 智能诊断提示
-
-- **错误提示AI友好**：cpc check 和编译出错提示，必须对ai 友好，不仅带编译出错信息，还应提供修正方法, 方便 agy 等智能体快速识别错误，进行修正, 而不是一筹莫展, 需要查看 cpc 源代码来解决。
-
-- 编译器报错将从冷冰冰的 Syntax Error 升级为三段式可自愈诊断（参考 Rustc 与 TypeScript Compiler）：
-
-```text
-  error[E0105]: ambiguous condition in control flow statement
-    --> src/boringssl/boringssl.cp:58:24
-     |
-  58 |     if addr_str.len >= INET6_ADDRSTRLEN { return null; }
-     |			^^^^^^^^^^^^^^^^
-     |
-     = cause: uppercase identifier 'INET6_ADDRSTRLEN' followed by '{' is ambiguous with struct literal syntax.
-     = help: in CP, control flow conditions should be enclosed in parentheses.
-     = suggestion: wrap the condition in parentheses:
-     |
-  58 |     if (addr_str.len >= INET6_ADDRSTRLEN) { return null; }
-     |        +                                +
-```
-
-#### 典型场景的智能自愈提示规则：
-
-1. 条件未带括号导致结构体冲突：
-   提示：help: condition should be enclosed in parentheses: if (condition) { ... }；
-2. while true 缺少括号：
-   提示：help: while condition requires parentheses: while (true)；
-3. 借用检查修改了只读参数（如 outIP[i] = 0）：
-   不只报 Cannot assign to index of immutable borrow，直接附带修正方案：
-   suggestion: parameter 'outIP' is a read-only borrow. Add '*' to declare it as mutable borrow: '*outIP: OutIPBuf'。
-
-工程价值：AI Agent 看到带有 suggestion 的报错后，耗时 0 秒，单轮对话直接采纳建议自动修复！
-
-### 4. 并行开发与合并标准执行步骤（7 步闭环）
+### 2. 并行开发与合并标准执行步骤（7 步闭环）
 
 1. **绑定 `CPC_BIN` 至调试沙盒**：
 
@@ -342,48 +385,42 @@ export CPC_BIN=/data/dev/cp/cap/bin/cpc
 
 - 汇报正式版 `cpc` 更新完毕，供用户恢复 Bun 迁移项目继续执行任务。
 
-### 多个子Agent并行工作
+## 六、 多智能体并行工作流与 `cpc_dev_*` 构建规范（核心）
 
-cpc 改写、编译、测试 时间非常长，你可以参照上述模式，创建多个 cpc_dev2、cpc_dev3， 将任务分解后并行开发、测试，再合并到 cpc_dev中， 此时可不通过CPC_BIN变量，直接通过 命令行 env 注入 cpc进行测试，来提高工作效率。
+### 1. 多智能体并行开发cpc机制（`cpc_dev_*` vs `cpc`）
 
-### 5. 库文件扁平设计
+cpc 源代码近2万行，修改、编译、测试非常耗时，需要修改、测试cpc 源代码实现自愈功能时，需将多个功能分派给多个子智能体在各自拷贝的沙箱目录中修改、测试，加快cpc研发速度。
 
-使用统一的 下划线 _ 命名约定：
+为避免多个智能体相互覆盖代码或阻塞等待，本项目采用 **“多缓冲隔离目录（`cpc_dev_*`）+ 乐观锁校验合并（CAS）”** 模式：
 
-- _ 开头的文件：代表底层、私有、包含直接 C 操作的内部声明文件（外部不可见）；
-- 普通文件：代表 100% 现代、面向对象、具备借用检查和 RAII 内存安全的对外标准库 API。
+- 子智能体创建自己的cpc的拷贝目录， 如 `cpc_dev_1`、`cpc_dev_2`。
+- **子智能体开发与调试一律在自己的 `cpc_dev_*` 目录中进行**，与正式目录 `cpc/` 保持隔离，待测试全部通过后再按流程合并至 `cpc/`。
 
-整个标准库将变得不可思议的扁平与清爽：
+### 2. 并行开发与合并标准执行步骤
 
-```text
-    lib/
-    ├── crypto/                       # 密码学库 (cap:crypto)
-    │   ├── _boringssl.zig            # 👈 唯一的 Zig 垫片 (1.9万行全套密码学绑定)
-    │   ├── hash.cp                   #    面向用户的 Hash (SHA256, MD5)
-    │   ├── cipher.cp                 #    面向用户的 AES/ChaCha 加密
-    │   ├── random.cp                 #    面向用户的安全随机数 / UUID
-    │   └── index.cp                  #    模块对外统一出口
-    │
-    ├── net/                          # 网络核心库 (cap:net)
-    │   ├── _usockets.cp              # 👈 纯 CP 写的 @c { ... } uSockets 声明 (仅几十行)
-    │   ├── socket.cp                 #    带 RAII 自动释放的 SafeSocket
-    │   ├── tcp_stream.cp             #    TCP 连接抽象
-    │   ├── tcp_server.cp             #    TCP 服务端
-    │   └── index.cp
-    │
-    ├── http/                         # HTTP 库 (cap:http)
-    │   ├── _picohttp.cp              # 👈 纯 CP 写的 @c { ... } picohttpparser 声明 (仅十几行)
-    │   ├── request.cp                #    HttpRequest
-    │   ├── response.cp               #    HttpResponse
-    │   ├── server.cp                 #    HttpServer
-    │   └── index.cp
-    │
-    └── event_loop/                   # 事件循环库 (cap:event_loop)
-        ├── timer.cp                  #    侵入式二叉最小堆定时器 (纯 CP)
-        ├── concurrent_task.cp        #    16 字节无锁跨线程任务 (纯 CP)
-        ├── file_poll.cp              #    系统描述符监听 (纯 CP)
-        ├── loop.cp                   #    统一 EventLoop 封装
-        └── index.cp
+1. **使用 `env` 至调试沙盒**：
+
+- `cap` 支持命令行`env CPC_BIN`设置cpc运行目录，来运行cpc， 你也可以直接使用你自己目录的cpc进行测试
+- 通过注入 CPC_BIN 运行官方测试用例，其中cpc_dev_2为子智能体拷贝的工作目录：
+
+```bash
+   env CPC_BIN=/data/dev/cp/cpc_dev_2/target/debug/cpc ./cap/bin/cap cap/test/test_err_and_move.cp
+
 ```
 
----
+3. **启动前记录状态 & 测试后校验 `cpc/src` 变更**：
+
+- 启动拷贝工作区时，记录 `cpc/src`的状态。
+- 在 `cpc_dev_*` 中修改代码（运行 `cargo check --manifest-path cpc_dev_*/Cargo.toml` 与 `cargo build --manifest-path cpc_dev_*/Cargo.toml`）并通过测试后，使用单条 Git 状态指令快速检查正式目录 `cpc/src` 在此期间是否被其他子智能体修改过：
+
+```bash
+git status --porcelain cpc/src
+```
+
+（或使用 `git diff cpc/src` 检查差异，避免使用复杂的 Shell 管道命令）。
+
+- 3.1 **若 `cpc/src` 无变化**：直接将工作区`cpc_dev_*`代码合并到正式`cpc/src`。
+- 3.2 **若 `cpc/src` 有变化**：先用文件读取与编辑工具将 `cpc/src` 中的新增修改同步合并到 `cpc_dev_*/src` 工作区中，重新编译 `cpc_dev_*` 并运行测试，确保兼容无误。
+- 重复 3.2，直至`cpc/src` 无变化，按 3.1 合并子工作区代码到正式'cpc/src'。合并后，删除子工作区目录。
+
+**注意**：以上 `cpc_dev_*`的`*`，表示各个子智能体创建的cpc 拷贝目录的数字编号，必须避免不同子智能体同时在一个工作区工作，同时修改同一个代码文件，导致代码混乱。

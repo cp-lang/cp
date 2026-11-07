@@ -6128,22 +6128,86 @@ cpc_dev 中启动 路线 B（局部 @c fn 提取与 comptime 形参）借力 Zig
 ---
 
 ### 用户指令 (User Input)
-合并到 cpc 并 git 提交
+const bun = @import("bun");
+
+const Environment = bun.Environment;
+const FD = bun.FD;
+const HashedString = bun.HashedString;
+const Logger = bun.logger;
+const Output = bun.Output;
+pub type PathString = bun.PathString;
+const default_allocator = bun.default_allocator;
+const api = bun.schema.api;
+const strings = bun.strings;
+const CodepointIterator = bun.strings.CodepointIterator;
+
+import DirInfo from "../resolver/dir_info.zig";
+import Options from "../bundler/options.zig";
+import URLPath from "../http_types/URLPath.zig";
+import Fs from "../resolver/fs.zig";
+const FileSystem = Fs.FileSystem;
+const PathnameScanner = @import("../url/url.zig").PathnameScanner;
+
+在 cp 中, import zig 代码, 和 const bun = @import("bun");
+这些本来应该 使用 zig {} 封装的代码, 不使用 zig {}, cpc 应该如何优化, 来避免使用 zig {}
+检查 正式 cpc, bun agy 是否已经修改了 cpc, 实现了该功能
+审核下bun agy 对 cpc 的所有修改, 是否合理/完整/必要
+
+同意
+
+继续你的工作
 
 ### 执行汇报 (Execution Report)
-1. **沙盒成果合并与构建校验**：
-   - 将沙盒 `cpc_dev/src/` 中的全套成熟实现（`ast.rs`、`ast_visitor.rs`、`parser.rs`、`sema.rs`、`codegen.rs`）100% 同步合入正式主干 `cpc/src/`；
-   - 运行 `cargo fmt --manifest-path cpc/Cargo.toml` 格式化代码；
-   - 运行 `cargo check --manifest-path cpc/Cargo.toml` 验证零编译错误；
-   - 执行 `cargo build --release --manifest-path cpc/Cargo.toml` 完成 LLVM 深度优化编译（耗时 36.25s），二进制覆盖安装至 `/data/dev/cp/cap/bin/cpc`。
-2. **正式编译器全量测试验证**：
-   - 切换系统环境指向正式发布版编译器（`CPC_BIN=/data/dev/cp/cap/bin/cpc`）；
-   - 执行 `cap cap/test/test_c_trampoline.cp` 与核心回归测试 `cap/test/test_bun_enums.cp`，全部毫秒级编译运行并 100% 绿灯通过。
-3. **本次 Git 提交范围清单**：
-   - 编译器核心源码：[`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs)、[`cpc/src/ast_visitor.rs`](file:///data/dev/cp/cpc/src/ast_visitor.rs)、[`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs)、[`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs)、[`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs)；
-   - 长期回归测试套件：[`cap/test/test_c_trampoline.cp`](file:///data/dev/cp/cap/test/test_c_trampoline.cp)；
-   - 语言设计权威规范：[`cp_ref.md`](file:///data/dev/cp/cp_ref.md)（第 17.9 节：C 回调跳板单态化与裸指针双轨镜像同构语法规范）；
-   - 四线研发演进文档：[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)、[`SESSION.md`](file:///data/dev/cp/SESSION.md)。
+1. **Bun agy 针对 `cpc` 编译器修改深度审计结论**：
+   - **合理性与必要性**：支持顶层 `const`/`var`、`import Name from "./path.zig"` 默认规范导入及带哨兵切片 `[start..end :sentinel]` 是从 Zig/Bun 迁移底层代码库的刚需，极具工程价值；
+   - **致命缺陷排查定性**：
+     - Bun agy 在 `lexer.rs` 中直接将 `and`、`or`、`orelse` 硬映射为 `Token::AmpAmp`、`Token::PipePipe`、`Token::QuestionQuestion`，彻底破坏了 `Atomic.and()`、`BitSet.or()` 等正常属性与方法；
+     - 缺失 Zig 保留字方法命名与调用的底层转义（如 `calc.and(...)` 导致 Zig 编译器语法报错）；
+     - 顶层重复引入 `std` 会触发 Zig `duplicate struct member name 'std'` 冲突。
+2. **编译器架构加固与技术落地 (`cpc/src` & `cpc_dev/src`)**：
+   - **上下文软关键字机制 (Contextual Soft Keywords)**：
+     - 在 `lexer.rs` 中彻底移除了固定 Token 硬替换，恢复 `and`、`or`、`orelse` 为普通标识符；
+     - 在 `parser.rs` 的二元运算符预测 `peek_op` 及后缀运算层进行上下文嗅探：在中缀表达式且下一个符号为操作数时作为逻辑运算符解析，在方法/属性访问上下文坚决保留标识符；彻底消除 Rust 借用检查在 match guard 处的生命周期冲突。
+   - **Zig 保留字自动安全转义与顶层去重**：
+     - `codegen.rs` 增加对函数名、方法调用及属性访问的保留字检测，自动发射 Zig 官方 `@"{}"` 安全转义序列；
+     - 顶层智能跳过重复声明的 `std` 模块，杜绝符号冲突；
+     - 全链路贯通带哨兵切片 `[start..end :sentinel]` 的 AST 与 Zig 状态机代码生成。
+3. **正式版 Release 编译构建与发布**：
+   - 在 `cpc/src` 中完成合并加固后，执行 `cargo build --release --manifest-path /data/dev/cp/cpc/Cargo.toml`，耗时 38.24s 完成深度优化编译；
+   - 正式 Release 二进制产物覆盖更新至 `/data/dev/cp/cap/bin/cpc`。
+4. **长效回归与正反向测试验证**：
+   - 编写回归测试用例 [`cap/test/test_bun_top_level_import.cp`](file:///data/dev/cp/cap/test/test_bun_top_level_import.cp) 及模块 [`cap/test/mock_sub_module.zig`](file:///data/dev/cp/cap/test/mock_sub_module.zig)；
+   - 运行 `./cap/bin/cap cap/test/test_bun_top_level_import.cp`：88ms 转译、687ms 链接，顶层 Zig 默认导入、深层级联命名空间、软关键字逻辑运算、保留字方法隔离调用、哨兵切片等 7 大断言全部 100% 绿灯全通；
+   - 回归运行 [`cap/test/test_c_trampoline.cp`](file:///data/dev/cp/cap/test/test_c_trampoline.cp)：3ms 转译、652ms 链接运行，既有特性零劣化，100% 绿灯全通。
+5. **四线文档全量同步完成**：
+   - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)（新增第 17.12 节规范）；
+   - [`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md) 及 [`SESSION.md`](file:///data/dev/cp/SESSION.md) 全部同步追加完毕。
+
+---
+
+### 用户指令 (User Input)
+git 提交
+
+### 执行汇报 (Execution Report)
+1. **执行 Git 提交三步规范**：
+   - 完整记录本次提交范围与指令到 `SESSION.md`；
+   - 执行 `git add .` 一次性暂存全部改动；
+   - 执行单次原子提交 `git commit -m "feat(cpc): 放宽顶层原生声明、支持默认 Zig 导入与上下文软关键字机制"`。
+2. **本次 Git 提交范围清单**：
+   - **编译器前端核心源码**：
+     - [`cpc/src/lexer.rs`](file:///data/dev/cp/cpc/src/lexer.rs)（解绑 `and`/`or`/`orelse` 硬替换，恢复为普通标识符）；
+     - [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs)（上下文软关键字嗅探、带哨兵切片解析、Zig 默认规范导入与顶层属性声明）；
+     - [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs)（Zig 保留字自动 `@"{}"` 安全转义、顶层 `std` 去重、哨兵切片生成）；
+     - [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs) & [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs)（`VarDecl` 与 `SliceExpr` 扩展及借用检查放宽）；
+   - **长期回归测试套件**：
+     - [`cap/test/test_bun_top_level_import.cp`](file:///data/dev/cp/cap/test/test_bun_top_level_import.cp)；
+     - [`cap/test/mock_sub_module.zig`](file:///data/dev/cp/cap/test/mock_sub_module.zig)；
+   - **语言设计权威规范与配置**：
+     - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)（第 17.12 节：顶层原生声明、透明 Zig 互操作与上下文软关键字规范）；
+   - **四线研发演进文档**：
+     - [`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)、[`SESSION.md`](file:///data/dev/cp/SESSION.md)。
+
+
 
 
 

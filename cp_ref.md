@@ -6779,7 +6779,7 @@ CP 语言针对底层 C-FFI 提供了双轨并行且心智完全统一的指针�
    ```
 3. **函数类型签名极简化**：支持省略形参名（如 `@c fn (*!?, i32, i32, *!?)`），且当返回值为 `void` 时可完全省略 `: void`。
 
-##### 17.9.3 完整使用范例
+##### 17.9.3 c回调跳板函数完整使用范例
 
 ```typescript
 import { print } from "cap:io";
@@ -6993,6 +6993,68 @@ export class ThreadPool {
 }
 ```
 
+#### 17.12 顶层原生声明、透明 Zig 互操作与上下文软关键字规范 (Top-Level Declarations & Transparent Zig Interop)
+
+在从 Zig/Bun 迁移底层系统组件或构建高性能底层库时，CP 语言提供了零摩擦的顶层语法兼容与透明模块互操作支持，彻底废除繁琐冗余的 `zig { ... }` 块包装。
+
+##### 17.12.1 顶层常量与变量直接声明
+
+CP 允许在模块顶层直接使用 `const`、`var` 以及 `pub const`、`pub var` 声明模块级常量与可变变量，并支持深层命名空间别名与带属性的类型引用：
+
+```typescript
+// 直接引用导入模块的命名空间与深层属性，无需 zig {} 包装
+const Environment = bun.Environment;
+const FD = bun.FD;
+const HashedString = bun.HashedString;
+const Logger = bun.logger;
+const default_allocator = bun.default_allocator;
+const api = bun.schema.api;
+
+// 顶层类型别名定义与对外导出
+pub type PathString = bun.PathString;
+
+// 模块级可变状态与线程局部变量
+pub var global_counter: i32 = 100;
+pub threadlocal var worker_id: u32 = 0;
 ```
 
+##### 17.12.2 透明 Zig 模块导入与默认导出绑定 (Default Specifier Import)
+
+CP 支持通过现代 ES 模块风格直接透明引入 `.zig` 源代码模块，并映射为命名空间对象：
+
+```typescript
+import DirInfo from "../resolver/dir_info.zig";
+import Options from "../bundler/options.zig";
+import URLPath from "../http_types/URLPath.zig";
+import Fs from "../resolver/fs.zig";
+
+const FileSystem = Fs.FileSystem;
+pub type LocalDirInfo = DirInfo;
 ```
+
+##### 17.12.3 上下文软关键字机制 (Contextual Soft Keywords)
+
+为了兼顾 Zig 风格的操作符（如 `and`、`or`、`orelse`）与面向对象 API（如 `Atomic.and()`、`BitSet.or()`）的并存，CP 编译器在词法分析与语法解析阶段采用**上下文软关键字**机制：
+
+1. **作为二元运算符**：当 `and`、`or` 处于中缀表达式位置时，自动作为逻辑与、逻辑或运算符解析；当 `orelse` 处于表达式后时，作为空值合并/解包兜底操作符解析；
+2. **作为标识符/成员名**：当作为结构体字段、方法名称或普通变量标识符出现时（例如 `calc.and(val)`、`flags.or(mask)`），保留标识符语义；
+3. **保留字自动转义**：CP Codegen 自动检测生成的 Zig 代码，当方法或属性名与 Zig 保留字（如 `and`, `or`, `type`）冲突时，底层自动发射 `@"and"`、`@"or"` 转义，无需开发者手动处理。
+
+```typescript
+let active = (count > 0 and ready) or forced;
+let final_name = opt_name orelse "default";
+
+// 正常调用以 and/or 命名的方法，编译器自动进行底层保留字安全转义
+let res = calc.and(mask);
+```
+
+##### 17.12.4 带哨兵切片 (Sentinel Slice)
+
+CP 原生支持带哨兵的切片语法 `[start..end :sentinel]`，直通 Zig 底层零结尾字符串与哨兵数组，保障 C-ABI 兼容性与高性能切片安全：
+
+```typescript
+let buf: [16]u8 = "Hello, World!\x00";
+// 截取以 0 结尾的哨兵切片
+let slice = buf[0..13 :0];
+```
+

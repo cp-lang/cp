@@ -3485,6 +3485,71 @@ Bun AGY 在推进 Bun 基础算法库（如 `wyhash`、`base64`）转译过程�
 - 运行 `env CPC_BIN=/data/dev/cp/cpc_dev/target/debug/cpc cap cap/test/test_c_trampoline.cp`，6ms 转译、604ms 编译运行，全部绿灯通过，断言 100% 达成！
 - 核心回归测试用例 `cap/test/test_bun_enums.cp` 一并绿灯通过。
 
+---
+
+## 2026-11-08 (顶层原生声明放宽、透明 Zig 模块默认导入、上下文软关键字与 Release 编译验证)
+
+### 1. 任务背景与核心诉求
+用户提出一段底层系统模块典型代码（包含 Zig 模块引入与深层属性命名空间绑定）：
+```typescript
+const bun = @import("bun");
+
+const Environment = bun.Environment;
+const FD = bun.FD;
+const HashedString = bun.HashedString;
+const Logger = bun.logger;
+const Output = bun.Output;
+pub type PathString = bun.PathString;
+const default_allocator = bun.default_allocator;
+const api = bun.schema.api;
+const strings = bun.strings;
+const CodepointIterator = bun.strings.CodepointIterator;
+
+import DirInfo from "../resolver/dir_info.zig";
+import Options from "../bundler/options.zig";
+import URLPath from "../http_types/URLPath.zig";
+import Fs from "../resolver/fs.zig";
+const FileSystem = Fs.FileSystem;
+const PathnameScanner = @import("../url/url.zig").PathnameScanner;
+```
+并提出三项核心诉求：
+1. **免 `zig { ... }` 包装**：探讨 CP 编译器如何优化以原生、零阻抗语法支持此类顶层声明；
+2. **审计 Bun 迁移智能体对 `cpc` 的改动**：全面检查 `cpc/src` 中 Bun 智能体的改动是否合理、完整、必要；
+3. **加固与发布**：修复潜在缺陷，编写测试验证，并按规范合并到正式 `cpc` 发布 Release 版本。
+
+### 2. 深度架构审查与关键缺陷定位
+
+对主干 `cpc/src` 审查发现，Bun 智能体初步引入了顶层声明与导入特性，但存在两大严重隐患：
+1. **Lexer 硬编码映射的破坏性**：
+   - 之前在 `lexer.rs` 中直接将 `and`、`or`、`orelse` 标记为 `Token::AmpAmp`、`Token::PipePipe`、`Token::QuestionQuestion`；
+   - 这导致只要用户代码或标准库中包含属性或方法名形如 `Atomic.and()`、`BitSet.or()`、`calc.and()` 时，词法分析直接将方法名当成了二元运算符，引发灾难性语法解析崩溃。
+2. **Zig 保留字转义缺失与编译冲突**：
+   - 当在 CP 中定义或调用名为 `and`、`or`、`orelse` 等方法时，底层生成的 Zig 代码未经保留字转义（如输出 `pub fn and(...)`），Zig 编译器直接拒绝编译（`expected '(', found 'and'`）；
+   - CP 编译器默认会在文件头部发射 `const std = @import("std");`，若开发者在顶层重复引入 `std`，会引发 Zig 结构体字段重复定义错误（`duplicate struct member name 'std'`）。
+
+### 3. 技术突破与加固方案
+
+1. **上下文软关键字机制 (Contextual Soft Keywords)**：
+   - 在 `lexer.rs` 中将 `and`、`or`、`orelse` 彻底从固定 Token 列表中解绑，恢复为普通标识符；
+   - 在 `parser.rs` 的二元运算符预测 `peek_op` 及后缀运算层进行上下文嗅探：仅当处于中缀表达式位置且下一个符号为操作数时，才将其视作逻辑与/或或空值兜底运算符；而在成员属性/方法调用的上下文中，坚决保留标识符属性；
+   - 彻底解决 Rust 借用检查在 `match` 分支中使用 guard 延长引用的生命周期冲突（NLL guard 缺陷）。
+2. **Zig 保留字自动安全转义**：
+   - 在 `codegen.rs` 中对函数声明、结构体字段、方法调用与属性访问增加保留字探测；
+   - 当标识符与 Zig 关键字冲突时，自动发射为 Zig 官方转义符号（如 `@"and"`、`@"or"`、`@"orelse"`）。
+3. **顶层重复符号防重与哨兵切片全链路支持**：
+   - 顶层跳过已声明的 `std` 模块，杜绝 Zig `duplicate struct member name` 冲突；
+   - 支持带哨兵切片 `[start..end :sentinel]` 从 AST 到 Zig 代码生成的全链路映射。
+
+### 4. 自动化测试与 Release 构建闭环
+
+1. **构建正式 Release 版本**：
+   - 运行 `cargo build --release --manifest-path /data/dev/cp/cpc/Cargo.toml`，耗时 38.24s 完成深度优化编译；
+   - 将产物安装覆盖至 `/data/dev/cp/cap/bin/cpc`。
+2. **回归与新功能全面验证**：
+   - 运行 `./cap/bin/cap cap/test/test_bun_top_level_import.cp`：88ms 转译、687ms 链接完成，7 项断言全部 100% 绿灯通过；
+   - 回归运行 `./cap/bin/cap cap/test/test_c_trampoline.cp`：3ms 转译、652ms 链接运行，C 跳板函数与四种裸指针双轨语法 100% 绿灯通过。
+
+
 
 
 

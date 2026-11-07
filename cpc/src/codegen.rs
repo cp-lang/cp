@@ -507,6 +507,9 @@ impl ModuleFeatures {
                 if let Some(en) = &s.end {
                     self.scan_expr(en);
                 }
+                if let Some(sent) = &s.sentinel {
+                    self.scan_expr(sent);
+                }
             }
             Expr::Index { obj, index } => {
                 self.scan_expr(obj);
@@ -651,6 +654,7 @@ pub struct Codegen {
     pub const_vars: HashSet<String>,
     pub current_block_label: Option<String>,
     pub local_trampolines: HashSet<String>,
+    pub source_dir: Option<std::path::PathBuf>,
 }
 
 impl Codegen {
@@ -724,6 +728,7 @@ impl Codegen {
             const_vars: HashSet::new(),
             current_block_label: None,
             local_trampolines: HashSet::new(),
+            source_dir: None,
         }
     }
 
@@ -1839,10 +1844,24 @@ impl Codegen {
                 } else {
                     String::new()
                 };
-                let kw = if var.kind == VarDeclKind::Const {
-                    "pub const"
+                let kw = if var.is_threadlocal {
+                    if var.is_pub {
+                        "pub threadlocal var"
+                    } else {
+                        "threadlocal var"
+                    }
+                } else if var.kind == VarDeclKind::Const {
+                    if var.is_pub {
+                        "pub const"
+                    } else {
+                        "const"
+                    }
                 } else {
-                    "pub var"
+                    if var.is_pub {
+                        "pub var"
+                    } else {
+                        "var"
+                    }
                 };
                 let old_array_elem = self.expected_array_elem_type.clone();
                 if let Some(Type::FixedArray(elem, _) | Type::Array(elem)) = &var.ty {
@@ -1850,6 +1869,9 @@ impl Codegen {
                 }
                 match &var.pat {
                     Pattern::Ident(ident) => {
+                        if ident.sym == "std" {
+                            continue;
+                        }
                         let init_code = if let Some(init) = &var.init {
                             self.generate_expr(init)
                         } else {
@@ -4314,7 +4336,9 @@ impl Codegen {
                                     ) {
                                         return;
                                     }
-                                    if matches!(f.ty, Type::BorrowType { is_mut: false, .. }) {
+                                    if matches!(f.ty, Type::BorrowType { is_mut: false, .. })
+                                        && !op_desc.starts_with("field assignment")
+                                    {
                                         panic!(
                                             "CP Compile Error: Cannot perform mutable operation ({}) through read-only borrow field '{}'",
                                             op_desc, id.sym
@@ -4397,7 +4421,9 @@ impl Codegen {
                     ) {
                         return;
                     }
-                    if matches!(m_ty, Type::BorrowType { is_mut: false, .. }) {
+                    if matches!(m_ty, Type::BorrowType { is_mut: false, .. })
+                        && !op_desc.starts_with("field assignment")
+                    {
                         panic!(
                             "CP Compile Error: Cannot perform mutable operation ({}) through read-only borrow field '{}'",
                             op_desc, mem.prop.sym
@@ -6875,7 +6901,12 @@ impl Codegen {
 
                 arms_code.push_str(&format!("{} {},\n", pat_arm_str, body_str));
             }
-            if !has_else && !is_exhaustive_enum {
+            let all_arms_are_enums = !m.arms.is_empty()
+                && m.arms.iter().all(|a| {
+                    matches!(a.pat, Pattern::Enum(_))
+                        || matches!(&a.pat, Pattern::Or(pats) if pats.iter().all(|p| matches!(p, Pattern::Enum(_))))
+                });
+            if !has_else && !is_exhaustive_enum && !all_arms_are_enums {
                 arms_code.push_str("else => unreachable,\n");
             }
             if is_expr {
@@ -7364,6 +7395,8 @@ impl Codegen {
                     ty: Some(p.ty.clone()),
                     init: Some(val),
                     kind: VarDeclKind::Let,
+                    is_threadlocal: false,
+                    is_pub: false,
                 }));
             }
         }
@@ -7510,6 +7543,8 @@ impl Codegen {
             "cp_main".to_string()
         } else if func.ident.sym == "test" {
             "cp_test".to_string()
+        } else if matches!(func.ident.sym.as_str(), "and" | "or" | "orelse") {
+            format!("@\"{}\"", func.ident.sym)
         } else {
             func.ident.sym.clone()
         };
@@ -8183,9 +8218,13 @@ impl Codegen {
                             let lhs = if self.is_state_machine {
                                 format!("ctx.{}", ident.sym)
                             } else {
-                                let keyword = match var.kind {
-                                    crate::ast::VarDeclKind::Const => "const",
-                                    _ => "var",
+                                let keyword = if var.is_threadlocal {
+                                    "threadlocal var"
+                                } else {
+                                    match var.kind {
+                                        crate::ast::VarDeclKind::Const => "const",
+                                        _ => "var",
+                                    }
                                 };
                                 let ty_annot = if expr_code == "undefined" {
                                     if let Some(t) = &var.ty {
@@ -8199,7 +8238,19 @@ impl Codegen {
                                     } else {
                                         false
                                     };
-                                    if matches!(t, Type::BorrowType { .. }) || is_trait_ty {
+                                    if let Type::BorrowType { inner, is_mut, .. } = t {
+                                        if *is_mut {
+                                            if let Type::Array(elem) = &**inner {
+                                                format!(": []{}", self.map_type(elem))
+                                            } else if let Type::String = &**inner {
+                                                ": []u8".to_string()
+                                            } else {
+                                                String::new()
+                                            }
+                                        } else {
+                                            String::new()
+                                        }
+                                    } else if is_trait_ty {
                                         String::new()
                                     } else if matches!(t, Type::CStr) {
                                         match var.kind {
@@ -10726,10 +10777,16 @@ impl Codegen {
                         let obj = self.generate_expr(&mem.obj);
                         let arg = self.generate_expr(&call.args[0]);
                         return format!("@as(i32, @intCast({}[@intCast({})]))", obj, arg);
-                    } else if prop == "match" && !call.args.is_empty() {
-                        let obj = self.generate_expr(&mem.obj);
-                        let arg = self.generate_expr(&call.args[0]);
-                        return format!("{}.exec({})", arg, obj);
+                    } else if prop == "match" && call.args.len() == 1 {
+                        let is_class_or_enum = match &*mem.obj {
+                            Expr::Ident(id) => self.class_defs.contains_key(&id.sym) || self.enum_defs.contains_key(&id.sym) || id.sym.chars().next().map_or(false, |c| c.is_uppercase()),
+                            _ => false,
+                        };
+                        if !is_class_or_enum {
+                            let obj = self.generate_expr(&mem.obj);
+                            let arg = self.generate_expr(&call.args[0]);
+                            return format!("{}.exec({})", arg, obj);
+                        }
                     } else if prop == "test" && !call.args.is_empty() {
                         let obj = self.generate_expr(&mem.obj);
                         let arg = self.generate_expr(&call.args[0]);
@@ -11117,6 +11174,11 @@ impl Codegen {
                                     }
                                 }
 
+                                let prop_name = if matches!(mem.prop.sym.as_str(), "and" | "or" | "orelse") {
+                                    format!("@\"{}\"", mem.prop.sym)
+                                } else {
+                                    mem.prop.sym.clone()
+                                };
                                 let call_res = if target_recv_mode == ReceiverMode::Move {
                                     if is_self_recv {
                                         self.moved_vars.insert("this".to_string());
@@ -11124,24 +11186,24 @@ impl Codegen {
                                         if !self.is_state_machine {
                                             format!(
                                                 "(blk: {{ __self_moved = true; break :blk {}.{}({}); }})",
-                                                obj_code, mem.prop.sym, args
+                                                obj_code, prop_name, args
                                             )
                                         } else {
-                                            format!("{}.{}({})", obj_code, mem.prop.sym, args)
+                                            format!("{}.{}({})", obj_code, prop_name, args)
                                         }
                                     } else {
                                         self.moved_vars.insert(id.sym.clone());
                                         if !self.is_state_machine {
                                             format!(
                                                 "(blk: {{ __{}_moved = true; break :blk {}.{}({}); }})",
-                                                id.sym, obj_code, mem.prop.sym, args
+                                                id.sym, obj_code, prop_name, args
                                             )
                                         } else {
-                                            format!("{}.{}({})", obj_code, mem.prop.sym, args)
+                                            format!("{}.{}({})", obj_code, prop_name, args)
                                         }
                                     }
                                 } else {
-                                    format!("{}.{}({})", obj_code, mem.prop.sym, args)
+                                    format!("{}.{}({})", obj_code, prop_name, args)
                                 };
                                 return self.maybe_wrap_try_call(call_res, ret_ty.as_ref());
                             }
@@ -11843,7 +11905,7 @@ impl Codegen {
                             code
                         } else {
                             let ec = self.generate_expr(e);
-                            if ec.starts_with("@panic") || ec.starts_with("@compileError") {
+                            if ec == "unreachable" || ec.starts_with("@panic") || ec.starts_with("@compileError") {
                                 format!("{};", ec)
                             } else if let Some(ty_str) = &target_payload_ty {
                                 format!("break :{} @as({}, {});", blk_label, ty_str, ec)
@@ -11890,7 +11952,7 @@ impl Codegen {
                                         continue;
                                     }
                                     let ec = self.generate_expr(e);
-                                    if ec.starts_with("@panic") || ec.starts_with("@compileError") {
+                                    if ec == "unreachable" || ec.starts_with("@panic") || ec.starts_with("@compileError") {
                                         self.write_to_case(&format!("{};", ec));
                                     } else if let Some(ty_str) = &target_payload_ty {
                                         self.write_to_case(&format!(
@@ -11933,6 +11995,9 @@ impl Codegen {
                 self.locals = old_locals;
 
                 if matches!(inner_ty, Some(Type::ErrorUnion(_))) || self.is_lib_mode || inner_ty.is_none() {
+                    if catch_arm_body == "unreachable;" && err_ident.is_none() {
+                        return format!("(({exp}) catch unreachable)");
+                    }
                     return format!(
                         "({blk_label}: {{ break :{blk_label} (({exp}) catch |{err_bind}| {{ _ = &{err_bind}; {catch_arm_body} }}); }})"
                     );
@@ -12198,10 +12263,14 @@ impl Codegen {
                             f_str.push_str(", ");
                         }
                     }
-                    format!(
-                        "{}{{ .{} = .{{ {} }} }}",
-                        ei.enum_name.sym, ei.variant_name.sym, f_str
-                    )
+                    if ei.variant_name.sym.is_empty() {
+                        format!("{}{{ {} }}", ei.enum_name.sym, f_str)
+                    } else {
+                        format!(
+                            "{}{{ .{} = .{{ {} }} }}",
+                            ei.enum_name.sym, ei.variant_name.sym, f_str
+                        )
+                    }
                 }
             }
             Expr::OptMember(mem) => {
@@ -12546,18 +12615,23 @@ impl Codegen {
                 let is_guard = obj_ty.contains("LockGuard(")
                     || obj_ty.contains("ReadGuard(")
                     || obj_ty.contains("WriteGuard(");
+                let safe_prop = if matches!(prop, "and" | "or" | "orelse") {
+                    format!("@\"{}\"", prop)
+                } else {
+                    prop.to_string()
+                };
                 if is_guard && prop != "release" && prop != "unlock" {
                     if obj_ty.starts_with('?') {
-                        format!("({}).?.data.{}", obj, prop)
+                        format!("({}).?.data.{}", obj, safe_prop)
                     } else {
-                        format!("{}.data.{}", obj, prop)
+                        format!("{}.data.{}", obj, safe_prop)
                     }
                 } else if obj_ty.starts_with('?') {
-                    format!("cp_opt_unwrap({}).{}", obj, prop)
+                    format!("cp_opt_unwrap({}).{}", obj, safe_prop)
                 } else if obj_ty.starts_with("*[]") {
-                    format!("{}.*.{}", obj, prop)
+                    format!("{}.*.{}", obj, safe_prop)
                 } else {
-                    format!("{}.{}", obj, prop)
+                    format!("{}.{}", obj, safe_prop)
                 }
             }
             Expr::Builtin(call) => match call.name.as_str() {
@@ -13225,11 +13299,16 @@ impl Codegen {
                     .as_ref()
                     .map(|e| self.generate_expr(e))
                     .unwrap_or_else(|| "0".to_string());
+                let sentinel_code = s
+                    .sentinel
+                    .as_ref()
+                    .map(|e| format!(" :{}", self.generate_expr(e)))
+                    .unwrap_or_default();
                 if let Some(end_expr) = &s.end {
                     let end_code = self.generate_expr(end_expr);
-                    format!("{}[{}..{}]", obj_code, start_code, end_code)
+                    format!("{}[{}..{}{}]", obj_code, start_code, end_code, sentinel_code)
                 } else {
-                    format!("{}[{}..]", obj_code, start_code)
+                    format!("{}[{}..{}]", obj_code, start_code, sentinel_code)
                 }
             },
             Expr::ReflectType { target_ty, .. } => {

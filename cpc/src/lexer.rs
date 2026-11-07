@@ -6,6 +6,10 @@ pub enum Token {
     // --- Keywords ---
     #[token("let")]
     Let,
+    #[token("var")]
+    Var,
+    #[token("threadlocal")]
+    ThreadLocal,
     #[token("const")]
     Const,
     #[token("match")]
@@ -253,6 +257,8 @@ pub enum Token {
     QuestionQuestion,
     #[token("?.")]
     QuestionDot,
+    #[token(".?")]
+    DotQuestion,
     #[token("?")]
     Question, // Error bubbling / fallback
     #[token("!")]

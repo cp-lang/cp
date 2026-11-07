@@ -3747,6 +3747,18 @@ impl Analyzer {
                 }
             }
         }
+        if let Type::Array(t_inner) = target {
+            if let Type::BorrowType { inner: s_inner, .. } = src {
+                if let Type::Tuple(s_elems) = &**s_inner {
+                    if s_elems.is_empty() {
+                        return true;
+                    }
+                }
+                if self.can_coerce(&Type::Array(t_inner.clone()), s_inner, init_expr) {
+                    return true;
+                }
+            }
+        }
         if let (Type::SentinelPtr(t_inner, t_s), Type::SentinelPtr(s_inner, s_s)) = (target, src) {
             if t_s == s_s && self.can_coerce(t_inner, s_inner, None) {
                 return true;
@@ -4226,6 +4238,7 @@ impl Analyzer {
                     || ident.sym == "err"
                     || ident.sym == "Error"
                     || ident.sym == "reflect"
+                    || ident.sym == "unreachable"
                     || ident.sym.starts_with("c_")
                     || matches!(
                         ident.sym.as_str(),

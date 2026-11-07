@@ -2119,6 +2119,47 @@
 - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
   - 第 17.9 节升级为《裸指针双轨语法：原生 as 强转与类型镜像同构取指针语法糖》，明晰类型与表达式在 `*`、`!`、`!?` 上的对称映射及零二义性保证。
 
+---
+
+## 2026-11-08 (顶层原生声明放宽、透明 Zig 模块默认导入、上下文软关键字与 Release 编译验证)
+
+### 修改文件 (Modified)
+- [`cpc/src/lexer.rs`](file:///data/dev/cp/cpc/src/lexer.rs) & [`cpc_dev/src/lexer.rs`](file:///data/dev/cp/cpc_dev/src/lexer.rs):
+  - 移除了词法层对 `and`、`or`、`orelse` 的硬编码 Token 替换，彻底规避破坏 `obj.and()`、`obj.or()` 等正常属性与方法调用的问题；
+  - 保持 `Token::Let`, `Token::Var`, `Token::Const`, `Token::ThreadLocal` 等顶层声明关键字。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs) & [`cpc_dev/src/parser.rs`](file:///data/dev/cp/cpc_dev/src/parser.rs):
+  - 实现**上下文软关键字 (Contextual Soft Keywords)** 解析机制：在二元表达式与后缀操作符判定中识别 `and`、`or` 与 `orelse`，而在成员调用/属性访问上下文中保留标识符语义；
+  - 支持带哨兵切片解析 `[start..end :sentinel]`；
+  - 支持 `import Name from "./path.zig"` 默认规范导入与顶层 `const`/`var` 命名空间属性级联绑定。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs) & [`cpc_dev/src/codegen.rs`](file:///data/dev/cp/cpc_dev/src/codegen.rs):
+  - 支持带哨兵切片底层代码生成；
+  - 增加 Zig 关键字自动转义：方法与属性如果为 Zig 保留字（如 `and`, `or`, `orelse`），底层转译自动输出 `@"and"`、`@"or"` 转义序列；
+  - 增加顶层 `std` 重复导入安全去重机制，防止 Zig 编译器报错 `duplicate struct member name 'std'`；
+  - 完善 `(exp catch unreachable)` 紧凑单态发射。
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs) & [`cpc_dev/src/ast.rs`](file:///data/dev/cp/cpc_dev/src/ast.rs):
+  - `VarDecl` 增加 `is_threadlocal` 与 `is_pub` 字段；
+  - `SliceExpr` 增加 `sentinel: Option<Box<Expr>>` 字段。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs) & [`cpc_dev/src/sema.rs`](file:///data/dev/cp/cpc_dev/src/sema.rs):
+  - 允许切片、空元组与目标数组类型的隐式借用转换，放宽 `unreachable` 标识符校验。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 新增第 17.12 节《顶层原生声明、透明 Zig 互操作与上下文软关键字规范》，详细记录顶层免 `zig {}` 声明规范、默认导入语法、软关键字与哨兵切片语义。
+- [`cap/bin/cpc`](file:///data/dev/cp/cap/bin/cpc):
+  - 使用 `cargo build --release` 编译并同步更新了正式 Release 版编译器二进制。
+
+### 自动化测试验证 (Tests Verified)
+- 新增回归测试用例 [`cap/test/test_bun_top_level_import.cp`](file:///data/dev/cp/cap/test/test_bun_top_level_import.cp) 与辅助模块 [`cap/test/mock_sub_module.zig`](file:///data/dev/cp/cap/test/mock_sub_module.zig)；
+- 覆盖验证：
+  1. 透明引入外部 `.zig` 模块；
+  2. 顶层常量与级联命名空间（`const api = MockBun.schema.api;`）；
+  3. 深层类型别名（`pub type DirInfo = SubModule.DirInfo;`）；
+  4. 顶层可变状态（`var global_counter: i32 = 100;`）；
+  5. 上下文软关键字 `and`、`or` 逻辑运算及 `orelse` 空值兜底；
+  6. 隔离验证 `LogicCalculator` 的 `and`/`or` 成员方法调用与 Zig 保留字安全转义；
+  7. 带哨兵的切片（`buf[0..3 :0]`）。
+- 运行 `./cap/bin/cap cap/test/test_bun_top_level_import.cp`（Release 版 `cpc` 全链路从零转译并在 687ms 内完成链接），断言 100% 绿灯全通；
+- 回归验证 [`cap/test/test_c_trampoline.cp`](file:///data/dev/cp/cap/test/test_c_trampoline.cp) 转译 3ms 绿灯通过，零功能劣化。
+
+
 
 
 

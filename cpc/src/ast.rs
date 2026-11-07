@@ -248,6 +248,10 @@ pub struct VarDecl {
     pub pat: Pattern,
     pub ty: Option<Type>,
     pub init: Option<Expr>,
+    #[serde(default)]
+    pub is_threadlocal: bool,
+    #[serde(default)]
+    pub is_pub: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -569,6 +573,8 @@ pub struct SliceExpr {
     pub obj: Box<Expr>,
     pub start: Option<Box<Expr>>,
     pub end: Option<Box<Expr>>,
+    #[serde(default)]
+    pub sentinel: Option<Box<Expr>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

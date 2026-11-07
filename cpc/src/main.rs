@@ -102,6 +102,7 @@ fn compile_file(
         let mut codegen = Codegen::new();
         codegen.is_beam_mode = beam;
         codegen.is_lib_mode = lib;
+        codegen.source_dir = input.parent().map(|p| p.to_path_buf());
         codegen.generate_module(&module)
     }));
 

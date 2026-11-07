@@ -3784,11 +3784,11 @@ return VTable {
 ---
 
 ## 2026-11-07 里程碑：cpc_dev 正式合并主干 cpc 并完成 Release 发布
+
 - **交付特性**：`@c union`、`switch` 标识符与负数范围模式匹配、`@if` 平台条件类型别名、带值块级作用域表达式、深层点号命名空间类型注解；
 - **AI 诊断**：全面集成标准三段式 AI 自愈诊断引擎；
 - **产物分发**：正式编译生成 release `cpc` 并覆盖安装至 `/data/dev/cp/cap/bin/cpc`；
 - **测试状态**：`test_c_union_and_comptime.cp`、`test_all_libs.cp`、`test_cptr_and_ai.cp` 全部 100% 绿灯全通。
-
 
 agyr --json | jq -r '.[].id'
 640a7490-6bcb-4d2f-a6af-60d7b8d6c522 最早
