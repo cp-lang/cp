@@ -56,7 +56,10 @@ impl Diagnostic {
             let line_num = line_idx + 1;
             let col_num = col_idx + 1;
 
-            out.push_str(&format!("  --> {}:{}:{}\n", file_display, line_num, col_num));
+            out.push_str(&format!(
+                "  --> {}:{}:{}\n",
+                file_display, line_num, col_num
+            ));
             out.push_str("   |\n");
 
             let line_prefix = format!("{:>4} | ", line_num);
@@ -68,7 +71,9 @@ impl Diagnostic {
 
             // Calculate underline length
             let underline_len = if span.end > span.start {
-                (span.end - span.start).min(line_str.len().saturating_sub(col_idx)).max(1)
+                (span.end - span.start)
+                    .min(line_str.len().saturating_sub(col_idx))
+                    .max(1)
             } else {
                 1
             };
@@ -78,7 +83,10 @@ impl Diagnostic {
             out.push_str(&format!("   | {}{}\n", indent, carets));
             out.push_str("   |\n");
         } else if let Some(span) = self.span {
-            out.push_str(&format!("  --> {}: (span: {}..{})\n", file_display, span.start, span.end));
+            out.push_str(&format!(
+                "  --> {}: (span: {}..{})\n",
+                file_display, span.start, span.end
+            ));
         }
 
         if let Some(cause) = &self.cause {
@@ -121,17 +129,19 @@ pub fn levenshtein_distance(a: &str, b: &str) -> usize {
         curr[0] = i + 1;
         for (j, cb) in b.chars().enumerate() {
             let cost = if ca == cb { 0 } else { 1 };
-            curr[j + 1] = std::cmp::min(
-                std::cmp::min(curr[j] + 1, prev[j + 1] + 1),
-                prev[j] + cost,
-            );
+            curr[j + 1] =
+                std::cmp::min(std::cmp::min(curr[j] + 1, prev[j + 1] + 1), prev[j] + cost);
         }
         prev.copy_from_slice(&curr);
     }
     prev[len_b]
 }
 
-pub fn find_closest_match<'a>(target: &str, candidates: &[&'a str], max_dist: usize) -> Option<&'a str> {
+pub fn find_closest_match<'a>(
+    target: &str,
+    candidates: &[&'a str],
+    max_dist: usize,
+) -> Option<&'a str> {
     let mut best: Option<(&'a str, usize)> = None;
     for &cand in candidates {
         let dist = levenshtein_distance(target, cand);
@@ -170,7 +180,9 @@ pub const STANDARD_BUILTIN_IMPORTS: &[(&str, &str)] = &[
 pub fn from_compiler_error_msg(raw_msg: &str, source_code: Option<&str>) -> Diagnostic {
     let msg = raw_msg.trim_start_matches("CP Compile Error:").trim();
 
-    let mut diag = if msg.contains("Cannot perform mutable operation") && msg.contains("read-only parameter") {
+    let mut diag = if msg.contains("Cannot perform mutable operation")
+        && msg.contains("read-only parameter")
+    {
         let param_name = msg
             .split("read-only parameter '")
             .nth(1)
@@ -201,13 +213,26 @@ pub fn from_compiler_error_msg(raw_msg: &str, source_code: Option<&str>) -> Diag
         let var_name = msg.split('\'').nth(1).unwrap_or("variable");
         Diagnostic::new(
             "E0201",
-            format!("cannot perform mutable operation through read-only borrow '{}'", var_name),
+            format!(
+                "cannot perform mutable operation through read-only borrow '{}'",
+                var_name
+            ),
         )
-        .with_cause(format!("'{}' is borrowed as read-only (immutable).", var_name))
+        .with_cause(format!(
+            "'{}' is borrowed as read-only (immutable).",
+            var_name
+        ))
         .with_help("in CP, mutable operations require exclusive mutable borrows ('*...').")
-        .with_suggestion(format!("declare '{}' with '*' for mutable borrowing: '*{}'", var_name, var_name))
+        .with_suggestion(format!(
+            "declare '{}' with '*' for mutable borrowing: '*{}'",
+            var_name, var_name
+        ))
     } else if msg.contains("Borrow conflict") {
-        let target = msg.split("on '").nth(1).and_then(|s| s.split('\'').next()).unwrap_or("variable");
+        let target = msg
+            .split("on '")
+            .nth(1)
+            .and_then(|s| s.split('\'').next())
+            .unwrap_or("variable");
         Diagnostic::new("E0202", msg)
             .with_cause(format!("variable '{}' is already borrowed in the current scope.", target))
             .with_help("CP enforces single-writer OR multiple-readers aliasing XOR mutability at compile time.")

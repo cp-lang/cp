@@ -6334,4 +6334,177 @@ CP 全面废止 C 风格类型关键字与前置问号指针语法，统一使�
 
 ---
 
+### 17.4 底层系统级互操作与高级表达式扩展规范
+
+为了彻底消除底层系统库（如网络解析、DNS、安全密码学等模块）中残留的 `zig { ... }` 桥接块，CP 语言提供了四项关键底层互操作与控制流扩展特性：
+
+#### 17.4.1 C-ABI 联合体声明与内存重叠 (`@c union`)
+
+在底层系统编程（如网络栈、协议报文解析）中，经常需要同一段内存在不同类型之间物理重叠（如 IPv4 `in_addr` 与 IPv6 `in6_addr`）。CP 语言原生提供 `@c union` 与普通 `union` 声明支持：
+
+```typescript
+// 声明 C-ABI 兼容的 extern union
+pub @c union union_unnamed_3 {
+    addr4: struct_in_addr,
+    addr6: struct_ares_in6_addr,
+}
+
+// 声明紧凑内存对齐的 packed union
+pub @packed union PackedBits {
+    raw: u32,
+    flag: u8,
+}
+
+// 声明普通安全联合体
+pub union ValueUnion {
+    int_val: i32,
+    byte_val: u8,
+}
+```
+
+- **转译语义**：`@c union` 转译为 Zig 的 `extern union`；`@packed union` 转译为 `packed union`；普通 `union` 转译为 `union`；
+- **内存安全保障**：`union` 类型自动跳过堆分配构造器（`_create`）和自动内存析构注入，直接与底层 C 内存布局 100% 同构对齐。
+
+#### 17.4.2 `switch` 整数与常量标识符范围匹配模式
+
+在状态码解析与网络错误映射中，需要匹配连续范围的整数或枚举（例如 `1...ARES_ENOSERVER` 或负数范围 `-ARES_ENOSERVER...-1`）。CP 放宽了范围匹配端点的限制：
+
+```typescript
+const ARES_SUCCESS = 0;
+const ARES_ENOSERVER = 10;
+
+fn classify_ares_code(rc: i32): i32 {
+    return switch (rc) {
+        0 => 0,
+        1...ARES_ENOSERVER => 100,      // Zig 风格端点常量标识符
+        -ARES_ENOSERVER...-1 => -100,   // 支持负数常量与负整数字面量
+        100..=200 => 200,               // 现代 CP 闭区间范围
+        * => 999,                        // 通配兜底
+    };
+}
+```
+
+- **端点支持**：端点支持字面量整数、常量标识符、负号表达式（如 `-ARES_ENOSERVER`）；
+- **范围符号**：全面支持 Zig 风格 `start...end` 以及 CP 风格 `start..=end`（闭区间）与 `start..end`（半开区间）。
+
+#### 17.4.3 `@if` 编译期平台条件类型别名与深层命名空间类型注解
+
+在编写跨平台网络和系统库时，特定系统类型往往随目标操作系统变化（如 Windows 的 `SOCKET` 对应 `ws2_32.SOCKET`，POSIX 对应 `i32`），或者直接引用标准库/外部命名空间类型（如 `std.posix.sockaddr`）。CP 原生支持条件类型别名与点号深层路径注解：
+
+```typescript
+import { Environment } from "bun";
+
+// 1. 根据编译期平台环境条件切换类型定义
+pub type ares_socket_t = @if (Environment.isWindows) ws2_32.SOCKET else i32;
+pub type hostent_int = @if (Environment.isWindows) i16 else i32;
+
+// 2. 深层命名空间系统类型别名与直接类型注解
+pub type struct_sockaddr = std.posix.sockaddr;
+let addr: struct_sockaddr = undefined;
+let p_addr: &std.posix.sockaddr = &addr;
+```
+
+- **转译语义**：条件别名转译为 Zig 的 `pub const Name = if (cond) TypeA else TypeB;`，深层类型直接映射为底层命名空间符号路径；
+- **语义分析（Sema）透明展开**：CP 编译器会在借用检查和类型推导时自动递归解开别名，当目标为 `@if` 条件类型时，只要与任意一侧分支类型兼容即可安全赋初值或传参。深层路径类型直接纳入借用与生命周期检查体系。
+
+#### 17.4.4 带值块级作用域表达式 (Labeled Block Expressions)
+
+当需要经过复杂多步局部计算得到不可变配置或指针（且避免先声明可变的未初始化变量 `let mut x = null;` 破坏不可变原则）时，可以使用带值的标签块表达式或匿名表达式块：
+
+```typescript
+// 1. 具名标签块表达式
+fn get_host_pointer(host: string, host_buf: *[256]u8): cstr?! {
+    const host_ptr: cstr?! = brk: {
+        let len = Math.min(host.len, host_buf.len - 1);
+        Memory.copy(host_buf[0..len], host[0..len]);
+        host_buf[len] = 0;
+        break :brk &host_buf[0]; // 带值跳出
+    };
+    return host_ptr;
+}
+
+// 2. 匿名表达式块
+fn compute_result(): i32 {
+    let result: i32 = ({
+        let base = 50;
+        let factor = 2;
+        break base * factor; // 自动绑定到匿名块并返回值
+    });
+    return result;
+}
+```
+
+- **转译语义**：`label: { ... break :label expr; }` 直接生成 Zig 原生标签块；匿名表达式块 `({ ... break expr; })` 转译为 `(blk: { ... break :blk expr; })`；
+- **纯净性**：保持变量的不变性声明（`let` / `const`），彻底杜绝由于提前声明可变变量带来的未初始化读取与悬挂别名隐患。
+
+---
+
 _本规范由 CP 架构设计委员会制定，作为全体编译器研发、运行时对接与开发者生态的唯一最高准则。_
+
+#### 17.5 高性能网络套接字与异步流式 I/O 设计模式 (High-Performance Sockets & Asynchronous Stream I/O Patterns)
+
+在编写跨平台、高吞吐的底层网络套接字（Socket）服务时，CP 语言提供了以下规范与最佳实践：
+
+##### 17.5.1 接收者 `_` 在高频事件回调中的应用
+在事件循环（Event Loop）触发的密集网络回调中，统一使用 `_` 作为接收者（`this`）的紧凑代称，代码更清晰易读：
+
+```typescript
+export class TCPSocket {
+    socket: SocketHandle;
+    bytes_written: u64 = 0;
+
+    pub fn onWritable(_: *TCPSocket): void {
+        if (_.socket.isDetached()) return;
+        _.internalFlush();
+    }
+
+    pub fn onData(_: *TCPSocket, data: []const u8): void {
+        _.processPayload(data);
+    }
+}
+```
+
+##### 17.5.2 泛型与参数化类工厂模式
+通过编译期布尔或类型参数单态化生成不同协议层（如 TCP / TLS）的高性能网络抽象：
+
+```typescript
+pub fn NewSocket(comptime ssl: bool): type {
+    return class {
+        const This = @This();
+        socket: SocketHandle;
+        flags: SocketFlags = .{};
+
+        pub fn memoryCost(_: *This): usize {
+            const ssl_cost: usize = if (ssl and !_.flags.bypass_tls) 40 * 1024 else 0;
+            return @sizeOf(This) + ssl_cost;
+        }
+
+        pub fn release(_: *This): void {
+            _.socket.close();
+            bun.destroy(_);
+        }
+
+        pub fn deinit(_: *This): void {
+            _.release();
+        }
+    };
+}
+
+pub const TCPSocket = NewSocket(false);
+pub const TLSSocket = NewSocket(true);
+```
+
+##### 17.5.3 表达式块在安全状态转换中的应用
+在套接字协议原地升级（如 TCP -> TLS 协商）或复杂选项提取时，使用表达式块 `({ ... break val; })` 消除未初始化可变变量：
+
+```typescript
+const secure_context: JSValue = ({
+    if (try opts.getTruthy(globalObject, "secureContext")) |v| break v;
+    if (try opts.getTruthy(globalObject, "tls")) |t| {
+        if (t.isObject()) {
+            if (try t.getTruthy(globalObject, "secureContext")) |v| break v;
+        }
+    }
+    break .zero;
+});
+```

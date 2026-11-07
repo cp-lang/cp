@@ -2002,4 +2002,57 @@
 - 构建完成 `cpc` 正式 release 二进制，耗时 35.73s，覆盖至 `/data/dev/cp/cap/bin/cpc`；
 - 所有回归测试 100% 绿灯全通。
 
+---
+
+## 2026-11-07 (cpc_dev 沙盒实现 C-ABI 联合体 `@c union`、`switch` 范围放宽、`@if` 条件类型别名与带值块级表达式)
+
+### 新增文件 (Added)
+- [`cap/test/test_c_union_and_comptime.cp`](file:///data/dev/cp/cap/test/test_c_union_and_comptime.cp): 4 大底层系统特性全覆盖测试套件（`@c union`、标识符范围匹配模式、`@if` 平台条件别名、标签块带值跳出与匿名块表达式）。
+
+### 修改文件 (Modified)
+- [`cpc_dev/src/lexer.rs`](file:///data/dev/cp/cpc_dev/src/lexer.rs):
+  - 新增 `Token::Union` (`union`) 词法关键字。
+- [`cpc_dev/src/ast.rs`](file:///data/dev/cp/cpc_dev/src/ast.rs):
+  - `Class` 新增 `pub is_union: bool` 标识；
+  - 新增 `RangeBound`（`Int(i64)`, `Ident(Ident)`, `NegIdent(Ident)`），扩展 `Pattern::Range { start: RangeBound, end: RangeBound, inclusive: bool }`；
+  - `Expr` 新增 `LabeledBreak(Span, Ident, Option<Box<Expr>>)` 与 `LabeledBlock { label: Option<Ident>, block: BlockStmt }`；
+  - `Type` 新增 `Conditional(Box<Expr>, Box<Type>, Box<Type>)` 表达编译期条件类型别名；
+  - 适配 `has_pipe_placeholder`。
+- [`cpc_dev/src/ast_visitor.rs`](file:///data/dev/cp/cpc_dev/src/ast_visitor.rs):
+  - `find_referenced_vars_in_expr` 支持 `LabeledBreak` 与 `LabeledBlock` 的变量引用收集。
+- [`cpc_dev/src/dcp.rs`](file:///data/dev/cp/cpc_dev/src/dcp.rs):
+  - `Decl::Class` 支持输出 `union` 声明，`format_type` 支持 `Type::Conditional`。
+- [`cpc_dev/src/parser.rs`](file:///data/dev/cp/cpc_dev/src/parser.rs):
+  - `parse_decl` 支持 `union` / `@c union` / `@packed union`；
+  - `parse_single_pattern` 与 `try_parse_range_bound` 放宽端点限制，支持常量标识符、负数常量标识符及 `...` / `..=` / `..` 符号；
+  - `parse_type` 支持 `@if (cond) TypeA else TypeB` 平台条件类型别名；
+  - `parse_stmt` 支持 `break :label [val];` 与 `break val;`；
+  - `parse_primary_expr` 支持标签块表达式 `label: { ... }` 与匿名块表达式 `({ ... })`；
+  - 完善 `left_span` 与 `right_span`。
+- [`cpc_dev/src/sema.rs`](file:///data/dev/cp/cpc_dev/src/sema.rs):
+  - 屏蔽 union 的成员自动 `init` 构造与堆分配方法注入；
+  - 新增 `resolve_type` 实现类型别名递归自动解开；
+  - `can_coerce`、`types_eq`、`is_int_type`、`int_fits_in_type` 全面支持 `Type::Conditional` 与类型别名展开；
+  - `infer_type` 与 `analyze_expr` 适配 `LabeledBlock` 与 `LabeledBreak`。
+- [`cpc_dev/src/codegen.rs`](file:///data/dev/cp/cpc_dev/src/codegen.rs):
+  - `struct_kind` 将 `is_union` 结构体转译为 Zig 原生 `extern union` / `packed union` / `union`，跳过 `_create`；
+  - `generate_pattern_match` 与 `format_simple_pat` 适配 `RangeBound`；
+  - `Codegen` 新增 `current_block_label` 追踪，精准将块内带值跳出转换为 Zig 原生 `break :label val;`；
+  - `Stmt::Expr` 中对 `Expr::LabeledBreak` / `Expr::Break` 消除 `_ = ` 冗余包装；
+  - `map_type` 配合 `expr_to_zig_pure` 输出 `if (cond) TypeA else TypeB`。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 新增 17.4 节《底层系统级互操作与高级表达式扩展规范》，完整详述四项扩展的语法规则与设计理念。
+
+### 自动化测试验证 (Tests Verified)
+- 运行 `CPC_BIN=/data/dev/cp/cpc_dev/target/debug/cpc /data/dev/cp/cap/bin/cap test cap/test/test_c_union_and_comptime.cp`，607ms 通过全部断言。
+- 核心回归测试 `test_all_libs.cp`、`test_cptr_and_ai.cp`、`test_bun_features.cp` 100% 绿灯全通。
+
+### 正式主干合并与 Release 交付 (Mainline Merge & Official Release Delivery)
+- **代码同步**：将沙盒 `cpc_dev/src/` 中的底层系统特性（`@c union`、`switch` 范围放宽、`@if` 平台条件别名、带值块表达式、深层命名空间类型注解）全量同步至正式主干 `cpc/src/`，代码对齐率 100%；
+- **代码规范**：运行 `cargo fmt --manifest-path cpc/Cargo.toml` 与 `cargo check --manifest-path cpc/Cargo.toml` 格式化并验证零错误；
+- **构建交付**：执行 `cargo build --release --manifest-path cpc/Cargo.toml` 完成 LLVM 深度优化，二进制覆盖安装至 `/data/dev/cp/cap/bin/cpc`；
+- **全量测试**：使用正式版 `cap/bin/cpc` 重新验证全部回归测试套件（`test_c_union_and_comptime.cp`、`test_all_libs.cp`、`test_cptr_and_ai.cp`），100% 绿灯全通。
+
+
+
 

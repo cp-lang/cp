@@ -5914,3 +5914,99 @@ bun agy 可能修改了cpc编译器代码, 经cpc_dev 与 cpc 合并, 并审核 
    - `cp_ref.md`、`CHANGELOG.md`、`DEVLOG.md` 以及 `SESSION.md` 全部同步更新；
    - 清理所有测试临时二进制与构建中间文件，工作区 100% 纯净。
 
+---
+
+### 用户指令 (User Input)
+按你的方案, 在 cpc_dev 中实现cp中缺少的以上功能, 并写入 cp_ref.md 设计规范, 方便 bun agy 使用.
+
+### 执行汇报 (Execution Report)
+1. **任务背景与架构破局**：
+   - 针对 Bun agy 在迁移 `c_ares.cp` 等系统级底层库时遇到的 11 处 `zig { ... }` 残留阻碍，在 `cpc_dev` 沙盒中攻克并实现了 4 大关键底层系统特性，全面赋能下游系统级库迁移；
+   - 严格在 `cpc_dev` 沙盒中作业，未触碰正式目录 `cpc`，保持双智能体并行隔离安全性。
+2. **4 大核心语言特性实装落地 (`cpc_dev`)**：
+   - **特性 A: `@c union` / 原生 `union` 声明**：
+     - `lexer.rs` 新增 `Token::Union` (`union`)；
+     - `ast.rs` 为 `Class` 增加 `pub is_union: bool` 标识；
+     - `parser.rs` 支持 `pub @c union Name { ... }`、`pub @packed union Name { ... }` 与普通 `pub union Name { ... }`；
+     - `sema.rs` 自动屏蔽 union 的 `init` 与字段构造注入；
+     - `codegen.rs` 将其精确转译为 Zig 原生 `extern union` / `packed union` / `union`，跳过 `_create` 堆分配，与 C 内存布局 100% 同构对齐。
+   - **特性 B: `switch` 整数与常量标识符范围模式放宽**：
+     - `ast.rs` 引入 `RangeBound`（支持整数、标识符与负标识符）；
+     - `parser.rs` 放宽端点限制，支持常量标识符（如 `1...ARES_ENOSERVER`）、带负号常量（如 `-ARES_ENOSERVER...-1`）、负整数，支持 Zig 风格 `...` 与 CP 风格 `..=`（闭区间）及 `..`（半开区间）；
+     - `codegen.rs` 精准输出 Zig 规范的 switch 范围分支。
+   - **特性 C: `@if` 平台条件类型别名与语义透明展开**：
+     - `ast.rs` 引入 `Type::Conditional(Box<Expr>, Box<Type>, Box<Type>)`；
+     - `parser.rs` 支持 `pub type T = @if (cond) TypeA else TypeB;`；
+     - `codegen.rs` 配合只读纯表达式提取函数 `expr_to_zig_pure` 输出 `if (cond) TypeA else TypeB`；
+     - `sema.rs` 实装 `resolve_type`，在 `can_coerce`、`types_eq`、`is_int_type`、`int_fits_in_type` 中递归解开别名并处理多分支联合兼容，解决别名赋值检查报错（`E0207`）。
+   - **特性 D: 带值块级作用域表达式 (Labeled Block Expressions)**：
+     - `ast.rs` 引入 `Expr::LabeledBreak` 与 `Expr::LabeledBlock`；
+     - `parser.rs` 识别具名标签块表达式 `label: { ... break :label val; }` 与匿名块表达式 `({ ... break val; })`；
+     - `codegen.rs` 引入 `current_block_label` 上下文追踪，消除 `_ = break` 冗余包装，精准生成 Zig 原生 `label: { ... break :label val; }` 或 `(blk: { ... break :blk val; })`。
+3. **官方规范手册同步更新 (`cp_ref.md`)**：
+   - 新增第 17.4 节《底层系统级互操作与高级表达式扩展规范》，详述 4 大特性的语法定义、转译机制与代码示例。
+4. **自动化测试与全量回归**：
+   - 创建正式测试套件 [`cap/test/test_c_union_and_comptime.cp`](file:///data/dev/cp/cap/test/test_c_union_and_comptime.cp)，测试覆盖全量 4 大特性断言；
+   - 运行测试 `CPC_BIN=/data/dev/cp/cpc_dev/target/debug/cpc /data/dev/cp/cap/bin/cap test cap/test/test_c_union_and_comptime.cp`，607ms 绿灯通过；
+   - 既有套件 `test_all_libs.cp` (682ms)、`test_cptr_and_ai.cp` (594ms)、`test_bun_features.cp` 全部绿灯一次性全通。
+5. **四线文档全量同步完成**：
+   - `cp_ref.md`、`CHANGELOG.md`、`DEVLOG.md` 以及 `SESSION.md` 全部同步更新完毕。
+
+---
+
+### 用户指令 (User Input)
+1. 条件类型别名 (pub type T = @if (cond) TypeA else TypeB;)
+2. 深层命名空间类型注解（如 std.posix.sockaddr）
+3. C 回调跳板（C-Trampoline） 
+这三个功能实现了吗
+
+### 执行汇报 (Execution Report)
+1. **特性 1：条件类型别名 (`pub type T = @if (cond) TypeA else TypeB;`)** -> **【已完全实现】**
+   - 在 `parser.rs`、`ast.rs`、`sema.rs`、`codegen.rs` 中完整打通，支持编译期条件判断，转译为 Zig 原生 `if (cond) TypeA else TypeB`；并在 `sema.rs` 中通过 `resolve_type` 透明展开别名，多分支兼容，已在 `test_c_union_and_comptime.cp` 中通过测试。
+2. **特性 2：深层命名空间类型注解（如 `std.posix.sockaddr`）** -> **【已完全实现】**
+   - 解析器支持任意层级的点号类型路径（`Token::Ident` 遇 `Token::Dot` 自动循环拼接收拢）；
+   - 代码生成器 `map_type` 识别 `sym.contains('.')` 保持原样生成；
+   - 语义检查器支持深层类型的别名绑定与借用类型检查；
+   - 在测试用例中加入 `pub type struct_sockaddr = std.posix.sockaddr;` 与 `let p_addr: &std.posix.sockaddr = &addr;`，端到端编译运行全绿通过。
+3. **特性 3：C 回调跳板（C-Trampoline / C-Closure）** -> **【尚未实现】**
+   - 属于高阶编译期单态化与函数内局部匿名结构体提取静态 C 函数指针的复杂元编程特性；
+   - 目前在 `c_ares.cp` 等系统库中涉及的 10 处 `callbackWrapper` / `hostCallbackWrapper` 仍需暂时保留在 `zig { ... }` 块中过渡，后续阶段再行演进。
+
+---
+
+### 用户指令 (User Input)
+先合并到 cpc,发布当前成果, git 提交代码库
+
+### 执行汇报 (Execution Report)
+1. **正式代码合并与原子同步 (Merge cpc_dev -> cpc)**：
+   - 将沙盒目录 `cpc_dev/src/` 中的全量代码完整同步至正式主干 `cpc/src/`（涉及 `ast.rs`、`ast_visitor.rs`、`codegen.rs`、`dcp.rs`、`diagnostic.rs`、`lexer.rs`、`main.rs`、`parser.rs`、`sema.rs`）；
+   - 执行 `diff -rq cpc_dev/src cpc/src` 校验，两边代码达成 100% 毫无差异对齐；
+   - 执行 `cargo fmt --manifest-path cpc/Cargo.toml` 保持全局代码风格统一；
+   - 执行 `cargo check --manifest-path cpc/Cargo.toml` 验证编译期借用与语法零错误。
+2. **正式 Release 版本构建与分发部署 (Official Release Delivery)**：
+   - 执行 release 构建：`cargo build --release --manifest-path /data/dev/cp/cpc/Cargo.toml`，耗时 36.54s；
+   - 将正式产物复制安装至系统二进制路径：`cp /data/dev/cp/cpc/target/release/cpc /data/dev/cp/cap/bin/cpc`；
+   - 切换终端环境变量至正式版：`export CPC_BIN=/data/dev/cp/cap/bin/cpc`。
+3. **正式环境全量回归验证 (Full Regression Test Suite)**：
+   - 运行新特性综合测试套件：`/data/dev/cp/cap/bin/cap test cap/test/test_c_union_and_comptime.cp`，输出全绿（`UnionAddr created successfully`、`Switch range matches with identifiers and negative values passed!`、`Conditional type alias and deep namespace type passed!`、`Labeled block and expression block returned values correctly!`、`ALL TESTS PASSED SUCCESSFULLY!`)；
+   - 运行多库集成测试：`/data/dev/cp/cap/bin/cap test cap/test/test_all_libs.cp`，653ms 绿灯通过；
+   - 运行 C 指针与 AI 自愈诊断测试：`/data/dev/cp/cap/bin/cap test cap/test/test_cptr_and_ai.cp`，585ms 绿灯通过。
+4. **本次 Git 提交完整范围 (Commit Scope)**：
+   - **编译器主干核心 (`cpc/src/`)**：
+     - `ast.rs`：新增 `Class.is_union`、`RangeBound`、`Expr::LabeledBreak` / `Expr::LabeledBlock`、`Type::Conditional`；
+     - `ast_visitor.rs`：变量追踪器支持标签跳出与块表达式；
+     - `codegen.rs`：支持 `@c union` 生成 Zig `extern union`、`switch` 标识符与负数范围模式映射、带值块表达式及 Zig `break :label val` 变换、`@if` 条件类型别名代码生成；
+     - `dcp.rs`：导出 `union` 与 `Type::Conditional` 声明；
+     - `diagnostic.rs`：三段式自愈诊断核心引擎；
+     - `lexer.rs`：新增 `Token::Union` (`union`)；
+     - `main.rs`：静默 hook 与自愈诊断渲染集成；
+     - `parser.rs`：支持 `@c union`、`switch` 范围分支、`pub type T = @if (cond) A else B`、深层点号类型注解（如 `std.posix.sockaddr`）、标签块与表达式块；
+     - `sema.rs`：`resolve_type` 透明展开别名，支持条件类型分支兼容，屏蔽 union 成员方法构造；
+   - **长期资产测试套件 (`cap/test/`)**：
+     - 新增 [`cap/test/test_c_union_and_comptime.cp`](file:///data/dev/cp/cap/test/test_c_union_and_comptime.cp)；
+   - **设计规范与官方手册**：
+     - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)：新增第 17.4 节《底层系统级互操作与高级表达式扩展规范》；
+   - **四线文档记录与任务流**：
+     - `SESSION.md`、`CHANGELOG.md`、`DEVLOG.md`、`TASK.md`。
+
+

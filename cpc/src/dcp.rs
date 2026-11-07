@@ -49,8 +49,9 @@ impl DcpEmitter {
                 }
             }
             Decl::Class(c) => {
+                let kw = if c.is_union { "union" } else { "class" };
                 self.output
-                    .push_str(&format!("export class {} ", c.ident.sym));
+                    .push_str(&format!("export {} {} ", kw, c.ident.sym));
                 if !c.implements.is_empty() {
                     self.output.push_str("implements ");
                     for (i, imp) in c.implements.iter().enumerate() {
@@ -337,6 +338,13 @@ impl DcpEmitter {
             Type::CFn(params, ret) => {
                 let p_str: Vec<String> = params.iter().map(|p| self.format_type(p)).collect();
                 format!("@c fn({}): {}", p_str.join(", "), self.format_type(ret))
+            }
+            Type::Conditional(_cond, cons, alt) => {
+                format!(
+                    "@if (...) {} else {}",
+                    self.format_type(cons),
+                    self.format_type(alt)
+                )
             }
         }
     }

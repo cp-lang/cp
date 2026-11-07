@@ -186,6 +186,8 @@ pub struct Class {
     pub is_static: bool,
     #[serde(default)]
     pub generic_params: Vec<GenericParam>,
+    #[serde(default)]
+    pub is_union: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -254,6 +256,13 @@ pub enum VarDeclKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum RangeBound {
+    Int(i64),
+    Ident(Ident),
+    NegIdent(Ident),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Pattern {
     Ident(Ident),
     Array(Vec<Pattern>),
@@ -266,8 +275,8 @@ pub enum Pattern {
     Null,
     Err(Box<Pattern>),
     Range {
-        start: i64,
-        end: i64,
+        start: RangeBound,
+        end: RangeBound,
         inclusive: bool,
     },
     Or(Vec<Pattern>),
@@ -431,6 +440,11 @@ pub enum Expr {
     },
     Continue(Span),
     Break(Span, Option<Box<Expr>>),
+    LabeledBreak(Span, Ident, Option<Box<Expr>>),
+    LabeledBlock {
+        label: Option<Ident>,
+        block: BlockStmt,
+    },
     Return(Span, Option<Box<Expr>>),
 }
 
@@ -650,6 +664,7 @@ pub enum Type {
     CStr,
     CFn(Vec<Type>, Box<Type>),
     Auto,
+    Conditional(Box<Expr>, Box<Type>, Box<Type>),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -730,6 +745,11 @@ pub fn has_pipe_placeholder(expr: &Expr) -> bool {
         Expr::Cast { expr, .. } => has_pipe_placeholder(expr),
         Expr::Range { start, end, .. } => has_pipe_placeholder(start) || has_pipe_placeholder(end),
         Expr::Builtin(b) => b.args.iter().any(has_pipe_placeholder),
+        Expr::LabeledBlock { block, .. } => block.body.iter().any(|s| match s {
+            Stmt::Expr(e) => has_pipe_placeholder(e),
+            _ => false,
+        }),
+        Expr::LabeledBreak(_, _, Some(val)) => has_pipe_placeholder(val),
         _ => false,
     }
 }

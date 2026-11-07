@@ -3241,4 +3241,78 @@ Bun AGY 在推进 Bun 基础算法库（如 `wyhash`、`base64`）转译过程�
 - Release 构建耗时 35.73s，正式替换 `/data/dev/cp/cap/bin/cpc`；
 - 回归套件 [`cap/test/test_cptr_and_ai.cp`](file:///data/dev/cp/cap/test/test_cptr_and_ai.cp)、[`cap/test/test_control_flow_coalesce.cp`](file:///data/dev/cp/cap/test/test_control_flow_coalesce.cp)、[`cap/test/test_ai_diagnostics.cp`](file:///data/dev/cp/cap/test/test_ai_diagnostics.cp)、[`cap/test/test_lifetime_pass.cp`](file:///data/dev/cp/cap/test/test_lifetime_pass.cp)、[`cap/test/test_ownership_pass.cp`](file:///data/dev/cp/cap/test/test_ownership_pass.cp) 全绿灯一次性全通！
 
+---
+
+## 2026-11-07: cpc_dev 沙盒实现 C-ABI 联合体 `@c union`、`switch` 常量范围放宽、`@if` 平台条件别名与带值块级表达式
+
+### 1. 任务背景与核心破局目标
+在 Bun.js 底层核心系统库（如 `c_ares.cp` 等）从 Zig 迁移到 CP 语言的过程中，源码中残留了多处 `zig { ... }` 桥接块（约占 450 行）。经深入语法剖析，阻碍消除 Zig 块的 4 项关键语言特性包括：
+1. **缺失 `@c union`（C-ABI 联合体）**：无法在纯 CP 中表达物理重叠内存（如 IPv4 `in_addr` 与 IPv6 `in6_addr`）；
+2. **`switch` 范围模式端点受限**：无法直接匹配常量标识符或负数常量（如 `1...ARES_ENOSERVER`、`-ARES_ENOSERVER...-1`）；
+3. **缺失 `@if` 编译期平台条件类型别名**：无法根据操作系统环境（如 `bun.Environment.isWindows`）优雅声明系统类型；
+4. **缺失带值块级表达式**：遇到复杂多步指针/配置构造时，必须先声明可变变量 `let mut host_ptr = null;` 再赋值，破坏不可变性与借用安全。
+
+### 2. 核心架构设计与执行落地
+
+#### 2.1 特性 A：`@c union` 与原生 `union` 声明
+- **词法与 AST**：在 `lexer.rs` 中新增 `Token::Union` (`union`)；在 `ast.rs` 中为 `Class` 增加 `pub is_union: bool` 标识；
+- **解析器适配**：在 `parser.rs` 的 `is_decl_keyword`、`parse_module_item`、`parse_decl` 中注册 `Token::Union`，支持 `pub @c union Name { ... }`、`pub @packed union Name { ... }`、`pub union Name { ... }`；
+- **语义与代码生成**：
+  - 在 `sema.rs` 中识别 `is_union`，严格跳过字段自动生成 `init` 构造逻辑；
+  - 在 `codegen.rs` 中，`struct_kind` 将 `is_union` 转译为 Zig 的 `extern union`、`packed union` 或普通 `union`，跳过 `_create` 堆分配生成，达成与 C 内存布局的 100% 同构对齐。
+
+#### 2.2 特性 B：`switch` 常量标识符与负数范围模式放宽
+- **AST 扩展**：定义 `RangeBound` 枚举（`Int(i64)`、`Ident(Ident)`、`NegIdent(Ident)`），扩展 `Pattern::Range { start: RangeBound, end: RangeBound, inclusive: bool }`；
+- **解析器升级**：在 `parser.rs` 的 `try_parse_range_bound` 中，允许标识符、带负号的标识符（如 `-ARES_ENOSERVER`）及负整数作为合法端点；支持 Zig 风格 `...` 与 CP 风格 `..=`（闭区间）及 `..`（半开区间）；
+- **代码生成**：`generate_pattern_match` 与 `format_simple_pat` 适配 `RangeBound`，直接输出规范的 Zig switch 范围分支 `1...ARES_ENOSERVER`、`-ARES_ENOSERVER...-1`。
+
+#### 2.3 特性 C：`@if` 平台条件类型别名与透明展开
+- **AST 扩展**：`Type` 新增变体 `Conditional(Box<Expr>, Box<Type>, Box<Type>)`；
+- **解析器升级**：在 `parser.rs` 的 `parse_type` 中支持 `@if (cond) TypeA else TypeB`；
+- **代码生成**：`codegen.rs` 的 `map_type` 配合纯只读 AST 表达式提取函数 `expr_to_zig_pure`，生成 Zig 原生 `if (cond) TypeA else TypeB`；
+- **Sema 别名递归解开与多分支联合兼容**：
+  - 在 `Analyzer` 中实装 `resolve_type(&self, ty: &Type) -> Type`，递归解析顶层收集的 `self.type_aliases`；
+  - 在 `can_coerce`、`types_eq`、`is_int_type`、`int_fits_in_type` 中，自动展开 `Type::Ref` 别名；
+  - 针对 `Type::Conditional`，只要源/目标与其中任意一个分支兼容即视为类型匹配成功，彻底解决系统类型别名赋值检查报错（`E0207`）问题。
+
+#### 2.4 特性 D：带值块级作用域表达式 (Labeled Block Expressions)
+- **AST 扩展**：`Expr` 新增 `LabeledBreak(Span, Ident, Option<Box<Expr>>)` 与 `LabeledBlock { label: Option<Ident>, block: BlockStmt }`；
+- **语法解析**：
+  - `parse_stmt` 拦截 `break :label [val];` 与普通 `break [val];`；
+  - `parse_primary_expr` 支持 `label: { ... }` 具名标签块表达式与 `({ ... })` 匿名表达式块；
+- **Zig 状态机与标签对齐生成**：
+  - 在 `Codegen` 中引入 `current_block_label: Option<String>` 上下文标签栈；
+  - 遇到 `Expr::LabeledBreak` 或匿名块内的 `Expr::Break` 时，精准输出 Zig 原生 `break :label val;`；
+  - 在 `generate_stmt` 的 `Stmt::Expr` 中专门拦截，彻底消除 Zig 报错中多余的 `_ = break ...` 赋值前缀。
+
+### 3. 测试验证与全量回归成果
+1. **正式测试套件**：
+   - 创建 [`cap/test/test_c_union_and_comptime.cp`](file:///data/dev/cp/cap/test/test_c_union_and_comptime.cp)，测试通过 4 大特性的全部断言；
+   - 运行 `CPC_BIN=/data/dev/cp/cpc_dev/target/debug/cpc /data/dev/cp/cap/bin/cap test cap/test/test_c_union_and_comptime.cp`，607ms 绿灯通过；
+2. **已有套件兼容性验证**：
+   - `test_all_libs.cp` (682ms)、`test_cptr_and_ai.cp` (594ms)、`test_bun_features.cp` 均 100% 一次性全通！
+
+---
+
+## 2026-11-07 (正式合并主干 cpc、构建 Release 版本并发布交付)
+
+### 1. 合并与交付目标
+- 将沙盒 `cpc_dev/` 中经过全量回归测试验证的底层系统特性与 AI 自愈诊断体系完整合并至正式主干 `cpc/`；
+- 按照 GEMINI.md 规范完成 Release 版本构建与全局覆盖部署，打通正式环境，支撑 Bun agy 的底层迁移工作。
+
+### 2. 执行与验证细节
+1. **源码同步与差异校验**：
+   - 将 `cpc_dev/src/` 的核心模块（`ast.rs`, `ast_visitor.rs`, `codegen.rs`, `dcp.rs`, `diagnostic.rs`, `lexer.rs`, `main.rs`, `parser.rs`, `sema.rs`）同步更新至 `cpc/src/`；
+   - 运行 `diff -rq cpc_dev/src cpc/src` 确认代码 100% 一致对齐；
+   - 运行 `cargo fmt --manifest-path cpc/Cargo.toml` 与 `cargo check --manifest-path cpc/Cargo.toml`。
+2. **Release 优化构建与二进制部署**：
+   - 执行 `cargo build --release --manifest-path cpc/Cargo.toml`，耗时 36.54s，顺利生成高阶优化二进制；
+   - 复制产物更新到 `/data/dev/cp/cap/bin/cpc`（系统 PATH 路径）。
+3. **正式版回归测试**：
+   - 切换环境变量：`export CPC_BIN=/data/dev/cp/cap/bin/cpc`；
+   - 运行 `cap test cap/test/test_c_union_and_comptime.cp`，725ms 绿灯通过；
+   - 运行 `cap test cap/test/test_all_libs.cp` (653ms)、`cap test cap/test/test_cptr_and_ai.cp` (585ms)，全部 100% 绿灯。
+
+
+
 

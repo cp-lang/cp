@@ -77,6 +77,8 @@ pub enum Token {
     Fn,
     #[token("class")]
     Class,
+    #[token("union")]
+    Union,
     #[token("trait")]
     Trait,
     #[token("impl")]

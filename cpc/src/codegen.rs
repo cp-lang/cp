@@ -275,6 +275,11 @@ impl ModuleFeatures {
             Type::ErrorUnion(_) => {}
             Type::Dict(_, _) | Type::Map(_, _) | Type::Set(_) => self.needs_collections = true,
             Type::PID => self.needs_actors = true,
+            Type::Conditional(cond, cons, alt) => {
+                self.scan_expr(cond);
+                self.scan_type(cons);
+                self.scan_type(alt);
+            }
             Type::Ref(id) => {
                 if id.sym == "RegExp" {
                     self.needs_regex = true;
@@ -567,6 +572,12 @@ impl ModuleFeatures {
                 ArrowBody::Block(b) => self.scan_block(b),
             },
             Expr::Unsafe(b) | Expr::Comptime(b) => self.scan_block(b),
+            Expr::LabeledBlock { block, .. } => self.scan_block(block),
+            Expr::LabeledBreak(_, _, val) => {
+                if let Some(v) = val {
+                    self.scan_expr(v);
+                }
+            }
             _ => {}
         }
     }
@@ -638,6 +649,7 @@ pub struct Codegen {
     pub type_aliases: HashMap<String, TypeAliasDecl>,
     pub narrowed_null_vars: HashSet<String>,
     pub const_vars: HashSet<String>,
+    pub current_block_label: Option<String>,
 }
 
 impl Codegen {
@@ -709,6 +721,7 @@ impl Codegen {
             type_aliases: HashMap::new(),
             narrowed_null_vars: HashSet::new(),
             const_vars: HashSet::new(),
+            current_block_label: None,
         }
     }
 
@@ -3607,9 +3620,30 @@ impl Codegen {
         }
         let type_id = Self::fnv1a_type_id(&class.ident.sym);
         let is_packed = class.meta.iter().find(|m| m.name.sym == "packed");
-        let is_extern = class.meta.iter().any(|m| m.name.sym == "extern" || m.name.sym == "c" || m.name.sym == "fix");
+        let is_extern = class
+            .meta
+            .iter()
+            .any(|m| m.name.sym == "extern" || m.name.sym == "c" || m.name.sym == "fix");
         let is_opaque = class.meta.iter().any(|m| m.name.sym == "opaque");
-        let struct_kind = if let Some(p) = is_packed {
+        let struct_kind = if class.is_union {
+            if let Some(p) = is_packed {
+                if let Some(arg) = p.args.first() {
+                    let expr = match arg {
+                        crate::ast::MetaArg::Positional(e) => e,
+                        crate::ast::MetaArg::Named(_, e) => e,
+                    };
+                    format!("packed union({})", self.generate_expr(expr))
+                } else {
+                    "packed union".to_string()
+                }
+            } else if is_extern {
+                "extern union".to_string()
+            } else if is_opaque {
+                "opaque".to_string()
+            } else {
+                "union".to_string()
+            }
+        } else if let Some(p) = is_packed {
             if let Some(arg) = p.args.first() {
                 let expr = match arg {
                     crate::ast::MetaArg::Positional(e) => e,
@@ -3726,6 +3760,7 @@ impl Codegen {
                 ));
             }
             if !is_generic
+                && !class.is_union
                 && !class.meta.iter().any(|m| {
                     m.name.sym == "value"
                         || m.name.sym == "packed"
@@ -6154,14 +6189,24 @@ impl Codegen {
                 end,
                 inclusive,
             } => {
+                let start_str = match start {
+                    crate::ast::RangeBound::Int(v) => format!("{}", v),
+                    crate::ast::RangeBound::Ident(id) => id.sym.clone(),
+                    crate::ast::RangeBound::NegIdent(id) => format!("-{}", id.sym),
+                };
+                let end_str = match end {
+                    crate::ast::RangeBound::Int(v) => format!("{}", v),
+                    crate::ast::RangeBound::Ident(id) => id.sym.clone(),
+                    crate::ast::RangeBound::NegIdent(id) => format!("-{}", id.sym),
+                };
                 if *inclusive {
                     (
-                        format!("({0} >= {1} and {0} <= {2})", val_expr, start, end),
+                        format!("({0} >= {1} and {0} <= {2})", val_expr, start_str, end_str),
                         String::new(),
                     )
                 } else {
                     (
-                        format!("({0} >= {1} and {0} < {2})", val_expr, start, end),
+                        format!("({0} >= {1} and {0} < {2})", val_expr, start_str, end_str),
                         String::new(),
                     )
                 }
@@ -6644,11 +6689,23 @@ impl Codegen {
                 end,
                 inclusive,
             } => {
-                if *inclusive {
-                    format!("{}...{}", start, end)
-                } else {
-                    format!("{}...{}", start, end.saturating_sub(1))
-                }
+                let start_str = match start {
+                    crate::ast::RangeBound::Int(v) => format!("{}", v),
+                    crate::ast::RangeBound::Ident(id) => id.sym.clone(),
+                    crate::ast::RangeBound::NegIdent(id) => format!("-{}", id.sym),
+                };
+                let end_str = match end {
+                    crate::ast::RangeBound::Int(v) => {
+                        if *inclusive {
+                            format!("{}", v)
+                        } else {
+                            format!("{}", v.saturating_sub(1))
+                        }
+                    }
+                    crate::ast::RangeBound::Ident(id) => id.sym.clone(),
+                    crate::ast::RangeBound::NegIdent(id) => format!("-{}", id.sym),
+                };
+                format!("{}...{}", start_str, end_str)
             }
             Pattern::Or(pats) => {
                 let parts: Vec<String> = pats
@@ -7581,8 +7638,7 @@ impl Codegen {
                     }
                     _ => self.map_type(&p.ty),
                 };
-                self.locals
-                    .insert(p.ident.sym.clone(), mapped_ty.clone());
+                self.locals.insert(p.ident.sym.clone(), mapped_ty.clone());
                 if !params_str.is_empty() {
                     params_str.push_str(", ");
                 }
@@ -8130,7 +8186,9 @@ impl Codegen {
                                         String::new()
                                     } else if matches!(t, Type::CStr) {
                                         match var.kind {
-                                            crate::ast::VarDeclKind::Const => ": [*:0]const u8".to_string(),
+                                            crate::ast::VarDeclKind::Const => {
+                                                ": [*:0]const u8".to_string()
+                                            }
                                             _ => ": [*:0]u8".to_string(),
                                         }
                                     } else {
@@ -8691,6 +8749,31 @@ impl Codegen {
                             self.write_to_case(&format!("if (!({})) {{ {} }}", l, ret_stmt));
                         }
                         _ => unreachable!(),
+                    }
+                }
+                Expr::LabeledBreak(_, label, val) => {
+                    if let Some(v) = val {
+                        let vc = self.generate_expr(v);
+                        self.write_to_case(&format!("break :{} {};", label.sym, vc));
+                    } else {
+                        self.write_to_case(&format!("break :{};", label.sym));
+                    }
+                }
+                Expr::Break(_, val) => {
+                    let cur_blk = self.current_block_label.clone();
+                    if let Some(v) = val {
+                        let vc = self.generate_expr(v);
+                        if let Some(blk) = &cur_blk {
+                            self.write_to_case(&format!("break :{} {};", blk, vc));
+                        } else {
+                            self.write_to_case(&format!("break {};", vc));
+                        }
+                    } else {
+                        if let Some(blk) = &cur_blk {
+                            self.write_to_case(&format!("break :{};", blk));
+                        } else {
+                            self.write_to_case("break;");
+                        }
                     }
                 }
                 _ => {
@@ -13323,10 +13406,67 @@ impl Codegen {
             }
             Expr::Continue(_) => "continue".to_string(),
             Expr::Break(_, val) => {
+                let cur_blk = self.current_block_label.clone();
                 if let Some(v) = val {
-                    format!("break {}", self.generate_expr(v))
+                    let vc = self.generate_expr(v);
+                    if let Some(blk) = cur_blk {
+                        format!("break :{} {}", blk, vc)
+                    } else {
+                        format!("break {}", vc)
+                    }
                 } else {
-                    "break".to_string()
+                    if let Some(blk) = cur_blk {
+                        format!("break :{}", blk)
+                    } else {
+                        "break".to_string()
+                    }
+                }
+            }
+            Expr::LabeledBreak(_, label, val) => {
+                if let Some(v) = val {
+                    format!("break :{} {}", label.sym, self.generate_expr(v))
+                } else {
+                    format!("break :{}", label.sym)
+                }
+            }
+            Expr::LabeledBlock { label, block } => {
+                let saved = self.current_case_content.clone();
+                self.current_case_content.clear();
+                let len = block.body.len();
+                let blk_label = label
+                    .as_ref()
+                    .map(|l| l.sym.clone())
+                    .unwrap_or_else(|| "blk".to_string());
+                let old_blk = self.current_block_label.clone();
+                self.current_block_label = Some(blk_label.clone());
+                for (idx, s) in block.body.iter().enumerate() {
+                    if idx + 1 == len {
+                        if let Stmt::Expr(e) = s {
+                            match e {
+                                Expr::Break(_, _)
+                                | Expr::LabeledBreak(_, _, _)
+                                | Expr::Return(_, _) => {
+                                    self.generate_stmt(s);
+                                }
+                                _ => {
+                                    let ec = self.generate_expr(e);
+                                    self.write_to_case(&format!("break :{} {};\n", blk_label, ec));
+                                }
+                            }
+                        } else {
+                            self.generate_stmt(s);
+                        }
+                    } else {
+                        self.generate_stmt(s);
+                    }
+                }
+                self.current_block_label = old_blk;
+                let body_str = self.current_case_content.clone();
+                self.current_case_content = saved;
+                if label.is_some() {
+                    format!("{}: {{\n{}}}", blk_label, body_str)
+                } else {
+                    format!("({}: {{\n{}}})", blk_label, body_str)
                 }
             }
             Expr::Return(_, val) => {
@@ -14267,22 +14407,26 @@ impl Codegen {
                 Stmt::Block(b) | Stmt::UnsafeBlock(b) => self.extract_local_vars_to_str(b, output),
                 Stmt::If(i) => {
                     match &*i.cons {
-                        Stmt::Block(b) | Stmt::UnsafeBlock(b) => self.extract_local_vars_to_str(b, output),
+                        Stmt::Block(b) | Stmt::UnsafeBlock(b) => {
+                            self.extract_local_vars_to_str(b, output)
+                        }
                         _ => {}
                     }
                     if let Some(alt) = &i.alt {
                         match &**alt {
-                            Stmt::Block(b) | Stmt::UnsafeBlock(b) => self.extract_local_vars_to_str(b, output),
+                            Stmt::Block(b) | Stmt::UnsafeBlock(b) => {
+                                self.extract_local_vars_to_str(b, output)
+                            }
                             _ => {}
                         }
                     }
                 }
-                Stmt::While(w) => {
-                    match &*w.body {
-                        Stmt::Block(b) | Stmt::UnsafeBlock(b) => self.extract_local_vars_to_str(b, output),
-                        _ => {}
+                Stmt::While(w) => match &*w.body {
+                    Stmt::Block(b) | Stmt::UnsafeBlock(b) => {
+                        self.extract_local_vars_to_str(b, output)
                     }
-                }
+                    _ => {}
+                },
                 Stmt::For(f) => {
                     if let Stmt::Block(b) = &*f.body {
                         self.extract_local_vars_to_str(b, output);
@@ -14296,7 +14440,9 @@ impl Codegen {
                     self.extract_local_vars_to_str(try_block, output);
                     if let Some(cb) = catch_body {
                         match &**cb {
-                            Stmt::Block(b) | Stmt::UnsafeBlock(b) => self.extract_local_vars_to_str(b, output),
+                            Stmt::Block(b) | Stmt::UnsafeBlock(b) => {
+                                self.extract_local_vars_to_str(b, output)
+                            }
                             _ => {}
                         }
                     }
@@ -14326,6 +14472,46 @@ impl Codegen {
             } else {
                 self.writeln(&format!("{}: {} = undefined,", name, ty_str));
             }
+        }
+    }
+
+    fn expr_to_zig_pure(&self, expr: &Expr) -> String {
+        match expr {
+            Expr::Ident(id) => id.sym.clone(),
+            Expr::Lit(lit) => match lit {
+                crate::ast::Lit::Int(n) => n.to_string(),
+                crate::ast::Lit::Float(f) => f.to_string(),
+                crate::ast::Lit::Str(s) => format!("\"{}\"", s),
+                crate::ast::Lit::Bool(b) => b.to_string(),
+                crate::ast::Lit::Null => "null".to_string(),
+                crate::ast::Lit::Undefined => "undefined".to_string(),
+            },
+            Expr::Member(mem) => {
+                format!("{}.{}", self.expr_to_zig_pure(&mem.obj), mem.prop.sym)
+            }
+            Expr::Bin(bin) => {
+                let op_str = match bin.op {
+                    BinaryOp::Eq => "==",
+                    BinaryOp::NotEq => "!=",
+                    BinaryOp::Lt => "<",
+                    BinaryOp::LtEq => "<=",
+                    BinaryOp::Gt => ">",
+                    BinaryOp::GtEq => ">=",
+                    BinaryOp::LogicalAnd => "and",
+                    BinaryOp::LogicalOr => "or",
+                    _ => "==",
+                };
+                format!(
+                    "({} {} {})",
+                    self.expr_to_zig_pure(&bin.left),
+                    op_str,
+                    self.expr_to_zig_pure(&bin.right)
+                )
+            }
+            Expr::Unwrap(inner) => {
+                format!("{}.?", self.expr_to_zig_pure(inner))
+            }
+            _ => "true".to_string(),
         }
     }
 
@@ -14647,6 +14833,12 @@ impl Codegen {
             Type::Fn(params, ret) => {
                 let mapped: Vec<String> = params.iter().map(|p| self.map_type(p)).collect();
                 format!("*const fn ({}) {}", mapped.join(", "), self.map_type(ret))
+            }
+            Type::Conditional(cond, cons, alt) => {
+                let cond_str = self.expr_to_zig_pure(cond);
+                let cons_str = self.map_type(cons);
+                let alt_str = self.map_type(alt);
+                format!("if ({}) {} else {}", cond_str, cons_str, alt_str)
             }
             _ => "i32".to_string(),
         }

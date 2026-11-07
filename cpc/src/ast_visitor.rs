@@ -142,11 +142,12 @@ pub fn find_referenced_vars_in_expr(expr: &Expr, vars: &mut HashSet<String>) {
             }
         }
         Expr::Continue(_) => {}
-        Expr::Break(_, val) | Expr::Return(_, val) => {
+        Expr::Break(_, val) | Expr::Return(_, val) | Expr::LabeledBreak(_, _, val) => {
             if let Some(v) = val {
                 find_referenced_vars_in_expr(v, vars);
             }
         }
+        Expr::LabeledBlock { block, .. } => find_referenced_vars_in_block(block, vars),
         _ => {}
     }
 }

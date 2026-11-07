@@ -2696,6 +2696,28 @@ CP 语言在编译器内部（/data/dev/cp/cpc/src/codegen.rs）及运行时库�
 3. 长期赋能（全栈事件驱动）：
    • 将 Bun 的 epoll/kqueue Reactor 与 Waker 唤醒机制回哺至 CP 的核心事件循环，打造出专为 AI Agent 设计的高性能原生运行时！
 
+## vendor
+
+```text
+我们可以把 vendor/ 下的内容做个透视盘点：
+
+  库名称                                                 │ 它是干什么的                                           │                事件循环/HTTP 是否需要？
+ ────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────
+  libspng / libjpeg-turbo / libwebp                      │ PNG/JPEG/WEBP 图片编解码（供 Bun.image 使用）          │                      ❌ 坚决不拷
+  libarchive                                             │ tar / zip 归档解压（供 bun install 提取 npm 包）       │                      ❌ 坚决不拷
+  highway                                                │ Google 开源的 SIMD 指令向量化加速库                    │                      ❌ 坚决不拷
+  lolhtml                                                │ Cloudflare 的流式 HTML 解析重写库                      │                      ❌ 坚决不拷
+  tinycc                                                 │ Tiny C 编译器（供 bun:ffi 实时编译 C 代码）            │                      ❌ 坚决不拷
+  hdrhistogram                                           │ 延迟测试的高动态范围直方图（做基准性能测试的）         │                ❌ 坚决不拷
+  zig                                                    │ Zig 编译器自身的源码镜像                    │                      ❌ 坚决不拷
+  mimalloc                                               │ 微软的高性能内存分配器                                 │          ❌ 暂不拷（CP 初期直接用系统分配器）
+  brotli / zstd / libdeflate / zlib                      │ 各种数据压缩算法（HTTP Gzip/Brotli 响应中间件用）      │             ❌ 第一阶段不拷（后续按需加）
+  lshpack / lsqpack / lsquic                             │ HTTP/3 QUIC 协议栈（属于高级复杂协议）                 │           ❌ 第一阶段不拷（先做 HTTP 1.1/2）
+  cares                                                  │ 异步 DNS 解析库                                        │      ❌ 第一阶段不拷（先支持直接连 IP/本地回环）
+  boringssl                                              │ Google 的 TLS/加密库                                   │             ⚠️ 第一阶段先不拷（详见下文）
+  picohttpparser                                         │ 超高性能 HTTP 1.x 协议解析器                           │                     ✅ 必须拷贝！
+```
+
 ## bun 网络结构分析
 
 我们深度分析下 bun的 http 模块与 uws uws_sys 的关系, http 底层 tls ssl tunnel socket 使用的是什么库, c 还是 c++,
@@ -3758,6 +3780,15 @@ return VTable {
 1. 零新增生僻关键字：不引入 extern、不引入 [*c]；
 2. 完全符合 TS/ES 直觉：采用小驼峰 reflect.has / reflect.hasMethod，变量读写统一走 const / let；
 3. 底层能力 100% 直达硬件：@align(16)、App<const ssl: bool>、[*]T! *any! 完美支撑最苛刻的操作系统级系统编程。
+
+---
+
+## 2026-11-07 里程碑：cpc_dev 正式合并主干 cpc 并完成 Release 发布
+- **交付特性**：`@c union`、`switch` 标识符与负数范围模式匹配、`@if` 平台条件类型别名、带值块级作用域表达式、深层点号命名空间类型注解；
+- **AI 诊断**：全面集成标准三段式 AI 自愈诊断引擎；
+- **产物分发**：正式编译生成 release `cpc` 并覆盖安装至 `/data/dev/cp/cap/bin/cpc`；
+- **测试状态**：`test_c_union_and_comptime.cp`、`test_all_libs.cp`、`test_cptr_and_ai.cp` 全部 100% 绿灯全通。
+
 
 agyr --json | jq -r '.[].id'
 640a7490-6bcb-4d2f-a6af-60d7b8d6c522 最早

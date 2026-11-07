@@ -331,6 +331,7 @@ pub struct Analyzer {
     pub loop_borrowed_vars: std::collections::HashSet<String>,
     pub moved_vars: std::collections::HashSet<String>,
     pub current_class: Option<String>,
+    pub type_aliases: HashMap<String, Type>,
 }
 
 impl Analyzer {
@@ -439,6 +440,7 @@ impl Analyzer {
             loop_borrowed_vars: std::collections::HashSet::new(),
             moved_vars: std::collections::HashSet::new(),
             current_class: None,
+            type_aliases: HashMap::new(),
         }
     }
 
@@ -463,6 +465,7 @@ impl Analyzer {
             extra_zig: vec![],
             is_pub: true,
             is_static: false,
+            is_union: false,
             generic_params: vec![],
         };
         self.classes
@@ -483,6 +486,7 @@ impl Analyzer {
             extra_zig: vec![],
             is_pub: true,
             is_static: false,
+            is_union: false,
             generic_params: vec![],
         };
         self.classes.insert("Set".to_string(), set_class.clone());
@@ -503,6 +507,7 @@ impl Analyzer {
             extra_zig: vec![],
             is_pub: true,
             is_static: false,
+            is_union: false,
             generic_params: vec![],
         };
         self.classes.insert("Map".to_string(), map_class.clone());
@@ -523,6 +528,7 @@ impl Analyzer {
             extra_zig: vec![],
             is_pub: true,
             is_static: false,
+            is_union: false,
             generic_params: vec![],
         };
         self.classes.insert("Dict".to_string(), dict_class.clone());
@@ -568,6 +574,7 @@ impl Analyzer {
             extra_zig: vec![],
             is_pub: true,
             is_static: false,
+            is_union: false,
             generic_params: vec![],
         };
         self.classes
@@ -591,6 +598,7 @@ impl Analyzer {
             extra_zig: vec![],
             is_pub: true,
             is_static: false,
+            is_union: false,
             generic_params: vec![],
         };
         self.classes.insert("Box".to_string(), box_class.clone());
@@ -619,6 +627,7 @@ impl Analyzer {
                 }],
                 is_pub: true,
                 is_static: false,
+                is_union: false,
                 generic_params: vec![],
             };
             self.classes.insert(reflect_name.to_string(), cls.clone());
@@ -652,6 +661,7 @@ impl Analyzer {
                 meta: Vec::new(),
                 is_pub: true,
                 is_static: false,
+                is_union: false,
                 generic_params: vec![],
             };
             self.classes.insert(name.to_string(), cls.clone());
@@ -783,6 +793,8 @@ impl Analyzer {
                     self.symbol_map.insert(f.ident.span, kind);
                 }
                 ModuleItem::Decl(Decl::TypeAlias(ta)) => {
+                    self.type_aliases
+                        .insert(ta.ident.sym.clone(), ta.target_ty.clone());
                     let _ = self.define(
                         ta.ident.sym.clone(),
                         SymbolKind::Var {
@@ -815,6 +827,7 @@ impl Analyzer {
                     }
                 }
                 _ => {}
+                _ => {}
             }
         }
 
@@ -834,6 +847,12 @@ impl Analyzer {
         }
 
         // Pass 3: Full Semantic Analysis & Type Checking
+        for item in &module.body {
+            if let ModuleItem::Decl(Decl::TypeAlias(ta)) = item {
+                self.type_aliases
+                    .insert(ta.ident.sym.clone(), ta.target_ty.clone());
+            }
+        }
         for item in &module.body {
             if let ModuleItem::Stmt(stmt) = item {
                 self.extract_zig_code_symbols(stmt);
@@ -926,6 +945,7 @@ impl Analyzer {
                 let is_extern = cls.meta.iter().any(|m| m.name.sym == "extern");
                 let is_generic = !cls.generic_params.is_empty();
                 if !cls.is_static
+                    && !cls.is_union
                     && !is_root
                     && !is_value
                     && !is_packed
@@ -1610,11 +1630,13 @@ impl Analyzer {
                     "bool" => *ty = Type::Bool,
                     "void" => *ty = Type::Void,
                     _ => {}
+                    _ => {}
                 }
             }
             Type::BorrowType { inner, .. } => Self::substitute_type(inner, subst),
             Type::Optional(inner) => Self::substitute_type(inner, subst),
             Type::Array(inner) => Self::substitute_type(inner, subst),
+            _ => {}
             _ => {}
         }
     }
@@ -1692,6 +1714,7 @@ impl Analyzer {
                 }
             }
             _ => {}
+            _ => {}
         }
     }
 
@@ -1760,6 +1783,7 @@ impl Analyzer {
                 Self::substitute_expr(count, subst);
             }
             _ => {}
+            _ => {}
         }
     }
 
@@ -1823,6 +1847,7 @@ impl Analyzer {
                     self.extract_zig_code_symbols(s);
                 }
             }
+            _ => {}
             _ => {}
         }
     }
@@ -2193,6 +2218,10 @@ impl Analyzer {
                     self.current_fn_is_unsafe = old_unsafe;
                 }
             }
+            Decl::TypeAlias(ta) => {
+                self.type_aliases
+                    .insert(ta.ident.sym.clone(), ta.target_ty.clone());
+            }
             _ => {}
         }
         Ok(())
@@ -2321,6 +2350,7 @@ impl Analyzer {
                     ident.span,
                 )?;
             }
+            _ => {}
             _ => {}
         }
         Ok(())
@@ -2626,6 +2656,7 @@ impl Analyzer {
                     self.exit_scope();
                 }
             }
+            _ => {}
             _ => {}
         }
         Ok(())
@@ -3085,6 +3116,15 @@ impl Analyzer {
                     }
                 }
             }
+            Expr::LabeledBlock { block, .. } => {
+                self.analyze_block(block)?;
+            }
+            Expr::LabeledBreak(_, _, val) => {
+                if let Some(v) = val {
+                    self.analyze_expr(v)?;
+                }
+            }
+            _ => {}
             _ => {}
         }
         Ok(())
@@ -3165,6 +3205,7 @@ impl Analyzer {
                 vars.extend(Self::extract_is_null_vars(&call.args[0]));
             }
             _ => {}
+            _ => {}
         }
         vars
     }
@@ -3200,12 +3241,14 @@ impl Analyzer {
                 vars.extend(Self::extract_not_null_vars(&call.args[0]));
             }
             _ => {}
+            _ => {}
         }
         vars
     }
 
     fn is_int_type(t: &Type) -> bool {
         match t {
+            Type::Conditional(_, cons, alt) => Self::is_int_type(cons) && Self::is_int_type(alt),
             Type::U8
             | Type::I8
             | Type::U16
@@ -3218,22 +3261,24 @@ impl Analyzer {
             | Type::I128
             | Type::ISize
             | Type::USize => true,
-            Type::Ref(id) => matches!(
-                id.sym.as_str(),
-                "c_int"
-                    | "c_uint"
-                    | "c_short"
-                    | "c_ushort"
-                    | "c_long"
-                    | "c_ulong"
-                    | "c_char"
-                    | "c_uchar"
-                    | "ares_socket_t"
-                    | "ares_socklen_t"
-                    | "ares_ssize_t"
-            ) || ((id.sym.starts_with('u') || id.sym.starts_with('i'))
-                && id.sym.len() > 1
-                && id.sym[1..].chars().all(|c| c.is_ascii_digit())),
+            Type::Ref(id) => {
+                matches!(
+                    id.sym.as_str(),
+                    "c_int"
+                        | "c_uint"
+                        | "c_short"
+                        | "c_ushort"
+                        | "c_long"
+                        | "c_ulong"
+                        | "c_char"
+                        | "c_uchar"
+                        | "ares_socket_t"
+                        | "ares_socklen_t"
+                        | "ares_ssize_t"
+                ) || ((id.sym.starts_with('u') || id.sym.starts_with('i'))
+                    && id.sym.len() > 1
+                    && id.sym[1..].chars().all(|c| c.is_ascii_digit()))
+            }
             _ => false,
         }
     }
@@ -3267,12 +3312,22 @@ impl Analyzer {
             Type::Void => "void".to_string(),
             Type::Any => "any".to_string(),
             Type::Ref(id) => id.sym.clone(),
+            Type::Conditional(_cond, cons, alt) => {
+                format!(
+                    "@if (...) {} else {}",
+                    Self::type_repr(cons),
+                    Self::type_repr(alt)
+                )
+            }
             _ => format!("{:?}", t),
         }
     }
 
     fn int_fits_in_type(val: i64, target: &Type) -> bool {
         match target {
+            Type::Conditional(_, cons, alt) => {
+                Self::int_fits_in_type(val, cons) || Self::int_fits_in_type(val, alt)
+            }
             Type::U8 => (0..=255).contains(&val),
             Type::I8 => (-128..=127).contains(&val),
             Type::U16 => (0..=65535).contains(&val),
@@ -3282,20 +3337,24 @@ impl Analyzer {
             Type::U64 | Type::U128 | Type::USize => true,
             Type::I64 | Type::I128 | Type::ISize => true,
             Type::F32 | Type::F64 => true,
-            Type::Ref(id) if matches!(
-                id.sym.as_str(),
-                "c_int"
-                    | "c_uint"
-                    | "c_short"
-                    | "c_ushort"
-                    | "c_long"
-                    | "c_ulong"
-                    | "c_char"
-                    | "c_uchar"
-                    | "ares_socket_t"
-                    | "ares_socklen_t"
-                    | "ares_ssize_t"
-            ) => true,
+            Type::Ref(id)
+                if matches!(
+                    id.sym.as_str(),
+                    "c_int"
+                        | "c_uint"
+                        | "c_short"
+                        | "c_ushort"
+                        | "c_long"
+                        | "c_ulong"
+                        | "c_char"
+                        | "c_uchar"
+                        | "ares_socket_t"
+                        | "ares_socklen_t"
+                        | "ares_ssize_t"
+                ) =>
+            {
+                true
+            }
             Type::Ref(id)
                 if (id.sym.starts_with('u') || id.sym.starts_with('i'))
                     && id.sym[1..].chars().all(|c| c.is_ascii_digit()) =>
@@ -3407,6 +3466,23 @@ impl Analyzer {
         false
     }
 
+    pub fn resolve_type(&self, ty: &Type) -> Type {
+        let mut curr = ty.clone();
+        for _ in 0..16 {
+            match &curr {
+                Type::Ref(id) => {
+                    if let Some(target) = self.type_aliases.get(&id.sym) {
+                        curr = target.clone();
+                    } else {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        curr
+    }
+
     pub fn can_coerce(&self, target: &Type, src: &Type, init_expr: Option<&Expr>) -> bool {
         if target == src {
             return true;
@@ -3419,6 +3495,25 @@ impl Analyzer {
             || *src == Type::Auto
         {
             return true;
+        }
+
+        let resolved_target = self.resolve_type(target);
+        let resolved_src = self.resolve_type(src);
+        if &resolved_target != target || &resolved_src != src {
+            if self.can_coerce(&resolved_target, &resolved_src, init_expr) {
+                return true;
+            }
+        }
+
+        if let Type::Conditional(_, cons, alt) = target {
+            if self.can_coerce(cons, src, init_expr) || self.can_coerce(alt, src, init_expr) {
+                return true;
+            }
+        }
+        if let Type::Conditional(_, cons, alt) = src {
+            if self.can_coerce(target, cons, init_expr) || self.can_coerce(target, alt, init_expr) {
+                return true;
+            }
         }
 
         // Layer 1.1: Literal and Const Expr fitting
@@ -3451,6 +3546,7 @@ impl Analyzer {
                         }
                     }
                     _ => {}
+                    _ => {}
                 },
                 Expr::NullCoalesce { right, .. } => {
                     if self.can_coerce(target, src, Some(right)) {
@@ -3469,6 +3565,7 @@ impl Analyzer {
                         return true;
                     }
                 }
+                _ => {}
                 _ => {}
             }
         }
@@ -3549,6 +3646,7 @@ impl Analyzer {
                 }
                 return self.can_coerce(t_ok, src, init_expr);
             }
+            _ => {}
             _ => {}
         }
 
@@ -3731,6 +3829,13 @@ impl Analyzer {
         if *a == Type::Any || *b == Type::Any || *a == Type::Unknown || *b == Type::Unknown {
             return true;
         }
+        let res_a = self.resolve_type(a);
+        let res_b = self.resolve_type(b);
+        if &res_a != a || &res_b != b {
+            if self.types_eq(&res_a, &res_b) {
+                return true;
+            }
+        }
         if Self::is_int_type(a) && Self::is_int_type(b) {
             return true;
         }
@@ -3738,6 +3843,12 @@ impl Analyzer {
             return true;
         }
         match (a, b) {
+            (Type::Conditional(_, c1, a1), Type::Conditional(_, c2, a2)) => {
+                self.types_eq(c1, c2) && self.types_eq(a1, a2)
+            }
+            (Type::Conditional(_, c1, a1), other) | (other, Type::Conditional(_, c1, a1)) => {
+                self.types_eq(c1, other) || self.types_eq(a1, other)
+            }
             (Type::Ref(t1), Type::Ref(t2)) => t1.sym == t2.sym,
             (Type::BoxDyn(t1), Type::BoxDyn(t2)) => t1.sym == t2.sym,
             (Type::BoxDyn(_), Type::Ref(_)) | (Type::Ref(_), Type::BoxDyn(_)) => true,
@@ -4175,7 +4286,10 @@ impl Analyzer {
                                 ..
                             }) = self.resolve(&ident.sym)
                             {
-                                return Err(SemaError::ConstAssignment(ident.sym.clone(), bin.span));
+                                return Err(SemaError::ConstAssignment(
+                                    ident.sym.clone(),
+                                    bin.span,
+                                ));
                             }
                         }
                     }
@@ -4183,8 +4297,12 @@ impl Analyzer {
                         let mut can_assign_to_outer = false;
                         if let Expr::Ident(ident) = &*bin.left {
                             for scope in self.scopes.iter().rev().skip(1) {
-                                if let Some(SymbolKind::Var { ty: outer_ty, kind }) = scope.get(&ident.sym) {
-                                    if *kind != VarDeclKind::Const && self.can_coerce(outer_ty, &right, Some(&*bin.right)) {
+                                if let Some(SymbolKind::Var { ty: outer_ty, kind }) =
+                                    scope.get(&ident.sym)
+                                {
+                                    if *kind != VarDeclKind::Const
+                                        && self.can_coerce(outer_ty, &right, Some(&*bin.right))
+                                    {
                                         can_assign_to_outer = true;
                                         break;
                                     }
@@ -4313,9 +4431,9 @@ impl Analyzer {
             Expr::Slice(slice) => {
                 let o_ty = self.infer_type(&slice.obj)?;
                 match o_ty {
-                    Type::ManyRawPtr(elem)
-                    | Type::CPtr(elem)
-                    | Type::SentinelPtr(elem, _) => Ok(Type::Array(elem)),
+                    Type::ManyRawPtr(elem) | Type::CPtr(elem) | Type::SentinelPtr(elem, _) => {
+                        Ok(Type::Array(elem))
+                    }
                     Type::CStr => Ok(Type::String),
                     _ => Ok(o_ty),
                 }
@@ -4417,9 +4535,9 @@ impl Analyzer {
                 match o_ty {
                     Type::Array(elem) => Ok(*elem),
                     Type::FixedArray(elem, _) => Ok(*elem),
-                    Type::ManyRawPtr(elem)
-                    | Type::CPtr(elem)
-                    | Type::SentinelPtr(elem, _) => Ok(*elem),
+                    Type::ManyRawPtr(elem) | Type::CPtr(elem) | Type::SentinelPtr(elem, _) => {
+                        Ok(*elem)
+                    }
                     Type::CStr => Ok(Type::U8),
                     Type::String => Ok(Type::U8),
                     Type::Tuple(tys) => Ok(tys.into_iter().next().unwrap_or(Type::Any)),
@@ -4689,6 +4807,22 @@ impl Analyzer {
                 } else {
                     Ok(cons_ty)
                 }
+            }
+            Expr::LabeledBlock { block, .. } => {
+                for s in block.body.iter().rev() {
+                    match s {
+                        Stmt::Expr(Expr::LabeledBreak(_, _, Some(val)))
+                        | Stmt::Expr(Expr::Break(_, Some(val))) => {
+                            return Ok(self.infer_type(val).unwrap_or(Type::Any));
+                        }
+                        Stmt::Expr(e) => {
+                            return Ok(self.infer_type(e).unwrap_or(Type::Any));
+                        }
+                        _ => {}
+                        _ => {}
+                    }
+                }
+                Ok(Type::Void)
             }
             _ => Ok(Type::Any),
         }

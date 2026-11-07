@@ -75,9 +75,9 @@ fn compile_file(
     if lib {
         let code = fs::read_to_string(input)?;
         let mut parser = CPParser::new(&code);
-        let parsed_module = parser
-            .parse_module()
-            .map_err(|e| anyhow::anyhow!("{}", e.to_diagnostic().render(Some(&code), Some(input))))?;
+        let parsed_module = parser.parse_module().map_err(|e| {
+            anyhow::anyhow!("{}", e.to_diagnostic().render(Some(&code), Some(input)))
+        })?;
         all_items = parsed_module.body;
     } else {
         resolve_imports(input, include, &mut all_items, &mut processed_sources)?;
@@ -89,13 +89,14 @@ fn compile_file(
     };
 
     let mut analyzer = Analyzer::new();
-    analyzer
-        .analyze_module(&mut module)
-        .map_err(|e| {
-            let known = analyzer.get_known_symbols();
-            let code = fs::read_to_string(input).ok();
-            anyhow::anyhow!("{}", e.to_diagnostic(&known).render(code.as_deref(), Some(input)))
-        })?;
+    analyzer.analyze_module(&mut module).map_err(|e| {
+        let known = analyzer.get_known_symbols();
+        let code = fs::read_to_string(input).ok();
+        anyhow::anyhow!(
+            "{}",
+            e.to_diagnostic(&known).render(code.as_deref(), Some(input))
+        )
+    })?;
 
     let zig_code_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut codegen = Codegen::new();
@@ -116,7 +117,10 @@ fn compile_file(
             };
             let code = fs::read_to_string(input).ok();
             let diag = cpc::diagnostic::from_compiler_error_msg(&msg, code.as_deref());
-            return Err(anyhow::anyhow!("{}", diag.render(code.as_deref(), Some(input))));
+            return Err(anyhow::anyhow!(
+                "{}",
+                diag.render(code.as_deref(), Some(input))
+            ));
         }
     };
 
@@ -164,16 +168,17 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             Commands::Check { input } => {
                 let code = fs::read_to_string(&input)?;
                 let mut parser = CPParser::new(&code);
-                let mut module = parser
-                    .parse_module()
-                    .map_err(|e| anyhow::anyhow!("{}", e.to_diagnostic().render(Some(&code), Some(&input))))?;
+                let mut module = parser.parse_module().map_err(|e| {
+                    anyhow::anyhow!("{}", e.to_diagnostic().render(Some(&code), Some(&input)))
+                })?;
                 let mut analyzer = Analyzer::new();
-                analyzer
-                    .analyze_module(&mut module)
-                    .map_err(|e| {
-                        let known = analyzer.get_known_symbols();
-                        anyhow::anyhow!("{}", e.to_diagnostic(&known).render(Some(&code), Some(&input)))
-                    })?;
+                analyzer.analyze_module(&mut module).map_err(|e| {
+                    let known = analyzer.get_known_symbols();
+                    anyhow::anyhow!(
+                        "{}",
+                        e.to_diagnostic(&known).render(Some(&code), Some(&input))
+                    )
+                })?;
                 println!("Check successful");
             }
             Commands::EmitTypes { input, output } => {

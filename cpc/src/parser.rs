@@ -241,6 +241,7 @@ impl<'a> Parser<'a> {
                 | Token::Unsafe
                 | Token::Class
                 | Token::Struct
+                | Token::Union
                 | Token::Ref
                 | Token::Meta
                 | Token::Dec
@@ -626,6 +627,7 @@ impl<'a> Parser<'a> {
             | Some(Token::Fn)
             | Some(Token::Class)
             | Some(Token::Struct)
+            | Some(Token::Union)
             | Some(Token::Ref)
             | Some(Token::Interface)
             | Some(Token::ErrorKw)
@@ -730,7 +732,7 @@ impl<'a> Parser<'a> {
                 }
                 Ok(Decl::Func(f))
             }
-            Some(Token::Class) | Some(Token::Struct) | Some(Token::Ref) => {
+            Some(Token::Class) | Some(Token::Struct) | Some(Token::Union) | Some(Token::Ref) => {
                 let mut c = self.parse_class()?;
                 c.meta = meta;
                 if is_pub {
@@ -1520,7 +1522,9 @@ impl<'a> Parser<'a> {
                     self.bump()?;
                     let elem_ty = self.parse_base_type()?;
                     let mut is_optional = false;
-                    if self.peek() == Some(&Token::Question) && self.peek_next() == Some(&Token::Bang) {
+                    if self.peek() == Some(&Token::Question)
+                        && self.peek_next() == Some(&Token::Bang)
+                    {
                         self.bump()?;
                         self.bump()?;
                         is_optional = true;
@@ -1553,7 +1557,9 @@ impl<'a> Parser<'a> {
                         self.expect(Token::RBracket)?;
                         let elem_ty = self.parse_base_type()?;
                         let mut is_optional = false;
-                        if self.peek() == Some(&Token::Question) && self.peek_next() == Some(&Token::Bang) {
+                        if self.peek() == Some(&Token::Question)
+                            && self.peek_next() == Some(&Token::Bang)
+                        {
                             self.bump()?;
                             self.bump()?;
                             is_optional = true;
@@ -1577,7 +1583,9 @@ impl<'a> Parser<'a> {
                         self.bump()?;
                         let elem_ty = self.parse_base_type()?;
                         let mut is_optional = false;
-                        if self.peek() == Some(&Token::Question) && self.peek_next() == Some(&Token::Bang) {
+                        if self.peek() == Some(&Token::Question)
+                            && self.peek_next() == Some(&Token::Bang)
+                        {
                             self.bump()?;
                             self.bump()?;
                             is_optional = true;
@@ -1609,7 +1617,9 @@ impl<'a> Parser<'a> {
                     self.expect(Token::RBracket)?;
                     let elem_ty = self.parse_base_type()?;
                     let mut is_optional = false;
-                    if self.peek() == Some(&Token::Question) && self.peek_next() == Some(&Token::Bang) {
+                    if self.peek() == Some(&Token::Question)
+                        && self.peek_next() == Some(&Token::Bang)
+                    {
                         self.bump()?;
                         self.bump()?;
                         is_optional = true;
@@ -1854,6 +1864,27 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type(&mut self) -> ParseResult<Type> {
+        if self.peek() == Some(&Token::At) {
+            let mut clone = self.clone_lookahead();
+            let _ = clone.bump();
+            if clone.peek() == Some(&Token::If)
+                || matches!(clone.peek(), Some(Token::Ident(s)) if s == "if")
+            {
+                self.bump()?; // consume '@'
+                self.bump()?; // consume 'if'
+                self.expect(Token::LParen)?;
+                let cond = self.parse_expr()?;
+                self.expect(Token::RParen)?;
+                let cons = self.parse_type()?;
+                self.expect(Token::Else)?;
+                let alt = self.parse_type()?;
+                return Ok(Type::Conditional(
+                    Box::new(cond),
+                    Box::new(cons),
+                    Box::new(alt),
+                ));
+            }
+        }
         if self.peek() == Some(&Token::Bang) {
             self.bump()?;
             if matches!(
@@ -1917,6 +1948,13 @@ impl<'a> Parser<'a> {
             Type::Optional(inner) => format!("{}?", Self::type_to_str(inner)),
             Type::Shared(inner) => format!("Shared<{}>", Self::type_to_str(inner)),
             Type::Ref(id) => id.sym.clone(),
+            Type::Conditional(_cond, cons, alt) => {
+                format!(
+                    "@if (...) {} else {}",
+                    Self::type_to_str(cons),
+                    Self::type_to_str(alt)
+                )
+            }
             _ => "any".to_string(),
         }
     }
@@ -1929,7 +1967,44 @@ impl<'a> Parser<'a> {
             Some(Token::If) => Ok(Stmt::If(self.parse_if_stmt()?)),
             Some(Token::Return) => Ok(Stmt::Return(self.parse_return_stmt()?)),
             Some(Token::Break) => {
-                self.bump()?;
+                let start = self.bump()?.1.start;
+                // Check if followed by colon for label: break :label [value]
+                if self.peek() == Some(&Token::Colon) {
+                    self.bump()?; // consume ':'
+                    let label = self.parse_ident()?;
+                    let val = if self.peek() != Some(&Token::Semicolon)
+                        && self.peek() != Some(&Token::RBrace)
+                        && self.peek().is_some()
+                    {
+                        Some(Box::new(self.parse_expr()?))
+                    } else {
+                        None
+                    };
+                    if self.peek() == Some(&Token::Semicolon) {
+                        self.bump()?;
+                    }
+                    let end = self.peek_span().start;
+                    return Ok(Stmt::Expr(Expr::LabeledBreak(
+                        Span { start, end },
+                        label,
+                        val,
+                    )));
+                }
+                // Check if break has a value (e.g. break value;)
+                if self.peek() != Some(&Token::Semicolon)
+                    && self.peek() != Some(&Token::RBrace)
+                    && self.peek().is_some()
+                {
+                    let val = self.parse_expr()?;
+                    if self.peek() == Some(&Token::Semicolon) {
+                        self.bump()?;
+                    }
+                    let end = self.peek_span().start;
+                    return Ok(Stmt::Expr(Expr::Break(
+                        Span { start, end },
+                        Some(Box::new(val)),
+                    )));
+                }
                 if self.peek() == Some(&Token::Semicolon) {
                     self.bump()?;
                 }
@@ -2115,6 +2190,29 @@ impl<'a> Parser<'a> {
             return Ok(Pattern::Or(pats));
         }
         Ok(first)
+    }
+
+    fn try_parse_range_bound(&mut self) -> Option<RangeBound> {
+        let (tok, span) = self.bump().ok()?;
+        match tok {
+            Token::Minus => {
+                let (next_tok, next_span) = self.bump().ok()?;
+                match next_tok {
+                    Token::IntLiteral(v) => Some(RangeBound::Int(-v)),
+                    Token::Ident(s) => Some(RangeBound::NegIdent(Ident {
+                        span: Span {
+                            start: span.start,
+                            end: next_span.end,
+                        },
+                        sym: s,
+                    })),
+                    _ => None,
+                }
+            }
+            Token::IntLiteral(v) => Some(RangeBound::Int(v)),
+            Token::Ident(s) => Some(RangeBound::Ident(Ident { span, sym: s })),
+            _ => None,
+        }
     }
 
     fn parse_single_pattern(&mut self) -> ParseResult<Pattern> {
@@ -2314,29 +2412,39 @@ impl<'a> Parser<'a> {
                     self.bump()?;
                     return Ok(Pattern::Wildcard);
                 }
+                // Try parsing range pattern e.g. 1...ARES_ENOSERVER or -ARES_ENOSERVER...-1 or 1..=10
+                {
+                    let mut probe = self.clone_lookahead();
+                    if let Some(start_bound) = probe.try_parse_range_bound() {
+                        if matches!(
+                            probe.peek(),
+                            Some(Token::DotDotDot) | Some(Token::DotDotEq) | Some(Token::DotDot)
+                        ) {
+                            let op = probe.bump().unwrap().0;
+                            let inclusive = op == Token::DotDotDot || op == Token::DotDotEq;
+                            if let Some(end_bound) = probe.try_parse_range_bound() {
+                                *self = probe;
+                                return Ok(Pattern::Range {
+                                    start: start_bound,
+                                    end: end_bound,
+                                    inclusive,
+                                });
+                            }
+                        }
+                    }
+                }
                 if self.peek() == Some(&Token::Minus) {
-                    self.bump()?;
-                    if let (Token::IntLiteral(v), _) = self.bump()? {
-                        return Ok(Pattern::Lit(Lit::Int(-v)));
+                    let mut probe = self.clone_lookahead();
+                    let _ = probe.bump();
+                    if let Some(Token::IntLiteral(_)) = probe.peek() {
+                        self.bump()?;
+                        if let (Token::IntLiteral(v), _) = self.bump()? {
+                            return Ok(Pattern::Lit(Lit::Int(-v)));
+                        }
                     }
                 }
                 if let Some(Token::IntLiteral(_)) = self.peek() {
                     if let (Token::IntLiteral(v), _) = self.bump()? {
-                        if self.peek() == Some(&Token::DotDotEq)
-                            || self.peek() == Some(&Token::DotDot)
-                        {
-                            let inclusive = self.bump()?.0 == Token::DotDotEq;
-                            let end_v = if let (Token::IntLiteral(ev), _) = self.bump()? {
-                                ev
-                            } else {
-                                v
-                            };
-                            return Ok(Pattern::Range {
-                                start: v,
-                                end: end_v,
-                                inclusive,
-                            });
-                        }
                         return Ok(Pattern::Lit(Lit::Int(v)));
                     }
                 }
@@ -2566,7 +2674,10 @@ impl<'a> Parser<'a> {
     fn parse_return_stmt(&mut self) -> ParseResult<ReturnStmt> {
         let span = self.expect(Token::Return)?;
         let mut arg = None;
-        let has_arg = if matches!(self.peek(), Some(Token::Semicolon | Token::RBrace | Token::RParen) | None) {
+        let has_arg = if matches!(
+            self.peek(),
+            Some(Token::Semicolon | Token::RBrace | Token::RParen) | None
+        ) {
             false
         } else {
             let next_start = self.peek_span().start;
@@ -2584,7 +2695,10 @@ impl<'a> Parser<'a> {
         }
         let end = self.peek_span().end;
         Ok(ReturnStmt {
-            span: Span { start: span.start, end },
+            span: Span {
+                start: span.start,
+                end,
+            },
             arg,
         })
     }
@@ -2808,6 +2922,7 @@ impl<'a> Parser<'a> {
         let mut is_ref = false;
         let mut _is_struct = false;
         let mut is_static = false;
+        let mut is_union = false;
         loop {
             if self.peek() == Some(&Token::Static) {
                 self.bump()?;
@@ -2819,7 +2934,10 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        if self.peek() == Some(&Token::Struct) {
+        if self.peek() == Some(&Token::Union) {
+            self.bump()?;
+            is_union = true;
+        } else if self.peek() == Some(&Token::Struct) {
             self.bump()?;
             is_ref = true;
             _is_struct = true;
@@ -2979,6 +3097,7 @@ impl<'a> Parser<'a> {
             extra_zig,
             is_pub: false,
             is_static,
+            is_union,
             generic_params,
         })
     }
@@ -3515,11 +3634,16 @@ impl<'a> Parser<'a> {
                         };
                     } else if self.peek() == Some(&Token::Return) {
                         let span = self.bump()?.1;
-                        let has_arg = if matches!(self.peek(), Some(Token::Semicolon | Token::RBrace | Token::RParen) | None) {
+                        let has_arg = if matches!(
+                            self.peek(),
+                            Some(Token::Semicolon | Token::RBrace | Token::RParen) | None
+                        ) {
                             false
                         } else {
                             let next_start = self.peek_span().start;
-                            if next_start >= span.end && self.input[span.end..next_start].contains('\n') {
+                            if next_start >= span.end
+                                && self.input[span.end..next_start].contains('\n')
+                            {
                                 false
                             } else {
                                 true
@@ -3568,11 +3692,16 @@ impl<'a> Parser<'a> {
                         Expr::Break(span, None)
                     } else if self.peek() == Some(&Token::Return) {
                         let span = self.bump()?.1;
-                        let has_arg = if matches!(self.peek(), Some(Token::Semicolon | Token::RBrace | Token::RParen) | None) {
+                        let has_arg = if matches!(
+                            self.peek(),
+                            Some(Token::Semicolon | Token::RBrace | Token::RParen) | None
+                        ) {
                             false
                         } else {
                             let next_start = self.peek_span().start;
-                            if next_start >= span.end && self.input[span.end..next_start].contains('\n') {
+                            if next_start >= span.end
+                                && self.input[span.end..next_start].contains('\n')
+                            {
                                 false
                             } else {
                                 true
@@ -3794,7 +3923,10 @@ impl<'a> Parser<'a> {
                 Expr::Break(span, None)
             } else if op == BinaryOp::LogicalOr && self.peek() == Some(&Token::Return) {
                 let span = self.bump()?.1;
-                let has_arg = if matches!(self.peek(), Some(Token::Semicolon | Token::RBrace | Token::RParen) | None) {
+                let has_arg = if matches!(
+                    self.peek(),
+                    Some(Token::Semicolon | Token::RBrace | Token::RParen) | None
+                ) {
                     false
                 } else {
                     let next_start = self.peek_span().start;
@@ -3834,7 +3966,9 @@ impl<'a> Parser<'a> {
             match self.peek() {
                 Some(Token::LParen) | Some(Token::Bang) => {
                     let next_start = self.peek_span().start;
-                    if next_start >= self.prev_token_end && self.input[self.prev_token_end..next_start].contains('\n') {
+                    if next_start >= self.prev_token_end
+                        && self.input[self.prev_token_end..next_start].contains('\n')
+                    {
                         break;
                     }
                     let mut is_comptime = false;
@@ -4419,6 +4553,14 @@ impl<'a> Parser<'a> {
                 Ok(Expr::Ident(Ident { span, sym }))
             }
             Token::Ident(sym) => {
+                if self.peek() == Some(&Token::Colon) && self.peek_next() == Some(&Token::LBrace) {
+                    self.bump()?; // consume ':'
+                    let block = self.parse_block_stmt()?;
+                    return Ok(Expr::LabeledBlock {
+                        label: Some(Ident { span, sym }),
+                        block,
+                    });
+                }
                 if (sym == "Err" || sym == "err") && self.peek() == Some(&Token::LParen) {
                     self.bump()?;
                     let inner = self.parse_expr()?;
@@ -4637,6 +4779,11 @@ impl<'a> Parser<'a> {
                 })))
             }
             Token::LParen => {
+                if self.peek() == Some(&Token::LBrace) {
+                    let block = self.parse_block_stmt()?;
+                    self.expect(Token::RParen)?;
+                    return Ok(Expr::LabeledBlock { label: None, block });
+                }
                 let checkpoint = self.lexer.clone();
                 let peeked_checkpoint = self.peeked.clone();
                 let peeked2_checkpoint = self.peeked2.clone();
@@ -5142,7 +5289,8 @@ fn left_span(expr: &Expr) -> Span {
         Expr::Unsafe(b) | Expr::Comptime(b) => b.span,
         Expr::If { span, .. } => *span,
         Expr::Continue(span) => *span,
-        Expr::Break(span, _) => *span,
+        Expr::Break(span, _) | Expr::LabeledBreak(span, _, _) => *span,
+        Expr::LabeledBlock { block, .. } => block.span,
         Expr::Return(span, _) => *span,
     }
 }
@@ -5187,7 +5335,10 @@ fn right_span(expr: &Expr) -> Span {
         Expr::Unsafe(b) | Expr::Comptime(b) => b.span,
         Expr::If { span, .. } => *span,
         Expr::Continue(span) => *span,
-        Expr::Break(span, val) => val.as_ref().map(|v| right_span(v)).unwrap_or(*span),
+        Expr::Break(span, val) | Expr::LabeledBreak(span, _, val) => {
+            val.as_ref().map(|v| right_span(v)).unwrap_or(*span)
+        }
+        Expr::LabeledBlock { block, .. } => block.span,
         Expr::Return(span, val) => val.as_ref().map(|v| right_span(v)).unwrap_or(*span),
     }
 }
