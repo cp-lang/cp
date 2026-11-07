@@ -1813,10 +1813,36 @@ switch(maybe) {
 #### 6.7.1 核心区分：安全借用 (`*T`) vs 底层裸指针 (`*T!`)
 
 - **`*T`（无尾置感叹号）**：**安全可变借用**，属于编译器安全体系，严格受借用检查器（Sema）、读写互斥与非词法生命周期（NLL）约束；
-- **`*T!`（尾置感叹号）**：**底层可变裸指针**，映射至 C/Zig 单项指针，用于底层系统级编程与 C-ABI 交互；
-- **`*const T!`**：**底层只读裸指针**，映射至 Zig `*const T`，禁止写入操作；
-- **`[*]T!`**：**未定长多项连续裸指针**，映射至 Zig `[*]T`，支持下标 `ptr[i]` 与切片 `ptr[a..b]` 操作；
-- **`*any!`**：**通用非类型化裸指针**，映射至 Zig `*anyopaque`（即 C 语言的 `void*`）。
+- **`*T!`（尾置感叹号）**：**底层可变裸指针**，映射至 C/Zig 单项指针 `*T`，用于底层系统级编程与 C-ABI 交互；
+- **`*T?!` 或 `*T!?`**：**底层可选裸指针**，映射至 Zig `?*T`；
+- **`**T!`**：**二级底层裸指针**，映射至 C/Zig `**T`，用于外部 C 库二级出参句柄初始化；
+- **`*const T!`**：**底层只读裸指针**，映射至 Zig `*const T`，禁止写入操作；可选版为 `*const T?!`，映射至 Zig `?*const T`；
+- **`[*]T!`**：**未定长多项连续裸指针**，映射至 Zig `[*]T`，支持下标 `ptr[i]` 与切片 `ptr[a..b]` 操作；可选版为 `[*]T?!`，映射至 Zig `?[*]T`；
+- **`[*c]T!`**：**C 兼容裸指针**，映射至 Zig `[*c]T`，用于与传统 C-ABI 头文件直接无损对接；可选版为 `[*c]T?!`，映射至 Zig `?[*c]T`；
+- **`[*:0]T!`**：**哨兵终止裸指针**，映射至 Zig `[*:0]T`，支持内部元素按字节就地修改与 C 风格字符串缓冲区操作（如 `[*:0]u8!`）；可选版为 `[*:0]T?!`，映射至 Zig `?[*:0]T`；
+- **`[*:null]T!`**：**null 哨兵终止裸指针**，映射至 Zig `[*:null]T`，用于以 null 结尾的指针数组；
+- **`*any!`**：**通用非类型化裸指针**，映射至 Zig `*anyopaque`（即 C 语言的 `void*`）；可选版为 `*anyopaque?!`，映射至 Zig `?*anyopaque`；
+- **括号优先级消歧 `(Type)`**：当裸指针修饰符组合嵌套时，支持小括号显式指明内层指针与外层修饰符结合性：
+  - `[*]([*:0]u8!)?!` 映射为 Zig `?[*][*:0]u8`（以 0 结尾的字符串指针的多项连续可选数组）；
+  - `[*:null]([*:0]u8?!)?!` 映射为 Zig `?[*:null]?[*:0]u8`（以 null 结尾的可选 C 字符串指针数组）；
+  - `*(*T?!)` 映射为 Zig `*?*T`（指向可选指针的指针，常用于 C 库二级出参返回）。
+
+#### 6.7.1.1 `cstr` 类型可变性与借用检查规范
+
+`cstr` 是 CP 对标 C 语言 `char*` / Zig `[*:0]u8` 的 C 风格字符串类型。CP 将其纳入严格的所有权与借用检查体系：
+
+1. **`let s: cstr = "hello";`（可变 C 字符串）**：
+   - 映射为 Zig `var s: [*:0]u8`；若字面量初始化则由编译器前端自动注入安全 `@constCast`；
+   - **允许按字节就地修改**：支持 `s[idx] = val`；
+2. **`const s: cstr = "hello";`（不可变只读 C 字符串）**：
+   - 映射为 Zig `const s: [*:0]const u8`；
+   - **借用检查器硬性拦截**：禁止任何按字节索引修改（尝试 `s[idx] = val` 在语义分析期抛出 `SemaError::ConstAssignment`）；
+3. **函数参数传递契约**：
+   - 只读借用参数 `fn foo(s: cstr)`：映射为 Zig `s: [*:0]const u8`，函数体内尝试 `s[idx] = val` 编译拦截并抛错：`Cannot perform mutable operation on read-only parameter 's'`；
+   - 独占可变借用参数 `fn foo(*s: cstr)`：映射为 Zig `s: [*:0]u8`，允许函数体内部对字符串就地修改。
+4. **显式借用类型**：
+   - `&cstr` 映射为 `[*:0]const u8`（只读借用）；
+   - `*cstr` 映射为 `[*:0]u8`（独占可变借用）。
 
 ---
 
@@ -2652,6 +2678,92 @@ print(e.code, e.message);
 ### 8.6 胖指针动态错误与错误集自动转换
 
 当不同模块的子错误集向上传播时，编译器自动织入 `cp_convert_err` 进行错误集合并与自动升级，亦支持通用动态错误胖指针 `Box<dyn Error>`。
+
+---
+
+### 8.7 守卫控制流三剑客（The Guard Trinity）：`||`、`??` 与 `?` 的发散控制与解包
+
+在工程级系统开发与海量智能体业务中，卫语句（Guard Clauses）与错误/空值早退是出现频率最高的模式。CP 原生设计了覆盖三大维度的**守卫控制流三剑客**，全面支持发散控制流（`continue`、`break`、`return [expr]`）：
+
+| 守卫操作符 | 适用类型 | 触发发散条件 | 正常执行行为 | 底层 Zig 转译映射 | 典型业务场景 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **`||`** | `bool` | 条件为 `false` | 表达式求值为 `true` | `if (!cond) action;` | 状态校验、循环边界、权限判定 |
+| **`??`** | 可选类型 `T?` | 值为 `null` | **自动解包**为 `T` | `opt orelse action` | 空值过滤、早退拦截、默认降级 |
+| **`?`** | 错误联合 `T!E` | 结果为 `error` | **自动解包**为 `T` | `res catch action` | 故障自愈、失败重试、错误发散 |
+
+#### 1. 语法形态与代码示例
+
+```typescript
+// 1. || 布尔条件守卫：条件不满足时早退/跳出
+while (i < max_len) {
+    let cur = items[i];
+    i += 1;
+    is_valid(cur) || continue;     // 若无效直接跳过本次迭代
+    (cur < 100) || break;          // 若超出范围直接跳出循环
+    check_auth(cur) || return 403; // 若无权限直接早期返回
+}
+
+// 2. ?? 可选值守卫：遇 null 发散，非空直接解包为 T
+while (has_more) {
+    let entry = fetch_next_opt() ?? continue; // 为 null 时跳过，非空则 entry: Entry
+    let config = load_config_opt() ?? break;  // 缺失时跳出循环
+    let user = find_user(id) ?? return null;  // 缺失时直接返回 null
+}
+
+// 3. ? 错误联合守卫：遇 error 发散，成功直接解包为 T
+while (task_running) {
+    let packet = read_socket() ? continue;       // 出错时丢弃并继续
+    let token = parse_header(buf) ? break;       // 解析失败跳出循环
+    let result = execute_step() ? return Err(500); // 故障时携带错误早期返回
+}
+```
+
+#### 2. 设计与性能优势
+- **零成本抽象（Zero Cost）**：`||` 直接编译为底层单条分支跳转指令 `if (!cond)`；`??` 与 `?` 直接编译为 Zig 原生内建 `orelse` 与 `catch`，不产生任何闭包或中间包装开销。
+- **对称优雅**：消除了传统语言中满屏的冗长 `if (...) { return; }`，让核心业务主干代码一目了然。
+
+---
+
+### 8.8 控制流条件圆括号强制规范与 AI-First 智能自愈提示
+
+为了彻底根除传统语法中因无括号条件与结构体实例化（Struct Literal）产生的严重二义性，CP 制定了清晰严格的条件语句括号规范：
+
+#### 1. 语法规范：`if` 与 `while` 条件必须外包 `()`
+所有 `if` 与 `while` 控制流语句的条件表达式，必须强制使用圆括号 `()` 包裹：
+```typescript
+// ✅ 正确规范写法
+if (addr_str.len >= INET6_ADDRSTRLEN) { return null; }
+while (true) { break; }
+if (x > 0 && y < 10) { ... }
+
+// ❌ 严禁无括号写法（编译器拒绝通过）
+if addr_str.len >= INET6_ADDRSTRLEN { return null; } // 编译报错！
+while true { break; }                                // 编译报错！
+```
+
+#### 2. 二义性根除原理
+在 CP 语言中，全大写标识符后紧跟 `{` 是结构体字面量的语法（如 `Point { x: 1, y: 2 }`）。若允许 `if CONST { ... }`，词法解析器会将 `{ ... }` 误判为结构体字段列表，从而报出莫名其妙的 `Expected token: Colon, found ...`。强制括号 `if (...) { ... }` 彻底消除二义性，极大加快编译解析速度。
+
+#### 3. AI-First 智能自愈诊断信息
+当开发者或 AI Agent 偶然遗漏括号时，CP 编译器绝不输出冷冰冰的语法错误，而是附带具备修正建议的三段式自愈诊断：
+```text
+Error: Parse Error in "src/boringssl.cp": Parse error: CP Syntax Error: 'if' condition requires parentheses.
+  = help: in CP, control flow conditions must be enclosed in parentheses to avoid ambiguity with struct literals.
+  = suggestion: wrap the condition in parentheses: if (condition) { ... } at Span { start: 35, end: 36 }
+```
+智能体识别到 `= suggestion:` 后，单轮对话耗时 0 秒即可自动采纳并修复，大幅提高无人值守自主迭代效率。
+
+---
+
+### 8.9 行末分号可选（Optional Semicolons）与 ASI 换行断句规范
+
+CP 采用符合现代前端（TypeScript/ES6）与系统语言（Go/Swift）直觉的分号机制：
+
+1. **100% 可选分号**：在语句末尾（如 `let` 变量声明、表达式语句、`return` 语句、`import` 语句等），分号 `;` 为完全可选项。写分号或不写分号均完全合规，不影响编译产物。
+2. **物理词元换行判定（ASI）**：编译器通过底层物理词元边界（Token Range）的换行符 `\n` 进行精准自动断句。
+3. **换行安全防御规则**：
+   - 换行后的首字符若为左圆括号 `(`（如独立表达式 `(a < b) || break`），**严禁**被贪婪解析为上一行末尾表达式的后缀函数调用（`CallExpr`）；
+   - 无参数的 `return` 语句若遇到换行，自动断句，不会将下一行的独立语句误吞为返回值。
 
 ---
 
@@ -6103,6 +6215,122 @@ server.post("/api/v1/agent/chat", (req: Request, res: Response) => {
 
 server.listen();
 ```
+
+---
+
+## 第十七章：AI-First 智能可自愈诊断系统与 E-Code 规范体系 (AI-Friendly Self-Healing Diagnostics)
+
+### 17.1 核心设计理念：专为 AI Agent 打造的 0 秒自愈编译器
+
+传统系统级编程语言（如 C/C++、Zig 早期或未调优的 Rust）在遇到编译错误时，往往抛出冷冰冰的语法错误（`SyntaxError: unexpected token`）或内部断言栈（`panic at ...`）。AI Agent 面对此类报错往往陷入信息孤岛，必须耗费多轮对话翻阅编译器前端源码，极大拖慢了自动化研发流。
+
+CP 语言编译器从底层确立了 **AI-First 诊断原则**：
+1. **彻底根除 Rust Panic 栈回溯污染**：所有借用检查、语法分析与类型错误全部转换为结构化 `Diagnostic`；
+2. **工业级三段式自愈诊断规范**：
+   - **错误主体与代码切片定位**：精确指出错误文件、行号、列号与 `^^^^` 下划线；
+   - **`= cause:` 根本原因剖析**：直白解释为何当前代码违反了语言设计语义；
+   - **`= help:` 规范与规则释义**：阐述 CP 语言的核心准则；
+   - **`= suggestion:` 精准可采纳建议**：提供可以直接单轮采纳应用的正确代码写法，实现 0 秒闭环自愈！
+
+```text
+error[E0201]: cannot perform mutable operation on read-only parameter 'outBuf'
+  --> src/boringssl.cp:58:24
+   |
+58 |     outBuf[0] = 0;
+   |     ^^^^^^
+   |
+   = cause: parameter 'outBuf' is a read-only borrow (immutable by default in CP).
+   = help: in CP, function parameters are read-only borrows by default. To modify arguments in-place, declare them as exclusive mutable borrows using '*' prefix.
+   = suggestion: parameter 'outBuf' is a read-only borrow. Add '*' to declare it as mutable borrow: '*outBuf: OutIPBuf'
+```
+
+---
+
+### 17.2 官方标准错误码（E-Code）全景矩阵
+
+CP 编译器的诊断错误码分为三大正交区间：
+
+| 错误码区间 | 所属编译阶段 | 涵盖核心领域与典型场景 |
+| :--- | :--- | :--- |
+| **`E01xx`** | **词法与语法分析 (Lexer & Parser)** | 条件圆括号强制、废除 TS 关键字自愈（`interface` -> `trait`, `try/catch` -> `?`, `mut` -> `let/*`）、循环语法 |
+| **`E02xx`** | **语义分析与借用检查 (Sema & Borrow Checker)** | 单写多读借用冲突、修改只读参数自愈、移动后访问、未定义符号（编辑距离智能联想与标准库导入提示）、类型不匹配与解包 |
+| **`E03xx`** | **模块解析与包管理 (Resolver & Module System)** | 模块缺失、内置 `cap:*` 协议标准库检索推荐 |
+
+#### 17.2.1 典型 E-Code 规则与 AI 自愈建议速查表
+
+| E-Code | 错误分类与诊断名称 | 触发场景示例 | AI Agent 自动化自愈方案 (`suggestion`) |
+| :--- | :--- | :--- | :--- |
+| **`E0101`** | **条件圆括号缺失** | `if x > 5 { ... }` 或 `while true { ... }` | 包装为圆括号：`if (x > 5) { ... }` |
+| **`E0102`** | **TS `interface` 关键字** | `interface User { id: i32 }` | 替换为行为契约 `trait`：`trait User { ... }` |
+| **`E0103`** | **传统 `try/catch` 异常块** | `try { ... } catch (e) { ... }` | 改为错误传播符 `?` 或行内 `catch` 表达式 |
+| **`E0104`** | **多余的 `mut` 关键字** | `mut a = 1;` | 移除 `mut`，使用默认可变的 `let a = 1;` |
+| **`E0105`** | **`any` 弱类型** | `let val: any;` | 声明具体类型、泛型 `<T>` 或 `*anyopaque` |
+| **`E0106`** | **C 风格三段式 for 循环** | `for (let i = 0; i < n; i++)` | 替换为 `while (i < n)` 或 `for x of list` |
+| **`E0201`** | **修改只读借用参数** | `fn f(buf: [16]u8) { buf[0] = 0; }` | 参数前添加 `*` 声明为独占可变借用：`*buf: [16]u8` |
+| **`E0202`** | **借用冲突 (Aliasing XOR Mutability)** | 在不可变借用存活期间发生可变借用 | 结束不可变借用作用域或使用克隆值 |
+| **`E0203`** | **移动后使用 (Use After Move)** | 变量经 `move` 所有权移交后再次读取 | 移除 `move` 或改用引用传参 `&x` |
+| **`E0204`** | **常量重新赋值** | `const x = 1; x = 2;` | 改为可变变量声明：`let x = 1;` |
+| **`E0205`** | **非 async 函数中使用 await** | 同步函数内调用 `await task;` | 函数签名添加 `async fn` |
+| **`E0206`** | **未定义符号（拼写错误/缺少导入）** | 调用未导入的 `print(...)` 或拼写错误 `addr_srt` | 自动给出 `import { print } from "cap:io";` 或 `did you mean 'addr_str'?` |
+| **`E0207`** | **类型不匹配 (Type Mismatch)** | 期待 `T` 却传入了 `T?` 或 `T!E` | 提示解包：`val ?? default` 或错误传播 `val ?` |
+| **`E0208`** | **运行时反射未启用** | 对未注解类调用 `Reflect.typeOf()` | 在类定义前添加 `@reflect class ...` |
+| **`E0209`** | **Unsafe 操作缺失** | 在普通函数内执行裸指针解引用 | 将操作包裹在 `unsafe { ... }` 块中 |
+| **`E0210`** | **循环中修改容器** | 在 `for item of list` 遍历中调用 `list.push()` | 克隆容器后遍历或改用下标 `while` 循环 |
+| **`E0107`** | **字段访问前冗余解引用 `.*.`** | `in6.*.family = AF.INET6;` | 移除 `.*.` 直接使用点号访问：`in6.family = AF.INET6;` |
+
+---
+
+### 17.3 现代系统级语法规范与指针类型字典
+
+#### 17.3.1 禁止字段访问前冗余解引用 `.*.`
+
+在 CP 语言中，值类型、引用（`*T`）和裸指针（`*T!`）在访问成员字段与方法时**统一采用点号 `.` 直接访问**（编译器自动完成寻址与解引用）。严禁书写 Zig 遗留的 `ptr.*.field` 冗余解引用语法：
+
+```typescript
+// ❌ 错误（编译器 E0107 拦截并提示修正）：
+in6.*.family = AF.INET6;
+
+// ✅ 正确：
+in6.family = AF.INET6;
+```
+
+#### 17.3.2 `pub` 与 `_` 极简规范
+
+- **导出声明统一使用 `pub`**：全面废弃繁琐的 `export`，统一使用 `pub class`、`pub @c struct`、`pub enum`、`pub const`、`pub fn`。
+- **接收者统一使用 `_` 替代 `this`**：在结构体与类方法中，接收者声明与访问推荐使用更简洁的 `_`（等同于 `this`），例如 `fn count(*_): u32`、`_.release()`。
+- **`_` 为接收者保留标识符**：`_` 不能作为普通变量名或编译期虚位形参使用（若需忽略编译期参数可使用具体命名如 `_lookup` 并配合 `_ = _lookup;`）。
+
+#### 17.3.3 RAII 自动析构 `release(*_)`
+
+CP 类与结构体资源释放统一实现 `pub fn release(*_): void`，由编译器 Comptime RAII 自动管理析构；同时可提供 `pub fn deinit(*_): void { _.release(); }` 供外部 Zig 调用方平滑兼容。
+
+#### 17.3.4 标准系统类型与后置修饰符语法字典
+
+CP 全面废止 C 风格类型关键字与前置问号指针语法，统一使用现代强类型与后置修饰符：
+
+| 传统/C 风格语法 | CP 现代标准语法 | 编译转译语义 (Zig) | 内存安全与语义说明 |
+| :--- | :--- | :--- | :--- |
+| `c_int` / `c_uint` | `i32` / `u32` | `i32` / `u32` | 明确位宽整数，消除平台歧义 |
+| `c_ushort` / `c_short` | `u16` / `i16` | `u16` / `i16` | 规范 16 位整数 |
+| `*anyopaque` | `*any?!` | `?*anyopaque` | 可选不透明裸指针 |
+| `?[*:0]u8` | `[*:0]u8?!` | `?[*:0]u8` | 可选哨兵以 0 结尾字符串指针 |
+| `?[*][*:0]u8` | `[*]([*:0]u8!)?!` | `?[*][*:0]u8` | 指向非空字符串数组的可选多项指针 |
+| `?[*:null]?[*:0]u8` | `[*:null]([*:0]u8?!)?!` | `?[*:null]?[*:0]u8` | null 结尾的可选字符串数组可选指针 |
+| `cstr` | `const s: cstr` / `let mut s: cstr` | `[*:0]const u8` / `[*:0]u8` | 纳入借用检查体系的原生 C 字符串 |
+| `[*c]T` | `[*c]T` / `[*c]T?` | `[*c]T` / `?[*c]T` | C-ABI 兼容指针，与 `&buf` 隐式无缝互通 |
+
+#### 17.3.5 C-ABI 兼容指针与守卫三剑客发散控制流
+
+1. **C-ABI 指针 (`[*c]T`)**：
+   - 专为 C 语言头文件 FFI 绑定设计，在底层转译为 Zig 的 `[*c]T`；
+   - 自动提升可选语义：`[*c]T?` 与 `?[*c]T` 等价，规范化为 `Optional(CPtr(T))`；
+   - 支持将局部借用引用（如 `&mut buf`）隐式传入接收 `[*c]T` 的 C-ABI 函数，极大减轻系统库绑定的心智负担。
+
+2. **守卫三剑客（发散控制流表达式）**：
+   - 空值守卫：`val ?? return null;`、`entry ?? continue;`、`item ?? break;`；
+   - 布尔守卫：`valid || return;`、`ready || continue;`、`found || break;`；
+   - 错误守卫：`res ? return;`、`step ? continue;`、`op ? break;`。
+   在遇到 null、false 或 error 时提前发散退出，消除深层嵌套 if，保持主干代码绝对扁平。
 
 ---
 

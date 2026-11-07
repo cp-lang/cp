@@ -1,10 +1,13 @@
 use crate::ast::*;
+use crate::diagnostic::{find_closest_match, Diagnostic, STANDARD_BUILTIN_IMPORTS};
 use crate::Span;
 use std::collections::HashMap;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum SemaError {
+    #[error("Diagnostic: {0:?}")]
+    Diagnostic(Diagnostic),
     #[error("Undefined symbol: {0} at {1:?}")]
     UndefinedSymbol(String, Span),
     #[error("Type mismatch: expected {0:?}, found {1:?} at {2:?}")]
@@ -73,6 +76,222 @@ pub enum SemaError {
     InvalidPointerArithmetic(String, Span),
 }
 
+impl SemaError {
+    pub fn to_diagnostic(&self, known_symbols: &[String]) -> Diagnostic {
+        match self {
+            SemaError::Diagnostic(d) => d.clone(),
+            SemaError::CannotMutateReadOnlyBorrow(name, span) => Diagnostic::new(
+                "E0201",
+                format!("cannot mutate read-only borrow '{}'", name),
+            )
+            .with_span(*span)
+            .with_cause(format!(
+                "parameter '{}' is a read-only borrow (immutable by default in CP).",
+                name
+            ))
+            .with_help("in CP, function parameters are read-only borrows by default. To modify arguments in-place, declare them as exclusive mutable borrows using '*' prefix.")
+            .with_suggestion(format!(
+                "parameter '{}' is a read-only borrow. Add '*' to declare it as mutable borrow: '*{}: <Type>'",
+                name, name
+            )),
+
+            SemaError::MutableBorrowConflict(name, span) => Diagnostic::new(
+                "E0202",
+                format!("cannot borrow '{}' as mutable because it is already borrowed as immutable", name),
+            )
+            .with_span(*span)
+            .with_cause(format!(
+                "variable '{}' is already borrowed as immutable in the current scope.",
+                name
+            ))
+            .with_help("CP enforces aliasing XOR mutability at compile time (single writer OR multiple readers).")
+            .with_suggestion(format!(
+                "ensure immutable borrows of '{}' end before taking a mutable borrow, or clone the value.",
+                name
+            )),
+
+            SemaError::UseOfMovedValue(name, span) => Diagnostic::new(
+                "E0203",
+                format!("use of moved value '{}'", name),
+            )
+            .with_span(*span)
+            .with_cause(format!(
+                "value of '{}' was moved and its ownership was transferred.",
+                name
+            ))
+            .with_help("variables moved via 'move' transfer ownership and cannot be accessed afterwards.")
+            .with_suggestion(format!(
+                "avoid moving '{}' if you need to use it later, or pass by borrow '&{}'",
+                name, name
+            )),
+
+            SemaError::ConstAssignment(name, span) => Diagnostic::new(
+                "E0204",
+                format!("cannot assign to const variable '{}'", name),
+            )
+            .with_span(*span)
+            .with_cause(format!(
+                "variable '{}' is declared with 'const' and cannot be reassigned.",
+                name
+            ))
+            .with_help("variables declared with 'const' are immutable bindings.")
+            .with_suggestion(format!(
+                "change 'const {}' to 'let {}' to allow reassignment",
+                name, name
+            )),
+
+            SemaError::AwaitOutsideAsync(span) => Diagnostic::new(
+                "E0205",
+                "'await' can only be used in async functions",
+            )
+            .with_span(*span)
+            .with_cause("'await' pauses execution and requires state-machine CPS transformation.")
+            .with_help("in CP, 'await' can only be used inside functions marked with 'async fn'.")
+            .with_suggestion("declare the enclosing function as async: 'async fn ...'"),
+
+            SemaError::UndefinedSymbol(sym, span) => {
+                let mut diag = Diagnostic::new("E0206", format!("undefined symbol '{}'", sym))
+                    .with_span(*span)
+                    .with_cause(format!("identifier '{}' is not declared in current scope or imported modules.", sym));
+
+                if let Some(&(_, mod_path)) = STANDARD_BUILTIN_IMPORTS.iter().find(|(name, _)| *name == sym.as_str()) {
+                    diag.help = Some(format!("'{}' is a standard library symbol in '{}'.", sym, mod_path));
+                    diag.suggestion = Some(format!("import {{ {} }} from \"{}\";", sym, mod_path));
+                } else {
+                    let cand_refs: Vec<&str> = known_symbols.iter().map(|s| s.as_str()).collect();
+                    if let Some(closest) = find_closest_match(sym, &cand_refs, 3) {
+                        diag.help = Some(format!("a symbol with a similar name '{}' exists in scope.", closest));
+                        diag.suggestion = Some(format!("did you mean '{}'?", closest));
+                    } else {
+                        diag.help = Some("declare the identifier before use with 'let' / 'const' or import it from a module.".to_string());
+                        diag.suggestion = Some(format!("let {} = ...;", sym));
+                    }
+                }
+                diag
+            }
+
+            SemaError::TypeMismatch(expected, found, span) => {
+                let mut diag = Diagnostic::new(
+                    "E0207",
+                    format!("type mismatch: expected '{:?}', found '{:?}'", expected, found),
+                )
+                .with_span(*span)
+                .with_cause(format!(
+                    "expression has type '{:?}', but the target requires '{:?}'.",
+                    found, expected
+                ));
+
+                match (expected, found) {
+                    (target, Type::Optional(inner)) if target == inner.as_ref() => {
+                        diag.help = Some("the value is an Optional ('T?'). It may be null.".to_string());
+                        diag.suggestion = Some("unwrap the optional using '?? <default_value>' or check for null using 'if (val != null)'".to_string());
+                    }
+                    (target, Type::ErrorUnion(inner)) if target == inner.as_ref() => {
+                        diag.help = Some("the value is an Error Union ('T ! Error'). It may contain an error.".to_string());
+                        diag.suggestion = Some("propagate the error using '?' (e.g. 'expr ?') or handle it using 'catch'".to_string());
+                    }
+                    (Type::USize, Type::I32) => {
+                        diag.help = Some("CP does not perform implicit integer widening conversions.".to_string());
+                        diag.suggestion = Some("cast explicitly using '@as(usize, val)'".to_string());
+                    }
+                    (target, Type::Optional(inner)) if matches!(inner.as_ref(), Type::Unknown | Type::Any) => {
+                        diag.help = Some(format!("'null' cannot be assigned to non-optional type '{:?}'.", target));
+                        diag.suggestion = Some(format!("change the type annotation to '{:?}?' to allow null", target));
+                    }
+                    _ => {
+                        diag.help = Some("types must match exactly in CP's strong static type system.".to_string());
+                        diag.suggestion = Some(format!("ensure the expression evaluates to '{:?}'", expected));
+                    }
+                }
+                diag
+            }
+
+            SemaError::ReflectNotEnabled(type_name, span) => Diagnostic::new(
+                "E0208",
+                format!("type '{}' cannot be reflected at runtime", type_name),
+            )
+            .with_span(*span)
+            .with_cause(format!("reflection metadata for '{}' was omitted during compilation.", type_name))
+            .with_help("CP strips runtime metadata by default for zero memory overhead. Runtime reflection requires the '@reflect' attribute.")
+            .with_suggestion(format!("add '@reflect' decorator before the definition: '@reflect class {} {{ ... }}'", type_name)),
+
+            SemaError::UnsafeRequired(msg, span) => Diagnostic::new(
+                "E0209",
+                msg.clone(),
+            )
+            .with_span(*span)
+            .with_cause("memory-unsafe operation (e.g. raw pointer dereference or C-FFI call) detected outside unsafe block.")
+            .with_help("all operations that may violate memory safety must be enclosed in 'unsafe { ... }' blocks or 'unsafe fn'.")
+            .with_suggestion("wrap the operation in 'unsafe { ... }'"),
+
+            SemaError::MutateWhileBorrowedInFor(name, span) => Diagnostic::new(
+                "E0210",
+                format!("cannot mutate '{}' while it is borrowed in 'for ... of' loop", name),
+            )
+            .with_span(*span)
+            .with_cause(format!("collection '{}' is actively borrowed by the iterator.", name))
+            .with_help("mutating a container during iteration causes iterator invalidation undefined behavior.")
+            .with_suggestion("iterate over a cloned collection or use an index-based 'while' loop"),
+
+            SemaError::PrivateAccess(msg, span) => Diagnostic::new(
+                "E0211",
+                msg.clone(),
+            )
+            .with_span(*span)
+            .with_cause("attempted to access a private member outside of its defining class.")
+            .with_help("members are private by default in CP. Only members with 'pub' are accessible externally.")
+            .with_suggestion("add 'pub' modifier to the member declaration, or provide a public getter/method"),
+
+            SemaError::CannotInstantiateStatic(cls_name, span) => Diagnostic::new(
+                "E0212",
+                format!("cannot instantiate static class '{}'", cls_name),
+            )
+            .with_span(*span)
+            .with_cause(format!("class '{}' is marked with 'static' and cannot be instantiated with 'new'.", cls_name))
+            .with_help("static classes only act as namespaces for static functions and constants.")
+            .with_suggestion(format!("call static methods directly via '{}.method(...)' without 'new'", cls_name)),
+
+            SemaError::InvalidCast(msg, span) => Diagnostic::new(
+                "E0213",
+                msg.clone(),
+            )
+            .with_span(*span)
+            .with_cause("semantic type conversions are prohibited via raw 'as' cast.")
+            .with_help("use dedicated parser methods for string-to-number parsing.")
+            .with_suggestion("use '<Type>.parse(str) ?' instead of 'as'"),
+
+            SemaError::DuplicateVarDecl(name, span) => Diagnostic::new(
+                "E0214",
+                format!("cannot redeclare variable '{}'", name),
+            )
+            .with_span(*span)
+            .with_cause(format!("identifier '{}' is already bound in the current block scope.", name))
+            .with_help("block-scoped variables cannot be redeclared with 'let' in the same scope.")
+            .with_suggestion(format!("remove 'let' to reassign to '{}', or rename the new variable", name)),
+
+            SemaError::MultipleRestInPattern(span) => Diagnostic::new(
+                "E0215",
+                "destructuring pattern cannot contain multiple '...' rest elements",
+            )
+            .with_span(*span)
+            .with_cause("a pattern can only have at most one rest element '...' to avoid ambiguity in slice length.")
+            .with_help("ensure only one rest element exists in array or object pattern.")
+            .with_suggestion("remove additional '...' rest elements from the pattern"),
+
+            SemaError::NotAFunction(span) => Diagnostic::new(
+                "E0216",
+                "expression is not a callable function",
+            )
+            .with_span(*span)
+            .with_cause("attempted to invoke a non-function value with '(...)' call syntax.")
+            .with_help("verify that the callee is a function, method, or callable object."),
+
+            _ => Diagnostic::new("E0290", format!("semantic error: {}", self))
+                .with_help("check semantic rules and types according to CP specification."),
+        }
+    }
+}
+
 pub type SemaResult<T> = Result<T, SemaError>;
 
 #[derive(Clone, Debug)]
@@ -115,6 +334,19 @@ pub struct Analyzer {
 }
 
 impl Analyzer {
+    pub fn get_known_symbols(&self) -> Vec<String> {
+        let mut symbols = std::collections::HashSet::new();
+        for scope in &self.scopes {
+            for key in scope.keys() {
+                symbols.insert(key.clone());
+            }
+        }
+        for key in self.classes.keys() {
+            symbols.insert(key.clone());
+        }
+        symbols.into_iter().collect()
+    }
+
     pub fn new() -> Self {
         let mut meta_defs = HashMap::new();
         let mut target_targets = std::collections::HashSet::new();
@@ -2412,11 +2644,28 @@ impl Analyzer {
             Expr::Bin(bin) => {
                 if bin.op == BinaryOp::Assign {
                     if let Expr::Ident(id) = &*bin.left {
+                        if let Some(SymbolKind::Var {
+                            kind: VarDeclKind::Const,
+                            ..
+                        }) = self.resolve(&id.sym)
+                        {
+                            return Err(SemaError::ConstAssignment(id.sym.clone(), bin.span));
+                        }
                         if self.loop_borrowed_vars.contains(&id.sym) {
                             return Err(SemaError::MutateWhileBorrowedInFor(
                                 id.sym.clone(),
                                 id.span,
                             ));
+                        }
+                    } else if let Expr::Index { obj, .. } = &*bin.left {
+                        if let Expr::Ident(id) = &**obj {
+                            if let Some(SymbolKind::Var {
+                                kind: VarDeclKind::Const,
+                                ..
+                            }) = self.resolve(&id.sym)
+                            {
+                                return Err(SemaError::ConstAssignment(id.sym.clone(), bin.span));
+                            }
                         }
                     }
                 }
@@ -2956,21 +3205,37 @@ impl Analyzer {
     }
 
     fn is_int_type(t: &Type) -> bool {
-        matches!(
-            t,
+        match t {
             Type::U8
-                | Type::I8
-                | Type::U16
-                | Type::I16
-                | Type::I32
-                | Type::U32
-                | Type::I64
-                | Type::U64
-                | Type::U128
-                | Type::I128
-                | Type::ISize
-                | Type::USize
-        )
+            | Type::I8
+            | Type::U16
+            | Type::I16
+            | Type::I32
+            | Type::U32
+            | Type::I64
+            | Type::U64
+            | Type::U128
+            | Type::I128
+            | Type::ISize
+            | Type::USize => true,
+            Type::Ref(id) => matches!(
+                id.sym.as_str(),
+                "c_int"
+                    | "c_uint"
+                    | "c_short"
+                    | "c_ushort"
+                    | "c_long"
+                    | "c_ulong"
+                    | "c_char"
+                    | "c_uchar"
+                    | "ares_socket_t"
+                    | "ares_socklen_t"
+                    | "ares_ssize_t"
+            ) || ((id.sym.starts_with('u') || id.sym.starts_with('i'))
+                && id.sym.len() > 1
+                && id.sym[1..].chars().all(|c| c.is_ascii_digit())),
+            _ => false,
+        }
     }
 
     fn is_float_type(t: &Type) -> bool {
@@ -3017,6 +3282,20 @@ impl Analyzer {
             Type::U64 | Type::U128 | Type::USize => true,
             Type::I64 | Type::I128 | Type::ISize => true,
             Type::F32 | Type::F64 => true,
+            Type::Ref(id) if matches!(
+                id.sym.as_str(),
+                "c_int"
+                    | "c_uint"
+                    | "c_short"
+                    | "c_ushort"
+                    | "c_long"
+                    | "c_ulong"
+                    | "c_char"
+                    | "c_uchar"
+                    | "ares_socket_t"
+                    | "ares_socklen_t"
+                    | "ares_ssize_t"
+            ) => true,
             Type::Ref(id)
                 if (id.sym.starts_with('u') || id.sym.starts_with('i'))
                     && id.sym[1..].chars().all(|c| c.is_ascii_digit()) =>
@@ -3136,6 +3415,8 @@ impl Analyzer {
             || *src == Type::Any
             || *target == Type::Unknown
             || *src == Type::Unknown
+            || *target == Type::Auto
+            || *src == Type::Auto
         {
             return true;
         }
@@ -3198,23 +3479,44 @@ impl Analyzer {
         }
 
         if let Type::Ref(id) = target {
-            if (id.sym.starts_with('u') || id.sym.starts_with('i'))
+            if matches!(
+                id.sym.as_str(),
+                "c_int"
+                    | "c_uint"
+                    | "c_short"
+                    | "c_ushort"
+                    | "c_long"
+                    | "c_ulong"
+                    | "c_char"
+                    | "c_uchar"
+                    | "ares_socket_t"
+                    | "ares_socklen_t"
+                    | "ares_ssize_t"
+            ) || ((id.sym.starts_with('u') || id.sym.starts_with('i'))
                 && id.sym.len() > 1
-                && id.sym[1..].chars().all(|c| c.is_ascii_digit())
+                && id.sym[1..].chars().all(|c| c.is_ascii_digit()))
             {
-                if matches!(
-                    src,
-                    Type::I8
-                        | Type::U8
-                        | Type::I16
-                        | Type::U16
-                        | Type::I32
-                        | Type::U32
-                        | Type::I64
-                        | Type::U64
-                        | Type::ISize
-                        | Type::USize
-                ) {
+                if Self::is_int_type(src) {
+                    return true;
+                }
+            }
+        }
+        if let Type::Ref(id) = src {
+            if matches!(
+                id.sym.as_str(),
+                "c_int"
+                    | "c_uint"
+                    | "c_short"
+                    | "c_ushort"
+                    | "c_long"
+                    | "c_ulong"
+                    | "c_char"
+                    | "c_uchar"
+                    | "ares_socket_t"
+                    | "ares_socklen_t"
+                    | "ares_ssize_t"
+            ) {
+                if Self::is_int_type(target) {
                     return true;
                 }
             }
@@ -3297,6 +3599,35 @@ impl Analyzer {
         ) = (target, src)
         {
             if t_d == s_d && self.can_coerce(t_inner, s_inner, None) {
+                return true;
+            }
+        }
+        if let (Type::CPtr(t_inner), Type::CPtr(s_inner)) = (target, src) {
+            if self.can_coerce(t_inner, s_inner, None) {
+                return true;
+            }
+        }
+        if let Type::CPtr(t_inner) = target {
+            if let Type::BorrowType { inner: s_inner, .. } = src {
+                if self.can_coerce(t_inner, s_inner, None) {
+                    return true;
+                }
+            }
+            if let Type::RawPtr { inner: s_inner, .. } = src {
+                if self.can_coerce(t_inner, s_inner, None) {
+                    return true;
+                }
+            }
+        }
+        if let (Type::SentinelPtr(t_inner, t_s), Type::SentinelPtr(s_inner, s_s)) = (target, src) {
+            if t_s == s_s && self.can_coerce(t_inner, s_inner, None) {
+                return true;
+            }
+        }
+        if let (Type::ManyRawPtr(t_inner), Type::CPtr(s_inner))
+        | (Type::CPtr(t_inner), Type::ManyRawPtr(s_inner)) = (target, src)
+        {
+            if self.can_coerce(t_inner, s_inner, None) {
                 return true;
             }
         }
@@ -3426,6 +3757,14 @@ impl Analyzer {
             (Type::ResultType { ok: o1, .. }, other) | (other, Type::ResultType { ok: o1, .. }) => {
                 self.types_eq(o1, other)
             }
+            (Type::ManyRawPtr(i1), Type::ManyRawPtr(i2)) => self.types_eq(i1, i2),
+            (Type::CPtr(i1), Type::CPtr(i2)) => self.types_eq(i1, i2),
+            (Type::CPtr(i1), Type::ManyRawPtr(i2)) | (Type::ManyRawPtr(i1), Type::CPtr(i2)) => {
+                self.types_eq(i1, i2)
+            }
+            (Type::SentinelPtr(i1, s1), Type::SentinelPtr(i2, s2)) => {
+                s1 == s2 && self.types_eq(i1, i2)
+            }
             (Type::Array(t1), Type::Array(t2)) => self.types_eq(t1, t2),
             (Type::FixedArray(t1, s1), Type::FixedArray(t2, s2)) => {
                 s1 == s2 && self.types_eq(t1, t2)
@@ -3474,6 +3813,7 @@ impl Analyzer {
             }
             (Type::Void, Type::Void) => true,
             (Type::Any, _) | (_, Type::Any) => true,
+            (Type::Auto, _) | (_, Type::Auto) => true,
             _ => a == b,
         }
     }
@@ -3745,6 +4085,7 @@ impl Analyzer {
                     || ident.sym == "err"
                     || ident.sym == "Error"
                     || ident.sym == "reflect"
+                    || ident.sym.starts_with("c_")
                     || matches!(
                         ident.sym.as_str(),
                         "u8" | "i8"
@@ -3763,6 +4104,7 @@ impl Analyzer {
                             | "bool"
                             | "void"
                             | "anytype"
+                            | "anyopaque"
                     )
                 {
                     return Ok(Type::Any);
@@ -3826,9 +4168,39 @@ impl Analyzer {
                         {
                             return Err(SemaError::ConstAssignment(ident.sym.clone(), bin.span));
                         }
+                    } else if let Expr::Index { obj, .. } = &*bin.left {
+                        if let Expr::Ident(ident) = &**obj {
+                            if let Some(SymbolKind::Var {
+                                kind: VarDeclKind::Const,
+                                ..
+                            }) = self.resolve(&ident.sym)
+                            {
+                                return Err(SemaError::ConstAssignment(ident.sym.clone(), bin.span));
+                            }
+                        }
                     }
                     if !self.can_coerce(&left, &right, Some(&*bin.right)) {
-                        return Err(SemaError::TypeMismatch(left, right, bin.span));
+                        let mut can_assign_to_outer = false;
+                        if let Expr::Ident(ident) = &*bin.left {
+                            for scope in self.scopes.iter().rev().skip(1) {
+                                if let Some(SymbolKind::Var { ty: outer_ty, kind }) = scope.get(&ident.sym) {
+                                    if *kind != VarDeclKind::Const && self.can_coerce(outer_ty, &right, Some(&*bin.right)) {
+                                        can_assign_to_outer = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if !can_assign_to_outer {
+                            return Err(SemaError::TypeMismatch(left, right, bin.span));
+                        }
+                    }
+                    if let Expr::Ident(ident) = &*bin.left {
+                        if let Some(scope) = self.scopes.last_mut() {
+                            if let Some(SymbolKind::Var { ty, .. }) = scope.get_mut(&ident.sym) {
+                                *ty = right.clone();
+                            }
+                        }
                     }
                     Ok(left)
                 } else if bin.op == BinaryOp::Lt
@@ -3838,6 +4210,8 @@ impl Analyzer {
                     || bin.op == BinaryOp::NotEq
                     || bin.op == BinaryOp::Eq
                 {
+                    Ok(Type::Bool)
+                } else if bin.op == BinaryOp::LogicalOr || bin.op == BinaryOp::LogicalAnd {
                     Ok(Type::Bool)
                 } else if bin.op == BinaryOp::Add && (left == Type::String || right == Type::String)
                 {
@@ -3939,7 +4313,9 @@ impl Analyzer {
             Expr::Slice(slice) => {
                 let o_ty = self.infer_type(&slice.obj)?;
                 match o_ty {
-                    Type::ManyRawPtr(elem) => Ok(Type::Array(elem)),
+                    Type::ManyRawPtr(elem)
+                    | Type::CPtr(elem)
+                    | Type::SentinelPtr(elem, _) => Ok(Type::Array(elem)),
                     Type::CStr => Ok(Type::String),
                     _ => Ok(o_ty),
                 }
@@ -4041,7 +4417,9 @@ impl Analyzer {
                 match o_ty {
                     Type::Array(elem) => Ok(*elem),
                     Type::FixedArray(elem, _) => Ok(*elem),
-                    Type::ManyRawPtr(elem) => Ok(*elem),
+                    Type::ManyRawPtr(elem)
+                    | Type::CPtr(elem)
+                    | Type::SentinelPtr(elem, _) => Ok(*elem),
                     Type::CStr => Ok(Type::U8),
                     Type::String => Ok(Type::U8),
                     Type::Tuple(tys) => Ok(tys.into_iter().next().unwrap_or(Type::Any)),

@@ -1,10 +1,13 @@
 use crate::ast::*;
+use crate::diagnostic::Diagnostic;
 use crate::lexer::{Lexer, Token};
 use crate::Span;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum ParseError {
+    #[error("Diagnostic: {0:?}")]
+    Diagnostic(Diagnostic),
     #[error("Unexpected token: {0:?} at {1:?}")]
     UnexpectedToken(Token, Span),
     #[error("Expected token: {0:?}, found {1:?} at {2:?}")]
@@ -15,6 +18,86 @@ pub enum ParseError {
     Generic(String, Span),
 }
 
+impl ParseError {
+    pub fn to_diagnostic(&self) -> Diagnostic {
+        match self {
+            ParseError::Diagnostic(d) => d.clone(),
+            ParseError::UnexpectedToken(tok, span) => match tok {
+                Token::Interface => Diagnostic::new("E0102", "CP does not support 'interface' keyword")
+                    .with_span(*span)
+                    .with_cause("'interface' has been abolished in CP to decouple data layout from behavior.")
+                    .with_help("in CP, use 'trait' for behavior contracts and 'class' / 'struct' for data containers.")
+                    .with_suggestion("replace 'interface' with 'trait': trait <Name> { ... }"),
+                Token::Try => Diagnostic::new("E0103", "traditional try/catch exception block is not supported in CP")
+                    .with_span(*span)
+                    .with_cause("CP has completely abolished try/catch in favor of zero-cost error unions and '?' operator.")
+                    .with_help("use '?' to propagate errors upward, or 'expr catch err => { ... }' / '?? fallback' to handle them.")
+                    .with_suggestion("use 'let val = expr ?;' or 'expr catch err => { ... }'"),
+                Token::Mut => Diagnostic::new("E0104", "'mut' keyword is not used for local variable declarations")
+                    .with_span(*span)
+                    .with_cause("in CP, variables declared with 'let' are already mutable by default.")
+                    .with_help("use 'let' for mutable variables and 'const' for immutable bindings. To declare mutable borrow parameters, prefix with '*': '*param: Type'.")
+                    .with_suggestion("remove 'mut': use 'let x = ...' or '*param: Type'"),
+                Token::Any => Diagnostic::new("E0105", "'any' type is not supported in CP")
+                    .with_span(*span)
+                    .with_cause("untyped 'any' is prohibited to ensure strict type safety and zero-cost runtime performance.")
+                    .with_help("use a concrete strong type (e.g. i32, string), a generic type parameter '<T>', or '*anyopaque' for C pointers.")
+                    .with_suggestion("replace 'any' with a concrete type or generic '<T>'"),
+                _ => Diagnostic::new("E0100", format!("unexpected token '{:?}'", tok))
+                    .with_span(*span)
+                    .with_cause(format!("parser encountered unexpected token '{:?}'", tok))
+                    .with_help("check the syntax around this token."),
+            },
+            ParseError::ExpectedToken(expected, found, span) => {
+                if *expected == Token::LParen {
+                    Diagnostic::new("E0101", "control flow condition must be enclosed in parentheses")
+                        .with_span(*span)
+                        .with_cause("in CP, control flow conditions (if/while) must be enclosed in parentheses to eliminate ambiguity with struct literal syntax.")
+                        .with_help("conditions in 'if' and 'while' must be enclosed in parentheses: if (condition) { ... }")
+                        .with_suggestion("wrap the condition in parentheses: if (condition) { ... }")
+                } else {
+                    Diagnostic::new("E0111", format!("expected token '{:?}', found '{:?}'", expected, found))
+                        .with_span(*span)
+                        .with_cause(format!("syntax requires '{:?}' at this position, but found '{:?}'", expected, found))
+                        .with_help(format!("ensure that '{:?}' is provided.", expected))
+                        .with_suggestion(format!("insert '{:?}' before '{:?}'", expected, found))
+                }
+            }
+            ParseError::EndOfInput => Diagnostic::new("E0199", "end of input reached unexpectedly")
+                .with_cause("source code terminated prematurely, likely missing a closing bracket or delimiter.")
+                .with_help("check for unclosed braces '{', parentheses '(', or quotes."),
+            ParseError::Generic(msg, span) => {
+                if msg.contains("= cause:") || msg.contains("= suggestion:") || msg.contains("= help:") {
+                    let first_line = msg.lines().next().unwrap_or(msg).to_string();
+                    let mut diag = Diagnostic::new("E0101", first_line).with_span(*span);
+                    for line in msg.lines() {
+                        let trimmed = line.trim();
+                        if let Some(rest) = trimmed.strip_prefix("= cause:") {
+                            diag.cause = Some(rest.trim().to_string());
+                        } else if let Some(rest) = trimmed.strip_prefix("= help:") {
+                            diag.help = Some(rest.trim().to_string());
+                        } else if let Some(rest) = trimmed.strip_prefix("= suggestion:") {
+                            diag.suggestion = Some(rest.trim().to_string());
+                        }
+                    }
+                    diag
+                } else if msg.contains("Expected 'of' in for loop") {
+                    Diagnostic::new("E0106", "invalid for loop syntax")
+                        .with_span(*span)
+                        .with_cause("CP does not use C-style three-clause 'for (;;)' loops.")
+                        .with_help("CP uses 'for elem of collection' or 'while (cond)' for indexed loops.")
+                        .with_suggestion("use 'for elem of list' or 'while (i < len)'")
+                } else {
+                    Diagnostic::new("E0190", format!("syntax error: {}", msg))
+                        .with_span(*span)
+                        .with_cause(msg.clone())
+                        .with_help("check syntax matching CP language grammar rules.")
+                }
+            }
+        }
+    }
+}
+
 pub type ParseResult<T> = Result<T, ParseError>;
 
 pub struct Parser<'a> {
@@ -22,6 +105,7 @@ pub struct Parser<'a> {
     input: &'a str,
     peeked: Option<(Token, Span)>,
     peeked2: Option<(Token, Span)>,
+    prev_token_end: usize,
     in_match_guard: bool,
     in_pipeline_rhs: usize,
     in_switch_arm: usize,
@@ -35,6 +119,7 @@ impl<'a> Parser<'a> {
             input,
             peeked: None,
             peeked2: None,
+            prev_token_end: 0,
             in_match_guard: false,
             in_pipeline_rhs: 0,
             in_switch_arm: 0,
@@ -43,18 +128,21 @@ impl<'a> Parser<'a> {
     }
 
     fn bump(&mut self) -> ParseResult<(Token, Span)> {
-        if let Some(p) = self.peeked.take() {
+        let (token, span) = if let Some(p) = self.peeked.take() {
             self.peeked = self.peeked2.take();
-            return Ok(p);
-        }
-        let (token, range) = self.lexer.next().ok_or(ParseError::EndOfInput)?;
-        Ok((
-            token,
-            Span {
-                start: range.start,
-                end: range.end,
-            },
-        ))
+            p
+        } else {
+            let (token, range) = self.lexer.next().ok_or(ParseError::EndOfInput)?;
+            (
+                token,
+                Span {
+                    start: range.start,
+                    end: range.end,
+                },
+            )
+        };
+        self.prev_token_end = span.end;
+        Ok((token, span))
     }
 
     fn peek(&mut self) -> Option<&Token> {
@@ -135,6 +223,7 @@ impl<'a> Parser<'a> {
             input: self.input,
             peeked: self.peeked.clone(),
             peeked2: self.peeked2.clone(),
+            prev_token_end: self.prev_token_end,
             in_match_guard: self.in_match_guard,
             in_pipeline_rhs: self.in_pipeline_rhs,
             in_switch_arm: self.in_switch_arm,
@@ -1085,8 +1174,27 @@ impl<'a> Parser<'a> {
     fn parse_postfix_type_modifiers(&mut self, mut ty: Type) -> ParseResult<Type> {
         loop {
             if self.peek() == Some(&Token::Question) {
+                if self.peek_next() == Some(&Token::Bang) {
+                    if matches!(ty, Type::CStr) {
+                        self.bump()?;
+                        self.bump()?;
+                        ty = Type::Optional(Box::new(ty));
+                        continue;
+                    }
+                    break;
+                }
                 self.bump()?;
                 ty = Type::Optional(Box::new(ty));
+            } else if self.peek() == Some(&Token::Bang) {
+                if self.peek_next() == Some(&Token::Question) {
+                    if matches!(ty, Type::CStr) {
+                        self.bump()?;
+                        self.bump()?;
+                        ty = Type::Optional(Box::new(ty));
+                        continue;
+                    }
+                }
+                break;
             } else if self.peek() == Some(&Token::LBracket) {
                 self.bump()?;
                 if self.peek() == Some(&Token::RBracket) {
@@ -1140,11 +1248,20 @@ impl<'a> Parser<'a> {
 
     fn parse_base_type(&mut self) -> ParseResult<Type> {
         if self.peek() == Some(&Token::Question) {
-            let (_, span) = self.bump()?;
-            return Err(ParseError::Generic(
-                "Prefix '?' for optional type is deprecated in CP; use postfix 'T?' or 'T?!' instead".to_string(),
-                span,
-            ));
+            self.bump()?;
+            let inner = self.parse_base_type()?;
+            let ty = Type::Optional(Box::new(inner));
+            return self.parse_postfix_type_modifiers(ty);
+        }
+        if self.peek() == Some(&Token::Const) {
+            self.bump()?;
+            let inner = self.parse_base_type()?;
+            let ty = Type::BorrowType {
+                inner: Box::new(inner),
+                is_mut: false,
+                lifetimes: vec![],
+            };
+            return self.parse_postfix_type_modifiers(ty);
         }
         if self.peek() == Some(&Token::Dyn) {
             self.bump()?;
@@ -1191,6 +1308,11 @@ impl<'a> Parser<'a> {
                 let ty = self.parse_fn_type_sig(is_c)?;
                 self.expect(Token::RParen)?;
                 return self.parse_postfix_type_modifiers(ty);
+            } else {
+                self.bump()?; // consume '('
+                let inner = self.parse_type()?;
+                self.expect(Token::RParen)?;
+                return self.parse_postfix_type_modifiers(inner);
             }
         }
         if self.peek() == Some(&Token::Star) {
@@ -1207,15 +1329,60 @@ impl<'a> Parser<'a> {
             let mut lifetimes = Vec::new();
             if depth == 1 {
                 if self.peek() == Some(&Token::LParen) {
+                    let checkpoint = self.lexer.clone();
+                    let peeked_checkpoint = self.peeked.clone();
+                    let peeked2_checkpoint = self.peeked2.clone();
                     self.bump()?;
+                    let mut is_lifetime = true;
+                    let mut candidate_lifetimes = Vec::new();
                     while self.peek() != Some(&Token::RParen) && self.peek().is_some() {
-                        let id = self.parse_ident()?;
-                        lifetimes.push(id.sym);
-                        if self.peek() == Some(&Token::Pipe) {
-                            self.bump()?;
+                        if let Some(Token::Ident(_)) = self.peek() {
+                            if let Ok(id) = self.parse_ident() {
+                                candidate_lifetimes.push(id.sym);
+                                if self.peek() == Some(&Token::Pipe) {
+                                    self.bump()?;
+                                }
+                                continue;
+                            }
                         }
+                        is_lifetime = false;
+                        break;
                     }
-                    self.expect(Token::RParen)?;
+                    if is_lifetime
+                        && self.peek() == Some(&Token::RParen)
+                        && !candidate_lifetimes.is_empty()
+                    {
+                        self.bump()?;
+                        if matches!(
+                            self.peek(),
+                            Some(Token::Ident(_))
+                                | Some(Token::Star)
+                                | Some(Token::Ampersand)
+                                | Some(Token::LBracket)
+                                | Some(Token::Const)
+                                | Some(Token::String)
+                                | Some(Token::I32)
+                                | Some(Token::U32)
+                                | Some(Token::I64)
+                                | Some(Token::U64)
+                                | Some(Token::I128)
+                                | Some(Token::U128)
+                                | Some(Token::F32)
+                                | Some(Token::F64)
+                                | Some(Token::USize)
+                                | Some(Token::Bool)
+                        ) {
+                            lifetimes = candidate_lifetimes;
+                        } else {
+                            self.lexer = checkpoint;
+                            self.peeked = peeked_checkpoint;
+                            self.peeked2 = peeked2_checkpoint;
+                        }
+                    } else {
+                        self.lexer = checkpoint;
+                        self.peeked = peeked_checkpoint;
+                        self.peeked2 = peeked2_checkpoint;
+                    }
                 } else if let Some(Token::Ident(_)) = self.peek() {
                     let checkpoint = self.lexer.clone();
                     let peeked_checkpoint = self.peeked.clone();
@@ -1352,10 +1519,115 @@ impl<'a> Parser<'a> {
                 if self.peek() == Some(&Token::RBracket) {
                     self.bump()?;
                     let elem_ty = self.parse_base_type()?;
-                    if self.peek() == Some(&Token::Bang) {
+                    let mut is_optional = false;
+                    if self.peek() == Some(&Token::Question) && self.peek_next() == Some(&Token::Bang) {
                         self.bump()?;
+                        self.bump()?;
+                        is_optional = true;
+                    } else if self.peek() == Some(&Token::Bang) {
+                        self.bump()?;
+                        if self.peek() == Some(&Token::Question) {
+                            self.bump()?;
+                            is_optional = true;
+                        }
                     }
-                    let ty = Type::ManyRawPtr(Box::new(elem_ty));
+                    let (elem_ty, has_elem_opt) = match elem_ty {
+                        Type::Optional(inner) => (*inner, true),
+                        other => (other, false),
+                    };
+                    let mut ty = Type::ManyRawPtr(Box::new(elem_ty));
+                    if is_optional || has_elem_opt {
+                        ty = Type::Optional(Box::new(ty));
+                    }
+                    return self.parse_postfix_type_modifiers(ty);
+                } else if matches!(self.peek(), Some(Token::Ident(s)) if s == "c") {
+                    self.bump()?;
+                    if self.peek() == Some(&Token::Colon) {
+                        self.bump()?;
+                        let sentinel = match self.bump()?.0 {
+                            Token::IntLiteral(n) => n.to_string(),
+                            Token::Ident(s) => s,
+                            Token::Null => "null".to_string(),
+                            _ => "0".to_string(),
+                        };
+                        self.expect(Token::RBracket)?;
+                        let elem_ty = self.parse_base_type()?;
+                        let mut is_optional = false;
+                        if self.peek() == Some(&Token::Question) && self.peek_next() == Some(&Token::Bang) {
+                            self.bump()?;
+                            self.bump()?;
+                            is_optional = true;
+                        } else if self.peek() == Some(&Token::Bang) {
+                            self.bump()?;
+                            if self.peek() == Some(&Token::Question) {
+                                self.bump()?;
+                                is_optional = true;
+                            }
+                        }
+                        let (elem_ty, has_elem_opt) = match elem_ty {
+                            Type::Optional(inner) => (*inner, true),
+                            other => (other, false),
+                        };
+                        let mut ty = Type::SentinelPtr(Box::new(elem_ty), sentinel);
+                        if is_optional || has_elem_opt {
+                            ty = Type::Optional(Box::new(ty));
+                        }
+                        return self.parse_postfix_type_modifiers(ty);
+                    } else if self.peek() == Some(&Token::RBracket) {
+                        self.bump()?;
+                        let elem_ty = self.parse_base_type()?;
+                        let mut is_optional = false;
+                        if self.peek() == Some(&Token::Question) && self.peek_next() == Some(&Token::Bang) {
+                            self.bump()?;
+                            self.bump()?;
+                            is_optional = true;
+                        } else if self.peek() == Some(&Token::Bang) {
+                            self.bump()?;
+                            if self.peek() == Some(&Token::Question) {
+                                self.bump()?;
+                                is_optional = true;
+                            }
+                        }
+                        let (elem_ty, has_elem_opt) = match elem_ty {
+                            Type::Optional(inner) => (*inner, true),
+                            other => (other, false),
+                        };
+                        let mut ty = Type::CPtr(Box::new(elem_ty));
+                        if is_optional || has_elem_opt {
+                            ty = Type::Optional(Box::new(ty));
+                        }
+                        return self.parse_postfix_type_modifiers(ty);
+                    }
+                } else if self.peek() == Some(&Token::Colon) {
+                    self.bump()?;
+                    let sentinel = match self.bump()?.0 {
+                        Token::IntLiteral(n) => n.to_string(),
+                        Token::Ident(s) => s,
+                        Token::Null => "null".to_string(),
+                        _ => "0".to_string(),
+                    };
+                    self.expect(Token::RBracket)?;
+                    let elem_ty = self.parse_base_type()?;
+                    let mut is_optional = false;
+                    if self.peek() == Some(&Token::Question) && self.peek_next() == Some(&Token::Bang) {
+                        self.bump()?;
+                        self.bump()?;
+                        is_optional = true;
+                    } else if self.peek() == Some(&Token::Bang) {
+                        self.bump()?;
+                        if self.peek() == Some(&Token::Question) {
+                            self.bump()?;
+                            is_optional = true;
+                        }
+                    }
+                    let (elem_ty, has_elem_opt) = match elem_ty {
+                        Type::Optional(inner) => (*inner, true),
+                        other => (other, false),
+                    };
+                    let mut ty = Type::SentinelPtr(Box::new(elem_ty), sentinel);
+                    if is_optional || has_elem_opt {
+                        ty = Type::Optional(Box::new(ty));
+                    }
                     return self.parse_postfix_type_modifiers(ty);
                 }
             }
@@ -1639,6 +1911,9 @@ impl<'a> Parser<'a> {
             Type::PID => "PID".to_string(),
             Type::Array(inner) => format!("[{}]", Self::type_to_str(inner)),
             Type::FixedArray(inner, n) => format!("[{}; {}]", Self::type_to_str(inner), n),
+            Type::ManyRawPtr(inner) => format!("[*]{}", Self::type_to_str(inner)),
+            Type::CPtr(inner) => format!("[*c]{}", Self::type_to_str(inner)),
+            Type::SentinelPtr(inner, n) => format!("[*:{n}]{}", Self::type_to_str(inner)),
             Type::Optional(inner) => format!("{}?", Self::type_to_str(inner)),
             Type::Shared(inner) => format!("Shared<{}>", Self::type_to_str(inner)),
             Type::Ref(id) => id.sym.clone(),
@@ -2289,9 +2564,19 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_return_stmt(&mut self) -> ParseResult<ReturnStmt> {
-        let start = self.expect(Token::Return)?.start;
+        let span = self.expect(Token::Return)?;
         let mut arg = None;
-        if self.peek() != Some(&Token::Semicolon) && self.peek() != Some(&Token::RBrace) {
+        let has_arg = if matches!(self.peek(), Some(Token::Semicolon | Token::RBrace | Token::RParen) | None) {
+            false
+        } else {
+            let next_start = self.peek_span().start;
+            if next_start >= span.end && self.input[span.end..next_start].contains('\n') {
+                false
+            } else {
+                true
+            }
+        };
+        if has_arg {
             arg = Some(self.parse_expr()?);
         }
         if self.peek() == Some(&Token::Semicolon) {
@@ -2299,7 +2584,7 @@ impl<'a> Parser<'a> {
         }
         let end = self.peek_span().end;
         Ok(ReturnStmt {
-            span: Span { start, end },
+            span: Span { start: span.start, end },
             arg,
         })
     }
@@ -2352,6 +2637,12 @@ impl<'a> Parser<'a> {
 
     fn parse_while_stmt(&mut self) -> ParseResult<WhileStmt> {
         let start = self.expect(Token::While)?.start;
+        if self.peek() != Some(&Token::LParen) {
+            return Err(ParseError::Generic(
+                "CP Syntax Error: 'while' condition requires parentheses.\n  = help: in CP, while loops require parentheses around the condition.\n  = suggestion: wrap the condition in parentheses: while (condition) { ... }".to_string(),
+                self.peek_span(),
+            ));
+        }
         self.expect(Token::LParen)?;
         let mut capture = None;
         if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw))
@@ -2478,13 +2769,10 @@ impl<'a> Parser<'a> {
             self.expect(Token::RParen)?;
             t
         } else {
-            if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw))
-                && self.peek_next() == Some(&Token::ColonAssign)
-            {
-                capture = Some(self.parse_ident()?);
-                self.expect(Token::ColonAssign)?;
-            }
-            self.parse_bin_expr(0)?
+            return Err(ParseError::Generic(
+                "CP Syntax Error: 'if' condition requires parentheses.\n  = help: in CP, control flow conditions must be enclosed in parentheses to avoid ambiguity with struct literals.\n  = suggestion: wrap the condition in parentheses: if (condition) { ... }".to_string(),
+                self.peek_span(),
+            ));
         };
         if self.peek() == Some(&Token::Pipe) {
             return Err(ParseError::Generic(
@@ -3039,6 +3327,13 @@ impl<'a> Parser<'a> {
                         left = Expr::Unwrap(Box::new(left));
                         continue;
                     }
+                    if let Expr::Deref(_) = left {
+                        let span = self.peek_span();
+                        return Err(ParseError::Generic(
+                            "Redundant dereference '.*.' before field access. In CP, pointer and reference fields are accessed directly using '.' (e.g., write 'obj.field' instead of 'obj.*.field').".to_string(),
+                            span,
+                        ));
+                    }
                     self.bump()?;
                     let prop = self.parse_ident()?;
                     if let Expr::Ident(ref obj_id) = left {
@@ -3204,12 +3499,40 @@ impl<'a> Parser<'a> {
                 }
                 Some(Token::Question) => {
                     self.bump()?;
-                    if self.peek() == Some(&Token::Return) {
-                        self.bump()?;
-                        let fallback = self.parse_expr()?;
+                    if self.peek() == Some(&Token::Continue) {
+                        let span = self.bump()?.1;
                         left = Expr::QuestionFallback {
                             expr: Box::new(left),
-                            fallback: Box::new(fallback),
+                            fallback: Box::new(Expr::Continue(span)),
+                            is_return_fallback: false,
+                        };
+                    } else if self.peek() == Some(&Token::Break) {
+                        let span = self.bump()?.1;
+                        left = Expr::QuestionFallback {
+                            expr: Box::new(left),
+                            fallback: Box::new(Expr::Break(span, None)),
+                            is_return_fallback: false,
+                        };
+                    } else if self.peek() == Some(&Token::Return) {
+                        let span = self.bump()?.1;
+                        let has_arg = if matches!(self.peek(), Some(Token::Semicolon | Token::RBrace | Token::RParen) | None) {
+                            false
+                        } else {
+                            let next_start = self.peek_span().start;
+                            if next_start >= span.end && self.input[span.end..next_start].contains('\n') {
+                                false
+                            } else {
+                                true
+                            }
+                        };
+                        let val = if has_arg {
+                            Some(Box::new(self.parse_expr()?))
+                        } else {
+                            None
+                        };
+                        left = Expr::QuestionFallback {
+                            expr: Box::new(left),
+                            fallback: Box::new(Expr::Return(span, val)),
                             is_return_fallback: true,
                         };
                     } else if matches!(
@@ -3237,7 +3560,33 @@ impl<'a> Parser<'a> {
                 }
                 Some(Token::QuestionQuestion) => {
                     self.bump()?;
-                    let right = self.parse_expr()?;
+                    let right = if self.peek() == Some(&Token::Continue) {
+                        let span = self.bump()?.1;
+                        Expr::Continue(span)
+                    } else if self.peek() == Some(&Token::Break) {
+                        let span = self.bump()?.1;
+                        Expr::Break(span, None)
+                    } else if self.peek() == Some(&Token::Return) {
+                        let span = self.bump()?.1;
+                        let has_arg = if matches!(self.peek(), Some(Token::Semicolon | Token::RBrace | Token::RParen) | None) {
+                            false
+                        } else {
+                            let next_start = self.peek_span().start;
+                            if next_start >= span.end && self.input[span.end..next_start].contains('\n') {
+                                false
+                            } else {
+                                true
+                            }
+                        };
+                        let val = if has_arg {
+                            Some(Box::new(self.parse_expr()?))
+                        } else {
+                            None
+                        };
+                        Expr::Return(span, val)
+                    } else {
+                        self.parse_expr()?
+                    };
                     left = Expr::NullCoalesce {
                         left: Box::new(left),
                         right: Box::new(right),
@@ -3437,7 +3786,33 @@ impl<'a> Parser<'a> {
             if is_pipe {
                 self.in_pipeline_rhs += 1;
             }
-            let right = self.parse_bin_expr(prec + 1)?;
+            let right = if op == BinaryOp::LogicalOr && self.peek() == Some(&Token::Continue) {
+                let span = self.bump()?.1;
+                Expr::Continue(span)
+            } else if op == BinaryOp::LogicalOr && self.peek() == Some(&Token::Break) {
+                let span = self.bump()?.1;
+                Expr::Break(span, None)
+            } else if op == BinaryOp::LogicalOr && self.peek() == Some(&Token::Return) {
+                let span = self.bump()?.1;
+                let has_arg = if matches!(self.peek(), Some(Token::Semicolon | Token::RBrace | Token::RParen) | None) {
+                    false
+                } else {
+                    let next_start = self.peek_span().start;
+                    if next_start >= span.end && self.input[span.end..next_start].contains('\n') {
+                        false
+                    } else {
+                        true
+                    }
+                };
+                let val = if has_arg {
+                    Some(Box::new(self.parse_expr()?))
+                } else {
+                    None
+                };
+                Expr::Return(span, val)
+            } else {
+                self.parse_bin_expr(prec + 1)?
+            };
             if is_pipe {
                 self.in_pipeline_rhs -= 1;
             }
@@ -3458,6 +3833,10 @@ impl<'a> Parser<'a> {
         loop {
             match self.peek() {
                 Some(Token::LParen) | Some(Token::Bang) => {
+                    let next_start = self.peek_span().start;
+                    if next_start >= self.prev_token_end && self.input[self.prev_token_end..next_start].contains('\n') {
+                        break;
+                    }
                     let mut is_comptime = false;
                     if self.peek() == Some(&Token::Bang) {
                         if self.peek_next() == Some(&Token::LParen) {
@@ -3539,6 +3918,13 @@ impl<'a> Parser<'a> {
                         self.bump()?; // consume ?
                         left = Expr::Unwrap(Box::new(left));
                         continue;
+                    }
+                    if let Expr::Deref(_) = left {
+                        let span = self.peek_span();
+                        return Err(ParseError::Generic(
+                            "Redundant dereference '.*.' before field access. In CP, pointer and reference fields are accessed directly using '.' (e.g., write 'obj.field' instead of 'obj.*.field').".to_string(),
+                            span,
+                        ));
                     }
                     self.bump()?;
                     let prop = self.parse_ident()?;
@@ -4006,6 +4392,7 @@ impl<'a> Parser<'a> {
             | Token::F64
             | Token::Bool
             | Token::Void
+            | Token::CStr
             | Token::Any => {
                 let sym = match token {
                     Token::U8 => "u8",
@@ -4024,6 +4411,7 @@ impl<'a> Parser<'a> {
                     Token::F64 => "f64",
                     Token::Bool => "bool",
                     Token::Void => "void",
+                    Token::CStr => "cstr",
                     Token::Any => "anytype",
                     _ => unreachable!(),
                 }
@@ -4753,6 +5141,9 @@ fn left_span(expr: &Expr) -> Span {
         Expr::BitNot(d) => left_span(d),
         Expr::Unsafe(b) | Expr::Comptime(b) => b.span,
         Expr::If { span, .. } => *span,
+        Expr::Continue(span) => *span,
+        Expr::Break(span, _) => *span,
+        Expr::Return(span, _) => *span,
     }
 }
 
@@ -4795,5 +5186,8 @@ fn right_span(expr: &Expr) -> Span {
         Expr::BitNot(d) => right_span(d),
         Expr::Unsafe(b) | Expr::Comptime(b) => b.span,
         Expr::If { span, .. } => *span,
+        Expr::Continue(span) => *span,
+        Expr::Break(span, val) => val.as_ref().map(|v| right_span(v)).unwrap_or(*span),
+        Expr::Return(span, val) => val.as_ref().map(|v| right_span(v)).unwrap_or(*span),
     }
 }

@@ -303,7 +303,11 @@ impl ModuleFeatures {
                 }
             }
             Type::Optional(inner) => self.scan_type(inner),
-            Type::Array(inner) | Type::FixedArray(inner, _) => self.scan_type(inner),
+            Type::Array(inner)
+            | Type::FixedArray(inner, _)
+            | Type::ManyRawPtr(inner)
+            | Type::CPtr(inner)
+            | Type::SentinelPtr(inner, _) => self.scan_type(inner),
             Type::Tuple(ts) => {
                 for item in ts {
                     self.scan_type(item);
@@ -633,6 +637,7 @@ pub struct Codegen {
     pub inline_closure_params: HashSet<String>,
     pub type_aliases: HashMap<String, TypeAliasDecl>,
     pub narrowed_null_vars: HashSet<String>,
+    pub const_vars: HashSet<String>,
 }
 
 impl Codegen {
@@ -703,6 +708,7 @@ impl Codegen {
             inline_closure_params: HashSet::new(),
             type_aliases: HashMap::new(),
             narrowed_null_vars: HashSet::new(),
+            const_vars: HashSet::new(),
         }
     }
 
@@ -2913,7 +2919,8 @@ impl Codegen {
             self.writeln("    if (comptime @typeInfo(T) == .comptime_int) return val << shift;");
             self.writeln("    if (comptime @typeInfo(T) == .int) {");
             self.writeln("        const ShiftType = std.math.Log2Int(T);");
-            self.writeln("        return val << @as(ShiftType, @truncate(shift));");
+            self.writeln("        const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);");
+            self.writeln("        return val << @as(ShiftType, @truncate(u_shift));");
             self.writeln("    }");
             self.writeln("    return val << shift;");
             self.writeln("}");
@@ -2922,7 +2929,8 @@ impl Codegen {
             self.writeln("    if (comptime @typeInfo(T) == .comptime_int) return val >> shift;");
             self.writeln("    if (comptime @typeInfo(T) == .int) {");
             self.writeln("        const ShiftType = std.math.Log2Int(T);");
-            self.writeln("        return val >> @as(ShiftType, @truncate(shift));");
+            self.writeln("        const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);");
+            self.writeln("        return val >> @as(ShiftType, @truncate(u_shift));");
             self.writeln("    }");
             self.writeln("    return val >> shift;");
             self.writeln("}");
@@ -4288,6 +4296,12 @@ impl Codegen {
                     self.check_borrow_conflict("this", true);
                     self.check_borrow_conflict("_", true);
                     return;
+                }
+                if self.const_vars.contains(&id.sym) {
+                    panic!(
+                        "CP Compile Error: Cannot perform mutable operation ({}) on 'const' variable '{}' (declare with 'let' to allow mutation)",
+                        op_desc, id.sym
+                    );
                 }
                 if self.moved_vars.contains(&id.sym) {
                     panic!("CP Compile Error: Use of moved value '{}'", id.sym);
@@ -7558,10 +7572,17 @@ impl Codegen {
                 }
                 let mapped_ty = match &p.ty {
                     Type::Ref(id) if self.trait_defs.contains_key(&id.sym) => "anytype".to_string(),
+                    Type::CStr => {
+                        if p.is_mut {
+                            "[*:0]u8".to_string()
+                        } else {
+                            "[*:0]const u8".to_string()
+                        }
+                    }
                     _ => self.map_type(&p.ty),
                 };
                 self.locals
-                    .insert(p.ident.sym.clone(), self.map_type(&p.ty));
+                    .insert(p.ident.sym.clone(), mapped_ty.clone());
                 if !params_str.is_empty() {
                     params_str.push_str(", ");
                 }
@@ -8051,6 +8072,11 @@ impl Codegen {
                     };
                     match &var.pat {
                         Pattern::Ident(ident) => {
+                            if matches!(var.kind, crate::ast::VarDeclKind::Const) {
+                                self.const_vars.insert(ident.sym.clone());
+                            } else {
+                                self.const_vars.remove(&ident.sym);
+                            }
                             self.var_scope_depth
                                 .insert(ident.sym.clone(), self.current_scope_depth);
                             if let Some(t) = &var.ty {
@@ -8102,6 +8128,11 @@ impl Codegen {
                                     };
                                     if matches!(t, Type::BorrowType { .. }) || is_trait_ty {
                                         String::new()
+                                    } else if matches!(t, Type::CStr) {
+                                        match var.kind {
+                                            crate::ast::VarDeclKind::Const => ": [*:0]const u8".to_string(),
+                                            _ => ": [*:0]u8".to_string(),
+                                        }
                                     } else {
                                         format!(": {}", self.map_type(t))
                                     }
@@ -8122,13 +8153,22 @@ impl Codegen {
                                 };
                                 format!("{} {}{}", keyword, ident.sym, ty_annot)
                             };
+                            let init_val = if matches!(var.ty, Some(Type::CStr))
+                                && var.kind != crate::ast::VarDeclKind::Const
+                                && (final_expr.starts_with('"')
+                                    || matches!(init, Expr::Lit(Lit::Str(_))))
+                            {
+                                format!("@constCast({})", final_expr)
+                            } else {
+                                final_expr.clone()
+                            };
                             self.write_to_case(&format!(
                                 "{} = {};",
                                 lhs,
                                 if is_try {
-                                    format!("try {}", final_expr)
+                                    format!("try {}", init_val)
                                 } else {
-                                    final_expr.clone()
+                                    init_val
                                 }
                             ));
                             let needs_drop = if let Some(t) = &var.ty {
@@ -8476,6 +8516,12 @@ impl Codegen {
                         self.check_mutation_allowed(obj, "index assignment '[] ='");
                     } else if let Expr::Ident(lhs_id) = &*bin.left {
                         if lhs_id.sym != "_" {
+                            if self.const_vars.contains(&lhs_id.sym) {
+                                panic!(
+                                    "CP Compile Error: Cannot assign to 'const' variable '{}' (declare with 'let' to allow mutation)",
+                                    lhs_id.sym
+                                );
+                            }
                             if self.current_fn_params.contains(&lhs_id.sym)
                                 && !self.mutable_fn_params.contains(&lhs_id.sym)
                             {
@@ -8620,6 +8666,33 @@ impl Codegen {
                     self.write_to_case(&sw_code);
                 }
                 Expr::Zig(zig) => self.write_to_case(&format!("{}\n", zig.code)),
+                Expr::Bin(bin)
+                    if bin.op == BinaryOp::LogicalOr
+                        && matches!(
+                            &*bin.right,
+                            Expr::Continue(_) | Expr::Break(_, _) | Expr::Return(_, _)
+                        ) =>
+                {
+                    let l = self.generate_expr(&bin.left);
+                    match &*bin.right {
+                        Expr::Continue(_) => {
+                            self.write_to_case(&format!("if (!({})) continue;", l));
+                        }
+                        Expr::Break(_, val) => {
+                            if let Some(v) = val {
+                                let v_code = self.generate_expr(v);
+                                self.write_to_case(&format!("if (!({})) break {};", l, v_code));
+                            } else {
+                                self.write_to_case(&format!("if (!({})) break;", l));
+                            }
+                        }
+                        Expr::Return(_, ret_expr) => {
+                            let ret_stmt = self.build_ret_stmt_for_fallback(ret_expr.as_deref());
+                            self.write_to_case(&format!("if (!({})) {{ {} }}", l, ret_stmt));
+                        }
+                        _ => unreachable!(),
+                    }
+                }
                 _ => {
                     let e = self.generate_expr(expr);
                     self.write_to_case(&format!("_ = {};", e));
@@ -9638,6 +9711,49 @@ impl Codegen {
         call_code
     }
 
+    fn build_ret_stmt_for_fallback(&mut self, fallback_expr: Option<&Expr>) -> String {
+        let is_null_fb = match fallback_expr {
+            Some(Expr::Lit(Lit::Null)) => true,
+            Some(Expr::Ident(id)) if id.sym == "null" => true,
+            None => false,
+            _ => false,
+        };
+
+        if let Some(Type::ResultType { ok, err: fn_err }) = self.current_fn_ret_ty.clone() {
+            if let Some(Expr::ErrWrap(err_inner)) = fallback_expr {
+                let ev = self.generate_err_value(err_inner, Some(&fn_err));
+                format!("return .{{ .err = {} }};", ev)
+            } else if is_null_fb || (fallback_expr.is_none() && matches!(&*ok, Type::Optional(_))) {
+                if !matches!(&*ok, Type::Optional(_)) {
+                    panic!("CP Compile Error: Cannot return 'null' from function whose return type is not optional '?T'");
+                }
+                "return .{ .ok = null };".to_string()
+            } else if let Some(fb) = fallback_expr {
+                let fb_c = self.generate_expr(fb);
+                format!("return .{{ .ok = {} }};", fb_c)
+            } else if matches!(&*ok, Type::Void) {
+                "return .{ .ok = {} };".to_string()
+            } else {
+                "return;".to_string()
+            }
+        } else {
+            let allows_null = match &self.current_fn_ret_ty {
+                Some(Type::Optional(_)) => true,
+                Some(Type::ErrorUnion(inner)) => matches!(&**inner, Type::Optional(_)),
+                _ => false,
+            };
+            if is_null_fb && !allows_null {
+                panic!("CP Compile Error: Cannot return 'null' from function whose return type is not optional '?T'");
+            }
+            if let Some(fb) = fallback_expr {
+                let fb_c = self.generate_expr(fb);
+                format!("return {};", fb_c)
+            } else {
+                "return;".to_string()
+            }
+        }
+    }
+
     fn generate_expr(&mut self, expr: &Expr) -> String {
         match expr {
             Expr::Lit(Lit::Int(v)) => v.to_string(),
@@ -10041,7 +10157,33 @@ impl Codegen {
                     BinaryOp::Shl => format!("cp_shl({}, {})", l, r),
                     BinaryOp::Shr => format!("cp_shr({}, {})", l, r),
                     BinaryOp::LogicalAnd => format!("({} and {})", l, r),
-                    BinaryOp::LogicalOr => format!("({} or {})", l, r),
+                    BinaryOp::LogicalOr => match &*bin.right {
+                        Expr::Continue(_) => {
+                            let id = self.lambda_counter;
+                            self.lambda_counter += 1;
+                            format!("(blk_{id}: {{ if (!({})) continue; break :blk_{id} true; }})", l)
+                        }
+                        Expr::Break(_, val) => {
+                            let id = self.lambda_counter;
+                            self.lambda_counter += 1;
+                            if let Some(v) = val {
+                                let v_code = self.generate_expr(v);
+                                format!(
+                                    "(blk_{id}: {{ if (!({})) break {}; break :blk_{id} true; }})",
+                                    l, v_code
+                                )
+                            } else {
+                                format!("(blk_{id}: {{ if (!({})) break; break :blk_{id} true; }})", l)
+                            }
+                        }
+                        Expr::Return(_, ret_expr) => {
+                            let id = self.lambda_counter;
+                            self.lambda_counter += 1;
+                            let ret_stmt = self.build_ret_stmt_for_fallback(ret_expr.as_deref());
+                            format!("(blk_{id}: {{ if (!({})) {{ {} }}; break :blk_{id} true; }})", l, ret_stmt)
+                        }
+                        _ => format!("({} or {})", l, r),
+                    },
                     BinaryOp::Assign => {
                         if let Expr::Ident(id) = &*bin.left {
                             if id.sym == "_" {
@@ -11292,54 +11434,85 @@ impl Codegen {
             } => {
                 let old_in_try = self.in_try_region;
                 self.in_try_region = false;
+                let inner_ty = self.infer_cp_type(inner);
                 let exp = self.generate_expr(inner);
                 self.in_try_region = old_in_try;
                 let id = self.lambda_counter;
                 self.lambda_counter += 1;
 
-                if *is_return_fallback {
-                    let is_null_fb = matches!(&**fallback, Expr::Lit(Lit::Null))
-                        || matches!(&**fallback, Expr::Ident(id) if id.sym == "null");
-                    let ret_stmt = if let Some(Type::ResultType { err: fn_err, .. }) =
-                        self.current_fn_ret_ty.clone()
-                    {
-                        if let Expr::ErrWrap(err_inner) = &**fallback {
-                            let ev = self.generate_err_value(err_inner, Some(&fn_err));
-                            format!("return .{{ .err = {} }};", ev)
-                        } else if is_null_fb {
-                            if !matches!(&self.current_fn_ret_ty, Some(Type::ResultType { ok, .. }) if matches!(&**ok, Type::Optional(_)))
-                            {
-                                panic!("CP Compile Error: Cannot return 'null' from function whose return type is not optional '?T'");
-                            }
-                            "return .{ .ok = null };".to_string()
-                        } else {
-                            let fb_c = self.generate_expr(fallback);
-                            format!("return .{{ .ok = {} }};", fb_c)
-                        }
-                    } else {
-                        let allows_null = match &self.current_fn_ret_ty {
-                            Some(Type::Optional(_)) => true,
-                            Some(Type::ErrorUnion(inner)) => matches!(&**inner, Type::Optional(_)),
-                            _ => false,
-                        };
-                        if is_null_fb && !allows_null
-                        {
-                            panic!("CP Compile Error: Cannot return 'null' from function whose return type is not optional '?T'");
-                        }
-                        let fb_c = self.generate_expr(fallback);
-                        format!("return {};", fb_c)
+                let is_inner_optional = matches!(inner_ty, Some(Type::Optional(_)));
+
+                if *is_return_fallback || matches!(&**fallback, Expr::Return(_, _)) {
+                    let ret_inner = match &**fallback {
+                        Expr::Return(_, val) => val.as_deref(),
+                        other => Some(other),
                     };
+                    let ret_stmt = self.build_ret_stmt_for_fallback(ret_inner);
+
                     if self.is_lib_mode {
-                        format!("(({exp}) orelse {{ {ret_stmt} }})")
+                        if is_inner_optional {
+                            format!("(({exp}) orelse {{ {ret_stmt} }})")
+                        } else {
+                            format!("(({exp}) catch {{ {ret_stmt} }})")
+                        }
+                    } else if is_inner_optional {
+                        format!(
+                            "(blk_qf_{id}: {{ const __v_{id} = {exp}; if (__v_{id} == null) {{ {ret_stmt} }} break :blk_qf_{id} __v_{id}.?; }})"
+                        )
                     } else {
                         format!(
                             "(blk_qf_{id}: {{ const __r_{id} = {exp}; if (cp_has_ok_val(__r_{id})) break :blk_qf_{id} cp_unwrap_ok_val(__r_{id}); {ret_stmt} }})"
                         )
                     }
+                } else if matches!(&**fallback, Expr::Continue(_)) {
+                    if self.is_lib_mode {
+                        if is_inner_optional {
+                            format!("(({exp}) orelse continue)")
+                        } else {
+                            format!("(({exp}) catch continue)")
+                        }
+                    } else if is_inner_optional {
+                        format!(
+                            "(blk_qf_{id}: {{ const __v_{id} = {exp}; if (__v_{id} == null) continue; break :blk_qf_{id} __v_{id}.?; }})"
+                        )
+                    } else {
+                        format!(
+                            "(blk_qf_{id}: {{ const __r_{id} = {exp}; if (cp_has_ok_val(__r_{id})) break :blk_qf_{id} cp_unwrap_ok_val(__r_{id}); continue; }})"
+                        )
+                    }
+                } else if let Expr::Break(_, val) = &**fallback {
+                    let brk_action = if let Some(v) = val {
+                        format!("break {}", self.generate_expr(v))
+                    } else {
+                        "break".to_string()
+                    };
+                    if self.is_lib_mode {
+                        if is_inner_optional {
+                            format!("(({exp}) orelse {brk_action})")
+                        } else {
+                            format!("(({exp}) catch {brk_action})")
+                        }
+                    } else if is_inner_optional {
+                        format!(
+                            "(blk_qf_{id}: {{ const __v_{id} = {exp}; if (__v_{id} == null) {brk_action}; break :blk_qf_{id} __v_{id}.?; }})"
+                        )
+                    } else {
+                        format!(
+                            "(blk_qf_{id}: {{ const __r_{id} = {exp}; if (cp_has_ok_val(__r_{id})) break :blk_qf_{id} cp_unwrap_ok_val(__r_{id}); {brk_action}; }})"
+                        )
+                    }
                 } else {
                     let fb_c = self.generate_expr(fallback);
                     if self.is_lib_mode {
-                        format!("(({exp}) orelse {fb_c})")
+                        if is_inner_optional {
+                            format!("(({exp}) orelse {fb_c})")
+                        } else {
+                            format!("(({exp}) catch {fb_c})")
+                        }
+                    } else if is_inner_optional {
+                        format!(
+                            "(blk_qf_{id}: {{ const __v_{id} = {exp}; if (__v_{id} == null) break :blk_qf_{id} cp_val({fb_c}); break :blk_qf_{id} __v_{id}.?; }})"
+                        )
                     } else {
                         format!(
                             "(blk_qf_{id}: {{ const __r_{id} = {exp}; if (cp_has_ok_val(__r_{id})) break :blk_qf_{id} cp_unwrap_ok_val(__r_{id}); break :blk_qf_{id} cp_val({fb_c}); }})"
@@ -11361,11 +11534,31 @@ impl Codegen {
                 }
                 let l_code = self.generate_expr(left);
                 self.in_try_region = old_in_try;
-                let r_code = self.generate_expr(right);
-                if self.is_lib_mode {
-                    format!("(({}) orelse ({}))", l_code, r_code)
-                } else {
-                    format!("cp_null_coalesce({}, {})", l_code, r_code)
+
+                match &**right {
+                    Expr::Continue(_) => {
+                        format!("(({}) orelse continue)", l_code)
+                    }
+                    Expr::Break(_, val) => {
+                        if let Some(v) = val {
+                            let v_code = self.generate_expr(v);
+                            format!("(({}) orelse break {})", l_code, v_code)
+                        } else {
+                            format!("(({}) orelse break)", l_code)
+                        }
+                    }
+                    Expr::Return(_, ret_expr) => {
+                        let ret_stmt = self.build_ret_stmt_for_fallback(ret_expr.as_deref());
+                        format!("(({}) orelse {{ {} }})", l_code, ret_stmt)
+                    }
+                    _ => {
+                        let r_code = self.generate_expr(right);
+                        if self.is_lib_mode {
+                            format!("(({}) orelse ({}))", l_code, r_code)
+                        } else {
+                            format!("cp_null_coalesce({}, {})", l_code, r_code)
+                        }
+                    }
                 }
             }
             Expr::Catch {
@@ -13128,6 +13321,21 @@ impl Codegen {
                     args_code.join(", ")
                 )
             }
+            Expr::Continue(_) => "continue".to_string(),
+            Expr::Break(_, val) => {
+                if let Some(v) = val {
+                    format!("break {}", self.generate_expr(v))
+                } else {
+                    "break".to_string()
+                }
+            }
+            Expr::Return(_, val) => {
+                if let Some(v) = val {
+                    format!("return {}", self.generate_expr(v))
+                } else {
+                    "return".to_string()
+                }
+            }
             _ => "0".to_string(),
         }
     }
@@ -14287,6 +14495,9 @@ impl Codegen {
             }
             Type::BorrowType { inner, is_mut, .. } => {
                 if !*is_mut {
+                    if matches!(**inner, Type::CStr) {
+                        return "[*:0]const u8".to_string();
+                    }
                     if let Type::Optional(opt_inner) = &**inner {
                         let opt_zig = self.map_type(opt_inner);
                         let clean_opt = if opt_zig.starts_with('*') {
@@ -14316,6 +14527,9 @@ impl Codegen {
                             return "[:0]u8".to_string();
                         }
                     }
+                    if matches!(**inner, Type::CStr) {
+                        return "[*:0]u8".to_string();
+                    }
                     if let Type::Optional(opt_inner) = &**inner {
                         if let Type::Array(elem) = &**opt_inner {
                             return format!("?[]{}", self.map_type(elem));
@@ -14326,7 +14540,11 @@ impl Codegen {
                     }
                 }
                 if let Type::Optional(opt_inner) = &**inner {
-                    return format!("?*{}", self.map_type(opt_inner));
+                    let opt_inner_zig = self.map_type(opt_inner);
+                    if opt_inner_zig.starts_with('*') {
+                        return format!("*?{}", opt_inner_zig);
+                    }
+                    return format!("?*{}", opt_inner_zig);
                 }
                 let inner_zig = self.map_type(inner);
                 let is_trait = if let Type::Ref(id) = &**inner {
@@ -14409,6 +14627,14 @@ impl Codegen {
                 let base = self.map_raw_ptr_base(inner);
                 format!("[*]{}", base)
             }
+            Type::CPtr(inner) => {
+                let base = self.map_raw_ptr_base(inner);
+                format!("[*c]{}", base)
+            }
+            Type::SentinelPtr(inner, val) => {
+                let base = self.map_raw_ptr_base(inner);
+                format!("[*:{val}]{}", base)
+            }
             Type::CStr => "[*:0]const u8".to_string(),
             Type::CFn(params, ret) => {
                 let mapped: Vec<String> = params.iter().map(|p| self.map_type(p)).collect();
@@ -14444,8 +14670,15 @@ impl Codegen {
             Type::F64 => "f64".to_string(),
             Type::Bool => "bool".to_string(),
             Type::String => "[]const u8".to_string(),
-            Type::CStr => "[*:0]const u8".to_string(),
+            Type::CStr => "[*:0]u8".to_string(),
             Type::Void | Type::Any => "anyopaque".to_string(),
+            Type::BorrowType { inner, is_mut, .. } => {
+                if !*is_mut {
+                    format!("const {}", self.map_raw_ptr_base(inner))
+                } else {
+                    self.map_raw_ptr_base(inner)
+                }
+            }
             Type::Ref(id) => {
                 if id.sym == "anyopaque" || id.sym == "any" {
                     "anyopaque".to_string()

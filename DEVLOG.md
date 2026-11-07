@@ -3117,3 +3117,128 @@ Bun AGY 在推进 Bun 基础算法库（如 `wyhash`、`base64`）转译过程�
 - 在 `cpc_dev` 中验证无误后，全量同步合入 `cpc/src/resolver.rs`；
 - 构建正式优化版本并部署至 `cap/bin/cpc`；
 - 编写 `cap/test/test_lib_reorg.cp` 端到端验证通过。
+
+---
+
+## 2026-11-07 开发日志：守卫控制流三剑客（||、??、? 发散控制）、if/while 强制括号自愈诊断与 ASI 换行断句物理防御
+
+### 1. 架构目标与背景
+在 Bun 迁移与真实业务编写中，暴露了三大影响开发体验与智能体自愈效率的痛点：
+1. **控制流发散无法一键短路**：在提取解包或条件检查时，无法直接写 `val ?? continue;` 或 `res ? return false;`，开发者被迫回退到多行繁琐的临时变量与 `if` 判断；
+2. **控制流条件二义性与冷冰冰的报错**：`if cond { ... }` 中若 `cond` 末尾是大写常量，解析器将其误判为结构体字面量并报出难以理解的语法错误，导致智能体陷入死循环；
+3. **分号可选后的跨行调用黏连陷阱（ASI ASI Hazards）**：当省略分号时，下一行以 `(` 开头的语句会被解析器贪婪地当成上一行表达式的函数调用后缀。
+
+为此，我们在 `cpc_dev/` 沙盒中进行了系统级重构与加固。
+
+### 2. 技术设计与底层实现细节
+
+#### 2.1 守卫控制流三剑客（The Guard Trinity）
+- **AST 升级**：在 `cpc_dev/src/ast.rs` 中为 `Expr` 引入 `Continue(Span)`、`Break(Span, Option<Box<Expr>>)`、`Return(Span, Option<Box<Expr>>)` 三种控制流发散表达式节点，将语句原语正式升格为表达式一等公民；
+- **Parser 适配**：在 `cpc_dev/src/parser.rs` 中，对 `||`、`??`、`?` 三大操作符右侧开放对 `continue`、`break`、`return [expr]` 的解析支持；
+- **类型系统兼容**：在 `cpc_dev/src/sema.rs` 中，将 `BinaryOp::LogicalOr` 与 `BinaryOp::LogicalAnd` 正式确立推导类型为 `Type::Bool`，消除了发散分支在二元操作符处的 `TypeMismatch` 误报；
+- **Codegen 机器码级映射**：
+  - `cond || continue / break / return`：转译为原生 Zig 单条最优跳转 `if (!cond) action;`；
+  - `val ?? continue / break / return`：转译为 `(val orelse action)`，成功解包为 `T`；
+  - `res ? continue / break / return`：转译为 `(res catch action)`，成功解包为 `T`；
+  - 抽取通用辅助方法 `build_ret_stmt_for_fallback`，根据当前函数返回类型（`ResultType`、`Optional` 或常规标量）自动生成精确的 Zig `return` 语句。
+
+#### 2.2 控制流条件圆括号强制规范与 AI-First 智能自愈提示
+- 彻底取消无括号的宽容解析，规范统一为 `if (condition)` 与 `while (condition)`；
+- 当遇到遗漏圆括号时，解析器不再报出晦涩的结构体字段解析错误，而是输出标准的三段式自愈诊断：
+  ```text
+  = cause: control flow conditions in CP must be enclosed in parentheses.
+  = help: enclose the condition in parentheses to prevent ambiguity with struct literals.
+  = suggestion: wrap the condition in parentheses: if (condition) { ... }
+  ```
+  AI Agent 看到带有 `suggestion` 的报错后可实现 0 秒单轮自愈修复。
+
+#### 2.3 可选分号（ASI）与底层物理换行断句防御
+- 在 `Parser` 内部维护物理词元结束偏移量 `prev_token_end: usize`；
+- 在 `parse_postfix_expr` 遇到 `LParen`（`(`）时，检查当前词元与 `prev_token_end` 之间是否跨越了物理换行符 `\n`。若跨越换行，则立即中断后缀调用解析，彻底杜绝了省略分号场景下下一行以 `(` 开头的语句被误判为函数调用的致命陷阱；
+- 同理防止无参数 `return` 换行后误吞下一行语句作为返回值。
+
+### 3. 沙盒验证与测试结果
+- 新增回归测试套件 [`cap/test/test_control_flow_coalesce.cp`](file:///data/dev/cp/cap/test/test_control_flow_coalesce.cp)；
+- 使用沙盒编译器（`CPC_BIN=/data/dev/cp/cpc_dev/target/debug/cpc`）进行验证：
+  - 前端转译耗时 7ms，测试全部用例 100% 绿灯全通（`ALL_CONTROL_FLOW_COALESCE_TESTS_PASSED`）；
+  - 故意省略括号验证自愈诊断，终端精准打印带有 `suggestion` 的三段式自愈提示，完全符合预期。
+
+---
+
+## 2026-11-07 开发日志：AI-First 智能可自愈诊断系统全景实装（消灭 Rust Panic、三段式诊断与智能自愈引擎）
+
+### 1. 痛点分析与架构权衡
+在实际开发与 Bun 迁移过程中，AI Agent 频繁遭遇两大编译痛点：
+1. **冷冰冰的 Syntax Error / Expected Token**：遇到开发者从 TypeScript 转写过来的习惯语法（如 `interface`、`let mut`、`any`、缺少 `import` 或条件遗漏括号）时，编译器报出难以理解的 Token 错误，AI 无法快速定位正确写法；
+2. **底层借用检查 Panic 污染**：在 Codegen 阶段执行严格借用检查（如修改只读参数 `outIP[0] = 0`）时，直接触发了 Rust 的 `panic!("CP Compile Error: ...")`，终端输出冗长的 Rust backtrace 堆栈，AI 往往陷入死循环，必须耗费多轮对话翻阅编译器前端源码。
+
+为此，我们在 `cpc_dev` 中实施了全方位的 AI-First 智能自愈诊断系统重构。
+
+### 2. 技术设计与底层实现细节
+
+#### 2.1 结构化诊断引擎与 Rustc/TS 级渲染器 (`diagnostic.rs`)
+- **`Diagnostic` 数据模型**：封装标准错误码 `code: String`（如 `E0101`, `E0201`）、核心错误描述 `message`、代码物理区间 `span`、根因解析 `cause`、语言规范说明 `help` 与自动化修复代码 `suggestion`；
+- **高保真高亮渲染器 (`Diagnostic::render`)**：
+  - 解析 `code` 文本中的换行偏移量，计算精确的 1-based 行号与列号；
+  - 自动提取当前行代码切片，生成对齐的前缀（如 `  58 | ...`）并在下方生成精确长度的 `^^^^` 下划线；
+  - 结构化附带 `= cause:`、`= help:` 与 `= suggestion:`，输出纯净且极具指引性的诊断报告。
+
+#### 2.2 智能拼写联想与内置标准库自动匹配
+- **Levenshtein 编辑距离**：实装 `levenshtein_distance` 动态规划算法与 `find_closest_match`，当触发 `UndefinedSymbol` 时，自动在当前作用域内检索编辑距离 <= 3 的符号。例如将 `addr_str` 误写为 `addr_srt` 时，自动输出 `= suggestion: did you mean 'addr_str'?`；
+- **内置标准库映射表 (`STANDARD_BUILTIN_IMPORTS`)**：收录 `print`, `json`, `fs`, `spawn`, `HttpServer` 等常用官方 API。当用户直接使用该符号时，自动输出具体的 `= suggestion: import { ... } from "cap:...";`。
+
+#### 2.3 语法分析错误转换 (`ParseError::to_diagnostic`)
+- 针对从 TS/JS 习惯迁移过来的开发者进行定向防护：
+  - `interface` 关键字 -> 报错 `E0102`，解释 CP 已废除 interface，建议改为 `trait`；
+  - `try / catch` 异常块 -> 报错 `E0103`，解释 CP 采用错误联合，建议改为 `?` 或 `catch` 表达式；
+  - `mut` 关键字 -> 报错 `E0104`，说明 CP 的 `let` 默认可变，参数使用 `*param`；
+  - `any` 弱类型 -> 报错 `E0105`，说明 CP 保证无 GC 零成本内存安全，建议声明具体类型或泛型 `<T>`。
+
+#### 2.4 消灭 Rust Panic：静默 Hook 与借用检查结构化捕获
+- **Panic 静默接管**：在 `main()` 入口注册 `std::panic::set_hook(Box::new(|_| {}))`，消除 Rust 原生 `thread 'main' panicked at...` 终端噪声；
+- **Codegen Unwind 捕获**：在 `compile_file` 中使用 `std::panic::catch_unwind` 包装 `Codegen::generate_module`；
+- **借用检查 Panic 结构化还原 (`from_compiler_error_msg`)**：将 `Cannot perform mutable operation on read-only parameter`、`read-only method`、`Borrow conflict`、`borrowed in a 'for' loop` 等借用检查 panic 实时转换为 `E0201`、`E0202`、`E0210` 等标准可自愈诊断，并自动匹配参数名附带 `suggestion: Add '*' to declare it as mutable borrow: '*param: Type'`。
+
+### 3. 沙盒多场景验证与测试结果
+- 在沙盒中构造并测试了全部 8 类典型错误场景：
+  1. `if` 缺少括号 -> 触发 `E0101`，精准提示括号自愈；
+  2. 修改只读借用参数 -> 触发 `E0201`，无任何 panic 栈，精准提示 `*param` 自愈；
+  3. 使用 `interface` -> 触发 `E0102`，精准提示 `trait` 自愈；
+  4. 使用独立 `mut` 变量声明 -> 触发 `E0104`，精准提示 `let` 自愈；
+  5. 直接调用未导入的 `print` -> 触发 `E0206`，精准提示 `import { print } from "cap:io";`；
+  6. 局部变量拼写错误 `addr_srt` -> 触发 `E0206`，精准提示 `did you mean 'addr_str'?`；
+  7. 类型不匹配 -> 触发 `E0207`，精准提示类型匹配；
+  8. 常量重新赋值 -> 触发 `E0204`，精准提示改为 `let`。
+
+## 2026-11-07: Bun agy 修改审核与双向合并、C-ABI 兼容指针系统、发散控制流与正式 Release 发布
+
+### 1. 任务背景与审核结论
+在 Bun.js 核心库向 CP 语言迁移的并行工程中，Bun agy 对 `cpc` 编译器源码进行了系列修改。经严格逐行审核：
+1. **`[*c]T` / `[*:<sentinel>]T` C-ABI 指针与哨兵指针**（`ast.rs`, `parser.rs`, `dcp.rs`, `codegen.rs`）：
+   - 解决了系统级 C-FFI 绑定与非受控 C 指针交互的关键需求；
+   - 包含 `parse_base_type` 的指针解析、`const T` 与括号类型 `(T)` 消除歧义，实现完全合理。
+2. **`const_vars` 常量保护与数组索引赋值拦截**（`sema.rs`, `codegen.rs`）：
+   - 严格遵循 CP 语言不可变绑定规范，拦截对 `const` 变量的标量赋值与 `arr[i] = v` 索引变更，实现完全合理。
+3. **`c_*` 兼容类型支持与有符号安全位移**（`sema.rs`, `codegen.rs`）：
+   - `is_int_type` 支持 `c_int`, `c_char`, `ares_*` 等 C 平台类型，移位操作引入 `@max(0, shift)` 防止负移位 UB，实现完全合理。
+- **审核结论**：Bun agy 修改 100% 合理且完整，无任何冗余或破坏性变更。
+
+### 2. 双向合并与关键技术增强
+1. **`[*c]T?` / `?[*c]T` 优先级提升与语义规范化**：
+   - 在解析 `[*c]i32?` 时，`parse_base_type` 的后置修饰符会先消费 `?` 形成 `elem_ty = Optional(I32)`，导致类型变成非法的 `CPtr(Optional(I32))`。
+   - 解决方案：在 `parser.rs` 构建 `CPtr` / `SentinelPtr` / `ManyRawPtr` 时，检测如果 `elem_ty` 是 `Optional(inner)`，自动提升为 `Optional(CPtr(inner))`，使 `?[*c]i32` 与 `[*c]i32?` 统一为可选 C 指针。
+2. **C-ABI 借用传递转换契约**：
+   - 在 `sema.rs` 的 `can_coerce` 中，允许目标为 `Type::CPtr(T)` 时由 `Type::BorrowType { inner: T, .. }` 或 `Type::RawPtr` 隐式转换，使得在 CP 中直接将 `&mut buf` 传递给接收 `[*c]T` 的 C 函数能够合法通过编译。
+3. **守卫三剑客（发散控制流）全链路支持**：
+   - 全面支持 `?? return/break/continue`、`|| return/break/continue` 与 `? return/break/continue`；
+   - `build_ret_stmt_for_fallback` 智能感知外层函数返回值类型，若返回 `?T` 自动生成 `return .{ .ok = null };` 或 `return null;`；
+   - 扁平化错误处理，彻底消除多层嵌套 `if`。
+4. **可选分号（ASI）断句机制**：
+   - 物理 token 坐标追踪换行，消除可选分号可能带来的解析歧义。
+
+### 3. 正式发布与端到端验证
+- `cpc_dev/src` 与 `cpc/src` 100% 毫无差异对齐（Exit code 0）；
+- Release 构建耗时 35.73s，正式替换 `/data/dev/cp/cap/bin/cpc`；
+- 回归套件 [`cap/test/test_cptr_and_ai.cp`](file:///data/dev/cp/cap/test/test_cptr_and_ai.cp)、[`cap/test/test_control_flow_coalesce.cp`](file:///data/dev/cp/cap/test/test_control_flow_coalesce.cp)、[`cap/test/test_ai_diagnostics.cp`](file:///data/dev/cp/cap/test/test_ai_diagnostics.cp)、[`cap/test/test_lifetime_pass.cp`](file:///data/dev/cp/cap/test/test_lifetime_pass.cp)、[`cap/test/test_ownership_pass.cp`](file:///data/dev/cp/cap/test/test_ownership_pass.cp) 全绿灯一次性全通！
+
+

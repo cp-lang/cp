@@ -237,7 +237,7 @@ hello/
 
 - **日常开发与调试一律在 `cpc_dev/` 目录中进行**，与正式目录 `cpc/` 保持隔离，待测试全部通过后再按流程合并至 `cpc/`。
 
-### 2. CP 编译器（Rust）提速与 Debug / Release 选型
+### 2. CP 编译器（Rust）提速与 Debug / Release 选型及错误提示
 
 - **先用 `cargo check` 秒级验证**：修改 `cpc_dev/src` 代码时，先运行 `cargo check`（仅需 1~2 秒）排查语法与借用问题。
 - **并行合并读写调用**：集中读取目标区域并一次性批量完成 `edit_file`，减少工具往返轮次。
@@ -245,7 +245,40 @@ hello/
 - **Debug 模式（`cargo build`）**：编译仅需 **1~2 秒**，单文件转译耗时约 10~15ms，且保留完整 panic 调用栈（Backtrace）与断言，排查编译器内部问题极快。**日常在 `cpc_dev` 中改动与高频跑测时，只构建 Debug 版。**
 - **Release 模式（`cargo build --release`）**：编译需 **25~35 秒**（LLVM 深度优化），单文件转译耗时约 3~5ms。**仅在全部测试通过、合并入正式 `cpc/` 目录发布时构建一次 Release 版。**
 
-### 3. 并行开发与合并标准执行步骤（7 步闭环）
+### 3. cpc 编译器必须“AI-First 智能诊断提示
+
+- **错误提示AI友好**：cpc check 和编译出错提示，必须对ai 友好，不仅带编译出错信息，还应提供修正方法, 方便 agy 等智能体快速识别错误，进行修正, 而不是一筹莫展, 需要查看 cpc 源代码来解决。
+
+- 编译器报错将从冷冰冰的 Syntax Error 升级为三段式可自愈诊断（参考 Rustc 与 TypeScript Compiler）：
+
+```text
+  error[E0105]: ambiguous condition in control flow statement
+    --> src/boringssl/boringssl.cp:58:24
+     |
+  58 |     if addr_str.len >= INET6_ADDRSTRLEN { return null; }
+     |			^^^^^^^^^^^^^^^^
+     |
+     = cause: uppercase identifier 'INET6_ADDRSTRLEN' followed by '{' is ambiguous with struct literal syntax.
+     = help: in CP, control flow conditions should be enclosed in parentheses.
+     = suggestion: wrap the condition in parentheses:
+     |
+  58 |     if (addr_str.len >= INET6_ADDRSTRLEN) { return null; }
+     |        +                                +
+```
+
+#### 典型场景的智能自愈提示规则：
+
+1. 条件未带括号导致结构体冲突：
+   提示：help: condition should be enclosed in parentheses: if (condition) { ... }；
+2. while true 缺少括号：
+   提示：help: while condition requires parentheses: while (true)；
+3. 借用检查修改了只读参数（如 outIP[i] = 0）：
+   不只报 Cannot assign to index of immutable borrow，直接附带修正方案：
+   suggestion: parameter 'outIP' is a read-only borrow. Add '*' to declare it as mutable borrow: '*outIP: OutIPBuf'。
+
+工程价值：AI Agent 看到带有 suggestion 的报错后，耗时 0 秒，单轮对话直接采纳建议自动修复！
+
+### 4. 并行开发与合并标准执行步骤（7 步闭环）
 
 1. **绑定 `CPC_BIN` 至调试沙盒**：
 
@@ -309,7 +342,11 @@ export CPC_BIN=/data/dev/cp/cap/bin/cpc
 
 - 汇报正式版 `cpc` 更新完毕，供用户恢复 Bun 迁移项目继续执行任务。
 
-### 4. 库文件扁平设计
+### 多个子Agent并行工作
+
+cpc 改写、编译、测试 时间非常长，你可以参照上述模式，创建多个 cpc_dev2、cpc_dev3， 将任务分解后并行开发、测试，再合并到 cpc_dev中， 此时可不通过CPC_BIN变量，直接通过 命令行 env 注入 cpc进行测试，来提高工作效率。
+
+### 5. 库文件扁平设计
 
 使用统一的 下划线 _ 命名约定：
 

@@ -2,6 +2,7 @@ pub mod ast;
 pub mod ast_visitor;
 pub mod codegen;
 pub mod dcp;
+pub mod diagnostic;
 pub mod lexer;
 pub mod lsp;
 pub mod parser;

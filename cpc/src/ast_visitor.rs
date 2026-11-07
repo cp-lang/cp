@@ -141,6 +141,12 @@ pub fn find_referenced_vars_in_expr(expr: &Expr, vars: &mut HashSet<String>) {
                 find_referenced_vars_in_expr(a, vars);
             }
         }
+        Expr::Continue(_) => {}
+        Expr::Break(_, val) | Expr::Return(_, val) => {
+            if let Some(v) = val {
+                find_referenced_vars_in_expr(v, vars);
+            }
+        }
         _ => {}
     }
 }

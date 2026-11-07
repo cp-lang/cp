@@ -1885,3 +1885,121 @@
 ### 回归验证通过 (Verified)
 - 新增 [`cap/test/test_lib_reorg.cp`](file:///data/dev/cp/cap/test/test_lib_reorg.cp)，验证 `import { print } from "cap:io"` 与 `import { json } from "cap:json"` 秒级命中并正常执行通过；
 - 既有测试用例全量兼容通过。
+
+---
+
+## 2026-11-07 控制流守卫三剑客（||、??、? 发散控制流）、if/while强制括号规范与可选分号ASI体系
+
+### 编译器增强 (cpc_dev 沙盒并行研发调试)
+- [`cpc_dev/src/ast.rs`](file:///data/dev/cp/cpc_dev/src/ast.rs):
+  - 为 `Expr` 引入 `Continue(Span)`、`Break(Span, Option<Box<Expr>>)`、`Return(Span, Option<Box<Expr>>)` 三种控制流发散表达式节点，将语句原语升格为表达式一等公民。
+- [`cpc_dev/src/ast_visitor.rs`](file:///data/dev/cp/cpc_dev/src/ast_visitor.rs):
+  - 适配 `Expr::Continue`、`Expr::Break`、`Expr::Return` 的引用变量扫描。
+- [`cpc_dev/src/parser.rs`](file:///data/dev/cp/cpc_dev/src/parser.rs):
+  - **`if` 与 `while` 条件圆括号强制规范**：取消无括号宽容解析，当缺失 `(` 时，提供三段式 AI 友好自愈报错（含 `= suggestion: wrap the condition in parentheses: if (condition) { ... }`），彻底杜绝与全大写常量结构体字面量的语法歧义；
+  - **`||`、`??`、`?` 全面支持发散控制流**：支持在 `||`、`??`、`?` 右侧书写 `continue`、`break`、`return [expr]`；
+  - **可选分号（ASI）与换行安全边界防御**：在 `Parser` 中引入 `prev_token_end` 物理位置记录；判定 `return` 语句换行不吞入下一行表达式；换行后的首字符 `(` 严禁被解析为前一表达式的后缀调用（`CallExpr`），彻底消除省略分号造成的跨行粘连。
+- [`cpc_dev/src/sema.rs`](file:///data/dev/cp/cpc_dev/src/sema.rs):
+  - 在 `infer_type` 中为 `BinaryOp::LogicalOr` 与 `BinaryOp::LogicalAnd` 正式确立推导类型为 `Type::Bool`，完美放行右侧发散控制流。
+- [`cpc_dev/src/codegen.rs`](file:///data/dev/cp/cpc_dev/src/codegen.rs):
+  - 实现通用辅助方法 `build_ret_stmt_for_fallback`，根据当前函数返回类型（`ResultType`、`Optional` 或常规标量）自动生成精确的 Zig `return` 语句；
+  - 在 `Stmt::Expr` 中特化 `cond || continue / break / return`，直接生成高效原生 Zig 语句 `if (!cond) action;`；
+  - 在 `generate_expr` 中为 `||`、`??` 与 `?` 生成合法的块表达式与 Zig 内建 `orelse` / `catch` 发散跳转代码；
+  - 在 `generate_expr` 结尾为 `Expr::Continue`、`Expr::Break`、`Expr::Return` 兜底生成代码。
+
+### 语言设计规范手册更新 (Updated Specification)
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - **新增第 8.7 节《守卫控制流三剑客（The Guard Trinity）：`||`、`??` 与 `?` 的发散控制与解包》**：详尽定义三大维度的条件触发、解包行为与零开销映射表；
+  - **新增第 8.8 节《控制流条件圆括号强制规范与 AI-First 智能自愈提示》**：明确 `if (cond)`、`while (cond)` 规范，解析二义性根除原理及智能体 0 秒自愈报错规则；
+  - **新增第 8.9 节《行末分号可选（Optional Semicolons）与 ASI 换行断句规范》**：确认 100% 可选分号与基于换行的物理断句防御机制。
+
+### 自动化测试全绿通过 (Tests Verified)
+- [`cap/test/test_control_flow_coalesce.cp`](file:///data/dev/cp/cap/test/test_control_flow_coalesce.cp):
+  - 覆盖验证 `?? continue`、`?? break`、`?? return`；
+  - 覆盖验证 `? continue`、`? break`、`? return`；
+  - 覆盖验证 `|| continue`、`|| break`、`|| return`；
+  - 覆盖验证 `if (cond)` 与 `while (cond)`；
+  - 通过 `CPC_BIN=/data/dev/cp/cpc_dev/target/debug/cpc /data/dev/cp/cap/bin/cap cap/test/test_control_flow_coalesce.cp` 编译运行，转译耗时 7ms，测试用例全部绿灯通过（输出 `ALL_CONTROL_FLOW_COALESCE_TESTS_PASSED`）；
+  - 验证遗漏括号的 `if cond` 与 `while cond` 精确触发带 `suggestion` 的自愈报错。
+
+---
+
+## 2026-11-07 AI-First 智能可自愈诊断系统全景实装 (AI-Friendly Self-Healing Diagnostics & E-Code Architecture)
+
+### 编译器增强 (cpc_dev 沙盒并行研发调试)
+- [`cpc_dev/src/diagnostic.rs`](file:///data/dev/cp/cpc_dev/src/diagnostic.rs):
+  - **结构化诊断引擎**：新增 `Diagnostic` 核心结构体，规范错误码（`code`）、主信息（`message`）、物理位置（`span`）、根因分析（`cause`）、规则释义（`help`）与修改建议（`suggestion`）；
+  - **Rustc/TypeScript 级渲染器**：实现 `Diagnostic::render`，输出精确包含行号、列号、源码代码切片高亮（`^^^^`）、行前缀对齐及三段式自愈诊断的纯净文本；
+  - **智能联想与编辑距离计算**：实装 `levenshtein_distance` 与 `find_closest_match` 算法，在未定义符号场景下智能探测当前作用域内的相近候选符号并输出 `did you mean '...'?`；
+  - **内置标准库智能匹配**：收录 `STANDARD_BUILTIN_IMPORTS` 映射字典，当直接使用 `print`、`json`、`fs`、`spawn` 等官方符号时，自动输出具体的 `import { ... } from "cap:..."` 建议；
+  - **借用检查 Panic 格式化**：实装 `from_compiler_error_msg`，将 Codegen 阶段的借用检查 panic 错误信息结构化还原为可自愈的 `Diagnostic`。
+- [`cpc_dev/src/parser.rs`](file:///data/dev/cp/cpc_dev/src/parser.rs):
+  - 为 `ParseError` 增加 `Diagnostic(Diagnostic)` 变体与 `to_diagnostic()` 转换方法；
+  - 深度适配 TS 习惯写法自愈：
+    - `Token::Interface` -> 输出 `E0102` 并建议替换为 `trait`；
+    - `Token::Try` -> 输出 `E0103` 并建议改为 `?` 错误传播或行内 `catch` 表达式；
+    - `Token::Mut` -> 输出 `E0104` 并说明 CP 中 `let` 默认可变，参数使用 `*param`；
+    - `Token::Any` -> 输出 `E0105` 并建议使用具体类型或泛型 `<T>`；
+    - 缺少圆括号 `LParen` -> 输出 `E0101` 并给出括号包裹建议。
+- [`cpc_dev/src/sema.rs`](file:///data/dev/cp/cpc_dev/src/sema.rs):
+  - 为 `SemaError` 增加 `to_diagnostic()` 转换实现，覆盖全量语义分析与借用错误：
+    - `CannotMutateReadOnlyBorrow` -> 输出 `E0201` 并给出 `*param` 独占可变借用声明建议；
+    - `MutableBorrowConflict` -> 输出 `E0202` 并给出借用作用域分离建议；
+    - `UseOfMovedValue` -> 输出 `E0203` 并给出引用借用传参建议；
+    - `ConstAssignment` -> 输出 `E0204` 并建议改为 `let` 声明；
+    - `AwaitOutsideAsync` -> 输出 `E0205` 并建议函数标注 `async fn`；
+    - `UndefinedSymbol` -> 输出 `E0206` 并附带 Levenshtein 拼写智能联想或标准库导入提示；
+    - `TypeMismatch` -> 输出 `E0207` 并针对 `Optional`、`ErrorUnion`、`usize/i32` 给出解包与转换建议；
+    - `ReflectNotEnabled` -> 输出 `E0208` 并建议添加 `@reflect` 属性；
+    - `UnsafeRequired` -> 输出 `E0209` 并建议包裹 `unsafe { ... }`；
+    - `MutateWhileBorrowedInFor` -> 输出 `E0210` 迭代器失效保护建议；
+    - `PrivateAccess` -> 输出 `E0211` 访问权限与 `pub` 建议；
+    - `CannotInstantiateStatic` -> 输出 `E0212` 静态命名空间调用建议；
+    - `InvalidCast` -> 输出 `E0213` 类型解析器建议；
+    - `DuplicateVarDecl` -> 输出 `E0214` 变量重声明建议。
+- [`cpc_dev/src/main.rs`](file:///data/dev/cp/cpc_dev/src/main.rs):
+  - 在 `main()` 开头设置静默 panic hook（`std::panic::set_hook`），消除 Rust 原生栈回溯干扰；
+  - 使用 `std::panic::catch_unwind` 包装 `Codegen::generate_module`，捕获借用检查 panic 并将其转换为结构化 `Diagnostic` 渲染输出；
+  - 统一接管 `ParseError`、`SemaError` 与 Codegen 错误，终端仅输出美观工整的 E-Code 三段式自愈诊断。
+
+### 语言设计规范手册更新 (Updated Specification)
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - **新增第十七章《AI-First 智能可自愈诊断系统与 E-Code 规范体系》**：正式确立 CP 语言三段式自愈诊断标准（Error Title、Code Slice、`= cause:`、`= help:`、`= suggestion:`）与 E01xx / E02xx / E03xx 标准错误码全景速查矩阵。
+
+### 自动化测试全绿通过 (Tests Verified)
+- [`cap/test/test_ai_diagnostics.cp`](file:///data/dev/cp/cap/test/test_ai_diagnostics.cp):
+  - 新增正式回归测试，覆盖条件括号校验与独占可变借用（`*buf`）传参调用；
+  - 运行 `CPC_BIN=/data/dev/cp/cpc_dev/target/debug/cpc /data/dev/cp/cap/bin/cap cap/test/test_ai_diagnostics.cp`，转译耗时 6ms，链接并运行成功（输出 `ALL_AI_DIAGNOSTICS_COMPATIBILITY_TESTS_PASSED`）；
+  - 全面测试验证了：条件缺少括号、修改只读参数、使用 `interface`、声明 `mut`、未导入 `print`、变量拼写错误 `addr_srt`、类型不匹配、常量重新赋值等场景，终端均精准打印出带 `suggestion` 的三段式自愈诊断。
+
+---
+
+## 2026-11-07 (Bun agy 修改审核与双向合并、C-ABI 兼容指针系统、发散控制流空合并与正式 Release 发布)
+
+### 审核与合并总结 (Audit & Merge Summary)
+- 经逐行审核，Bun agy 在 `cpc/src` 中对 C 指针 `[*c]T` / 哨兵指针 `[*:<sentinel>]T`、`const_vars` 常量保护、`c_*` 兼容类型与有符号位移安全检查的修改 100% 合理且完整；
+- 双向合并完成：将沙盒 `cpc_dev` 的 AI 三段式自愈诊断、发散控制流（`??/||/? return/break/continue`）、可选分号 ASI 断句与条件强制括号规范，与 Bun agy 的指针系统完美融合。
+- `cpc/src` 与 `cpc_dev/src` 达成 100% 毫无差异代码对齐。
+
+### 新增文件 (Added)
+- [`cpc/src/diagnostic.rs`](file:///data/dev/cp/cpc/src/diagnostic.rs): AI-First 三段式自愈诊断核心引擎，包含 Levenshtein 编辑距离拼写建议与标准库映射。
+- [`cap/test/test_cptr_and_ai.cp`](file:///data/dev/cp/cap/test/test_cptr_and_ai.cp): 综合测试用例，覆盖 C-ABI 指针、可选提升、借用隐式转换与发散空合并。
+- [`cap/test/test_control_flow_coalesce.cp`](file:///data/dev/cp/cap/test/test_control_flow_coalesce.cp): 守卫三剑客完整控制流测试。
+
+### 修改文件 (Modified)
+- [`cpc/src/lib.rs`](file:///data/dev/cp/cpc/src/lib.rs): 导出 `pub mod diagnostic;`。
+- [`cpc/src/main.rs`](file:///data/dev/cp/cpc/src/main.rs): 集成静默 panic hook 与 catch_unwind 诊断渲染。
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs): 新增 `Type::CPtr` 与 `Type::SentinelPtr`。
+- [`cpc/src/ast_visitor.rs`](file:///data/dev/cp/cpc/src/ast_visitor.rs): 新增对发散表达式 `Continue/Break/Return` 的变量追踪。
+- [`cpc/src/dcp.rs`](file:///data/dev/cp/cpc/src/dcp.rs): 导出 `[*c]T` 与 `[*:<sentinel>]T` 的 `.d.cp` 格式声明。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs): 支持 `[*c]T`、`[*:<sentinel>]T`、可选后置优先级提升 `Optional(CPtr(T))`、守卫三剑客语法与换行 ASI 断句。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs): `can_coerce` 支持 `BorrowType` 与 `RawPtr` 隐式转 `CPtr`；`types_eq` 支持 C 指针比较；`to_diagnostic` 覆盖全量 E02xx 诊断。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs): 支持发散控制流 Zig 代码生成、`build_ret_stmt_for_fallback` 辅助函数、`const_vars` 常量保护与 `[*:0]u8` 形参映射。
+- [`cpc/src/resolver.rs`](file:///data/dev/cp/cpc/src/resolver.rs): 模块解析阶段支持三段式诊断渲染。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md): 更新 17.3 节系统类型字典与发散控制流规范。
+
+### 正式 Release 交付 (Release Artifacts)
+- 构建完成 `cpc` 正式 release 二进制，耗时 35.73s，覆盖至 `/data/dev/cp/cap/bin/cpc`；
+- 所有回归测试 100% 绿灯全通。
+
+

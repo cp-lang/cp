@@ -331,6 +331,8 @@ impl DcpEmitter {
                 format!("{}{}{}", "*".repeat(*depth), self.format_type(inner), "!")
             }
             Type::ManyRawPtr(inner) => format!("[*]{}!", self.format_type(inner)),
+            Type::CPtr(inner) => format!("[*c]{}!", self.format_type(inner)),
+            Type::SentinelPtr(inner, val) => format!("[*:{val}]{}!", self.format_type(inner)),
             Type::CStr => "cstr".to_string(),
             Type::CFn(params, ret) => {
                 let p_str: Vec<String> = params.iter().map(|p| self.format_type(p)).collect();

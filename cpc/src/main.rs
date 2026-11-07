@@ -77,7 +77,7 @@ fn compile_file(
         let mut parser = CPParser::new(&code);
         let parsed_module = parser
             .parse_module()
-            .map_err(|e| anyhow::anyhow!("Parse Error in {:?}: {}", input, e))?;
+            .map_err(|e| anyhow::anyhow!("{}", e.to_diagnostic().render(Some(&code), Some(input))))?;
         all_items = parsed_module.body;
     } else {
         resolve_imports(input, include, &mut all_items, &mut processed_sources)?;
@@ -91,12 +91,34 @@ fn compile_file(
     let mut analyzer = Analyzer::new();
     analyzer
         .analyze_module(&mut module)
-        .map_err(|e| anyhow::anyhow!("Semantic Error: {}", e))?;
+        .map_err(|e| {
+            let known = analyzer.get_known_symbols();
+            let code = fs::read_to_string(input).ok();
+            anyhow::anyhow!("{}", e.to_diagnostic(&known).render(code.as_deref(), Some(input)))
+        })?;
 
-    let mut codegen = Codegen::new();
-    codegen.is_beam_mode = beam;
-    codegen.is_lib_mode = lib;
-    let zig_code = codegen.generate_module(&module);
+    let zig_code_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut codegen = Codegen::new();
+        codegen.is_beam_mode = beam;
+        codegen.is_lib_mode = lib;
+        codegen.generate_module(&module)
+    }));
+
+    let zig_code = match zig_code_result {
+        Ok(code) => code,
+        Err(err) => {
+            let msg = if let Some(s) = err.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = err.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "Internal compiler error".to_string()
+            };
+            let code = fs::read_to_string(input).ok();
+            let diag = cpc::diagnostic::from_compiler_error_msg(&msg, code.as_deref());
+            return Err(anyhow::anyhow!("{}", diag.render(code.as_deref(), Some(input))));
+        }
+    };
 
     match output {
         Some(path) => {
@@ -113,10 +135,16 @@ fn compile_file(
 }
 
 fn main() {
+    std::panic::set_hook(Box::new(|_| {}));
     let cli = Cli::parse();
 
     if let Err(e) = run(cli) {
-        eprintln!("Error: {}", e);
+        let err_str = e.to_string();
+        if err_str.starts_with("error[") {
+            eprint!("{}", err_str);
+        } else {
+            eprintln!("Error: {}", err_str);
+        }
         std::process::exit(1);
     }
 }
@@ -138,26 +166,14 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 let mut parser = CPParser::new(&code);
                 let mut module = parser
                     .parse_module()
-                    .map_err(|e| {
-                        let span = match &e {
-                            cpc::parser::ParseError::UnexpectedToken(_, s) => Some(*s),
-                            cpc::parser::ParseError::ExpectedToken(_, _, s) => Some(*s),
-                            cpc::parser::ParseError::Generic(_, s) => Some(*s),
-                            _ => None,
-                        };
-                        let loc = if let Some(s) = span {
-                            let before = &code[..s.start.min(code.len())];
-                            let line = before.lines().count();
-                            let col = before.lines().last().map(|l| l.len() + 1).unwrap_or(1);
-                            let snippet = code[s.start.min(code.len())..].lines().next().unwrap_or("");
-                            format!(" at line {}:{} (snippet: '{}')", line, col, snippet)
-                        } else {
-                            String::new()
-                        };
-                        anyhow::anyhow!("Parse Error in {:?}: {}{}", input, e, loc)
-                    })?;
+                    .map_err(|e| anyhow::anyhow!("{}", e.to_diagnostic().render(Some(&code), Some(&input))))?;
                 let mut analyzer = Analyzer::new();
-                analyzer.analyze_module(&mut module)?;
+                analyzer
+                    .analyze_module(&mut module)
+                    .map_err(|e| {
+                        let known = analyzer.get_known_symbols();
+                        anyhow::anyhow!("{}", e.to_diagnostic(&known).render(Some(&code), Some(&input)))
+                    })?;
                 println!("Check successful");
             }
             Commands::EmitTypes { input, output } => {

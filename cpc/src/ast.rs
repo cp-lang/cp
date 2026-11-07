@@ -429,6 +429,9 @@ pub enum Expr {
         alt: Option<Box<Expr>>,
         is_comptime: bool,
     },
+    Continue(Span),
+    Break(Span, Option<Box<Expr>>),
+    Return(Span, Option<Box<Expr>>),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -642,6 +645,8 @@ pub enum Type {
         depth: usize,
     },
     ManyRawPtr(Box<Type>),
+    CPtr(Box<Type>),
+    SentinelPtr(Box<Type>, String),
     CStr,
     CFn(Vec<Type>, Box<Type>),
     Auto,
