@@ -210,6 +210,9 @@ pub fn find_referenced_vars_in_stmt(stmt: &Stmt, vars: &mut HashSet<String>) {
                 find_referenced_vars_in_stmt(cb, vars);
             }
         }
+        Stmt::Func(f) => {
+            find_referenced_vars_in_block(&f.body, vars);
+        }
     }
 }
 
@@ -226,6 +229,8 @@ pub fn get_declared_vars_in_block(block: &BlockStmt) -> HashSet<String> {
             if let Pattern::Ident(i) = &v.pat {
                 vars.insert(i.sym.clone());
             }
+        } else if let Stmt::Func(f) = stmt {
+            vars.insert(f.ident.sym.clone());
         } else if let Stmt::Block(b) | Stmt::UnsafeBlock(b) = stmt {
             let inner = get_declared_vars_in_block(b);
             vars.extend(inner);

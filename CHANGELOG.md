@@ -2053,6 +2053,75 @@
 - **构建交付**：执行 `cargo build --release --manifest-path cpc/Cargo.toml` 完成 LLVM 深度优化，二进制覆盖安装至 `/data/dev/cp/cap/bin/cpc`；
 - **全量测试**：使用正式版 `cap/bin/cpc` 重新验证全部回归测试套件（`test_c_union_and_comptime.cp`、`test_all_libs.cp`、`test_cptr_and_ai.cp`），100% 绿灯全通。
 
+---
+
+## 2026-11-07 (cpc_dev 沙盒实现 C 回调跳板工厂与局部函数单态化 C-Trampoline)
+
+### 新增文件 (Added)
+- [`cap/test/test_c_trampoline.cp`](file:///data/dev/cp/cap/test/test_c_trampoline.cp): C 回调跳板（C-Trampoline）、泛型包装工厂、单态化 `callconv(.c)` 局部函数与弱类型上下文转换综合验证测试。
+
+### 修改文件 (Modified)
+- [`cpc_dev/src/ast.rs`](file:///data/dev/cp/cpc_dev/src/ast.rs):
+  - `Stmt` 枚举新增 `Func(Box<Function>)` 变体以支持局部作用域内声明静态函数与跳板函数。
+- [`cpc_dev/src/ast_visitor.rs`](file:///data/dev/cp/cpc_dev/src/ast_visitor.rs):
+  - `find_referenced_vars_in_stmt` 与 `get_declared_vars_in_block` 完整适配 `Stmt::Func`，支持嵌套函数作用域的变量引用递归扫描与声明提取。
+- [`cpc_dev/src/parser.rs`](file:///data/dev/cp/cpc_dev/src/parser.rs):
+  - `parse_params` 支持形参前置 `comptime` 及 `@comptime` 注解标记（`Param.is_comptime = true`）；
+  - `parse_base_type` 支持 `Type: type` 映射为 `Type::Ref("type")`，并新增 `*!` 与 `*!?` / `[*]!` 通用裸指针极简缩写（自动映射基础类型为 `Type::Any`）；
+  - `parse_var_decl` 遇到 `mut` 关键字立即触发 `E0104` 三段式自愈诊断拦截，提示 CP 中 `let` 默认可变；
+  - `parse_stmt` 支持在函数局部块内解析 `@c fn` 与普通 `fn` 语句并包装为 `Stmt::Func`；
+  - 函数类型签名 `parse_fn_type_sig` 全面支持省略参数名（如 `@c fn (*!?, i32, i32, *!?)`）及缺省返回类型直接省略 `: void`。
+- [`cpc_dev/src/sema.rs`](file:///data/dev/cp/cpc_dev/src/sema.rs):
+  - `analyze_stmt` 递归遍历并类型检查局部 `Stmt::Func`；
+  - `infer_type` 在 `Expr::Call` 中支持 `Type::Auto`（如 `comptime callback: anytype`）与类型别名展开，将其视为一等可调用函数并放行。
+- [`cpc_dev/src/codegen.rs`](file:///data/dev/cp/cpc_dev/src/codegen.rs):
+  - `Expr::Cast`（`as` 运算符）扩展识别 `Type::BorrowType`（`*Type`），强转指针时自动安全生成底层 `@as(Target, @ptrCast(@alignCast(source)))`；
+  - 新增 `local_trampolines: HashSet<String>` 跟踪局部 C-ABI 跳板符号；
+  - 遇到局部 `@c fn` 时，自动生成单态化 Zig 静态包装结构体 `const __cp_trampoline_{name} = struct { pub fn {name}(...) callconv(.c) ... { ... } };`；
+  - 遇到取地址操作 `&handle` 时，自动提升并转译为 `&__cp_trampoline_{name}.{name}`；
+  - 在局部变量生命周期逃逸分析与 `return` 检查中，对 `local_trampolines` 中的符号豁免局部逃逸拦截；
+  - 升级 `block_contains_ident` 接入 `ast_visitor::find_referenced_vars_in_block`，精准分析局部函数参数使用情况，杜绝 Zig 0.17 的 `pointless discard of function parameter` 编译报错；
+  - 状态机内部对局部函数指针的调用精准转译为 `ctx.{ident.sym}(...)`。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 新增第 17.9 节《C-ABI 回调跳板工厂与局部函数单态化架构规范》，详细记录 C-Trampoline 原理、局部 `@c fn` 提升、`@comptime` 参数、极简指针 `*!?`、无参名函数签名及规范 `as` 运算符。
+
+### 自动化测试验证 (Tests Verified)
+- 运行 `env CPC_BIN=/data/dev/cp/cpc_dev/target/debug/cpc cap cap/test/test_c_trampoline.cp`，6ms 转译、596ms 链接运行，断言 100% 通过（Status: 200, Timeouts: 15, C-Trampoline test passed!）；
+- 正向验证：`let` 声明默认可变无需 `mut`、`let cb = ...` 自动推断、`as *Type` 自动生成对齐指针转换、`*!?` 极简指针、`&handle` 静态 C 函数指针只读借用、`@c fn (*!?, i32, i32, *!?)` 省略参数名与 `: void`、`@comptime` 参数修饰全部验证通过；
+- 反向自愈验证：故意书写 `let mut x = ...` 精准触发 `error[E0104]: 'mut' keyword is not used for local variable declarations` 三段式自愈诊断拦截；
+- 核心回归测试用例 `cap/test/test_bun_enums.cp` 绿灯通过。
+
+---
+
+## 2026-11-07 (阶段续：取裸指针语法架构裁定与 C 跳板编译期全链路剖析)
+
+### 文档与设计规范 (Documentation & Specs)
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 第 17.9 节详述 C-ABI 回调跳板工厂与局部函数单态化规范，明晰 `pub type ares_host_callback = @c fn (*!?, i32, i32, *!?);`、`@comptime` 参数修饰、`let raw_ctx = &my_ctx as *!?;` 及 `this_ptr = ctx.? as *Type;` 现代标准范式；
+- [`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md):
+  - 记录 `*expr!` 历史代码（`parser.rs` 4568-4581 行）考古溯源，深度评估其与 Deref 符号倒置、后缀 `!` 二义性冲突及违反显式类型擦除安全原则等 4 大缺陷，裁定确立 `&expr as *!?` 为官方唯一标准语法；
+  - 详细剖析 `cpc` 编译器编译期识别局部 `@c fn`、Zig 匿名结构体提升（Struct Lifting）、外层单态化、符号重定向及借用检查静态豁免的全链路机制。
+
+---
+
+## 2026-11-07 (阶段续：CP 裸指针语法镜像同构全套实现与双轨支持)
+
+### 修改文件 (Modified)
+- [`cpc_dev/src/parser.rs`](file:///data/dev/cp/cpc_dev/src/parser.rs):
+  - 在 `Token::Star`（可变借用）与 `Token::Ampersand`（只读借用）表达式解析中，全面支持 `!`、`!?` 与 `?!` 后缀提取裸指针语法糖；
+  - `*expr!` 自动构造可变 C 裸指针（`*!`，即 `*anyopaque`）；
+  - `*expr!?` 自动构造可选可变 C 裸指针（`*!?`，即 `?*anyopaque`）；
+  - `&expr!` 自动构造只读 C 裸指针（`*const anyopaque`）；
+  - `&expr!?` 自动构造可选只读 C 裸指针（`?*const anyopaque`）；
+  - 与类型系统（`*!`、`*!?`）及显式强转（`*my_ctx as *!?` / `&my_ctx as *!?`）构成 100% 镜像同构与双轨互通。
+- [`cap/test/test_c_trampoline.cp`](file:///data/dev/cp/cap/test/test_c_trampoline.cp):
+  - 增加四种形式的完整断言测试（`*my_ctx!?`、`&my_ctx!?`、`*my_ctx as *!?`、`&my_ctx as *!?`），100% 绿灯全通。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 第 17.9 节升级为《裸指针双轨语法：原生 as 强转与类型镜像同构取指针语法糖》，明晰类型与表达式在 `*`、`!`、`!?` 上的对称映射及零二义性保证。
+
+
+
+
 
 
 

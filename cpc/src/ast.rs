@@ -232,6 +232,7 @@ pub enum Stmt {
         is_err_mut: bool,
         catch_body: Option<Box<Stmt>>,
     },
+    Func(Box<Function>),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

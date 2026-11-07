@@ -2656,7 +2656,37 @@ impl Analyzer {
                     self.exit_scope();
                 }
             }
-            _ => {}
+            Stmt::Func(f) => {
+                let params = f.params.iter().map(|p| p.ty.clone()).collect();
+                let kind = SymbolKind::Func {
+                    params,
+                    ret: f.return_type.clone(),
+                    is_async: f.is_async,
+                    is_unsafe: f.is_unsafe,
+                };
+                let _ = self.define(f.ident.sym.clone(), kind.clone(), f.ident.span);
+                self.symbol_map.insert(f.ident.span, kind);
+
+                let old_async = self.current_fn_is_async;
+                let old_unsafe = self.current_fn_is_unsafe;
+                self.current_fn_is_async = f.is_async;
+                self.current_fn_is_unsafe = f.is_unsafe;
+                self.enter_scope();
+                for p in &f.params {
+                    let p_kind = SymbolKind::Var {
+                        ty: p.ty.clone(),
+                        kind: VarDeclKind::Let,
+                    };
+                    let _ = self.define(p.ident.sym.clone(), p_kind.clone(), p.ident.span);
+                    self.symbol_map.insert(p.ident.span, p_kind);
+                }
+                for stmt in &f.body.body {
+                    self.analyze_stmt(stmt)?;
+                }
+                self.exit_scope();
+                self.current_fn_is_async = old_async;
+                self.current_fn_is_unsafe = old_unsafe;
+            }
             _ => {}
         }
         Ok(())
@@ -4402,11 +4432,16 @@ impl Analyzer {
                         }
                     }
                 }
-                let callee_ty = self.infer_type(&call.callee)?;
+                let mut callee_ty = self.infer_type(&call.callee)?;
+                if let Type::Ref(id) = &callee_ty {
+                    if let Some(target) = self.type_aliases.get(&id.sym).cloned() {
+                        callee_ty = target;
+                    }
+                }
                 match callee_ty {
                     Type::Fn(_, ret) => Ok(*ret),
                     Type::CFn(_, ret) => Ok(*ret),
-                    Type::Any => Ok(Type::Any),
+                    Type::Any | Type::Auto => Ok(Type::Any),
                     _ => Err(SemaError::NotAFunction(call.span)),
                 }
             }

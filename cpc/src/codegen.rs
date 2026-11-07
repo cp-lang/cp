@@ -650,6 +650,7 @@ pub struct Codegen {
     pub narrowed_null_vars: HashSet<String>,
     pub const_vars: HashSet<String>,
     pub current_block_label: Option<String>,
+    pub local_trampolines: HashSet<String>,
 }
 
 impl Codegen {
@@ -722,6 +723,7 @@ impl Codegen {
             narrowed_null_vars: HashSet::new(),
             const_vars: HashSet::new(),
             current_block_label: None,
+            local_trampolines: HashSet::new(),
         }
     }
 
@@ -4449,6 +4451,9 @@ impl Codegen {
             Expr::Borrow(inner, is_mut) => {
                 match &**inner {
                     Expr::Ident(id) => {
+                        if self.local_trampolines.contains(&id.sym) {
+                            return (vec![], false, false);
+                        }
                         if id.sym == "this" || id.sym == "_" || self.is_class_field(&id.sym) {
                             if *is_mut && self.current_receiver_mode == ReceiverMode::ReadOnly {
                                 panic!(
@@ -7453,6 +7458,12 @@ impl Codegen {
     }
 
     fn block_contains_ident(block: &BlockStmt, id: &str) -> bool {
+        let mut vars = std::collections::HashSet::new();
+        crate::ast_visitor::find_referenced_vars_in_block(block, &mut vars);
+        if vars.contains(id) {
+            return true;
+        }
+
         for s in &block.body {
             match s {
                 Stmt::Expr(Expr::Zig(z)) => {
@@ -7535,6 +7546,7 @@ impl Codegen {
         self.mutable_fn_params.clear();
         self.move_fn_params.clear();
         self.var_cp_types.clear();
+        self.local_trampolines.clear();
         self.current_fn_ret_ty = func.return_type.clone();
         self.current_stmt_idx = 0;
         self.last_use_map.clear();
@@ -7999,6 +8011,11 @@ impl Codegen {
             Stmt::For(f) => {
                 self.collect_expr_error_types(&f.expr, out);
                 self.collect_stmt_error_types(&f.body, out);
+            }
+            Stmt::Func(f) => {
+                for s in &f.body.body {
+                    self.collect_stmt_error_types(s, out);
+                }
             }
             _ => {}
         }
@@ -9458,6 +9475,9 @@ impl Codegen {
                     // Check for dangling local reference return or ref struct escape!
                     let (borrow_sources, _, is_ref_st) = self.extract_expr_borrow_info(arg);
                     for src in &borrow_sources {
+                        if self.local_trampolines.contains(src) {
+                            continue;
+                        }
                         if !self.current_fn_params.contains(src) {
                             if is_ref_st {
                                 panic!(
@@ -9761,6 +9781,101 @@ impl Codegen {
                     self.in_try_region = old_in_try;
                 }
             }
+            Stmt::Func(f) => {
+                let trampoline_name = f.ident.sym.clone();
+                self.local_trampolines.insert(trampoline_name.clone());
+                let struct_name = format!("__cp_trampoline_{}", trampoline_name);
+                self.write_to_case(&format!("const {} = struct {{", struct_name));
+                self.indent();
+
+                let mut params_str = String::new();
+                for p in &f.params {
+                    let mapped_ty = match &p.ty {
+                        Type::Ref(id) if self.trait_defs.contains_key(&id.sym) => {
+                            "anytype".to_string()
+                        }
+                        Type::CStr => {
+                            if p.is_mut {
+                                "[*:0]u8".to_string()
+                            } else {
+                                "[*:0]const u8".to_string()
+                            }
+                        }
+                        _ => self.map_type(&p.ty),
+                    };
+                    self.locals.insert(p.ident.sym.clone(), mapped_ty.clone());
+                    if !params_str.is_empty() {
+                        params_str.push_str(", ");
+                    }
+                    let comptime_prefix = if p.is_comptime { "comptime " } else { "" };
+                    params_str.push_str(&format!(
+                        "{}{}: {}",
+                        comptime_prefix, p.ident.sym, mapped_ty
+                    ));
+                }
+
+                let is_inline = f.meta.iter().any(|m| m.name.sym == "inline");
+                let inline_kw = if is_inline { "inline " } else { "" };
+                let is_c = f
+                    .meta
+                    .iter()
+                    .any(|m| m.name.sym == "c" || m.name.sym == "extern");
+                let callconv_clause = if is_c {
+                    "callconv(.c) ".to_string()
+                } else if let Some(m) = f.meta.iter().find(|m| m.name.sym == "callconv") {
+                    let conv = match m.args.first() {
+                        Some(MetaArg::Positional(Expr::Lit(Lit::Str(s)))) => {
+                            if s.starts_with('.') {
+                                s.clone()
+                            } else {
+                                format!(".{}", s)
+                            }
+                        }
+                        Some(MetaArg::Positional(Expr::Ident(id))) => {
+                            if id.sym.starts_with('.') {
+                                id.sym.clone()
+                            } else {
+                                format!(".{}", id.sym)
+                            }
+                        }
+                        _ => ".c".to_string(),
+                    };
+                    format!("callconv({}) ", conv)
+                } else {
+                    String::new()
+                };
+
+                let zig_ret_ty = f
+                    .return_type
+                    .as_ref()
+                    .map(|t| self.map_type(t))
+                    .unwrap_or_else(|| "void".to_string());
+
+                self.write_to_case(&format!(
+                    "pub {}fn {}({}) {}{} {{",
+                    inline_kw, f.ident.sym, params_str, callconv_clause, zig_ret_ty
+                ));
+                self.indent();
+
+                for p in &f.params {
+                    let is_used = Self::block_contains_ident(&f.body, &p.ident.sym);
+                    if !p.is_comptime && !is_used {
+                        self.write_to_case(&format!("_ = {};", p.ident.sym));
+                    }
+                }
+
+                let saved_sm = self.is_state_machine;
+                self.is_state_machine = false;
+                for s in &f.body.body {
+                    self.generate_stmt(s);
+                }
+                self.is_state_machine = saved_sm;
+
+                self.dedent();
+                self.write_to_case("}");
+                self.dedent();
+                self.write_to_case("};");
+            }
             _ => {}
         }
     }
@@ -9938,6 +10053,8 @@ impl Codegen {
                     } else {
                         base
                     }
+                } else if self.local_trampolines.contains(&i.sym) {
+                    format!("__cp_trampoline_{}.{}", i.sym, i.sym)
                 } else if self.mut_borrow_loop_vars.contains(&i.sym) {
                     format!("({}.*)", i.sym)
                 } else if self.narrowed_null_vars.contains(&i.sym) {
@@ -9948,6 +10065,9 @@ impl Codegen {
             }
             Expr::Borrow(inner, is_mut) => {
                 if let Expr::Ident(i) = &**inner {
+                    if self.local_trampolines.contains(&i.sym) {
+                        return format!("&__cp_trampoline_{}.{}", i.sym, i.sym);
+                    }
                     self.uninitialized_vars.remove(&i.sym);
                     if i.sym == "this" || i.sym == "_" || self.is_class_field(&i.sym) {
                         if *is_mut && self.current_receiver_mode == ReceiverMode::ReadOnly {
@@ -11031,6 +11151,16 @@ impl Codegen {
 
                 // 3. Check omitted-receiver sibling method call inside a class method (`helper()` -> `self.helper()`)
                 if let Expr::Ident(ident) = &*call.callee {
+                    if self.local_trampolines.contains(&ident.sym) {
+                        let mut args = String::new();
+                        for (idx, arg) in call.args.iter().enumerate() {
+                            args.push_str(&self.generate_expr(arg));
+                            if idx + 1 < call.args.len() {
+                                args.push_str(", ");
+                            }
+                        }
+                        return format!("__cp_trampoline_{}.{}({})", ident.sym, ident.sym, args);
+                    }
                     if self.enum_defs.contains_key(&ident.sym) && call.args.len() == 1 {
                         let arg_code = self.generate_expr(&call.args[0]);
                         return format!("@as({}, @enumFromInt({}))", ident.sym, arg_code);
@@ -11166,7 +11296,13 @@ impl Codegen {
                     "@task_spawn_cpu".to_string()
                 } else {
                     match &*call.callee {
-                        Expr::Ident(ident) => ident.sym.clone(),
+                        Expr::Ident(ident) => {
+                            if self.is_state_machine && self.locals.contains_key(&ident.sym) && !self.inline_closure_params.contains(&ident.sym) {
+                                format!("ctx.{}", ident.sym)
+                            } else {
+                                ident.sym.clone()
+                            }
+                        }
                         _ => self.generate_expr(&call.callee),
                     }
                 };
@@ -13193,7 +13329,7 @@ impl Codegen {
                         );
                         let is_src_ptr = matches!(
                             src_ty,
-                            Some(Type::RawPtr { .. } | Type::ManyRawPtr(_) | Type::CStr)
+                            Some(Type::RawPtr { .. } | Type::ManyRawPtr(_) | Type::CStr | Type::BorrowType { .. })
                         );
                         let is_target_int = matches!(
                             resolved_ty,
@@ -13213,7 +13349,7 @@ impl Codegen {
                         let is_target_float = matches!(resolved_ty, Type::F32 | Type::F64);
                         let is_target_ptr = matches!(
                             resolved_ty,
-                            Type::RawPtr { .. } | Type::ManyRawPtr(_) | Type::CStr
+                            Type::RawPtr { .. } | Type::ManyRawPtr(_) | Type::CStr | Type::BorrowType { .. }
                         );
                         let is_src_enum = if let Some(Type::Ref(id)) = &src_ty {
                             self.enum_defs.contains_key(&id.sym)
