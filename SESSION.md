@@ -6690,4 +6690,45 @@ git 提交
    - `git add BUN_AGY_MIGRATION_GUIDE.md CHANGELOG.md DEVLOG.md SESSION.md cpc/src/codegen.rs cpc/src/parser.rs`
    - `git commit -m "feat(cpc): tree-shake dead helper templates and fix composite return type parsing"`
 
+---
+
+### 用户指令 (User Prompts)
+1. 很好, 你仔细思考下, cpc 还需要增加哪些功能, 更加成熟/完整, 满足生产级别
+2. 很好, 将上述内容, 写入 cp_ref.md 的路线图, 我们逐步完成
+
+### 执行汇报 (Execution Report)
+1. **工业级生产化深度架构推演**：
+   - 系统梳理了 CP 语言从“语法完备与原型验证”跨越到“支撑企业级、高吞吐、微秒级延迟与百万 Agent 生产环境（Production-Grade）”的核心差距；
+   - 确立了八大支柱体系演进方案：
+     - ① **源码映射与生产级调试**（Source Map / DWARF `#line` 指示、CP Demangler 堆栈还原、perf/pprof 符号规范）；
+     - ② **可插拔 Allocator 与作用域内存池**（`with (arena)` 作用域区域分配器、前端栈分配逃逸分析）；
+     - ③ **抢占式调度与高可用并发引擎**（循环回边 Auto-Reduction 计数自动注入、跨 await 线程安全拦截、结构化并发 Nursery）；
+     - ④ **模块化增量编译与工程扩展性**（Content-Addressable Cache 增量转译、双向循环类型依赖解耦、稳定 C-ABI 动态插件）；
+     - ⑤ **高级类型系统与借用检查器升级**（前端 Trait 契约拦截、多字段独立借用 Disjoint Field Borrowing、常量泛型 Const Generics）；
+     - ⑥ **生产级零拷贝标准库基石**（统一 Reader/Writer 流抽象、编译期静态 Zero-Copy Serde、MPMC 无锁环形队列）；
+     - ⑦ **开发者体验与全家桶工具链**（完备工业级 LSP、官方格式化工具 `cpc fmt`、原生测试/基准评测、C 头文件自动化绑定 `cap bindgen`）；
+     - ⑧ **AI-First 机器自愈全闭环与确定性构建**（100% 结构化错误修正 Edits、跨平台确定性可复现构建）。
+2. **四线演进文档全量同步写入**：
+   - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)：新增第二十章《CP 语言与 `cpc` 编译器工业级生产化演进路线图 (Production-Grade Roadmap)》，系统阐明八大支柱体系架构规范、代码示例与 Mermaid 架构全景图，并制定 P0（近期待攻坚）、P1（中期生产化）、P2（生态成熟期）三阶段推进里程碑；
+   - [`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)：记录八大支柱的设计理念与技术细节；
+   - [`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)：记录规范更新轨迹；
+   - [`SESSION.md`](file:///data/dev/cp/SESSION.md)：记录本次交互决策与执行全过程。
+
+---
+
+### 用户指令 (User Prompts)
+git 提交
+
+### 执行汇报 (Execution Report)
+1. **Git 一次性原子暂存与提交范围**：
+   - `cp_ref.md`：官方参考手册新增第二十章，确立工业级生产化八大支柱体系（调试与 DWARF 源码映射、可插拔 Allocator 与 Scoped Arena、Auto-Reduction 抢占式调度与跨 await 安全、增量转译缓存、高级泛型契约、零拷贝标准库、完整 LSP/格式化全家桶、AI 确定性自愈闭环）及 P0/P1/P2 推进里程碑；
+   - `DEVLOG.md`：记录生产级架构设计哲学、技术差距诊断与实施方案；
+   - `CHANGELOG.md`：记录 2026-11-09 演进路线图全面落地归档；
+   - `SESSION.md`：记录交互与提交指令全轨迹。
+2. **执行唯一原子提交**：
+   - `git add CHANGELOG.md DEVLOG.md SESSION.md cp_ref.md`
+   - `git commit -m "docs: establish production-grade roadmap in cp_ref.md"`
+
+
+
 

@@ -2392,6 +2392,17 @@
 - [`BUN_AGY_MIGRATION_GUIDE.md`](file:///data/dev/cp/BUN_AGY_MIGRATION_GUIDE.md):
   - 补充第五章《最新升级：系统级底层特性与类型转换规范（消除剩余 25 个模块中的 `zig {}` 块）》。
 
+---
+
+## 2026-11-09 (CP 语言与 cpc 编译器工业级生产化演进路线图全面落地)
+
+### 修改文件 (Modified)
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 新增第二十章《CP 语言与 `cpc` 编译器工业级生产化演进路线图 (Production-Grade Roadmap)》，系统阐述调试/DWARF/Source Map 映射、可插拔 Allocator 与 Scoped Arena 作用域内存池、Auto-Reduction 抢占式调度器自动织入与跨 await 安全、模块级增量编译缓存与循环解耦、泛型 Trait 前端拦截与多字段独立借用、零拷贝标准库基石、开发者全家桶工具链（完备 LSP、`cpc fmt`、原生测试与性能评测）以及 AI-First 机器自愈闭环。
+- [`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md):
+  - 记录生产级别核心设计哲学、八大支柱体系演进技术指标与 P0/P1/P2 三阶段推进规划。
+
+
 
 
 
