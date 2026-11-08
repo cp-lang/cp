@@ -235,6 +235,12 @@ pub enum Token {
     Caret,
     #[token("~")]
     Tilde,
+    #[token("+%")]
+    WrappingAdd,
+    #[token("-%")]
+    WrappingSub,
+    #[token("*%")]
+    WrappingMul,
     #[token("+")]
     Plus,
     #[token("-")]

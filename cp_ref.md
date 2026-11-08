@@ -7665,4 +7665,314 @@ error[E0203]: use of moved value 'r1'
    = suggestion: avoid moving 'r1' if you need to use it later, or pass by borrow '&r1'
 ```
 
+---
+
+### 第十九章：原生系统级底层能力扩展与编译期元编程规范 (System-Level Extensions & Comptime Metaprogramming)
+
+为了支撑高性能系统软件（如 Bun.js 底层 I/O 内核、WebAssembly 运行环境、密码学与网络协议栈）从底层 Zig 向纯正 CP 语言的平滑迁移，CP 编译器引入了原生的系统级能力扩展与编译期元编程工具集。
+
+#### 19.1 原生内联汇编表达式 (`@asm(...)` / `asm volatile (...)`)
+
+在微架构调优、WebAssembly 运行时代数运算、原子同步等待（如 Futex `memory.atomic.wait32`）或特定 CPU 指令调用场景下，CP 原生支持内联汇编表达式：
+
+##### 1. 语法规范
+- **简易内联指令**：`@asm("nop")` 或 `@asm volatile ("nop")`；
+- **带输入/输出寄存器约束的汇编表达式**：
+  支持直接书写汇编字符串与操作数约束，使用 `: [ret] "=r" (-> Type)` 指定输出寄存器，使用 `: [param] "r" (val)` 指定输入寄存器及 clobber 列表：
+  ```typescript
+  // 1. 无操作数的基本汇编指令
+  @asm("nop");
+  asm volatile ("nop");
+
+  // 2. 携带寄存器绑定的内联汇编表达式
+  let result = asm volatile (
+      "mov %1, %0"
+      : [ret] "=r" (-> usize),
+      : [input] "r" (val)
+  );
+
+  // 3. WebAssembly 环境下的原子 Futex 等待（Futex.cp 场景）
+  let rc = asm volatile (
+      "local.get %[ptr]\nlocal.get %[expected]\nlocal.get %[timeout]\nmemory.atomic.wait32 0\nlocal.set %[ret]"
+      : [ret] "=r" (-> u32),
+      : [ptr] "r" (&ptr.raw),
+        [expected] "r" (@as(i32, @bitCast(expect))),
+        [timeout] "r" (to),
+  );
+  ```
+
+##### 2. 编译器代码生成映射
+- CP AST 中将该语法节点解析为 `Expr::InlineAsm { is_volatile: bool, content: String }`；
+- Codegen 层精确映射并发射 Zig 原生的 `asm volatile (...)` / `asm (...)` 语法。
+
+---
+
+#### 19.2 线程局部存储属性修饰符 (`@tls let` / `threadlocal let`)
+
+在高性能网络服务与 URL 路径解析等高并发场景下，避免高频内存分配的经典方案是使用线程局部静态缓冲区（Thread-Local Storage）。
+
+##### 1. 核心语法约束
+CP 语言**彻底废除了容易引起混乱的 `var` 关键字**，变量声明体系只有 `let`（默认可重新赋值/修改）与 `const`（不可变常量）。因此，TLS 变量严格遵循 CP 风格：
+- 推荐现代宏修饰符写法：`@tls let name: Type = init;`
+- 系统关键字兼容写法：`threadlocal let name: Type = init;`
+- **严禁使用 `var`**：若书写 `threadlocal var`，编译器在语法解析阶段将直接报错并提示修正为 `let`。
+
+```typescript
+// 顶层声明线程局部复用缓冲区（URLPath.cp 场景）
+@tls let temp_path_buf: [1024]u8 = undefined;
+threadlocal let big_temp_path_buf: [16384]u8 = undefined;
+
+pub fn format_path(input: []const u8): []const u8 {
+    // 线程独立访问，零数据竞争，零全局锁竞争开销
+    temp_path_buf[0] = '/';
+    return temp_path_buf[0..1];
+}
+```
+
+##### 2. 编译器代码生成映射
+CP Codegen 会将顶层 `@tls let` / `threadlocal let` 变量发射为 Zig 的 `threadlocal var name: Type = init;`，实现零开销线程私有全局变量。
+
+---
+
+#### 19.3 辨识联合（Tagged / Discriminated Union）
+
+Zig 中的 `union(enum)` 在 CP 语言中天然映射为 **携带载荷的强类型枚举（Payload Enums）**。
+
+##### 1. CP 纯正定义与映射契约
+在 CP 中，用户无需使用冷冰冰的 Zig 式宏定义，直接以现代面向对象联合枚举书写：
+```typescript
+// 带载荷的强类型辨识联合枚举（Header.cp:60 场景）
+pub enum Class {
+    forbidden,
+    host,
+    regular: u16,
+}
+
+// 复杂应用任务状态辨识联合
+pub enum Task {
+    Idle,
+    Text: string,
+    Move: [i32, i32],
+}
+```
+
+- **底层发射**：CP 编译器检测到枚举变体携带类型载荷（`tuple_type` 或匿名结构体字段）时，自动发射为 Zig 原生的：
+  ```zig
+  pub const Task = union(enum) {
+      Idle,
+      Text: []const u8,
+      Move: [2]i32,
+  };
+  ```
+
+##### 2. 模式匹配与变量捕获解构
+配合 CP 原生的 `match` 表达式，可以直接安全地解构辨识联合的变体载荷：
+```typescript
+let t = Task.Text("hello tagged union");
+
+match (t) {
+    Task.Idle => print("idle"),
+    Task.Text(s) => print("text payload: {}", s),
+    Task.Move(pos) => print("coords: x={}, y={}", pos[0], pos[1]),
+    _ => print("unknown"),
+}
+```
+
+---
+
+#### 19.4 编译期静态查找表与内置枚举映射体系 (`@map`, `.get()`, `.has()`, `.name`, `@refCount`)
+
+在处理网络协议、HTTP MIME 类型解析（如 `MimeType.cp`）、S3 ACL 权限列表（如 `acl.cp`）时，运行时的字符串哈希查找存在显著性能损耗。CP 引入了编译期静态查找表与枚举内置映射体系：
+
+##### 1. 编译期静态查找表 `@map`
+`@map` 在编译期（Comptime）将键值对映射生成完美最小哈希表（Perfect Hash Map），运行时享受 O(1) 甚至近似 O(0) 的内联静态查表性能：
+
+- **显式指定枚举类型（推荐）**：首参数声明目标类型，内部享受极简的点语法（`.variant`）：
+  ```typescript
+  enum ACL {
+      Private,
+      PublicRead,
+      PublicReadWrite,
+  }
+
+  // 显式声明类型，映射外部非标字符串至强类型枚举变体
+  const ACL_MAP = @map(ACL, {
+      "private": .Private,
+      "public-read": .PublicRead,
+      "public-read-write": .PublicReadWrite,
+  });
+  ```
+- **自动推导类型**：首个键值对作为锚点标明类型，后续自动享受极简点语法：
+  ```typescript
+  const MIME = @map({
+      "text/html": MimeType.html,
+      "application/json": .json,
+      "image/png": .png,
+  });
+  ```
+- **查询 API**：
+  - `MAP.get("key")`：返回可选类型 `?ValueType`（查无则为 `null`）；
+  - `MAP.has("key")`：返回布尔值 `bool`。
+
+##### 2. 内置枚举映射自洽体系（替代繁琐的 `fromName`）
+枚举类型本身是天然的“标识符名称 -> 枚举变体”静态映射表。CP 语言正式确立以 `.get()` / `.has()` / `.name` 统一的极简自洽体系：
+```typescript
+enum Method {
+    GET,
+    POST,
+    PUT,
+    DELETE,
+}
+
+// 1. 编译期自动生成的极速静态获取：代替冗长的 fromName/fromString
+let m = Method.get("GET");      // 返回 ?Method: Method.GET
+let invalid = Method.get("FOO");// 返回 null
+
+// 2. 存在性快速判定
+let exists = Method.has("POST");// 返回 true
+
+// 3. 极速获取枚举变体标识符名称（零开销字符串）
+let val = Method.POST;
+let str_name = val.name;         // 返回 "POST"
+```
+
+##### 3. 类顶层引用计数自动管理装饰器 (`@refCount`)
+在包装底层 C 资源、网络套接字或共享内存对象时，生命周期需要通过侵入式引用计数（Reference Counting）进行精准管理。CP 提供了 `@refCount` 类顶层装饰器（credentials.cp 等场景）：
+
+```typescript
+@refCount(cleanup) // 指定归零时触发的析构回调函数名（缺省默认为 deinit）
+class SharedResource {
+    pub ref_count: u32;
+    pub cleaned: bool;
+
+    pub fn init() {
+        this.ref_count = 1;
+        this.cleaned = false;
+    }
+
+    pub fn cleanup(mut _) {
+        this.cleaned = true;
+    }
+}
+
+pub fn main() {
+    let res = new SharedResource();
+    _ = res.ref();   // 引用计数递增：ref_count = 2
+    res.deref();     // 引用计数递减：ref_count = 1
+    res.deref();     // 归零时自动触发 cleanup()，执行安全释放
+}
+```
+- **编译器支持**：如果当前环境处于 Bun 宿主中，编译器自动桥接对接 `bun.ptr.RefCount`；如果处于独立 CP 环境，则自动生成原子递增/递减与条件析构的纯正原生方法。
+
+---
+
+#### 19.5 整型标量与枚举类型的显式双向智能转换 (`as EnumType` / `as i32`)
+
+在网络底层协议（如 Socket 类型 `ConnectingSocket.cp`、状态字 `SocketKind.cp`）中，底层网络系统调用往往返回原始整数（如 `c_int` / `i32`），需高频与高级强类型枚举相互转换。
+
+CP 编译器在语义分析器（`sema.rs`）与代码生成器（`codegen.rs`）中全面打通了整型标量与枚举类型的显式 `as` 转换：
+
+##### 1. 显式双向转换规范
+- **枚举转换为整型**：`kind as i32`、`kind as usize`，编译器自动发射底层原生 `@intFromEnum(kind)`；
+- **整型转换为枚举**：`raw_int as SocketKind`、`0 as SocketKind`，编译器自动发射底层原生 `@enumFromInt(raw_int)`。
+
+```typescript
+pub enum SocketKind {
+    Stream = 0,
+    Datagram = 1,
+    Raw = 2,
+}
+
+pub fn handle_socket(raw_fd_type: i32): void {
+    // 1. 整数智能转换为枚举类型
+    let kind = raw_fd_type as SocketKind;
+
+    // 2. 枚举类型智能转换为整型
+    let code = kind as i32;
+
+    // 3. 字面量直接强制转换
+    let default_kind = 0 as SocketKind;
+}
+```
+- **架构价值**：开发者再也无需在 CP 代码中嵌入 Zig 的 `@enumFromInt` / `@intFromEnum` 代码块，彻底消除了此类转换对 `zig {}` 内联块的依赖，保持代码库 100% 纯正优雅。
+
+---
+
+#### 19.6 函数风格类型构造转换 (`Type(val)`) 与通用 `.toString()`
+
+在系统级编程与高级业务逻辑中，除了通过 `as` 运算符进行显式类型强转外，CP 语言全面支持类似主流现代语言（TypeScript / Rust / Python）的**函数调用风格类型构造与转换**（Functional Casts / Constructors），并原生提供统一的 `.toString()` 方法。
+
+##### 1. 函数风格类型转换规范
+开发者可以直接将类型名称作为函数调用，将源值转换为目标类型：
+
+- **基础标量数值转换**：
+  - 整型：`i8(x)`, `i16(x)`, `i32(x)`, `i64(x)`, `i128(x)`, `isize(x)`
+  - 无符号整型：`u8(x)`, `u16(x)`, `u32(x)`, `u64(x)`, `u128(x)`, `usize(x)`
+  - 浮点型：`f32(x)`, `f64(x)`
+  - 布尔型：`bool(x)`（将数值非零转换为 `true`，`0` 转换为 `false`，布尔值保持原样）
+- **字符串转换与构造**：
+  - `string(x)` 与 `String(x)`：支持将标量数值、枚举或布尔值格式化为字符串。
+- **枚举构造转换**：
+  - `EnumType(int_val)`：将整型标量直接构造为枚举变体，与 `int_val as EnumType` 完全对等且更具面向对象构造质感。
+
+```typescript
+pub enum SocketKind {
+    Stream = 0,
+    Datagram = 1,
+    Raw = 2,
+}
+
+pub fn demo_casts() {
+    // 1. 枚举与整型函数构造互转
+    let kind = SocketKind(1);       // 整型构造为 SocketKind.Datagram
+    let code = i32(kind);           // 枚举变体转换回 i32: 1
+    let u_code = usize(kind);       // 枚举变体转换为 usize: 1
+
+    // 2. 标量类型之间函数构造
+    let pi = 3.14159;
+    let int_pi = i32(pi);           // 截断为 3
+    let f_val = f64(42);            // 提升为 42.0
+    let is_ok = bool(1);            // 转换为 true
+    let is_zero = bool(0);          // 转换为 false
+
+    // 3. 字符串转换
+    let s1 = string(12345);         // "12345"
+    let s2 = String(SocketKind.Raw);// "Raw"
+}
+```
+
+##### 2. 强类型安全防线：坚决摒弃模糊的 `num(x)` / `Number(x)`
+> [!IMPORTANT]
+> **拒绝 JS 弱类型泥潭**：JavaScript 中的 `Number()` / `num` 模糊了整数、无符号数、指针位宽与浮点数的物理边界，这在系统级高并发与高性能 Agent 通信场景中是致命隐患。
+> CP 语言坚决要求精确标量类型（Precise Scalar Types）。若在代码中调用 `num(x)` 或 `Number(x)`，编译器将在前端直接硬性拦截，并输出 AI 友好的自愈诊断：
+> ```text
+> error[E0204]: invalid cast: 'num()' is ambiguous in CP.
+>   --> src/demo.cp:12:15
+>    |
+> 12 |     let val = num(x);
+>    |               ^^^^^^
+>    = cause: CP requires explicit scalar types.
+>    = help: replace 'num()' with a precise scalar cast such as 'i32(x)', 'u32(x)', 'usize(x)', or 'f64(x)'.
+> ```
+
+##### 3. 内置 `.toString()` 统一方法
+所有基础标量类型与枚举类型均原生支持 `.toString()` 方法：
+
+- **枚举类型**：`val.toString()` 自动零开销展开为枚举标签标识符字符串（底层发射 Zig 原生 `@tagName(val)`，**零堆分配、零内存损耗**，等价于 `val.name`）；
+- **基础标量类型**：`num.toString()` 与 `flag.toString()` 自动格式化输出对应文本字符串；
+- **自定义类/结构体**：若类中定义了 `toString()` 方法则直接调用；若未定义则通过系统运行时反射进行安全格式化输出。
+
+```typescript
+let state = SocketKind.Datagram;
+let name_str = state.toString();   // "Datagram"（零堆分配，底层编译期静态展开）
+
+let count = 42;
+let count_str = count.toString();  // "42"
+
+let flag = true;
+let flag_str = flag.toString();    // "true"
+```
+
+---
+
 _本规范由 CP 架构设计委员会制定，作为全体编译器研发、运行时对接与开发者生态的唯一最高准则。_

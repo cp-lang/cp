@@ -462,6 +462,16 @@ pub enum Expr {
         block: BlockStmt,
     },
     Return(Span, Option<Box<Expr>>),
+    InlineAsm {
+        span: Span,
+        is_volatile: bool,
+        content: String,
+    },
+    ComptimeMap {
+        span: Span,
+        target_ty: Option<Type>,
+        entries: Vec<ObjectField>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -561,6 +571,9 @@ pub enum BinaryOp {
     LtEq,
     GtEq,
     Pipe,
+    WrappingAdd,
+    WrappingSub,
+    WrappingMul,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -679,6 +692,7 @@ pub enum Type {
     ManyRawPtr(Box<Type>),
     CPtr(Box<Type>),
     SentinelPtr(Box<Type>, String),
+    SentinelSlice(Box<Type>, String),
     CStr,
     CFn(Vec<Type>, Box<Type>),
     Auto,

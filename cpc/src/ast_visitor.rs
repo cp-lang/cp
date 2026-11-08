@@ -97,6 +97,11 @@ pub fn find_referenced_vars_in_expr(expr: &Expr, vars: &mut HashSet<String>) {
                     find_referenced_vars_in_expr(&a.val, vars);
                 }
             }
+            if let Some(args) = &e.tuple_args {
+                for a in args {
+                    find_referenced_vars_in_expr(a, vars);
+                }
+            }
         }
         Expr::Template(t) => {
             for e in &t.expressions {
@@ -148,6 +153,12 @@ pub fn find_referenced_vars_in_expr(expr: &Expr, vars: &mut HashSet<String>) {
             }
         }
         Expr::LabeledBlock { block, .. } => find_referenced_vars_in_block(block, vars),
+        Expr::InlineAsm { .. } => {}
+        Expr::ComptimeMap { entries, .. } => {
+            for f in entries {
+                find_referenced_vars_in_expr(&f.val, vars);
+            }
+        }
         _ => {}
     }
 }

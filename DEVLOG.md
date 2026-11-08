@@ -3860,7 +3860,58 @@ const PathnameScanner = @import("../url/url.zig").PathnameScanner;
 
 ---
 
-## 2026-11-08: 彻底废除 Zig 管道解包语法、确立海象指针解包唯一标准与多智能体 CAS 双向合并
+## 2026-11-09: CP 编译器原生系统级能力扩展与编译期元编程（支持 Bun.js 剩余 25 个模块纯正 CP 转换）
+
+### 1. 任务背景与核心需求
+Bun.js 1.3.14 的 CP 语言重构进入关键攻坚阶段：全仓库 206 个 `.cp` 模块中已有 181 个实现纯正 CP。为了使剩余 25 个包含 61 处 `zig {}` 内联代码块的文件完全迁移为 100% 纯正 CP 语法，针对 Bun AGY 提出的 5 项核心语法需求展开评估与针对性编译器扩展：
+
+1. **内联汇编表达式 (`@asm(...)` / `asm volatile (...)`)**：
+   - 适配 Futex 等待原子指令（`memory.atomic.wait32`）与硬件特殊指令调用；
+   - 支持简易 `@asm("nop")` 与带寄存器操作数绑定的 `asm volatile ("..." : [ret] "=r" (-> T) : [in] "r" (val))`。
+2. **线程局部存储属性修饰符 (`@tls let` / `threadlocal let`)**：
+   - 适配 URLPath 等高频解析场景的无锁全局复用缓冲区；
+   - 坚定维护 CP 语言语法纯洁性：彻底禁止 `var` 关键字，仅支持 `@tls let` 与 `threadlocal let`，若书写 `threadlocal var` 触发三段式智能自愈诊断。
+3. **辨识联合（Tagged / Discriminated Union）**：
+   - 求证确认 CP 现有的带载荷枚举（`enum Task { Idle, Text: string, Move: [i32, i32] }`）原生映射为 Zig 的 `pub const Task = union(enum) { ... }`；
+   - 攻坚修复 match arm pattern capture 在状态机/闭包环境下的局部作用域绑定（`block_locals`），消灭 `ctx.s` 误发射与 unused capture 告警。
+4. **编译期静态查找表与引用计数管理工具 (`@map`, `.get()`, `.has()`, `.name`, `@refCount`)**：
+   - 引入编译期静态查找表 `@map(Type, { ... })` 与 `@map({ ... })`，底层映射为完美最小哈希表 `std.StaticStringMap`；
+   - 建立内置枚举映射自洽体系：为每个枚举自动生成 `.get(str)`、`.has(str)` 与 `.name`，以统一优雅的 API 替代冗长繁琐的 `fromName`；
+   - 引入类顶层引用计数装饰器 `@refCount(deinit)`，自动桥接 Bun 的 `bun.ptr.RefCount` 并提供通用原生 `ref()` / `deref()` 备选实现。
+5. **整型标量与枚举类型的显式双向智能转换 (`as EnumType` / `as i32`)**：
+   - 在 `sema.rs` 与 `codegen.rs` 中全面打通整型与枚举类型的显式 `as` 双向转换，自动生成 `@enumFromInt` 与 `@intFromEnum`，彻底告别临时 Zig 内联块。
+
+---
+
+### 2. 核心架构设计与关键修复
+
+1. **内联汇编 AST 与解析器**：
+   - 在 `ast.rs` 中新增 `Expr::InlineAsm { is_volatile: bool, content: String, span: Span }`；
+   - 在 `parser.rs` 中扩展支持 `@asm` 宏调用与 `asm [volatile] (...)` 表达式，直接捕获多行汇编指令与操作数约束；
+   - 在 `codegen.rs` 中准确发射对应 Zig 内联汇编代码。
+2. **TLS 变量顶层声明与去重**：
+   - 在 `VarDecl` 中新增 `is_threadlocal: bool` 标识；
+   - 修复了 `codegen.rs` 顶层变量遍历去重漏洞，确保 `@tls let` 正确发射为 `threadlocal var name: Type = init;` 且不产生重复符号。
+3. **Match 分支解构绑定与状态机隔离 (`block_locals`)**：
+   - 在模式匹配分支生成（`generate_switch`）中，将捕获的变量名显式注册进 `self.block_locals`；
+   - 在 `generate_expr` 处理标识符时，优先检查 `self.block_locals`，阻止状态机代码生成器误将其前缀化为 `ctx.var`，彻底解决 `lambda_Context` 不存在字段的编译错误。
+4. **全局常量类型跨函数作用域持久化 (`global_var_types`)**：
+   - 针对 `@map` 定义在文件顶层但在函数/闭包内部调用的情况，在 `Codegen` 中引入 `global_var_types: HashMap<String, Type>`，跨越 `self.var_cp_types.clear()` 的函数边界，确保 `.get()` 与 `.has()` 在函数与 Lambda 内部正常推导和调用。
+5. **双向枚举转换全打通**：
+   - 在 `sema.rs` 类型检查中允许整型与枚举相互 `as` 转换；
+   - 在 `codegen.rs` 的 `Expr::Cast` 中自动识别源类型与目标类型：整型转枚举生成 `@enumFromInt`，枚举转整型生成 `@intFromEnum`。
+
+---
+
+### 3. 测试验证结果
+在 `cpc_dev` 中全量运行以下测试套件，均 100% 编译运行通过：
+- `cap/test/test_tls_global.cp`：PASS (1/1)
+- `cap/test/test_enum_cast_smart.cp`：PASS (2/2)
+- `cap/test/test_inline_asm.cp`：PASS (2/2)
+- `cap/test/test_comptime_map.cp`：PASS (2/2)
+- `cap/test/test_tagged_union_refcount.cp`：PASS (2/2)
+- `cargo test --manifest-path cpc_dev/Cargo.toml`：PASS (2/2)
+
 
 ### 1. 语法纯洁性与架构决策
 根据用户明确指导：“管道语法：if (opt) |*val| { val = 200; }，cp 没有这个语法”，CP 语言必须保持语法纯洁性，杜绝底层 Zig 风格语法对 CP 前端心智的侵入。
@@ -3887,6 +3938,54 @@ const PathnameScanner = @import("../url/url.zig").PathnameScanner;
 - **Release 构建与回归验证**：
   - 通过 `cargo build --release` 耗时 38.83s 编译深度优化正式版，发布至 `cap/bin/cpc`；
   - 验证 `test_ptr_capture.cp`、`test_switch_binding_pass.cp`、`test_pipe_capture_fail.cp`（JSON 诊断拦截）全量通过，单文件转译耗时低至 2ms。
+
+---
+
+## 2026-11-09: 函数风格类型构造转换 (`Type(val)`)、通用 `.toString()` 与强类型安全防线确立
+
+### 1. 任务背景与核心架构考量
+在系统级编程（尤其与底层 C/Zig 交互、网络协议字解包、高频数据转换）中，开发者除了使用 `val as Type` 进行强制类型转换外，高频渴望使用 TypeScript、Python、Rust 中的函数风格类型构造器：
+- `EnumType(int_val)`：直观构造枚举变体；
+- `i32(val)`、`u32(val)`、`usize(val)`、`f64(val)`、`bool(val)`：标量数值类型精准转换；
+- `string(val)` / `String(val)`：字符串构造；
+- `val.toString()`：所有基础标量与枚举通用字符串转换。
+
+**强类型安全决策（坚决驳回 `num` / `Number`）**：
+- JavaScript 弱类型动态特性引入的 `num(x)` / `Number(x)` 会彻底抹杀系统级编程中 `i32`、`u32`、`usize`、`f64` 的物理内存边界与性能优势；
+- 编译器在语义分析阶段（`sema.rs`）硬性拦截 `num(x)` / `Number(x)`，并给出精准三段式 AI 自愈建议，引导开发者使用 `i32(x)`、`u32(x)` 或 `f64(x)`。
+
+### 2. 编译器核心攻坚与实现原理
+
+1. **语义分析与类型推导 (`sema.rs`)**：
+   - 在 `analyze_expr` 中添加对 `num(...)` 与 `Number(...)` 调用的专属拦截规则，直接抛出带建议的 `SemaError::InvalidCast`；
+   - 在 `infer_type` 中，将 `i8`..`i128`、`u8`..`u128`、`isize`、`usize`、`f32`、`f64`、`bool` 等标量标识符作为函数调用时，推导出对应标量 `Type`；
+   - 将 `string(...)` / `String(...)` 作为函数调用时，推导出 `Type::String`；
+   - 识别自定义枚举标识符的单参调用为枚举构造，推导出对应枚举类型；
+   - 识别 `.toString()` 成员访问和方法调用，推导出 `Type::String`；
+   - 完善 `@map` 实例与枚举类型的 `.get()`、`.has()` 与 `.name` 类型推导。
+
+2. **代码生成层精准发射 (`codegen.rs`)**：
+   - **枚举零开销字符串化**：在 `generate_expr` 中处理 `toString` 成员调用时，判断对象类型若为枚举，直接发射 Zig 原生的 `@tagName(obj)`，**零堆分配、零内存损耗**；若为普通标量或对象则调用 `cp_string_from(obj)`；
+   - **布尔类型函数转换**：针对 Zig 中 `@as(bool, 1)` 无法直接编译的问题，发射编译期保护表达式 `(if (comptime @typeInfo(@TypeOf({0})) == .bool) {0} else ({0} != 0))`，无缝支持标量到布尔值的正确语义转换；
+   - **标量函数风格强转**：在 `generate_expr` 中识别标量类型函数调用 `Type(val)`，自动映射生成 `@as(TargetZigType, val)`；
+   - **枚举函数风格构造**：识别 `EnumType(val)`，自动映射生成 `@enumFromInt(val)`；
+   - **特征扫描与依赖注入**：在 `scan_expr` 中检测到 `string()` 或 `.toString()` 时自动标记 `needs_fmt = true` 与 `needs_string_helpers = true`，确保 Zig 运行时格式化函数按需生成。
+
+### 3. 测试验证与全量回归成果
+1. **针对性综合测试 (`cap/test/test_type_conv_functional.cp`)**：
+   - ① 枚举与整型函数风格双向构造：`SocketKind(1)` -> `.Datagram`, `i32(kind)` -> `1`, `usize(kind)` -> `1`；
+   - ② 标量数值函数风格转换：`i32(pi)` -> `3`, `f64(42)` -> `42.0`, `bool(1)` -> `true`, `bool(0)` -> `false`；
+   - ③ 字符串转换：`string(12345)` -> `"12345"`, `String(SocketKind.Raw)` -> `"Raw"`；
+   - ④ 通用 `.toString()`：`kind.toString()` -> `"Datagram"`, `count.toString()` -> `"42"`, `flag.toString()` -> `"true"`；
+   - 测试通过率 100% (4/4 passed)。
+2. **全量 Bun 迁移新特性零回归验证**：
+   - `test_tls_global.cp` (TLS 线程局部存储)：PASS (1/1)；
+   - `test_enum_cast_smart.cp` (枚举智能双向 as 强转)：PASS (2/2)；
+   - `test_inline_asm.cp` (内联汇编表达式)：PASS (2/2)；
+   - `test_comptime_map.cp` (@map 与枚举 .get/.has/.name)：PASS (2/2)；
+   - `test_tagged_union_refcount.cp` (辨识联合与 @refCount)：PASS (2/2)；
+   - `cargo test --manifest-path cpc_dev/Cargo.toml`：PASS (2/2)。
+
 
 
 

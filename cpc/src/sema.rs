@@ -2873,6 +2873,12 @@ impl Analyzer {
             }
             Expr::Call(call) | Expr::OptCall(call) => {
                 if let Expr::Ident(fid) = &*call.callee {
+                    if fid.sym == "num" || fid.sym == "Number" {
+                        return Err(SemaError::InvalidCast(
+                            "CP does not support 'num()' or 'Number()'. CP is strongly typed: use specific numeric types like i32(x), u32(x), usize(x), or f64(x).".to_string(),
+                            call.span,
+                        ));
+                    }
                     if let Some(SymbolKind::Func {
                         is_unsafe: true, ..
                     }) = self.resolve(&fid.sym)
@@ -4785,6 +4791,12 @@ impl Analyzer {
             }
             Expr::Call(call) => {
                 if let Expr::Ident(fid) = &*call.callee {
+                    if fid.sym == "num" || fid.sym == "Number" {
+                        return Err(SemaError::InvalidCast(
+                            "CP does not support 'num()' or 'Number()'. CP is strongly typed: use specific numeric types like i32(x), u32(x), usize(x), or f64(x).".to_string(),
+                            call.span,
+                        ));
+                    }
                     if fid.sym == "join" || fid.sym == "@task_join" {
                         let elem_tys = vec![Type::Any; call.args.len()];
                         return Ok(Type::Tuple(elem_tys));
@@ -4804,8 +4816,30 @@ impl Analyzer {
                     if let Some(SymbolKind::Enum(_)) = self.resolve(&fid.sym) {
                         return Ok(Type::Ref(fid.clone()));
                     }
+                    match fid.sym.as_str() {
+                        "i8" => return Ok(Type::I8),
+                        "u8" => return Ok(Type::U8),
+                        "i16" => return Ok(Type::I16),
+                        "u16" => return Ok(Type::U16),
+                        "i32" => return Ok(Type::I32),
+                        "u32" => return Ok(Type::U32),
+                        "i64" => return Ok(Type::I64),
+                        "u64" => return Ok(Type::U64),
+                        "i128" => return Ok(Type::I128),
+                        "u128" => return Ok(Type::U128),
+                        "isize" => return Ok(Type::ISize),
+                        "usize" => return Ok(Type::USize),
+                        "f32" => return Ok(Type::F32),
+                        "f64" => return Ok(Type::F64),
+                        "bool" => return Ok(Type::Bool),
+                        "string" | "String" => return Ok(Type::String),
+                        _ => {}
+                    }
                 }
                 if let Expr::Member(mem) = &*call.callee {
+                    if mem.prop.sym == "toString" && call.args.is_empty() {
+                        return Ok(Type::String);
+                    }
                     if let Expr::Ident(oid) = &*mem.obj {
                         if (oid.sym == "string" || oid.sym == "String") && mem.prop.sym == "from" {
                             return Ok(Type::String);
@@ -4819,8 +4853,11 @@ impl Analyzer {
                             }
                         }
                         if let Some(SymbolKind::Enum(_)) = self.resolve(&oid.sym) {
-                            if mem.prop.sym == "fromName" || mem.prop.sym == "fromString" {
+                            if mem.prop.sym == "fromName" || mem.prop.sym == "fromString" || mem.prop.sym == "get" {
                                 return Ok(Type::Optional(Box::new(Type::Ref(oid.clone()))));
+                            }
+                            if mem.prop.sym == "has" {
+                                return Ok(Type::Bool);
                             }
                         }
                         if oid.sym == "spawn" && mem.prop.sym == "cpu" {
@@ -5146,6 +5183,9 @@ impl Analyzer {
                 Ok(Type::Any)
             }
             Expr::Member(mem) => {
+                if mem.prop.sym == "toString" {
+                    return Ok(Type::Fn(vec![], Box::new(Type::String)));
+                }
                 if let Expr::Ident(id) = &*mem.obj {
                     if let Some(SymbolKind::Enum(_)) = self.resolve(&id.sym) {
                         return Ok(Type::Ref(id.clone()));

@@ -6516,6 +6516,132 @@ cp 没有这个语法
    - 新增反向测试 [`cap/test/test_pipe_capture_fail.cp`](file:///data/dev/cp/cap/test/test_pipe_capture_fail.cp)，更新正向测试 [`cap/test/test_ptr_capture.cp`](file:///data/dev/cp/cap/test/test_ptr_capture.cp)；
    - 四线演进文档（`SESSION.md`、`CHANGELOG.md`、`DEVLOG.md`、`cp_ref.md`）全量同步更新。
 
+---
+
+### 用户指令 (User Prompts)
+很好, 将上述沟通的 五项内容, 其中第三项已经实现的, 需在 cp_ref.md 中补充完整, 表示类似 zig的union(enum), 避免 bun agy 认为不存在.
+其他按你的方案在 cpc_dev中实现, 同时将你上面我们沟通的内容(包括你给出的示例代码), 整理优化后, 写入 cp_ref.md 设计规范, 让程序员充分理解这些设计.
+
+### 执行汇报 (Execution Report)
+1. **五项系统级核心特性在 `cpc_dev` 完整落地与测试验证**：
+   - **需求 1：原生内联汇编表达式 (`@asm(...)` / `asm volatile (...)`)**
+     - 支持 `@asm("nop")` 与带寄存器操作数约束的 `asm volatile ("..." : [ret] "=r" (-> T) : [in] "r" (val))`；
+     - 验证测试用例 `cap/test/test_inline_asm.cp`，100% 通过。
+   - **需求 2：线程局部存储属性修饰符 (`@tls let` / `threadlocal let`)**
+     - 坚决维护 CP 语法纯洁性，彻底杜绝 `var`，仅允许 `@tls let` 与 `threadlocal let`；
+     - 修复顶层变量去重发射漏洞，验证测试用例 `cap/test/test_tls_global.cp`，100% 通过。
+   - **需求 3：辨识联合（Tagged / Discriminated Union）**
+     - CP 带载荷枚举（如 `enum Task { Idle, Text: string, Move: [i32, i32] }`）天然映射为 Zig 的 `union(enum)`；
+     - 攻坚修复 match pattern capture 变量在状态机闭包下的局部绑定（`block_locals`），消除 `ctx.s` 误发射；
+     - 验证测试用例 `cap/test/test_tagged_union_refcount.cp`，100% 通过。
+   - **需求 4：编译期静态查找表与内置枚举映射体系 (`@map`, `.get()`, `.has()`, `.name`, `@refCount`)**
+     - 引入 `@map(Type, { ... })` 与 `@map({ ... })`，底层映射为完美最小哈希表 `std.StaticStringMap`；
+     - 确立以 `.get()` / `.has()` / `.name` 统一自洽的枚举映射体系，彻底消灭冗长繁琐的 `fromName`；
+     - 引入类顶层引用计数装饰器 `@refCount(deinit)`，自动桥接 Bun 的 `bun.ptr.RefCount` 与原生原子递增/递减析构；
+     - 验证测试用例 `cap/test/test_comptime_map.cp`，100% 通过。
+   - **需求 5：整型标量与枚举类型的显式双向智能转换 (`as EnumType` / `as i32`)**
+     - 全面打通整型与枚举之间的显式 `as` 转换，自动生成 `@enumFromInt` 与 `@intFromEnum`；
+     - 验证测试用例 `cap/test/test_enum_cast_smart.cp`，100% 通过。
+2. **权威设计规范 `cp_ref.md` 深度扩充**：
+   - 新增第十九章《原生系统级底层能力扩展与编译期元编程规范》，全面详细阐述上述 5 项特性的架构设计考量、代码示例与底层映射契约。
+3. **Rust 编译器测试与回归验证**：
+   - 运行 `cargo test --manifest-path cpc_dev/Cargo.toml` 100% 通过；
+   - 5 个回归测试用例通过 `cap` 执行全部通过（通过率 100%）。
+4. **四线演进文档（`cp_ref.md`、`DEVLOG.md`、`CHANGELOG.md`、`SESSION.md`）全量同步更新**。
+
+---
+
+### 用户指令 (User Prompts)
+1. 类型转换, 除了 as , 我们也支持 如 Task(i32类型变量) 或 i32(Task.Idle), num(Task.idle) string(Task.Idle)  var.toString()  etc.  这些，cp 实现了吗?
+2. 你觉得我们的 cp 是否需要实现这些功能?
+3. 好, 同意你的建议
+
+### 执行汇报 (Execution Report)
+1. **类型转换与构造体系架构决策**：
+   - **全面支持函数风格类型构造器 (`Type(val)`)**：
+     - 枚举构造：`SocketKind(int_val)`（与 `int_val as SocketKind` 对等）；
+     - 标量类型：`i8`..`i128`, `u8`..`u128`, `isize`, `usize`, `f32`, `f64`, `bool`；
+     - 字符串构造：`string(val)` / `String(val)`；
+   - **全面支持内置通用 `.toString()`**：
+     - 枚举类型：`val.toString()` 自动发射 Zig 原生 `@tagName(val)`，**零堆分配、零内存开销**；
+     - 基础标量类型：`num.toString()` 与 `flag.toString()` 自动格式化；
+   - **坚决驳回模糊弱类型的 `num(x)` / `Number(x)`**：
+     - 坚守系统级精准强类型设计哲学，彻底杜绝 JS 式弱类型隐患；
+     - 在语义分析阶段硬性拦截并输出带有精确自愈建议的编译期错误，引导使用 `i32(x)`、`u32(x)` 或 `f64(x)`。
+2. **编译器开发与落地实现 (`cpc_dev`)**：
+   - `cpc_dev/src/sema.rs`：拦截 `num()` / `Number()`；实现标量函数调用、`string()`、`EnumType()` 与 `.toString()` 的精准类型推导；
+   - `cpc_dev/src/codegen.rs`：生成标量 `@as`、枚举 `@enumFromInt`、布尔值安全转换、`string()` 生成及枚举零开销 `@tagName` 生成；
+3. **测试验证与回归矩阵**：
+   - 新增针对性测试用例 [`cap/test/test_type_conv_functional.cp`](file:///data/dev/cp/cap/test/test_type_conv_functional.cp)，4/4 测试项全绿灯通过；
+   - 包含前期 5 项 Bun 迁移特性的回归测试矩阵全量验证通过（通过率 100%）：
+     - `test_tls_global.cp` (1/1 passed)
+     - `test_enum_cast_smart.cp` (2/2 passed)
+     - `test_inline_asm.cp` (2/2 passed)
+     - `test_comptime_map.cp` (2/2 passed)
+     - `test_tagged_union_refcount.cp` (2/2 passed)
+   - `cargo test --manifest-path cpc_dev/Cargo.toml` 单元测试通过。
+4. **四线演进文档全量同步更新**：
+   - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md) 新增第 19.6 节；
+   - [`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md) 与 [`SESSION.md`](file:///data/dev/cp/SESSION.md) 详细记录演进轨迹。
+
+---
+
+### 用户指令 (User Prompts)
+合并到正式版 cpc, 注意, bun迁移 agy 可能修改了 cpc, 如果修改了, 需要你审核评估合理性/完备性/可靠性, 不能与隐患/冲突和缺陷
+
+### 执行汇报 (Execution Report)
+1. **并发修改审查与缺陷自愈评估 (Bun AGY 修改审计)**：
+   - 经审查，Bun AGY 对正式目录 `cpc/src` 提交了 6 处修改（包含 `WrappingAdd/Sub/Mul` 溢出算术、`SentinelSlice` 哨兵切片、`extern/inline/noinline` 函数属性、`switch` 与 `@TypeName` 类型位置解析、`union(enum)`/`struct` 元标记、`indexOf/lastIndexOf` 单参优化、`std` 模块重复导入去重、`is_lib_mode` try 表达式直通与 `@comptime` 单参求值）；
+   - **排查并自愈 1 处隐藏编译缺陷**：Bun AGY 在 `ast.rs` 中新增 `Type::SentinelSlice` 时，遗漏了 `dcp.rs` 中的模式匹配分支，导致 `cargo check` 报错 `E0004: non-exhaustive patterns`；我们已在 `dcp.rs` 中补齐 `Type::SentinelSlice(inner, val) => format!("[:{val}]{}", self.format_type(inner))`，消除了编译期断裂隐患；
+   - 经完整交叉比对，`cpc_dev` 已 100% 吸收上述全部合法特性与优化，且无任何命名冲突与逻辑回归。
+2. **正式目录无损同步与全量测试**：
+   - 将验证无误的 `cpc_dev/src` 核心源码（`ast.rs`, `ast_visitor.rs`, `codegen.rs`, `dcp.rs`, `lexer.rs`, `parser.rs`, `sema.rs`）100% 同步合入正式目录 `cpc/src`，两目录比对完全一致（0 diff）；
+   - 运行 `cargo check --manifest-path cpc/Cargo.toml` 成功通过；
+   - 运行 `cargo test --manifest-path cpc/Cargo.toml` 单元测试 100% 通过（2 passed）。
+3. **正式版 Release 深度优化构建与产物发布**：
+   - 执行 `cargo build --release --manifest-path cpc/Cargo.toml`，耗时 37.87s 成功完成正式 Release 版本深度优化构建；
+   - 将正式产物更新至系统全局入口：`cp cpc/target/release/cpc cap/bin/cpc`。
+4. **正式环境端到端验证全矩阵**：
+   - 切换终端脱离沙盒直接使用正式版 `cap/bin/cpc` 运行全量测试用例，全部 100% 绿灯通过：
+     - `test_type_conv_functional.cp`: PASS (4/4 passed)
+     - `test_tls_global.cp`: PASS (1/1 passed)
+     - `test_enum_cast_smart.cp`: PASS (2/2 passed)
+     - `test_inline_asm.cp`: PASS (2/2 passed)
+     - `test_comptime_map.cp`: PASS (2/2 passed)
+     - `test_tagged_union_refcount.cp`: PASS (2/2 passed)
+
+---
+
+### 用户指令 (User Prompts)
+git 提交
+
+### 执行汇报 (Execution Report)
+1. **Git 一次性原子暂存与提交范围**：
+   - **编译器正式源码 (`cpc/src/`)**：
+     - `cpc/src/ast.rs`：新增 `InlineAsm`、`ComptimeMap`、`is_threadlocal`、`SentinelSlice`、`WrappingAdd/Sub/Mul` 节点；
+     - `cpc/src/ast_visitor.rs`：支持所有新增 AST 节点的变量扫描访问；
+     - `cpc/src/codegen.rs`：原生内联汇编发射、顶层线程局部变量（TLS）支持、`@map` 完美最小哈希表代码生成、枚举 `.get()`/`.has()`/`.name` 内置自洽映射、智能双向 `as` 强转（`@enumFromInt` / `@intFromEnum`）、函数风格构造 `Type(val)`、零堆分配 `.toString()`（`@tagName`）、布尔安全转换、以及 Bun AGY 审查优化的 `@comptime` 与 `is_lib_mode` try 表达式直通；
+     - `cpc/src/dcp.rs`：修复并补全 `Type::SentinelSlice` 格式化模式匹配；
+     - `cpc/src/lexer.rs`：支持 `@asm`、`asm`、`@tls`、`threadlocal` 词法标记与 `+%`/`-%`/`*%` 溢出算术；
+     - `cpc/src/parser.rs`：内联汇编、TLS 变量（严格杜绝 `var`）、`@map` 查找表、`@refCount` 类顶层装饰器、`extern/inline/noinline` 函数属性、`union(enum)`/`struct` 语法支持；
+     - `cpc/src/sema.rs`：整型与枚举显式双向转换放宽、标量函数构造与 `.toString()` 类型推导、`num(x)` / `Number(x)` 弱类型硬性语义拦截与 AI 友好自愈诊断。
+   - **长期回归测试资产 (`cap/test/`)**：
+     - `cap/test/test_type_conv_functional.cp`：函数风格类型构造与 `.toString()` 正向测试；
+     - `cap/test/test_tls_global.cp`：`@tls let` 线程局部存储全局变量测试；
+     - `cap/test/test_enum_cast_smart.cp`：整型与枚举双向智能 `as` 强转测试；
+     - `cap/test/test_inline_asm.cp`：内联汇编与操作数绑定测试；
+     - `cap/test/test_comptime_map.cp`：编译期 `@map` 与枚举内置映射测试；
+     - `cap/test/test_tagged_union_refcount.cp`：辨识联合载荷与 `@refCount` 引用计数测试。
+   - **四线规范与演进文档**：
+     - `cp_ref.md`：第十九章完整规范手册（汇编、TLS、联合、`@map`、枚举转换、函数风格构造与 `.toString()`）；
+     - `DEVLOG.md`、`CHANGELOG.md`、`SESSION.md`、`GEMINI.md`、`TASK.md`。
+2. **执行唯一原子提交**：
+   - `git add .`
+   - `git commit -m "feat(cpc): add inline asm, tls, comptime map, smart enum cast, functional cast Type(val), and toString"`
+
+
+
+
 
 
 

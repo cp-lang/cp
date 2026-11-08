@@ -2291,6 +2291,43 @@
 
 ---
 
+## 2026-11-09 (原生系统级能力扩展：内联汇编、TLS、辨识联合、ComptimeMap 与枚举智能转换)
+
+### 修改文件 (Modified)
+- [`cpc_dev/src/ast.rs`](file:///data/dev/cp/cpc_dev/src/ast.rs):
+  - 在 `VarDecl` 中新增 `is_threadlocal: bool` 标识；
+  - 在 `Expr` 中新增 `InlineAsm` 与 `ComptimeMap` 表达式变体。
+- [`cpc_dev/src/lexer.rs`](file:///data/dev/cp/cpc_dev/src/lexer.rs):
+  - 支持 `asm`、`@asm`、`threadlocal` 与 `@tls` 标识符及关键字识别。
+- [`cpc_dev/src/parser.rs`](file:///data/dev/cp/cpc_dev/src/parser.rs):
+  - 新增内联汇编表达式解析：支持 `@asm(...)` 与 `asm [volatile] (...)` 表达式以及操作数约束；
+  - 新增线程局部存储变量解析：支持 `@tls let` 与 `threadlocal let`；若误用 `var` 抛出友好自愈建议；
+  - 新增编译期静态查找表解析：支持 `@map(Type, { ... })` 与 `@map({ ... })`；
+  - 新增类顶层 `@refCount(deinit)` 装饰器解析。
+- [`cpc_dev/src/sema.rs`](file:///data/dev/cp/cpc_dev/src/sema.rs):
+  - 放宽类型转换检查：允许整型标量与枚举类型之间的显式 `as` 双向转换；
+  - 为 `@map` 静态映射注入 `.get()`（返回 `?ValueType`）与 `.has()`（返回 `bool`）方法类型推导；
+  - 为所有枚举类型自动注册内置 `.get()`、`.has()` 与 `.name` 方法语义。
+- [`cpc_dev/src/codegen.rs`](file:///data/dev/cp/cpc_dev/src/codegen.rs):
+  - 发射 Zig 原生内联汇编 `asm volatile (...)` / `asm (...)`；
+  - 发射 Zig 顶层 `threadlocal var name: Type = init;`，修复顶层变量去重缺陷；
+  - 发射 `std.StaticStringMap` 静态查找表定义与查找调用；
+  - 为枚举生成统一自洽的 `.get()`、`.has()`、`.name` 原生实现；
+  - 增强 `Expr::Cast`：整型转枚举生成 `@enumFromInt`，枚举转整型生成 `@intFromEnum`；
+  - 完善 `@refCount(deinit)`：在 Bun 环境对接 `bun.ptr.RefCount`，在独立环境生成带原子计数与条件析构的 `ref()` / `deref()` 方法；
+  - 修复 `generate_switch` 中模式匹配变量在状态机闭包环境下的 `block_locals` 作用域绑定问题。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 新增第十九章《原生系统级底层能力扩展与编译期元编程规范》，全面详细说明 5 项新语法的设计理念、规范与代码示例。
+
+### 新增测试用例 (Added)
+- [`cap/test/test_tls_global.cp`](file:///data/dev/cp/cap/test/test_tls_global.cp): 验证 `@tls let` 与 `threadlocal let` 全局线程局部变量读写与隔离。
+- [`cap/test/test_enum_cast_smart.cp`](file:///data/dev/cp/cap/test/test_enum_cast_smart.cp): 验证整型与枚举类型的显式双向智能转换（`kind as i32` 与 `val as SocketKind`）。
+- [`cap/test/test_inline_asm.cp`](file:///data/dev/cp/cap/test/test_inline_asm.cp): 验证 `@asm` 与带操作数绑定的 `asm volatile (...)` 原生内联汇编执行。
+- [`cap/test/test_comptime_map.cp`](file:///data/dev/cp/cap/test/test_comptime_map.cp): 验证编译期静态查找表 `@map` 与枚举内置 `.get()` / `.has()` / `.name` 自洽映射体系。
+- [`cap/test/test_tagged_union_refcount.cp`](file:///data/dev/cp/cap/test/test_tagged_union_refcount.cp): 验证带载荷辨识联合枚举（Tagged Union）匹配解构与 `@refCount` 引用计数自动管理。
+
+---
+
 ## 2026-11-08 (彻底废除 Zig 管道解包语法、确立海象指针解包唯一标准与多智能体 CAS 双向合并)
 
 ### 修改文件 (Modified)
@@ -2317,6 +2354,30 @@
 
 ### 新增测试用例 (Added)
 - [`cap/test/test_pipe_capture_fail.cp`](file:///data/dev/cp/cap/test/test_pipe_capture_fail.cp): 反向拦截测试，验证误用管道语法 `if (opt) |*val|` 被前端精确识别为 `E0101` 并输出包含海象解包修正建议的标准 JSON 诊断。
+
+---
+
+## 2026-11-09 (函数风格类型构造 Type(val)、通用 .toString() 与弱类型拦截)
+
+### 修改文件 (Modified - cpc_dev)
+- [`cpc_dev/src/sema.rs`](file:///data/dev/cp/cpc_dev/src/sema.rs):
+  - 在 `analyze_expr` 中添加对 `num(...)` 与 `Number(...)` 的语义硬性拦截，触发带精确修正建议的 `SemaError::InvalidCast`；
+  - 在 `infer_type` 中，将标量数值类型标识符（`i8`..`i128`, `u8`..`u128`, `isize`, `usize`, `f32`, `f64`, `bool`）调用推导为对应标量类型；
+  - 将 `string(...)` / `String(...)` 调用推导为 `Type::String`；
+  - 将枚举标识符单参调用推导为对应枚举类型；
+  - 将 `.toString()` 属性访问和调用统一推导为 `Type::String`。
+- [`cpc_dev/src/codegen.rs`](file:///data/dev/cp/cpc_dev/src/codegen.rs):
+  - 在 `generate_expr` 中实现标量函数风格类型强转 `Type(val)` 映射至 Zig `@as(TargetZigType, val)`；
+  - 实现枚举函数风格构造 `EnumType(val)` 映射至 Zig `@enumFromInt(val)`；
+  - 实现布尔函数风格转换：通过 Zig 编译期表达式安全处理数字到布尔值的非零判定；
+  - 实现 `string(val)` 与 `String(val)` 生成，按需触发 `needs_fmt` 与 `needs_string_helpers`；
+  - 优化 `.toString()` 代码生成：当源类型为枚举时直接发射 Zig 原生 `@tagName(obj)` 实现零堆分配零开销转换；当源类型为标量或对象时调用 `cp_string_from(obj)`。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 新增第 19.6 节《函数风格类型构造转换 (`Type(val)`) 与通用 `.toString()`》，明确函数风格构造规范、禁止模糊 `num` 的强类型安全设计，以及零开销 `.toString()` 规范。
+
+### 新增测试用例 (Added)
+- [`cap/test/test_type_conv_functional.cp`](file:///data/dev/cp/cap/test/test_type_conv_functional.cp): 全面覆盖枚举与整型函数风格双向构造、标量数值类型转换、布尔转换、`string(val)` / `String(val)` 以及枚举与标量的 `.toString()` 方法调用（4/4 测试项全绿灯通过）。
+
 
 
 

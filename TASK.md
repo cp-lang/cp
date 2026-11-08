@@ -3907,10 +3907,10 @@ Bun AGY 在检查转换好的 .cp 文件时，请优先使用 --json 参数：
 1. 控制流括号铁律：if (...)、while (...)、for (...) 必须包裹圆括号，杜绝与结构体实例化大括号产生歧义；
 2. 解包语法铁律（全面废除 Zig 管道语法）：
    • CP 统一采用海象解包：
-     - 常规只读解包：if (val := opt) { ... } 或 while (val := opt) { ... }
-     - 可变指针就地解包：if (*val := opt) { val = 200; } 或 while (*val := opt) { val = 200; }
-     - （状态机内部已透明支持块级局部变量解引用，可直接就地赋值修改）；
-   • 严禁使用 Zig 风格管道语法：CP 不支持 if (opt) |*val| 或 if (opt) |val|。若误写管道语法，cpc 编译器将在解析期直接报 E0101 语法错误，并提示改用海象解包！
+   - 常规只读解包：if (val := opt) { ... } 或 while (val := opt) { ... }
+   - 可变指针就地解包：if (*val := opt) { val = 200; } 或 while (*val := opt) { val = 200; }
+   - （状态机内部已透明支持块级局部变量解引用，可直接就地赋值修改）；
+     • 严禁使用 Zig 风格管道语法：CP 不支持 if (opt) |*val| 或 if (opt) |val|。若误写管道语法，cpc 编译器将在解析期直接报 E0101 语法错误，并提示改用海象解包！
 3. 结构体展开更新（Spread）：
    • 支持 TS/Zig 风格的展开构造：let next_state = State { ...prev_state, status: 1 };；
 4. 编译测试标准命令：
@@ -3919,6 +3919,7 @@ Bun AGY 在检查转换好的 .cp 文件时，请优先使用 --json 参数：
 ──────
 祝 Bun.js 核心库迁移极速、安全、顺畅！
 
-topt99755@gmail.com L
-walteryu99@gmail.com v
-walteryu66@gmail.com
+topt99755@gmail.com 138h 30m
+walteryu99@gmail.com 3h 49m
+walteryu66@gmail.com 2h 31m
+walteryu33@gmail.com 3h 9m
