@@ -6639,6 +6639,21 @@ git 提交
    - `git add .`
    - `git commit -m "feat(cpc): add inline asm, tls, comptime map, smart enum cast, functional cast Type(val), and toString"`
 
+---
+
+### 用户指令 (User Prompts)
+将你本次完成的5项功能以及后续补充的类型转换, 写一份 说明, 我发给 bun 迁移agy, 按你实现的新版本, 进行zig 向cp 迁移
+
+### 执行汇报 (Execution Report)
+1. **编写并更新专用迁移指南 (`BUN_AGY_MIGRATION_GUIDE.md`)**：
+   - 新增第五章《最新升级：系统级底层特性与类型转换规范（消除剩余 25 个模块中的 `zig {}` 块）》；
+   - 包含：内联汇编 `@asm`、`@tls let`、辨识联合 `enum Class { ... }`、编译期 `@map` / 枚举 `.get()`/`.has()`/`.name`、`@refCount` 引用计数、整型与枚举显式智能 `as` 转换、函数风格构造 `Type(val)`、零堆分配 `.toString()`，以及 `num(x)` 弱类型红线警示；
+   - 附带 Zig 与 CP 代码对比、参数约定与核心使用注意事项。
+2. **Git 一次性暂存与提交**：
+   - `git add BUN_AGY_MIGRATION_GUIDE.md SESSION.md`
+   - `git commit -m "docs: add section 5 to BUN_AGY_MIGRATION_GUIDE for bun agy migration"`
+
+
 
 
 
