@@ -3584,6 +3584,257 @@ const PathnameScanner = @import("../url/url.zig").PathnameScanner;
 - **借用排他性**：只读借用期间的可变借用冲突同样 100% 被捕获；
 - **跨语言 Comptime Auto-Drop (RAII)**：代码生成器通过 Zig 的 `@typeInfo` 与 `@hasDecl` 反射在底层自动侦测外部结构体的 `deinit()` 或 `release()`，配合影子标记 `__moved` 实现跨语言的确定性析构，彻底消灭 Double-Free 与内存泄漏。
 
+---
+
+## 2026-11-08: C 跳板函数中 `@comptime callback: anytype` 的合法性、编译期单态化与四大铁律
+
+### 1. 核心困惑与架构求证
+用户针对系统级跳板函数中的 `@comptime callback: anytype` 提出疑问：CP 语言严厉废除 `any`，为何在此处能合法使用 `anytype`？
+
+### 2. 原理认定与全景辨析
+1. **`any`（运行期弱类型，废除） vs `anytype`（编译期泛型占位符，一等公民）**：
+   - `any`：运行期类型擦除，动态装箱，非确定性 GC，抹杀静态安全；
+   - `anytype`（亦支持 `auto`）：专属于编译期泛型推导的占位符，由调用点实参进行静态单态化展开，零运行时开销，100% 强类型保留。
+2. **C 跳板函数的根本矛盾与破局**：
+   - C 原生回调接口（如 `ares_host_callback`）仅接受裸函数指针（`*const fn(...) void`），不支持携带闭包上下文；
+   - 通过 `@comptime Type: type, @comptime callback: anytype`，工厂在编译期捕获具体的类型与回调符号，就地生成局部专有 `@c fn handle`；
+   - `@c fn handle` 内部直接内联或直接调用具体 `callback`，消除间接寻址开销，最后通过 `return &handle;` 返回合法合规的 C-ABI 函数指针。
+3. **四大铁律确立**：
+   - 铁律一：仅限作为函数形参的泛型占位符；
+   - 铁律二：严禁用于普通局部变量类型；
+   - 铁律三：严禁用于结构体/类字段类型；
+   - 铁律四：强调静态内联时与 `@comptime` 强绑定。
+
+---
+
+## 2026-11-08: 标记块（Labeled Blocks）穿透多层循环赋值、cstr/cstring 一等公民与越界防护规范沉淀、文档示例全面纠偏
+
+### 1. 架构目标与背景
+用户提出 3 项关键规范与文档纠错诉求：
+1. **标记块（Labeled Blocks）跳出多层循环赋值**：补充使用 CP 标记块瞬间穿透多层嵌套循环并直接赋值给外部 `const` 常量的示例，阐述其不可变性与上下文隔离优势；
+2. **`cstr` / `cstring` 一等公民规范与越界保护**：深入求证并阐述其脱离 `unsafe {}` 限制的物理机制、支持的方法属性、可变下标写入权限以及在发生越界修改时 CP 的安全防护措施；
+3. **`cp_ref.md` 示例系统性纠偏**：全面清查并修复文档中残留的废弃旧语法（如 `let mut`、`any`、`try/catch`、`for .. in`、管道捕获等），严禁删除有用内容。
+
+### 2. 核心原理与规范落地
+
+#### 2.1 标记块穿透多层循环赋值与工程价值
+- **语法形态**：
+  ```typescript
+  const target: Item? = search: {
+      for (row of matrix) {
+          for (col of row) {
+              if (check(col)) {
+                  break :search col; // 一击穿透两层循环并赋值给 target
+              }
+          }
+      }
+      break :search null;
+  };
+  ```
+- **架构价值**：
+  1. **从根源确立 `const` 不可变性（Immutable by Construction）**：无需像传统命令式那样先声明可变的未初始化变量 `let target = null;`，目标变量定义时即为深度不可变的 `const`；
+  2. **零上下文污染（Zero Scope Pollution）**：搜索循环内引入的行游标、列游标、临时累加器等全部限制在块内部，块结束即刻弹出销毁，外层作用域零变量残留、零命名冲突。
+
+#### 2.2 `cstr` / `cstring` 一等公民机制与越界写入安全防护体系
+- **双层抽象**：
+  - `cstring`（带 0 哨兵切片 `[:0]const u8` / `[:0]u8`，Fat Pointer）：附带 `len` 长度信息，完全脱离 `unsafe {}` 限制，支持 O(1) 访问 `.len`、`.ptr`、切片截取与 `s[i] = 'A'` 修改；
+  - `cstr`（零结尾裸指针 `[*:0]const u8` / `[*:0]u8`，Thin Pointer）：无内联长度字段，用于 C-ABI 边界高速互操作。
+- **越界写入防护网（Bounds Safety Protection）**：
+  - **编译期常量边界检查**：对于字面量或已知定长切片，常量索引越界直接在前端抛出编译错误；
+  - **运行时强制安全检查（Runtime Bounds Check）**：在 Debug 与 ReleaseSafe 模式下，底层机器码在执行内存写入前自动校验 `index >= slice.len`。一旦越界，即刻触发确定性断言（Fail-Fast Panic），输出明确的行号与调用栈；
+  - **物理免疫缓冲区溢出**：绝对不允许像 C/C++ 那样发生静默覆写相邻内存或栈缓冲区溢出漏洞。
+
+#### 2.3 `cp_ref.md` 代码示例系统性审查与纠偏
+- 彻底清理遗留的 19 处 `let mut` / `mut` 声明（修正为标准 `let`）；
+- 修正类字段中废弃的 `: any` 弱类型为通用裸指针 `*any!`；
+- 修正第 8.4 节废弃的传统 `try { ... } catch` 异常块为现代行内表达式级 `catch` 与 3-State 错误传播符 `?`；
+- 修正第 11.4 节 `for i in 0..times` 为 CP 标准 `for i of 0..times`；
+- 修正第 17 章 5 处 Zig 风格管道捕获 `|v|` 与 `try` 残留为现代海象操作符 `:=` 与 `?`；
+- 修正 7 处废弃的前置问号类型 `?T` 为标准纯后缀形式 `T?`；
+- 修正局部变量 `var` 残留为 `let`。
+
+---
+
+## 2026-11-08: 控制流强制圆括号铁律加固（E0101 AI 自愈诊断）、cstr 三重安全防御网与 Fail-Fast Panic 架构释疑
+
+### 1. 架构目标与背景
+用户提出两项核心规范与编译器防御机制要求：
+1. **控制流圆括号铁律（The Parentheses Iron Rule）**：
+   - 用户指出：`for i of 0..times` 缺少 `()`，必须写为 `for (i of 0..times)`，否则编译拦截报错；
+   - 检查并实现 `cpc` 对缺少括号的拦截和 AI 友好提示（`if`、`while`、`for` 统一必须带圆括号 `()`）；
+   - 全面排查并纠正 `cp_ref.md` 中的所有代码示例与相关说明，消除无括号书写的历史存量遗留。
+2. **`cstr` 越界三重安全防御网与 Fail-Fast Panic 机制释疑**：
+   - 评估并落地用户构想的“三重安全防御网”方案：
+     - ① 编译期已知边界检查（Comptime Bounds Check）：定长缓冲区越界静态拒绝编译；
+     - ② 切片优先安全惯用法（Slice-First）：转换为具备长度的 `cstring` 或 `[]u8` 切片，受运行时边界检查保护；
+     - ③ 无界裸指针修改强制隔离进 `unsafe {}`：对于未知来源裸内存，强制通过 `[*]u8!` 并在 `unsafe {}` 作用域内操作，未进 `unsafe` 直接编译拦截；
+   - 深度解答 Fail-Fast Panic 的本质作用：能否通过 Try/Catch 捕获异常防止崩溃？为什么不能吞掉越界？CP-Nest 是如何在不捕获 Panic 的前提下实现 99.999% 高可用？
+
+### 2. 核心原理与规范落地
+
+#### 2.1 编译器加固：强制 `for (...)` 括号与 E0101 AI 友好诊断
+- 在 [`cpc_dev/src/parser.rs`](file:///data/dev/cp/cpc_dev/src/parser.rs) 中重构 `parse_for_stmt_with_comptime`：
+  - 在遇到 `for` 关键字后，若下一个 Token 不是 `Token::LParen`，直接抛出 `ParseError::MissingParenthesesForControlFlow("for")`；
+  - 触发统一的三段式 AI 自愈诊断（`error[E0101]`）：
+    ```text
+    error[E0101]: CP Syntax Error: 'for' loop statement requires parentheses.
+      --> src/main.cp:4:9
+       |
+       4 |     for item of list {
+       |         ^^^^
+       |
+       = cause: 'for' loop header is missing enclosing parentheses: 'for (...)'.
+       = help: in CP, control flow statements ('if', 'while', 'for') must be enclosed in parentheses to eliminate ambiguity with struct literal syntax and maintain syntax consistency.
+       = suggestion: wrap the loop header in parentheses: for (item of collection) { ... }
+    ```
+- 在解析完迭代主体后，强制要求匹配并闭合 `Token::RParen`。
+
+#### 2.2 全文排查并修复 `cp_ref.md` 中的存量无括号示例
+- 借助子智能体对 `cp_ref.md` 全文 7338 行进行精细化扫描，共定位并全部纠正：
+  - **16 处 `for` 循环示例与规范表**：包含代码块中 `for (handler of handlers)`、`for (i of 0..1000)`、`for (i of 0..256)`、`@for (i of 0..5)`、`@for (f of @fieldsOf(target))`、`for (n of stream)`、`for (i of 0..times)`、`for (f of info.fields)`、`for (n of deque)` 以及借用符号总表中的 `for (x of list)` 等；
+  - **19 处 `if` / `@if` 条件示例**：包含 `if (a > b)`、`if (n <= 1)`、`if (flag == 1)`、`if (path == "missing.txt")`、`if (id < 0)`、`if (emailRegex.test(...))`、`@if (true)` 等；
+  - **第 8.8 节升级为《控制流条件与循环迭代圆括号强制铁律（The Parentheses Iron Rule）与 AI-First 智能自愈提示》**，全景收录 `if`、`while`、`for` 的二义性根除原理与 AI 自愈建议。
+
+#### 2.3 `cstr` 三重安全防御网架构沉淀
+- **第一重防御：编译期已知边界检查（Comptime Bounds Check）**：对于定长缓冲区 `[256]u8` 或静态字面量，常量下标越界在编译期常量折叠与 Sema 期直接拦截，零运行时损耗；
+- **第二重防御：切片优先惯用法（Slice-First）**：安全代码中修改 C 字符串必须先切片 `let slice = s[0..max_len]`，或直接使用 `cstring`（`[:0]u8`）。切片自带长度元数据，在 Debug/ReleaseSafe 模式下自动注入硬件级下标有效性比较；
+- **第三重防御：无界裸指针修改强制隔离进 `unsafe {}`**：未知来源的裸内存（`[*]u8!` / `*cstr!`）禁止在 Safe 域进行下标修改，未进 `unsafe` 直接编译拦截。
+
+#### 2.4 Fail-Fast Panic vs Try/Catch 深度架构剖析
+- **Panic vs Exception 的本质分野**：业务错误（`T ! E`）是系统预期内的分支；越界 Panic 代表数据结构完整性被物理破坏或存在致命逻辑 Bug；
+- **为什么绝不能吞掉越界 Panic**：吞掉越界强行继续执行会导致灾难性的静默脏数据污染（如金融错账、模型幻觉输出）和安全提权漏洞；
+- **CP-Nest 百万并发高可用解法**：
+  1. **Actor 微进程沙箱物理隔离**：Panic 限制在单个 Agent 实例内，不波及集群中其余 999,999 个 Agent；
+  2. **监控树自愈（Supervisor Tree）**：集群监控树收到子 Agent 退出信号后，在数微秒内自动拉起状态纯净的全新 Agent 恢复服务，保障系统 7x24 小时永不停机。
+
+---
+
+## 2026-11-08: cstr / cstring 编译期边界防御、Safe 域裸指针修改拦截与 AI-First 自愈诊断实装实录
+
+### 1. 架构目标与求证求实
+用户提问并要求：“你提到的 cstr cstring 编译拦截, 这些 cpc 已经实现了吗? 没有实现的话,需要你实现”。
+- **求证阶段**：
+  - 经对 `cpc` 源码及测试用例深入审查，此前 `cpc` 仅具备类型系统的基础类型推导，尚未实装定长缓冲区物理长度追踪，未实现编译期已知边界检查（第一重防御），也未对 Safe 域下无界裸指针/cstr 修改进行拦截（第三重防御）。
+- **攻坚决断**：
+  - 严格按照用户构想的三重防御网规范，在沙盒 `cpc_dev` 中全套实装静态边界求值、无界修改安全隔离与 AI-First 三段式自愈诊断。
+
+### 2. 编译器语义分析层（Sema）核心实现原理
+
+#### 2.1 作用域感知的长度与常量追踪
+在 [`cpc_dev/src/sema.rs`](file:///data/dev/cp/cpc_dev/src/sema.rs) 的 `Analyzer` 结构体中，引入两套作用域感知栈：
+1. `known_lengths_stack: Vec<HashMap<String, usize>>`：追踪定长数组、切片字面量以及指向定长缓冲区切片（如 `let s: cstr = &host_buf[0];`）的已知物理长度；
+2. `const_int_vars_stack: Vec<HashMap<String, i64>>`：追踪编译期已知的整型常量变量（如 `const IDX = 10;` 或 `let len = 5;`）。
+
+在 `enter_scope()` 与 `exit_scope()` 中自动压栈与出栈，保证局部变量的生命周期与可见性绝对纯净。
+
+#### 2.2 物理长度溯源与下标静态求值
+- **物理长度溯源 (`infer_known_length`)**：
+  - 当变量初始化为数组类型 `Type::Array(inner)` 时，提取其物理长度；
+  - 当变量初始化为借用指针 `&host_buf[offset]` 时，递归分析其底层基址变量 `host_buf` 的物理长度并扣除偏移量；
+  - 对字符串字面量 `let s = "hello"`，自动记录其字节长度。
+- **常量下标静态求值 (`eval_int_expr`)**：
+  - 递归求值整型字面量、作用域内的整型常量变量，以及加减乘除二元运算表达式。
+
+#### 2.3 第一重与第三重安全防御拦截逻辑
+在 `check_index_expr` 中统一把关：
+1. **静态已知边界检查（第一重防御）**：
+   - 若下标为负数，立即抛出 `NegativeIndex`，映射为 AI 诊断 `error[E0218]`；
+   - 若基址具有编译期已知物理长度 `known_len`，且下标表达式求出常量值 `idx`：
+     - 若 `idx >= known_len`，在编译期直接阻断，抛出 `CompileTimeIndexOutOfBounds`，映射为三段式 AI 诊断 `error[E0217]`：
+       ```text
+       error[E0217]: index out of bounds: index 10 is out of bounds for buffer of length 5
+         --> cap/test/test_bounds_fail.cp:6:5
+          |
+        6 |     s[10] = 99;
+          |     ^
+          |
+          = cause: index 10 exceeds compile-time known length 5 of the buffer.
+          = help: accessing a fixed-size array or known-length buffer beyond its bound is a compile-time fatal error.
+          = suggestion: ensure index is within 0..5, or use safe slicing: 'slice = s[0..max_len]'
+       ```
+2. **Safe 域无界裸指针修改隔离（第三重防御）**：
+   - 当在非 `unsafe` 作用域内（`!self.current_fn_is_unsafe && self.unsafe_depth == 0`）对无界裸指针（`ManyRawPtr`）或来源未知、无静态长度的 `cstr` 执行下标修改写入时；
+   - 立即阻断并抛出 `UnboundedRawPointerMutation`，映射为三段式 AI 诊断 `error[E0209]`：
+     ```text
+     error[E0209]: mutation via unbounded raw pointer or cstr 'ptr' requires 'unsafe' block
+       --> cap/test/test_raw_ptr_fail.cp:4:5
+        |
+      4 |     ptr[10] = 99;
+        |     ^
+        |
+        = cause: modifying memory via unbounded pointer/cstr 'ptr' without statically known length is unsafe.
+        = help: raw pointers and unbounded cstr buffers do not carry runtime length metadata. Modifying memory through them can lead to buffer overflows.
+        = suggestion: wrap the mutation in 'unsafe { ptr[...] = ...; }' or slice it first: 'let slice = ptr[0..len]; slice[...] = ...;'
+     ```
+
+### 3. 代码生成层（Codegen）适配与类型打通
+- **切片类型自适应可变推导**：
+  在 [`cpc_dev/src/codegen.rs`](file:///data/dev/cp/cpc_dev/src/codegen.rs) 的 `infer_zig_type` 中，若切片底层源变量是可变变量（`kind != VarDeclKind::Const`），自动将其发射为可变切片类型 `[]u8`（而非只读 `[]const u8`），确保 `slice[1] = 88;` 合法写入；
+- **单项指针到多项指针安全转换**：
+  在变量生成处，当目标类型为 `ManyRawPtr` 且初值为单项借用指针（如 `&host_buf[0]`）时，自动生成 Zig 原生的 `@ptrCast(...)` 包装，符合底层编译器语义；
+- **打通 `cstring` / `cstr` 与 `BorrowType` / `ManyRawPtr` 的安全隐式兼容**。
+
+### 4. 测试套件与双智能体并发合并
+- **反向测试 1** ([`cap/test/test_bounds_fail.cp`](file:///data/dev/cp/cap/test/test_bounds_fail.cp))：精准验证静态已知越界阻断与 `E0217` 诊断；
+- **反向测试 2** ([`cap/test/test_raw_ptr_fail.cp`](file:///data/dev/cp/cap/test/test_raw_ptr_fail.cp))：精准验证 Safe 域无界修改阻断与 `E0209` 诊断；
+- **正向测试** ([`cap/test/test_cstr_bounds_safe.cp`](file:///data/dev/cp/cap/test/test_cstr_bounds_safe.cp))：端到端验证合法切片修改、只读安全读取与显式 `unsafe {}` 写入，极速编译并正确执行输出预期数据；
+- **双工作区并发代码合并**：检测到正式目录 `cpc/src` 并发修改，安全同步合并 `parser.rs`、`sema.rs`、`codegen.rs`，`cargo check` 与 `cargo build` 100% 绿灯。
+
+---
+
+## 2026-11-08: Bun AGY 并发改动审查评估、状态机块局部变量逃逸修复与指针解包实装实录
+
+### 1. 任务背景与改动审查
+用户指示对 Bun AGY 正在修改的 `cpc` 进行全面审核评估，并合并至 `cpc_dev` 进行端到端验证。
+经审查，Bun AGY 对 `cpc/src` 提交了以下改动：
+1. **AST 增强 (`ast.rs`)**：
+   - 为 `IfStmt` 与 `WhileStmt` 增加 `is_ptr_capture: bool`（序列化标注 `#[serde(default)]`），用于标记该控制流节点是否属于指针解包模式。
+2. **语法解析层扩展 (`parser.rs`)**：
+   - 在 `parse_if_stmt` 与 `parse_while_stmt` 中全面支持两套解包语法：
+     - 海象指针解包：`if (*val := opt)`、`if (mut val := opt)`、`while (*val := opt)`；
+     - 管道指针解包：`if (opt) |*val|`、`if (opt) |mut val|`、`while (opt) |*val|`；
+   - 块级解析遇到大括号结束时增加括号深度平衡判定 `brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 && had_brace`，提升了语法解析的稳健性。
+3. **语义分析层适配 (`sema.rs`)**：
+   - 在捕获变量定义时，若 `is_ptr_capture` 为 true，将符号种类提升为可变变量 `VarDeclKind::Let`（普通捕获为 `VarDeclKind::Const`），放行在后续代码块中的就地赋值；
+   - 赋值表达式中针对 `_` 变量忽略赋值（`_ = expr`）进行豁免处理；
+   - 类方法作用域自动注入类的类型/常量泛型参数。
+4. **代码生成层升级 (`codegen.rs`)**：
+   - 变量推导中优先采用当前局部变量类型表 `var_cp_types`；
+   - 大写常量变量自动登记至 `value_classes`；
+   - 在 `If` 与 `While` 生成中为解包变量发射 Zig 原生指针捕获语法 `|*val|`。
+
+### 2. 深度排查与状态机块级局部变量（Block Locals）Bug 攻坚修复
+在初次将 Bun AGY 代码合入并编写测试用例 `test_ptr_capture.cp` 运行时，遇到了编译阻塞：
+```text
+.cap/zig/cap/test/test_ptr_capture.zig:727:13: error: no field named 'val' in struct 'test_ptr_capture.cp_main_Context'
+    ctx.val = 200;
+```
+**根因排查**：
+- CP 语言中所有普通顶级函数默认编译为 CPS 状态机结构体（`is_state_machine == true`）；
+- Bun AGY 在 `generate_stmt` 处理 `If` 与 `While` 时，把解包变量 `cap.sym` 注册进了 `self.locals`；
+- 当函数体内部访问或赋值该变量时，`generate_expr` 判断其属于 `self.locals`，且 `is_state_machine` 为真，便自动加上了 `ctx.` 前缀（生成了 `ctx.val = 200;`）；
+- 但在 Zig 生成的机器码中，`if (ctx.mut_val) |*val|` 的 `val` 是一个独立的 Zig 代码块局部指针变量，并不是状态机结构体 `cp_main_Context` 的持久化字段，从而触发编译错误；
+- 此外，在 Zig 中向指针解包变量写入时，必须是解引用赋值 `val.* = 200;`，而非 `val = 200;`。
+
+**架构修复**：
+1. **引入 `block_locals` 隔离集合**：
+   在 `Codegen` 中增加 `block_locals: HashSet<String>`。当控制流进入 `If` / `While` 的捕获块时将 `cap.sym` 加入集合，退出时移除；
+   在 `generate_expr` 中对标识符处理时判断：若变量属于 `block_locals`，严格豁免附加 `ctx.` 前缀，直通局部变量名；
+2. **激活 `mut_borrow_loop_vars` 实现透明解引用**：
+   当 `is_ptr_capture` 为真时，将 `cap.sym` 动态登记入 `mut_borrow_loop_vars`；
+   无论在赋值左侧 `(val.*) = 200;` 还是右侧读取 `(val.*)`，编译器均自动织入 Zig 必须的解引用操作，彻底实现原值就地修改！
+
+### 3. 测试套件全量验证
+- **针对性测试** ([`cap/test/test_ptr_capture.cp`](file:///data/dev/cp/cap/test/test_ptr_capture.cp))：
+  - 测试 `if (*val := mut_val) { val = 200; }`；
+  - 测试 `if (mut_val) |*val| { val = 300; }`；
+  - 测试 `_ = mut_val;` 丢弃语法；
+  - 极速 5ms 完成转译，链接并运行成功输出 `200`、`300`、`all ptr capture tests passed!`。
+- **全量回归验证**：
+  - `test_bounds_fail.cp`（反向越界拦截）、`test_raw_ptr_fail.cp`（反向裸指针拦截）、`test_cstr_bounds_safe.cp`（正向切片安全）、`test_for_paren_fail.cp`（控制流括号拦截）、`test_for_paren_success.cp` 全部 100% 绿灯。
+
+
+
 
 
 

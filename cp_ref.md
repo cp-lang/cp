@@ -1,6 +1,6 @@
 # CP 语言设计规范与技术白皮书 (The CP Language Specification)
 
-**版本**：v0.6.0  
+**版本**：v0.7.0  
 **定级**：工业级官方参考规范手册与底层架构指南 (The Definitive Reference Manual)  
 **定位**：TypeScript 的直觉表达力 + Rust 的内存安全 + Zig 的极致底层掌控力与无 GC 暴力并发，专为高安全、高并发、高性能、小体积、低内存与AI、百万级AI Agent并发而设计的系统级编程语言。
 **特点**：上手像TypeScript，安全模型对标Rust，底层能力继承Zig。既能写优雅的业务代码，又能下到裸机、系统、高性能服务，不用在“好写”和“安全高性能”之间二选一。同时在AI与AI智能体编程方面有独特优势。
@@ -594,6 +594,48 @@ CP 是一门严格无 GC 的静态类型编译型语言，禁止任何隐式类�
 
 ---
 
+### 3.1.1 编译期自动推导占位符 auto 与历史兼容 anytype 的本质界限
+
+很多初学者容易将 CP 语言中的泛型推导关键字与动态弱类型 `any` 混为一谈。在此必须明确：
+
+1. **标准语法确立为 `auto`**：CP 官方首选且唯一的标准语法关键字是 **`auto`**，语义为 **“编译期自动推导类型 (Automatic Comptime Type Deduction)”**，心智模型清晰直观，完全杜绝与 `any` 的任何联想混淆；
+2. **`anytype` 仅作历史与 Zig 互操作兼容**：CP 词法与语法分析器保留了 `anytype` 关键字，但其**仅用于向下兼容早期历史代码以及无缝对接 Zig 原生源码直译**，新代码一律强制推荐使用 `auto`；
+3. **绝对禁止运行期动态类型 `any`**：CP 语言严厉废除运行期弱类型 `any`（报 `E0105`），杜绝隐式堆装箱、类型擦除和非确定性 GC。
+
+| 核心维度       | 运行期动态弱类型 `any`（❌ 彻底废除）          | 编译期自动推导占位符 `auto`（✅ 官方标准一等公民）                        |
+| :------------- | :--------------------------------------------- | :------------------------------------------------------------------------ |
+| **生命周期**   | **运行期（Runtime）**                          | **编译期（`@comptime`）**                                                 |
+| **类型本质**   | 类型擦除（Type Erasure），动态类型标签         | **不是类型**，是**静态单态化泛型占位符**（Monomorphization Placeholder）  |
+| **开销代价**   | 隐式装箱（Box）、堆分配、GC 跟踪、动态虚表派发 | **零装箱、零堆分配、零运行时开销（Zero Cost）**，完全单态化生成独立机器码 |
+| **类型安全性** | 彻底丧失静态类型检查，运行期崩溃隐患           | **100% 强类型保留**，编译器针对实参类型进行全量类型与借用安全检查         |
+| **标准语法**   | ❌ 语法彻底禁用（报 `E0105`）                  | ✅ **官方推荐标准为 `auto`**（兼容别名 `anytype` 仅供历史互操作）         |
+| **对标特性**   | JS/TS 的 `any`，Python 的动态类型              | C++ 的 `auto` 概念泛化，Rust 的 `impl Trait` / `<T>`                      |
+
+#### 1. 语法规范与四大铁律约束
+
+1. **铁律一：仅限作为函数形参的泛型占位符**：
+   - 允许在通用泛型函数或编译期高阶函数中使用标准 `auto`：
+     ```typescript
+     // 泛型打印函数：标准推荐 auto，编译期根据实参自动单态化展开
+     pub fn print(v: auto): void { ... }
+
+     // 编译期高阶跳板函数：以编译期符号接收任意具体函数
+     pub fn wrapper(@comptime callback: auto) { ... }
+
+     // 历史代码兼容写法（等价于 auto，内部统一映射为 Type::Auto）：
+     // pub fn wrapper(@comptime callback: anytype) { ... }
+     ```
+2. **铁律二：严禁用于普通局部变量类型声明**：
+   - ❌ 错误：`let x: auto = 10;` 或 `let x: anytype = 10;`（编译器静态拦截）；
+   - ✅ 正确：局部变量直接使用自动类型推断 `let x = 10;` 或显式强类型 `let x: i32 = 10;`。
+3. **铁律三：严禁用于类/结构体字段类型声明**：
+   - ❌ 错误：`struct Container { data: auto; }`（结构体内存布局必须确定，禁止持有未单态化的占位符）；
+   - ✅ 正确：结构体泛型必须使用类级泛型参数：`struct Container<T> { data: T; }`。
+4. **铁律四：强调编译期求值时与 `@comptime` 强绑定**：
+   - 当参数涉及类型计算、编译期常量或静态函数内联时，必须显式标注 `@comptime callback: auto`，强制调用方在编译期提供已知静态符号，杜绝运行期动态传递。
+
+---
+
 ### 3.2 复合容器类型
 
 ```typescript
@@ -1079,7 +1121,7 @@ CP 编译器内建了工业级**流式类型智能收窄机制（Flow-Sensitive 
 
 #### 4.6.1 正向条件收窄（Positive Narrowing）
 
-在 `if (v != null)`、`while (v != null)` 或 `if (null != v)` 的条件真值作用域内，任何可空类型（如 `?T`、`*T!?`、`?User`）会被编译器自动收窄为确定非空类型（`T`、`*T!`、`User`）：
+在 `if (v != null)`、`while (v != null)` 或 `if (null != v)` 的条件真值作用域内，任何可空类型（如 `T?`、`*T!?`、`User?`）会被编译器自动收窄为确定非空类型（`T`、`*T!`、`User`）：
 
 ```typescript
 struct User {
@@ -1087,7 +1129,7 @@ struct User {
     age: i32,
 }
 
-fn render(u: ?User): void {
+fn render(u: User?): void {
     if (u != null) {
         // 智能收窄生效：在当前作用域内，u 直接被视为 User 类型
         // 彻底免除 u.?.name 或 u!?.age 冗余写法
@@ -1101,7 +1143,7 @@ fn render(u: ?User): void {
 在逻辑与 `&&` 表达式中，左侧的判空条件会立刻收窄右侧表达式的类型上下文：
 
 ```typescript
-fn check_user(u: ?User): bool {
+fn check_user(u: User?): bool {
     // && 右侧的 u.age 直接享受左侧 u != null 的智能类型收窄
     if (u != null && u.age >= 18) {
         return true;
@@ -1125,7 +1167,7 @@ fn process_handle(loop: *us_loop_t!?): void {
     }
 }
 
-fn process_user_guard(u: ?User): void {
+fn process_user_guard(u: User?): void {
     // 2. 卫语句早期返回：return 后的作用域自动推导为非空
     if (u == null) return;
 
@@ -1364,7 +1406,7 @@ let size = @square(4); // 编译期直接算出 16
 
 ```ts
 fn max<T>(a:T, b:T): T {
-    if a > b { a } else { b }
+    if (a > b) { a } else { b }
 }
 
 let m = max<i32>(10, 20);
@@ -1423,8 +1465,8 @@ print(u.get_id());
 
 ```ts
    fn fib(n:u32): u32 {
-   if n <= 1 { return n; }
-   return fib(n-1) + fib(n-2);
+       if (n <= 1) { return n; }
+       return fib(n-1) + fib(n-2);
    }
 
 ```
@@ -1512,7 +1554,7 @@ class BankAccount {
     account_no: string;      // 未标注：默认等价于 priv
 
     pub fn deposit(*_, amount: i64) {
-        if validate_amount(amount) { // 内部调用私有方法
+        if (validate_amount(amount)) { // 内部调用私有方法
             balance = balance + amount;
         }
     }
@@ -1648,7 +1690,7 @@ static class MathUtils {
     }
 
     pub fn max(a: f64, b: f64): f64 {
-        if a > b {
+        if (a > b) {
             return a;
         }
         return b;
@@ -1710,7 +1752,7 @@ CP 语言通过编译器底层的“所有权、隐式借用、读写互斥与�
 | **2. 变量赋值**             | **`let a = &b`**                                                    | **`let a = *b`**                                       | **`let a = b`**<br>_(或 `let a = move b`)_     | `let a = *b!`<br>`let pp = **a!` |
 | **3. 类型声明 / 返回值**    | **`: &T`**                                                          | **`: *T`**                                             | **`: T`**                                      | **`: *T!`** / **`: **T!`**       |
 | **4. 对象/结构 `this`/`_`** | `fn get()` _(默认省略 `_`)_<br>*(兼容 `fn get(_)` / `fn get(&_)`) * | **`fn set(*_, v: i32)`**<br>_(兼容 `*this` / `mut _`)_ | **`fn close(move _)`**<br>_(兼容 `move this`)_ | —                                |
-| **5. `for` 循环迭代**       | `for x of list` _(默认省略)_<br>_(兼容 `for &x of list`)_           | **`for *x of list`**                                   | **`for move x of list`**                       | —                                |
+| **5. `for` 循环迭代**       | `for (x of list)` _(默认省略)_<br>_(兼容 `for (&x of list)`)_       | **`for (*x of list)`**                                 | **`for (move x of list)`**                     | —                                |
 
 ### 6.3 所有权与自动释放 (Ownership & Auto-Drop)
 
@@ -1770,14 +1812,14 @@ return User{id:3, name:"abc"}; // 返回值所有权交给调用方
   ```
 - **容器改变操作全面纳入可变借用检查 (`Array` / `Vec`, `VecDeque`、`BinaryHeap`、`BTreeMap`、`BTreeSet`、`Map`/`HashMap`、`Set`/`HashSet`、 `Dict`)**：
   - **受检容器改变操作清单**：
-    - `Array<T>` / `Vec<T>` / `T[]`：`push(v)`、`pop()`、`clear()`、索引写入 `arr[i] = v`、`for *x of arr` 原地可变遍历；
+    - `Array<T>` / `Vec<T>` / `T[]`：`push(v)`、`pop()`、`clear()`、索引写入 `arr[i] = v`、`for (*x of arr)` 原地可变遍历；
     - `Map<K, V>`：`set(k, v)`、`delete(k)`、`clear()`、索引写入 `map[k] = v`；
     - `Set<T>`：`add(v)`、`delete(v)`、`clear()`；
     - `Dict<K, V>` (`#{}`)：`set(k, v)`、`put_all(other)`、`delete(k)`、`clear()`、索引写入 `dict[k] = v`。
   - **四重编译期拦截保障**：
     1. **禁止通过只读借用 (`&v`) 或只读参数改变容器**：如 `let r = &v; r.push(30);` 直接报错 `Cannot perform mutable operation (container method 'push') through read-only borrow 'r'`；
     2. **读写互斥与活跃借用冲突拦截**：当容器存在活跃的只读借用 `let r = &m;` 或另一个可变借用时，对原容器或冲突借用执行 `set`/`push`/`delete`/`clear`/`[] =` 立即报错 `Borrow conflict on 'm': cannot borrow as mutable while 'r' is still active`；
-    3. **防御迭代器失效（Loop-Borrow Lock）**：在 `for x of container` 或 `for *x of container` 遍历期间，严禁在循环体内对该容器（或其借用别名）调用 `push`、`pop`、`set`、`add`、`push_back`、`push_front`、`insert`、`remove`、`delete`、`clear` 或重赋值（禁止 `v[0] = 6`）；
+    3. **防御迭代器失效（Loop-Borrow Lock）**：在 `for (x of container)` 或 `for (*x of container)` 遍历期间，严禁在循环体内对该容器（或其借用别名）调用 `push`、`pop`、`set`、`add`、`push_back`、`push_front`、`insert`、`remove`、`delete`、`clear` 或重赋值（禁止 `v[0] = 6`）；
     4. **Use-After-Move 拦截**：容器所有权 `move` 转移后，任何读写或方法调用立即报错拦截。
 
 ```typescript
@@ -1830,9 +1872,46 @@ switch(maybe) {
   - `[*:null]([*:0]u8?!)?!` 映射为 Zig `?[*:null]?[*:0]u8`（以 null 结尾的可选 C 字符串指针数组）；
   - `*(*T?!)` 映射为 Zig `*?*T`（指向可选指针的指针，常用于 C 库二级出参返回）。
 
-#### 6.7.1.1 `cstr` 类型可变性与借用检查规范
+#### 6.7.1.1 `cstr` / `cstring` 一等公民规范与内存越界防护机制
 
-`cstr` 是 CP 对标 C 语言 `char*` / Zig `[*:0]u8` 的 C 风格字符串类型。CP 将其纳入严格的所有权与借用检查体系：
+在 CP 语言中，与 C-ABI 原生兼容的零结尾（Null-Terminated）字符串拥有双层抽象：
+
+- **`cstring`（带 0 哨兵切片 `[:0]const u8` / `[:0]u8`）**：附带长度信息的**胖指针（Fat Pointer = 指针 `ptr` + 长度 `len` + 结尾 `\0` 哨兵）**，是 CP 中最高频、最安全的一等公民；
+- **`cstr`（零结尾连续指针 `[*:0]const u8` / `[*:0]u8`）**：C-ABI 原生薄指针（Thin Pointer），无内联长度字段，专注于高频系统 FFI 传参与底层操作。
+
+##### 1. 一等公民地位：彻底脱离 `unsafe {}` 限制
+
+在许多系统语言中，操作 C 风格字符串或裸指针必须全程被丑陋的 `unsafe { ... }` 块包裹。而在 CP 语言中，**`cstr` 与 `cstring` 均是一等公民（First-Class Citizens）**，在安全代码中拥有完整的语法和生命周期支持：
+
+- **无需 `unsafe` 即可声明、传参和读取**：
+  ```typescript
+  // 1. 在普通安全函数中直接声明与传递
+  fn print_c_info(title: cstr, version: cstring): void {
+      print(`Title: ${string.from(title)}, Version len: ${version.len}`);
+  }
+
+  // 2. 局部变量直接初始化
+  let app_name: cstring = "Antigravity-Engine";
+  let c_title: cstr = "CP Native Runtime";
+  print_c_info(c_title, app_name);
+  ```
+- **借用检查与所有权严密保护**：
+  编译器对 `cstr` / `cstring` 的参数和变量同样运行完整的借用检查（Borrow Checker）。只读参数不可被可变借用，生命周期超出宿主作用域的逃逸会被编译期硬性拦截。
+
+##### 2. `cstr` / `cstring` 支持的方法与操作全景
+
+| 方法 / 语法特性           | `cstring` (带长度切片 `[:0]u8`)      | `cstr` (C原生指针 `[*:0]u8`)             | 功能说明与性能特性                                                |
+| :------------------------ | :----------------------------------- | :--------------------------------------- | :---------------------------------------------------------------- |
+| **`.len` 属性**           | ✅ **O(1) 瞬时获取**                 | ❌ 无内联字段（需 `string.from(s).len`） | `cstring` 自带切片长度信息，**无需调用昂贵的 `strlen` O(N) 扫描** |
+| **`.ptr` 属性**           | ✅ 获取底层的 `[*:0]const u8`        | ✅ 自身即为原生指针                      | 用于无缝直通传给第三方底层 C 动态库函数                           |
+| **下标读取 `s[i]`**       | ✅ 支持，返回第 `i` 个字节 `u8`      | ✅ 支持，返回第 `i` 个字节 `u8`          | 随机读取指定偏移处的字节值                                        |
+| **下标写入 `s[i] = 'A'`** | ✅ 仅当 `let` 可变或 `*s` 可变借用时 | ✅ 仅当 `let` 可变或 `*s` 可变借用时     | 允许对缓冲区就地可变覆写（受只读借用保护）                        |
+| **普通切片 `s[a..b]`**    | ✅ 支持，返回普通切片 `string`       | ✅ 支持，截取为普通只读切片              | 零拷贝内存视图重构                                                |
+| **哨兵切片 `s[a..b :0]`** | ✅ 支持，保留零结尾哨兵特性          | ❌ 不直接支持                            | 截取带零结尾的子切片                                              |
+| **`string.from(s)`**      | ✅ 零拷贝转换为 CP `string`          | ✅ 零拷贝转换为 CP `string`              | 自动计算/透传长度，零堆分配、零内存复制                           |
+| **`s.to_string()`**       | ✅ 堆分配克隆为独立字符串            | ✅ 堆分配克隆为独立字符串                | 产生独立的堆内存副本                                              |
+
+##### 3. 可变性规范：`let` vs `const` 与参数传递契约
 
 1. **`let s: cstr = "hello";`（可变 C 字符串）**：
    - 映射为 Zig `var s: [*:0]u8`；若字面量初始化则由编译器前端自动注入安全 `@constCast`；
@@ -1841,11 +1920,141 @@ switch(maybe) {
    - 映射为 Zig `const s: [*:0]const u8`；
    - **借用检查器硬性拦截**：禁止任何按字节索引修改（尝试 `s[idx] = val` 在语义分析期抛出 `SemaError::ConstAssignment`）；
 3. **函数参数传递契约**：
-   - 只读借用参数 `fn foo(s: cstr)`：映射为 Zig `s: [*:0]const u8`，函数体内尝试 `s[idx] = val` 编译拦截并抛错：`Cannot perform mutable operation on read-only parameter 's'`；
+   - 只读借用参数 `fn foo(s: cstr)`：映射为 Zig `s: [*:0]const u8`，函数体内尝试 `s[idx] = val` 编译拦截并抛错：`cannot perform mutable operation on read-only parameter 's'`；
    - 独占可变借用参数 `fn foo(*s: cstr)`：映射为 Zig `s: [*:0]u8`，允许函数体内部对字符串就地修改。
 4. **显式借用类型**：
    - `&cstr` 映射为 `[*:0]const u8`（只读借用）；
-   - `*cstr` 映射为 `[*:0]u8`（独占可变借用）。
+   - `*cstr` 映射为 `[*:0]u8`（独占可变借用）；
+   - `*cstring` 映射为 `[:0]u8`（独占可变带哨兵切片）。
+
+##### 4. 越界写入与三重安全防御网（The Triple Safety Guardrails）
+
+> **疑问解答**：如果声明了可变字符串或缓冲区，执行 `s[9999] = 'A'` 越界写入，程序会崩溃吗？CP 语言中如何确保安全？运行时触发 Fail-Fast Panic 的作用是什么，能通过捕获异常防止崩溃吗？
+
+在传统的 C/C++ 语言中，裸指针 `char*` 没有长度信息，向未验证的下标写入（如 `s[9999] = 'A'`）会直接引发恶名昭彰的 **堆栈缓冲区溢出（Buffer Overflow）**，静默覆写相邻变量、破坏调用栈帧或触发未定义行为（UB）。
+
+CP 语言通过以下**三重安全防御网**，彻底杜绝越界隐患：
+
+###### 第一重防御：编译期已知边界检查（Comptime Bounds Check）
+
+对于字面量、编译期已知物理大小的定长缓冲区（如 `host_buf: [256]u8`）或带静态长度的切片，当访问的索引是常量表达式时，CP 编译器的常量折叠与语义分析期（Sema）会**在编译期静态发现越界并直接拒绝编译**：
+
+```typescript
+let host_buf: [256]u8 = undefined;
+let s: cstr = &host_buf[0];
+
+// ❌ cpc 编译期静态检测出索引 300 超过 256 物理边界，直接报错拦截！
+s[300] = 'A';
+```
+
+编译器输出 AI 友好的三段式诊断：
+
+```text
+error[E0217]: index out of bounds: index 300 is out of bounds for buffer of length 256
+  --> src/main.cp:12:3
+   |
+12 |   s[300] = 'A';
+   |   ^
+   |
+   = cause: index 300 exceeds compile-time known length 256 of the buffer.
+   = help: accessing a fixed-size array or known-length buffer beyond its bound is a compile-time fatal error.
+   = suggestion: ensure index is within 0..256, or use safe slicing: 'slice = s[0..max_len]'
+```
+
+在编译期直接扼杀隐患，零运行时损耗！
+
+###### 第二重防御：CP 官方倡导的“切片优先”安全惯用法（Slice-First）
+
+在安全代码（Safe Code）中，修改 C 字符串或底层内存的最佳实践是**先切片再索引修改**，或直接使用自带长度元数据的安全切片 `cstring`（`[:0]u8`）：
+
+```typescript
+let s: cstring = "hello"; // 具备确定长度 len 为 5 (有效范围 0..4，5 为哨兵 \0)
+
+// 转换或提取带明确长度的安全切片
+let slice = s[0..max_len]; // 转换为 []u8
+slice[1] = 'A'; // 若动态索引超出 max_len，触发带行号与完整调用栈的安全 Panic！
+```
+
+切片自带动态长度，在 `Debug` 与 `ReleaseSafe` 模式下，底层机器码在每一次内存寻址写入前，会自动注入硬件级边界校验（`index >= slice.len`）。一旦越界，在任何破坏性物理写入发生之前，立即触发确定性 Fail-Fast Panic，绝不发生静默脏数据污染！
+
+###### 第三重防御：无界裸指针修改强制隔离进 `unsafe {}`
+
+对于来源未知、无编译期长度元数据的裸内存下标操作（如 C FFI 传入的未定长指针 `[*]u8!` 或裸 `*cstr!`），CP 划出绝对安全红线：**安全域（Safe Context）中严禁直接对无界裸指针进行下标写入！**
+
+```typescript
+// ❌ 普通 Safe 域中盲目下标写入，cpc 直接编译拦截：
+raw_ptr[100] = 'A';
+// error[E0209]: mutation via unbounded raw pointer or cstr 'raw_ptr' requires 'unsafe' block
+//   = cause: modifying memory via unbounded pointer/cstr 'raw_ptr' without statically known length is unsafe.
+//   = help: raw pointers and unbounded cstr buffers do not carry runtime length metadata. Modifying memory through them can lead to buffer overflows.
+//   = suggestion: wrap the mutation in 'unsafe { raw_ptr[...] = ...; }' or slice it first: 'let slice = raw_ptr[0..len]; slice[...] = ...;'
+
+// ✔️ 合法：显式纳入 unsafe 块，审计面极度收窄
+unsafe {
+    raw_ptr[100] = 'A';
+}
+```
+
+---
+
+##### 5. Fail-Fast Panic 的本质作用与高可用自愈架构（Fail-Fast & Crash-Proof Architecture）
+
+> **架构释疑**：底层注入边界检查触发 `panic: index out of bounds: index 10, len 5` 的作用是什么？能通过类似 `try/catch` 捕获异常来防止程序崩溃吗？
+
+###### 5.1 Panic（致命逻辑 Bug / 不变式破坏）vs Exception/Error（业务可预期分支）
+
+在现代顶级系统级语言（Rust、Zig、CP）中，Panic 与业务错误有着本质分野：
+
+1. **业务错误（Business Errors：`T ! Err` / `?` 传播）**：
+   - 网络断开、文件未找到、请求超时、输入校验不通过等，属于**系统在设计上已知且必然会发生的正常业务分支**；
+   - CP 废除传统低效且容易遗漏的 `try/catch`，统一使用强类型错误联合 `T ! E`、错误传播符 `?` 以及模式匹配 `switch`，进行确定性、显式的流式处理。
+2. **安全 Panic（Invariants Violation / Fatal Logic Bug）**：
+   - 数组/切片越界访问、除以零、空指针解引用断言失败等，代表**程序员的代码存在严重的代码 Bug，或者底层数据结构、内存的不变式（Invariants）已被物理破坏**！
+
+###### 5.2 为什么绝不能通过 Try/Catch 捕获越界 Panic 并“带病运行”？
+
+很多动态脚本语言（如 Python、JS）允许用 `try { slice[999] = 'A' } catch { ... }` 盲目吞掉越界异常，但在高并发系统与金融/AI 级工程中，这是**极其危险的反模式**：
+
+- **静默脏数据灾难**：如果越界发生在核心数据结构写入的中间状态，一旦被捕获强行继续往下跑，程序将携带已被损坏的半成品内存状态继续执行：
+  - 示例：在转账事务中，扣减账户 A 成功，但在写入收款方 B 时越界；若捕获异常并吞掉，事务后续提交，将导致永久性的资金凭空蒸发与不可逆的历史错账！
+  - 示例：在 AI Agent 推理中，张量索引越界被吞掉，模型在错位权重下持续输出具有严重误导性的幻觉结果，造成静默业务事故。
+- **杜绝安全漏洞跳板**：C 语言之所以漏洞频发，正是因为越界后“没有立即崩溃”，而是继续拿着被踩烂的内存继续执行，最终被黑客利用篡改指令指针（RIP）。
+
+**CP 的安全哲学：在任何破坏性物理写入发生之前，以确定性断言（Fail-Fast）立即熔断！终止受污染的执行流，把破坏范围精确锁死在 0 扩散！**
+
+###### 5.3 不捕获 Panic，程序如何做到 99.999% 高可用？—— Actor 物理隔离与监控树自愈
+
+既然越界不能捕获，程序整体会全部崩溃死机吗？
+**答案是：绝对不会！CP 通过 Nest-Actor 容器架构提供了高可用解法：**
+
+```text
+                  ┌───────────────────────────────┐
+                  │    Supervisor (集群监控树)    │
+                  └───────────────┬───────────────┘
+                                  │ (监控与故障自愈)
+            ┌─────────────────────┼─────────────────────┐
+            ▼                     ▼                     ▼
+   ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────┐
+   │ Agent #1 (Actor)│   │ Agent #2 (Actor)│   │ Agent #N (Actor)│
+   │ 独立堆栈与信箱  │   │ [💥 越界 Panic] │   │ 独立堆栈与信箱  │
+   │ [ 正常运行中 ]  │   │ 立即熔断退出    │   │ [ 正常运行中 ]  │
+   └─────────────────┘   └────────┬────────┘   └─────────────────┘
+                                  │
+                                  ▼ (微秒级响应)
+                         Supervisor 自动原地重启
+                         生成状态干净的全新 Agent #2
+```
+
+1. **Actor 微进程沙箱物理隔离（Process Isolation）**：
+   - 在 CP-Nest 中，海量 AI Agent 与高并发任务是以轻量级 Actor（微进程）为单位独立运行的；
+   - 每个 Actor 拥有完全隔离的独立堆栈、私有内存与 Reductions 抢占调度凭据；
+   - 当某个 Agent 因代码 Bug 触发越界 Panic 时，熔断的作用域**严格受限于该单个 Agent 实例**；
+   - 包含文件行号与调用栈的 Panic 诊断信息被确定性输出，该 Agent 立即释放自身占用的外部资源；
+   - **系统中的其余 999,999 个 Agent 完全不受任何干扰，全速并发运行！**
+2. **监控树自愈机制（Let It Crash & Supervisor Recovery）**：
+   - 继承自 Erlang/OTP 顶级电信级高可用哲学：上层的 Supervisor（监控树）实时监控所有子 Agent；
+   - 当收到子 Agent 的崩溃终止信号后，监控树根据策略（如 `OneForOne`）在几微秒内自动拉起一个状态纯净的新 Agent 实例；
+   - **既杜绝了脏数据在内存中的传染扩散，又保障了百万并发集群整体 7x24 小时永不停机！**
 
 ---
 
@@ -1873,7 +2082,7 @@ switch(maybe) {
 CP 提供了前置 `*` 与尾置 `!` 的对称取指针语法，前置星号数量表示指针层级：
 
 ```typescript
-let mut num: i32 = 100;
+let num: i32 = 100;
 
 unsafe {
     // 1. 获取一级裸指针 (*num!)
@@ -1881,7 +2090,7 @@ unsafe {
     p.* = 200; // num 变为 200
 
     // 2. 获取二级裸指针 (**p!)
-    let mut p_copy: *i32! = p;
+    let p_copy: *i32! = p;
     let pp: **i32! = **p_copy!;
     pp.*.* = 300; // num 变为 300
 }
@@ -1892,7 +2101,7 @@ unsafe {
 通过安全域的只读借用（`&v`）或可变借用（`*v`），在 `unsafe` 块内使用 `as` 显式转换为目标裸指针：
 
 ```typescript
-let mut v: i32 = 42;
+let v: i32 = 42;
 
 unsafe {
     // 1. 从只读借用 &v 转换为只读裸指针 *const i32!
@@ -1915,7 +2124,7 @@ unsafe {
 
 ```typescript
 unsafe {
-    let mut num: i32 = 1000;
+    let num: i32 = 1000;
     let p: *i32! = *num!;
 
     // 1. 裸指针按位重解释（指针类型互转）
@@ -2201,7 +2410,7 @@ let handlers: [Box<dyn EventHandler>] = [];
 handlers.push(Box.new(NetworkHandler.init()));
 
 // 运行时安全向下转型 (Downcast)
-for handler of handlers {
+for (handler of handlers) {
     if (net := NetworkHandler>) {
         net.flush_socket();
     }
@@ -2332,10 +2541,10 @@ err NetErr {
 
 // 2. 具名 + 匿名错误联合声明
 fn test_anon_union(flag: i32): string ! FileErr || err{Timeout, Canceled} {
-    if flag == 1 {
+    if (flag == 1) {
         return FileErr.NotFound; // 具名变体
     }
-    if flag == 2 {
+    if (flag == 2) {
         return err.Timeout;      // 即席匿名标签
     }
     return "ok_anon";
@@ -2343,17 +2552,17 @@ fn test_anon_union(flag: i32): string ! FileErr || err{Timeout, Canceled} {
 
 // 3. 具名 + 动态 Err 联合声明
 fn test_err_union(flag: i32): string ! FileErr || Err {
-    if flag == 1 {
+    if (flag == 1) {
         return FileErr.NotFound; // 自动转换为 Err
     }
-    if flag == 2 {
+    if (flag == 2) {
         return err(500, "internal server failure"); // 动态业务错误
     }
     return "ok_err";
 }
 
 fn open_file(path: string): string ! FileErr {
-    if path == "missing.txt" {
+    if (path == "missing.txt") {
         return FileErr.NotFound; // 或直接 return .NotFound;
     }
     return "file content";
@@ -2366,7 +2575,7 @@ enum HttpError {
 }
 
 fn handle_req(id: i32): string ! HttpError {
-    if id < 0 {
+    if (id < 0) {
         return err(HttpError.BadRequest); // 或 return err(.BadRequest);
     }
     return "ok";
@@ -2374,7 +2583,7 @@ fn handle_req(id: i32): string ! HttpError {
 
 // 3. 业务动态错误 Err：签名必须显式标注 T ! Err，不能写成 T!
 fn query_db(sql: string): string ! Err {
-    if sql == "" {
+    if (sql == "") {
         return err(404, "record not found"); // 动态 Err 实例
     }
     return "result";
@@ -2382,7 +2591,7 @@ fn query_db(sql: string): string ! Err {
 
 // 4. 全局错误 AnyErr / T!：函数内只能返回 err.TagName 即席错误
 fn calc(val: i32): i32! { // 展开等价于 i32 ! AnyErr
-    if val < 0 {
+    if (val < 0) {
         return err.NegativeNotAllowed; // 静态即席标签
     }
     // return err("bad"); // ❌ 编译拦截：Cannot return dynamic 'err(...)' in 'T ! AnyErr'
@@ -2652,21 +2861,25 @@ let hard_val: string = opt_val.?;
 
 ---
 
-### 8.4 异常作用域与块级捕获
+### 8.4 错误捕获表达式与结构化处理 (Catch Expression & Fallback)
+
+CP 语言彻底废除传统的运行时异常体系与低效的 `try/catch` 动态调用栈展开（若书写传统 `try/catch` 编译器将触发 `E0103` 智能自愈提示）。错误处理统一采用零开销的表达式级 `catch`、3-State 传播符 `?` 以及 `switch` 模式匹配：
 
 ```typescript
-// 1. 表达式后缀 catch
-let cfg = load_config() catch e => #{ port: 8080 };
+// 1. 行内表达式 catch：遇错就地捕获并降级为缺省值
+let cfg = load_config("config.json") catch e => #{ port: 8080 };
 
-// 2. 块级 try ... catch 作用域
-// 核心魔法：在 try 块内，所有产生 Err 的调用均自动具备隐式 ? 向上冒泡机制，无需逐行书写 ?
-try {
-    let raw = read_file("agent.json"); // 遇错直接跳转 catch
-    let obj = parse_json(raw);
-    save_to_db(obj);
-} catch err => {
-    print("Failed transaction:", err);
+// 2. 链式业务与错误传播 (?)：各步骤通过 ? 自动冒泡错误，零样板代码
+fn process_transaction(): void! {
+    let raw = read_file("agent.json")?;
+    let obj = parse_json(raw)?;
+    save_to_db(obj)?;
 }
+
+// 3. 业务层统一捕获：在调用端使用 catch 执行优雅降级、日志记录或重试
+process_transaction() catch err => {
+    print("Failed transaction:", err);
+};
 ```
 
 ---
@@ -2732,44 +2945,120 @@ while (task_running) {
 
 ---
 
-### 8.8 控制流条件圆括号强制规范与 AI-First 智能自愈提示
+### 8.8 控制流条件与循环迭代圆括号强制铁律（The Parentheses Iron Rule）与 AI-First 智能自愈提示
 
-为了彻底根除传统语法中因无括号条件与结构体实例化（Struct Literal）产生的严重二义性，CP 制定了清晰严格的条件语句括号规范：
+为了彻底根除传统语法中因无括号条件/迭代与结构体实例化（Struct Literal）产生的严重 AST 二义性，并保持与 TypeScript/C-Family 高度一致的直觉美感，CP 制定了清晰严格的控制流圆括号铁律：
 
-#### 1. 语法规范：`if` 与 `while` 条件必须外包 `()`
+#### 1. 语法规范：`if`、`while` 条件与 `for` 迭代头必须强制外包 `()`
 
-所有 `if` 与 `while` 控制流语句的条件表达式，必须强制使用圆括号 `()` 包裹：
+所有 `if`、`while` 条件表达式以及 `for` 循环迭代表达式，必须强制使用圆括号 `()` 包裹：
 
 ```typescript
 // ✅ 正确规范写法
 if (addr_str.len >= INET6_ADDRSTRLEN) { return null; }
 while (true) { break; }
 if (x > 0 && y < 10) { ... }
+for (item of numbers) { print(item); }
+for (*item of numbers) { item.* += 1; }
+for (move item of numbers) { sink(item); }
+for (i of 0..10) { print(i); }
 
-// ❌ 严禁无括号写法（编译器拒绝通过）
+// ❌ 严禁无括号写法（编译器拒绝通过，直接触发 E0101）
 if addr_str.len >= INET6_ADDRSTRLEN { return null; } // 编译报错！
 while true { break; }                                // 编译报错！
+for item of numbers { print(item); }                 // 编译报错！
+for i of 0..10 { print(i); }                         // 编译报错！
 ```
 
 #### 2. 二义性根除原理
 
-在 CP 语言中，全大写标识符后紧跟 `{` 是结构体字面量的语法（如 `Point { x: 1, y: 2 }`）。若允许 `if CONST { ... }`，词法解析器会将 `{ ... }` 误判为结构体字段列表，从而报出莫名其妙的 `Expected token: Colon, found ...`。强制括号 `if (...) { ... }` 彻底消除二义性，极大加快编译解析速度。
+在 CP 语言中，大写标识符后紧跟 `{` 是结构体字面量的语法（如 `Point { x: 1, y: 2 }`），而解构与模式匹配中也普遍包含 `{ ... }`。若允许 `if CONST { ... }` 或 `for item of coll { ... }`，词法与语法解析器会将 `{ ... }` 误判为结构体字段列表或模式，从而报出莫名其妙的 `Expected token: Colon, found ...`。强制括号 `if (...) { ... }`、`while (...) { ... }`、`for (...) { ... }` 彻底消除二义性，极大加快编译解析速度。
 
 #### 3. AI-First 智能自愈诊断信息
 
 当开发者或 AI Agent 偶然遗漏括号时，CP 编译器绝不输出冷冰冰的语法错误，而是附带具备修正建议的三段式自愈诊断：
 
 ```text
-Error: Parse Error in "src/boringssl.cp": Parse error: CP Syntax Error: 'if' condition requires parentheses.
-  = help: in CP, control flow conditions must be enclosed in parentheses to avoid ambiguity with struct literals.
-  = suggestion: wrap the condition in parentheses: if (condition) { ... } at Span { start: 35, end: 36 }
+error[E0101]: CP Syntax Error: 'for' loop statement requires parentheses.
+  --> src/main.cp:15:5
+   |
+15 |     for i of 0..times {
+   |         ^
+   = cause: loop specification lacks required outer parentheses.
+   = help: in CP, for loop expressions must be enclosed in parentheses: for (item of iterable) { ... }
+   = suggestion: wrap the loop target in parentheses:
+   |
+15 |     for (i of 0..times) {
+   |         +             +
 ```
 
 智能体识别到 `= suggestion:` 后，单轮对话耗时 0 秒即可自动采纳并修复，大幅提高无人值守自主迭代效率。
 
 ---
 
-### 8.9 行末分号可选（Optional Semicolons）与 ASI 换行断句规范
+### 8.9 控制流可选值/错误联合解包与就地指针修改（Value & Pointer Unwrapping）
+
+在现代系统开发中，从可选容器（`T?`）或错误联合（`T ! E`）中提取有效值，或直接对其底层物理内存进行就地覆写（In-Place Mutation）是极为高频的需求。CP 同时提供**海象绑定语法**与**管道捕获语法**：
+
+#### 1. 普通值只读解包：海象语法 (`val :=`) 与管道语法 (`|val|`)
+
+当目标非空（非 `null` 或非 `Err`）时，自动解包出内部成功载荷值，并将捕获变量声明为当前代码块内的常量（`const`）：
+
+```typescript
+let opt_user: User? = find_user(1);
+
+// 方式 A：海象表达式语法 (优先推荐)
+if (user := opt_user) {
+    print(user.name);
+}
+
+// 方式 B：管道捕获语法 (兼容传统系统语言习惯)
+if (opt_user) |user| {
+    print(user.name);
+}
+```
+
+#### 2. 可变指针就地解包：`*val :=` 与 `|*val|`
+
+当需要对被包含的值进行**就地可变更新**（例如链表节点替换、状态机翻转、复杂结构体字段修改）时，在捕获变量前加上解包修饰符 `*`（或 `mut`）：
+
+```typescript
+let state: i32? = 100;
+
+// 1. 海象指针解包：获得底层可变指针借用并就地更新
+if (*val := state) {
+    val = 200; // 自动就地覆写底层 state 的内存，无需重新包装！
+}
+
+// 2. 管道指针解包：等价于海象指针解包
+if (state) |*val| {
+    val = 300;
+}
+
+print(state.?); // 输出 300
+```
+
+#### 3. 循环结构中的流式指针迭代
+
+在 `while` 循环遍历带有内部缓冲区的对象或自定义流式迭代器时，结合指针解包可以直接对每一次返回的条目进行无拷贝修改：
+
+```typescript
+while (*item := buffer.next()) {
+    item.processed = true;
+}
+```
+
+#### 4. 忽略绑定 (`_ = expr`)
+
+当调用产生返回值的表达式但明确无需保留其结果时，支持使用单下划线 `_` 显式丢弃：
+
+```typescript
+_ = flush_socket(); // 显式丢弃结果，抑制未捕获警告
+```
+
+---
+
+### 8.10 行末分号可选（Optional Semicolons）与 ASI 换行断句规范
 
 CP 采用符合现代前端（TypeScript/ES6）与系统语言（Go/Swift）直觉的分号机制：
 
@@ -2854,19 +3143,19 @@ let idx: usize = 0;
 const len = buf.len;
 
 while (idx < len) {
-    // continue: 跳过当前循环，进入下一轮迭代
-    if buf[idx] == 0x20 {
-        idx = idx + 1;
-        continue;
-    }
-
-    // break: 立即跳出当前循环体
-    if buf[idx] == 0x00 {
-        break;
-    }
-
-    process_byte(buf[idx]);
+  // continue: 跳过当前循环，进入下一轮迭代
+  if (buf[idx] == 0x20) {
     idx = idx + 1;
+    continue;
+  }
+
+  // break: 立即跳出当前循环体
+  if (buf[idx] == 0x00) {
+    break;
+  }
+
+  process_byte(buf[idx]);
+  idx = idx + 1;
 }
 ```
 
@@ -2879,7 +3168,7 @@ while (idx < len) {
 循环在每次迭代前对表达式 `expr` 求值：若返回非 `null` 值，则自动解包并将非空值绑定到循环局部变量 `binding`，进入循环体执行；当表达式求值为 `null`（或布尔为假）时，循环自动优雅终止。
 
 ```typescript
-let mut iter = std.mem.splitScalar(u8, if_none_match, ','); // 按逗号切分
+let iter = std.mem.splitScalar(u8, if_none_match, ','); // 按逗号切分
 while (tag_str := iter.next()) {
     let parsed = parse(tag_str);
     if (weakMatch(our_parsed.tag, our_parsed.is_weak, parsed.tag, parsed.is_weak)) {
@@ -2967,8 +3256,8 @@ let summary = "Agent ${agentName} executed ${taskCount} reductions.";
 
 // 原生正则字面量
 let emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
-if emailRegex.test("admin@cp-nest.org") {
-    print("Valid email format");
+if (emailRegex.test("admin@cp-nest.org")) {
+  print("Valid email format");
 }
 ```
 
@@ -3233,7 +3522,7 @@ let metrics = Shared(Mutex(SharedMetrics {
 
 let m1 = metrics.clone();
 let t1 = spawn.cpu(() => {
-    for i of 0..1000 {
+    for (i of 0..1000) {
         m1.withLock((m) => {
             m.totalRequests += 1;
         });
@@ -3242,7 +3531,7 @@ let t1 = spawn.cpu(() => {
 
 let m2 = metrics.clone();
 let t2 = spawn.cpu(() => {
-    for i of 0..1000 {
+    for (i of 0..1000) {
         m2.withLock((m) => {
             m.totalRequests += 1;
         });
@@ -3633,7 +3922,7 @@ const COMPUTED_VAL = @{
 // 编译期生成预置哈希表 / 查找表
 const HASH_TABLE = @{
     let table: [i32] = [];
-    for i of 0..256 {
+    for (i of 0..256) {
         table.push(i * 31 % 255);
     }
     table
@@ -3685,7 +3974,7 @@ let float_size = get_type_size(3.14 as f64); // 单态化为 f64 版本，返回
 
 ```typescript
 // 1. 编译期分支修剪
-@if true {
+@if (true) {
     let mode = "fast_path";
 } @else {
     let mode = "slow_path"; // 完全被编译器丢弃，零运行时开销
@@ -3693,7 +3982,7 @@ let float_size = get_type_size(3.14 as f64); // 单态化为 f64 版本，返回
 
 // 2. 编译期循环展开
 let total = 0;
-@for i of 0..5 {
+@for (i of 0..5) {
     total = total + (i as i32);
 }
 // 展开为: total = total + 0; total = total + 1; ... total = total + 4;
@@ -3810,7 +4099,7 @@ CP 的宏是强类型感知、结构化的 AST 过程宏（Type-Directed Procedu
     // 4. 业务调用验证
     // ============================================================
     fn main(): void {
-        let mut acc = new Account("Alice", 1000.0);
+        let acc = new Account("Alice", 1000.0);
 
         // 调用由 @Accessor("balance") 自动展开生成的 getter
         @print("Initial Balance: {}", acc.get_balance()); // 1000.0
@@ -3850,12 +4139,12 @@ CP 的宏是强类型感知、结构化的 AST 过程宏（Type-Directed Procedu
         // 注入 reset 方法
         pub fn reset(*_): void {
             // ⬇️ 利用 Comptime 编译期循环展开：遍历 target 类的字段元数据
-            @for f of @fieldsOf(target) {
-                @if f.type == i32 || f.type == f64 {
+            @for (f of @fieldsOf(target)) {
+                @if (f.type == i32 || f.type == f64) {
                     _.${f.name} = 0;
-                } @else @if f.type == string {
+                } @else @if (f.type == string) {
                     _.${f.name} = "";
-                } @else @if f.type == bool {
+                } @else @if (f.type == bool) {
                     _.${f.name} = false;
                 }
             }
@@ -3883,9 +4172,9 @@ CP 的宏是强类型感知、结构化的 AST 过程宏（Type-Directed Procedu
     // ============================================================
     macro ToYaml(target) {
         pub fn toYaml(&_): string {
-            let mut yaml_output = "---\n";
+            let yaml_output = "---\n";
             // 编译期全静态展开，运行时零反射开销！
-            @for f of @fieldsOf(target) {
+            @for (f of @fieldsOf(target)) {
                 yaml_output = yaml_output + `  ${f.name}: ` + `${_.${f.name}}\n`;
             }
             return yaml_output;
@@ -3914,7 +4203,7 @@ CP 的宏是强类型感知、结构化的 AST 过程宏（Type-Directed Procedu
     // 5. 业务调用验证
     // ============================================================
     fn main(): void {
-        let mut player = new GamePlayer("ShadowHunter", 99, 15800.5, true);
+        let player = new GamePlayer("ShadowHunter", 99, 15800.5, true);
 
         // 1. 调用由 @ToYaml 自动展开生成的 YAML 序列化方法
         let yaml_str = player.toYaml();
@@ -4148,8 +4437,8 @@ class NumberStream {
     }
 }
 
-let mut stream = new NumberStream(1, 5);
-for n of stream {
+let stream = new NumberStream(1, 5);
+for (n of stream) {
     // 自动按流式展开调用 stream.next()
     print(n);
 }
@@ -4234,7 +4523,7 @@ dec doubleResult(next) {
   ```cp
   dec retry(times: i32 = 3) {
       return fn(next) {
-          for i in 0..times {
+          for (i of 0..times) {
               let res = next();
               if (res != null) { return res; }
           }
@@ -4539,7 +4828,7 @@ let user = new UserService();
 let info = reflect.of(user); // 动态内省实例的类型
 @print("实例所属类型:", info.name); // "UserService"
 
-for f of info.fields {
+for (f of info.fields) {
     print("Field:", f.name, "Type:", f.type);
 }
 ```
@@ -4761,7 +5050,7 @@ zig {
 }
 
 export class NativeBuffer {
-    ptr: any,
+    ptr: *any!,
     len: usize,
 
     fn init(*this, size: usize): void {
@@ -5183,7 +5472,7 @@ import { expect_eq } from "cap:test";
 // =========================================================================
 // 1. VecDeque (双端环形队列)
 // =========================================================================
-let mut deque = new VecDeque();
+let deque = new VecDeque();
 deque.push_back(10);
 deque.push_back(20);
 deque.push_front(5); // 队列当前布局: [5, 10, 20]
@@ -5198,8 +5487,8 @@ expect_eq(front_item, 5);
 expect_eq(back_item, 20);
 
 // 双轨流式迭代遍历 (支持自动消费排出)
-let mut sum = 0;
-for n of deque {
+let sum = 0;
+for (n of deque) {
     sum = sum + n;
 }
 expect_eq(sum, 10);
@@ -5208,7 +5497,7 @@ expect_eq(deque.is_empty(), true);
 // =========================================================================
 // 2. BinaryHeap (优先队列二叉堆)
 // =========================================================================
-let mut heap = new BinaryHeap();
+let heap = new BinaryHeap();
 heap.push(15);
 heap.push(42);
 heap.push(8);
@@ -5227,7 +5516,7 @@ expect_eq(heap.is_empty(), true);
 // =========================================================================
 // 3. BTreeMap (有序键值映射)
 // =========================================================================
-let mut btree = new BTreeMap();
+let btree = new BTreeMap();
 btree.insert("banana", 20);
 btree.insert("apple", 10);
 btree.insert("cherry", 30);
@@ -5251,7 +5540,7 @@ expect_eq(btree.has("banana"), false);
 // =========================================================================
 // 4. BTreeSet (有序去重集合)
 // =========================================================================
-let mut bset = new BTreeSet();
+let bset = new BTreeSet();
 bset.add(30);
 bset.add(10);
 bset.add(20);
@@ -5270,11 +5559,11 @@ expect_eq(sorted_vals[2], 30);
 // =========================================================================
 // 5. HashMap 与 HashSet (Rust Parity 别名)
 // =========================================================================
-let mut map = new HashMap();
+let map = new HashMap();
 map.set("name", "CP-BEAM");
 expect_eq(map.get("name"), "CP-BEAM");
 
-let mut set = new HashSet();
+let set = new HashSet();
 set.add(100);
 expect_eq(set.has(100), true);
 ```
@@ -5668,7 +5957,7 @@ let val = st.value; // 1
 
 let from_int = TaskState(2); // TaskState.Completed
 let from_as = 1 as TaskState; // TaskState.Running
-let from_str = TaskState.fromName("Idle"); // ?TaskState, .? 为 TaskState.Idle
+let from_str = TaskState.fromName("Idle"); // TaskState?, .? 为 TaskState.Idle
 ```
 
 ---
@@ -6280,25 +6569,25 @@ CP 编译器的诊断错误码分为三大正交区间：
 
 #### 17.2.1 典型 E-Code 规则与 AI 自愈建议速查表
 
-| E-Code      | 错误分类与诊断名称                     | 触发场景示例                                    | AI Agent 自动化自愈方案 (`suggestion`)                                   |
-| :---------- | :------------------------------------- | :---------------------------------------------- | :----------------------------------------------------------------------- |
-| **`E0101`** | **条件圆括号缺失**                     | `if x > 5 { ... }` 或 `while true { ... }`      | 包装为圆括号：`if (x > 5) { ... }`                                       |
-| **`E0102`** | **TS `interface` 关键字**              | `interface User { id: i32 }`                    | 替换为行为契约 `trait`：`trait User { ... }`                             |
-| **`E0103`** | **传统 `try/catch` 异常块**            | `try { ... } catch (e) { ... }`                 | 改为错误传播符 `?` 或行内 `catch` 表达式                                 |
-| **`E0104`** | **多余的 `mut` 关键字**                | `mut a = 1;`                                    | 移除 `mut`，使用默认可变的 `let a = 1;`                                  |
-| **`E0105`** | **`any` 弱类型**                       | `let val: any;`                                 | 声明具体类型、泛型 `<T>` 或 `*anyopaque`                                 |
-| **`E0106`** | **C 风格三段式 for 循环**              | `for (let i = 0; i < n; i++)`                   | 替换为 `while (i < n)` 或 `for x of list`                                |
-| **`E0201`** | **修改只读借用参数**                   | `fn f(buf: [16]u8) { buf[0] = 0; }`             | 参数前添加 `*` 声明为独占可变借用：`*buf: [16]u8`                        |
-| **`E0202`** | **借用冲突 (Aliasing XOR Mutability)** | 在不可变借用存活期间发生可变借用                | 结束不可变借用作用域或使用克隆值                                         |
-| **`E0203`** | **移动后使用 (Use After Move)**        | 变量经 `move` 所有权移交后再次读取              | 移除 `move` 或改用引用传参 `&x`                                          |
-| **`E0204`** | **常量重新赋值**                       | `const x = 1; x = 2;`                           | 改为可变变量声明：`let x = 1;`                                           |
-| **`E0205`** | **非 async 函数中使用 await**          | 同步函数内调用 `await task;`                    | 函数签名添加 `async fn`                                                  |
-| **`E0206`** | **未定义符号（拼写错误/缺少导入）**    | 调用未导入的 `print(...)` 或拼写错误 `addr_srt` | 自动给出 `import { print } from "cap:io";` 或 `did you mean 'addr_str'?` |
-| **`E0207`** | **类型不匹配 (Type Mismatch)**         | 期待 `T` 却传入了 `T?` 或 `T!E`                 | 提示解包：`val ?? default` 或错误传播 `val ?`                            |
-| **`E0208`** | **运行时反射未启用**                   | 对未注解类调用 `Reflect.typeOf()`               | 在类定义前添加 `@reflect class ...`                                      |
-| **`E0209`** | **Unsafe 操作缺失**                    | 在普通函数内执行裸指针解引用                    | 将操作包裹在 `unsafe { ... }` 块中                                       |
-| **`E0210`** | **循环中修改容器**                     | 在 `for item of list` 遍历中调用 `list.push()`  | 克隆容器后遍历或改用下标 `while` 循环                                    |
-| **`E0107`** | **字段访问前冗余解引用 `.*.`**         | `in6.*.family = AF.INET6;`                      | 移除 `.*.` 直接使用点号访问：`in6.family = AF.INET6;`                    |
+| E-Code      | 错误分类与诊断名称                     | 触发场景示例                                                        | AI Agent 自动化自愈方案 (`suggestion`)                                   |
+| :---------- | :------------------------------------- | :------------------------------------------------------------------ | :----------------------------------------------------------------------- |
+| **`E0101`** | **条件与循环圆括号缺失**               | `if x > 5 { ... }`、`while true { ... }` 或 `for i of 0..n { ... }` | 包装为圆括号：`if (...)`、`while (...)`、`for (...)`                     |
+| **`E0102`** | **TS `interface` 关键字**              | `interface User { id: i32 }`                                        | 替换为行为契约 `trait`：`trait User { ... }`                             |
+| **`E0103`** | **传统 `try/catch` 异常块**            | `try { ... } catch (e) { ... }`                                     | 改为错误传播符 `?` 或行内 `catch` 表达式                                 |
+| **`E0104`** | **多余的 `mut` 关键字**                | `mut a = 1;`                                                        | 移除 `mut`，使用默认可变的 `let a = 1;`                                  |
+| **`E0105`** | **`any` 弱类型**                       | `let val: any;`                                                     | 声明具体类型、泛型 `<T>` 或 `*anyopaque`                                 |
+| **`E0106`** | **C 风格三段式 for 循环**              | `for (let i = 0; i < n; i++)`                                       | 替换为 `while (i < n)` 或 `for (x of list)`                              |
+| **`E0201`** | **修改只读借用参数**                   | `fn f(buf: [16]u8) { buf[0] = 0; }`                                 | 参数前添加 `*` 声明为独占可变借用：`*buf: [16]u8`                        |
+| **`E0202`** | **借用冲突 (Aliasing XOR Mutability)** | 在不可变借用存活期间发生可变借用                                    | 结束不可变借用作用域或使用克隆值                                         |
+| **`E0203`** | **移动后使用 (Use After Move)**        | 变量经 `move` 所有权移交后再次读取                                  | 移除 `move` 或改用引用传参 `&x`                                          |
+| **`E0204`** | **常量重新赋值**                       | `const x = 1; x = 2;`                                               | 改为可变变量声明：`let x = 1;`                                           |
+| **`E0205`** | **非 async 函数中使用 await**          | 同步函数内调用 `await task;`                                        | 函数签名添加 `async fn`                                                  |
+| **`E0206`** | **未定义符号（拼写错误/缺少导入）**    | 调用未导入的 `print(...)` 或拼写错误 `addr_srt`                     | 自动给出 `import { print } from "cap:io";` 或 `did you mean 'addr_str'?` |
+| **`E0207`** | **类型不匹配 (Type Mismatch)**         | 期待 `T` 却传入了 `T?` 或 `T!E`                                     | 提示解包：`val ?? default` 或错误传播 `val ?`                            |
+| **`E0208`** | **运行时反射未启用**                   | 对未注解类调用 `Reflect.typeOf()`                                   | 在类定义前添加 `@reflect class ...`                                      |
+| **`E0209`** | **Unsafe 操作缺失**                    | 在普通函数内执行裸指针解引用                                        | 将操作包裹在 `unsafe { ... }` 块中                                       |
+| **`E0210`** | **循环中修改容器**                     | 在 `for (item of list)` 遍历中调用 `list.push()`                    | 克隆容器后遍历或改用下标 `while` 循环                                    |
+| **`E0107`** | **字段访问前冗余解引用 `.*.`**         | `in6.*.family = AF.INET6;`                                          | 移除 `.*.` 直接使用点号访问：`in6.family = AF.INET6;`                    |
 
 ---
 
@@ -6330,23 +6619,23 @@ CP 类与结构体资源释放统一实现 `pub fn release(*_): void`，由编�
 
 CP 全面废止 C 风格类型关键字与前置问号指针语法，统一使用现代强类型与后置修饰符：
 
-| 传统/C 风格语法        | CP 现代标准语法                     | 编译转译语义 (Zig)          | 内存安全与语义说明                     |
-| :--------------------- | :---------------------------------- | :-------------------------- | :------------------------------------- |
-| `c_int` / `c_uint`     | `i32` / `u32`                       | `i32` / `u32`               | 明确位宽整数，消除平台歧义             |
-| `c_ushort` / `c_short` | `u16` / `i16`                       | `u16` / `i16`               | 规范 16 位整数                         |
-| `*anyopaque`           | `*any?!`                            | `?*anyopaque`               | 可选不透明裸指针                       |
-| `?[*:0]u8`             | `[*:0]u8?!`                         | `?[*:0]u8`                  | 可选哨兵以 0 结尾字符串指针            |
-| `?[*][*:0]u8`          | `[*]([*:0]u8!)?!`                   | `?[*][*:0]u8`               | 指向非空字符串数组的可选多项指针       |
-| `?[*:null]?[*:0]u8`    | `[*:null]([*:0]u8?!)?!`             | `?[*:null]?[*:0]u8`         | null 结尾的可选字符串数组可选指针      |
-| `cstr`                 | `const s: cstr` / `let mut s: cstr` | `[*:0]const u8` / `[*:0]u8` | 纳入借用检查体系的原生 C 字符串        |
-| `[*c]T`                | `[*c]T` / `[*c]T?`                  | `[*c]T` / `?[*c]T`          | C-ABI 兼容指针，与 `&buf` 隐式无缝互通 |
+| 传统/C 风格语法        | CP 现代标准语法                 | 编译转译语义 (Zig)          | 内存安全与语义说明                     |
+| :--------------------- | :------------------------------ | :-------------------------- | :------------------------------------- |
+| `c_int` / `c_uint`     | `i32` / `u32`                   | `i32` / `u32`               | 明确位宽整数，消除平台歧义             |
+| `c_ushort` / `c_short` | `u16` / `i16`                   | `u16` / `i16`               | 规范 16 位整数                         |
+| `*anyopaque`           | `*any?!`                        | `?*anyopaque`               | 可选不透明裸指针                       |
+| `?[*:0]u8`             | `[*:0]u8?!`                     | `?[*:0]u8`                  | 可选哨兵以 0 结尾字符串指针            |
+| `?[*][*:0]u8`          | `[*]([*:0]u8!)?!`               | `?[*][*:0]u8`               | 指向非空字符串数组的可选多项指针       |
+| `?[*:null]?[*:0]u8`    | `[*:null]([*:0]u8?!)?!`         | `?[*:null]?[*:0]u8`         | null 结尾的可选字符串数组可选指针      |
+| `cstr`                 | `const s: cstr` / `let s: cstr` | `[*:0]const u8` / `[*:0]u8` | 纳入借用检查体系的原生 C 字符串        |
+| `[*c]T`                | `[*c]T` / `[*c]T?`              | `[*c]T` / `?[*c]T`          | C-ABI 兼容指针，与 `&buf` 隐式无缝互通 |
 
 #### 17.3.5 C-ABI 兼容指针与守卫三剑客发散控制流
 
 1. **C-ABI 指针 (`[*c]T`)**：
    - 专为 C 语言头文件 FFI 绑定设计，在底层转译为 Zig 的 `[*c]T`；
    - 自动提升可选语义：`[*c]T?` 与 `?[*c]T` 等价，规范化为 `Optional(CPtr(T))`；
-   - 支持将局部借用引用（如 `&mut buf`）隐式传入接收 `[*c]T` 的 C-ABI 函数，极大减轻系统库绑定的心智负担。
+   - 支持将局部借用引用（如 `*buf` 可变借用或 `&buf` 只读借用）隐式传入接收 `[*c]T` 的 C-ABI 函数，极大减轻系统库绑定的心智负担。
 
 2. **守卫三剑客（发散控制流表达式）**：
    - 空值守卫：`val ?? return null;`、`entry ?? continue;`、`item ?? break;`；
@@ -6429,23 +6718,61 @@ let p_addr: &std.posix.sockaddr = &addr;
 - **转译语义**：条件别名转译为 Zig 的 `pub const Name = if (cond) TypeA else TypeB;`，深层类型直接映射为底层命名空间符号路径；
 - **语义分析（Sema）透明展开**：CP 编译器会在借用检查和类型推导时自动递归解开别名，当目标为 `@if` 条件类型时，只要与任意一侧分支类型兼容即可安全赋初值或传参。深层路径类型直接纳入借用与生命周期检查体系。
 
-#### 17.4.4 带值块级作用域表达式 (Labeled Block Expressions)
+#### 17.4.4 带值块级作用域表达式与标记块 (Labeled Block Expressions)
 
-当需要经过复杂多步局部计算得到不可变配置或指针（且避免先声明可变的未初始化变量 `let mut x = null;` 破坏不可变原则）时，可以使用带值的标签块表达式或匿名表达式块：
+当需要经过复杂多步局部计算、或穿透多层嵌套循环才能计算得到目标值时，使用带值的**具名标记块（Labeled Block）**或**匿名表达式块**是 CP 语言中极为优雅且高安全的惯用法。
+
+##### 1. 一击穿透多层嵌套循环并直接赋值给不可变变量
+
+在传统编程语言中，从多层嵌套循环中寻找目标项时，通常必须：
+
+1. 先在外层声明一个可变变量 `let target: Item? = null;`；
+2. 再额外引入一个布尔标志位 `let found = false;`；
+3. 在内层找到目标后，设置 `target` 和 `found`，并在每一层循环判断 `if (found) break;` 逐层跳出；
+4. 或者不得不将循环逻辑强行拆分成一个单独的辅助函数以便使用 `return`。
+
+在 CP 中，使用**标记块（Labeled Block）**，可以直接一击穿透所有嵌套循环，将结果带值返回并赋给外层的 `const` 常量：
 
 ```typescript
-// 1. 具名标签块表达式
+// search 是定义在循环外部的具名标记块
+const target: Item? = search: {
+    for (row of matrix) {
+        for (col of row) {
+            if (check(col)) {
+                // 瞬间连跳两层循环，直接将 col 赋给外层的 target 常量，并即刻结束 search 块！
+                break :search col;
+            }
+        }
+    }
+    break :search null; // 如果全都没搜到，返回默认的 null
+};
+```
+
+##### 2. 标记块赋值的两大工程与架构价值
+
+1. **从根源确立 `const` 不可变性（Immutable by Construction）**：
+   - 传统命令式写法必须先声明可变变量（如 `let target: Item? = null;`），随后在循环内重新赋值。这不仅丧失了编译期对常量的强类型不可变保证，而且在外层后续庞大的业务流程中，该变量极易被误写、被竞态覆盖；
+   - 通过标记块表达式直接赋值，`target` **在定义诞生的那一刻起就是绝对的 `const` 常量**！后续任何代码试图对其重新赋值，编译器前端将即刻拦截，构筑坚不可摧的不可变状态安全。
+
+2. **彻底避免中间过程变量污染外层上下文（Zero Scope Pollution）**：
+   - 搜索与计算过程中引入的矩阵行变量 `row`、列变量 `col`、临时累加器或中间标志位，**生命周期完全限定在标记块大括号内部**；
+   - 块执行完毕后，所有中间临时变量被即刻弹出销毁，**外层作用域零污染、零命名冲突**，上下文保持 100% 极致纯净！
+
+##### 3. 具名标签块与匿名表达式块用法总览
+
+```typescript
+// 1. 具名标签块表达式：适合需要多点分支跳出或跨控制流返回的复杂构造
 fn get_host_pointer(host: string, host_buf: *[256]u8): cstr?! {
     const host_ptr: cstr?! = brk: {
         let len = Math.min(host.len, host_buf.len - 1);
         Memory.copy(host_buf[0..len], host[0..len]);
         host_buf[len] = 0;
-        break :brk &host_buf[0]; // 带值跳出
+        break :brk &host_buf[0]; // 带值跳出并赋值给外层常量
     };
     return host_ptr;
 }
 
-// 2. 匿名表达式块
+// 2. 匿名表达式块：适合快速收敛单流程的局部复杂初始化
 fn compute_result(): i32 {
     let result: i32 = ({
         let base = 50;
@@ -6456,12 +6783,9 @@ fn compute_result(): i32 {
 }
 ```
 
-- **转译语义**：`label: { ... break :label expr; }` 直接生成 Zig 原生标签块；匿名表达式块 `({ ... break expr; })` 转译为 `(blk: { ... break :blk expr; })`；
-- **纯净性**：保持变量的不变性声明（`let` / `const`），彻底杜绝由于提前声明可变变量带来的未初始化读取与悬挂别名隐患。
+- **底层转译映射**：`label: { ... break :label expr; }` 直接生成 Zig 原生标签块；匿名表达式块 `({ ... break expr; })` 转译为 `(blk: { ... break :blk expr; })`，在机器码层面直接编译为寄存器直接传递，零函数调用开销、零栈帧分配！
 
 ---
-
-_本规范由 CP 架构设计委员会制定，作为全体编译器研发、运行时对接与开发者生态的唯一最高准则。_
 
 #### 17.5 高性能网络套接字与异步流式 I/O 设计模式 (High-Performance Sockets & Asynchronous Stream I/O Patterns)
 
@@ -6520,14 +6844,14 @@ pub const TLSSocket = NewSocket(true);
 
 ##### 17.5.3 表达式块在安全状态转换中的应用
 
-在套接字协议原地升级（如 TCP -> TLS 协商）或复杂选项提取时，使用表达式块 `({ ... break val; })` 消除未初始化可变变量：
+在套接字协议原地升级（如 TCP -> TLS 协商）或复杂选项提取时，使用表达式块 `({ ... break val; })` 消除未初始化可变变量，配合 CP 规范的 `:=` 条件解包与 `?` 错误传播：
 
 ```typescript
 const secure_context: JSValue = ({
-    if (try opts.getTruthy(globalObject, "secureContext")) |v| break v;
-    if (try opts.getTruthy(globalObject, "tls")) |t| {
+    if (v := opts.getTruthy(globalObject, "secureContext")?) break v;
+    if (t := opts.getTruthy(globalObject, "tls")?) {
         if (t.isObject()) {
-            if (try t.getTruthy(globalObject, "secureContext")) |v| break v;
+            if (v := t.getTruthy(globalObject, "secureContext")?) break v;
         }
     }
     break .zero;
@@ -6546,7 +6870,7 @@ const secure_context: JSValue = ({
 export class RequestContext {
     arena: MemoryArena;
     request_headers: Headers;
-    response_body: ?ResponseStream;
+    response_body: ResponseStream?;
 
     pub fn respondWith(_: *RequestContext, response: JSValue): void {
         if (_.response_body != null) return;
@@ -6566,8 +6890,8 @@ export class RequestContext {
 
 ```typescript
 const match_result: RouteResult = ({
-    if (try static_routes.find(path)) |entry| break entry;
-    if (try file_router.match(path)) |file_entry| break file_entry;
+    if (entry := static_routes.find(path)?) break entry;
+    if (file_entry := file_router.match(path)?) break file_entry;
     break RouteResult.notFound;
 });
 ```
@@ -6612,7 +6936,7 @@ export class MiniEventLoop {
             _.loop.dec();
         }
 
-        while (_.tasks.readItem()) |task| {
+        while (task := _.tasks.readItem()) {
             task.run(context);
         }
     }
@@ -6706,7 +7030,7 @@ export class URL {
 
     pub fn displayProtocol(_: *const URL): string {
         if (_.protocol.len > 0) return _.protocol;
-        if (_.getPort()) |port| {
+        if (port := _.getPort()) {
             if (port == 443) return "https";
         }
         return "http";
@@ -6718,7 +7042,7 @@ export class URL {
 
 通过 `MultiArrayList` 结构体切片布局与紧凑字符串指针（`StringPointer`），结合自动 RAII 释放，实现亚微秒级参数查询：
 
-````typescript
+`````typescript
 export class QueryStringMap {
     allocator: std.mem.Allocator;
     slice: string;
@@ -6742,8 +7066,8 @@ export class QueryStringMap {
 // 省略参数名、省略 ': void'、使用极简 '*!?' 通用裸指针
 pub type ares_host_callback = @c fn (*!?, i32, i32, *!?);
 
-// 使用统一的 @comptime 元编程注解修饰编译期参数
-pub fn hostCallbackWrapper(@comptime Type: type, @comptime callback: anytype): ares_host_callback {
+// 使用统一的 @comptime 元编程注解修饰编译期参数，使用标准 auto 自动推导类型（兼容历史 anytype）
+pub fn hostCallbackWrapper(@comptime Type: type, @comptime callback: auto): ares_host_callback {
     @c fn handle(ctx: *!?, status: i32, timeouts: i32, hostent: *!?): void {
         unsafe {
             // 使用 CP 规范的 'as' 显式强转，编译器自动安全注入底层 @ptrCast(@alignCast(...))
@@ -6754,9 +7078,24 @@ pub fn hostCallbackWrapper(@comptime Type: type, @comptime callback: anytype): a
     // &handle 获取静态 C-ABI 函数指针（只读不可变符号借用）
     return &handle;
 }
-````
+```
 
-##### 17.9.2 裸指针双轨语法：原生 `as` 强转与类型镜像同构取指针语法糖
+##### 17.9.2 为什么必须是 `@comptime callback: auto`？（编译期单态化 vs 运行期 any）
+
+在系统级 C 跳板中，`@comptime callback: auto`（编译期自动类型推导，兼容 `anytype`）具有极其严密且不可替代的架构意义：
+
+1. **C-ABI 裸函数指针的根本矛盾**：
+   C 原生接口（如 `ares_host_callback`）仅接受无状态、无环境闭包的静态纯函数指针（`*const fn(...) void`），它**无法像 JS 箭头函数或高阶闭包那样隐式捕获外层变量**；
+2. **零开销编译期单态化（Zero-Cost Monomorphization）**：
+   - 如果不使用单态化，开发者就必须为每一种回调类型手写一个专有静态跳板；
+   - CP 语言引入 `@comptime callback: auto`（标准语法，语义即“自动推导回调类型”，向下兼容 Zig 历史习惯的 `anytype`），让编译器在编译期捕获具体的函数符号；
+   - 当调用 `hostCallbackWrapper(MyContext, my_user_callback)` 时，编译器就地为该特定类型和回调具现化出一套**专有的局部静态结构体与函数**；
+   - 在生成的 `@c fn handle` 内部，对 `callback` 的调用是**静态直接调用（Direct Call）甚至内联展开**，不存在任何虚表查找或间接函数指针调用的性能损耗；
+3. **与运行期弱类型 `any` 的本质区别**：
+   - 这里的 `auto` **不是运行期动态类型**，它没有类型标签，不产生任何装箱（Boxing）或动态 GC 追踪；
+   - 它在编译期直接绑定为实参的具体强类型，**100% 享有静态类型与借用安全检查**。
+
+##### 17.9.3 裸指针双轨语法：原生 `as` 强转与类型镜像同构取指针语法糖
 
 CP 语言针对底层 C-FFI 提供了双轨并行且心智完全统一的指针操作语法：
 
@@ -6779,7 +7118,7 @@ CP 语言针对底层 C-FFI 提供了双轨并行且心智完全统一的指针�
    ```
 3. **函数类型签名极简化**：支持省略形参名（如 `@c fn (*!?, i32, i32, *!?)`），且当返回值为 `void` 时可完全省略 `: void`。
 
-##### 17.9.3 c回调跳板函数完整使用范例
+##### 17.9.4 c回调跳板函数完整使用范例
 
 ```typescript
 import { print } from "cap:io";
@@ -6797,13 +7136,13 @@ fn my_user_callback(ctx: *MyContext, status: i32, timeouts: i32, hostent: *!?) {
     ctx.received_timeouts = timeouts;
 }
 
-// 使用统一的 @comptime 元编程注解修饰编译期参数
-pub fn hostCallbackWrapper(@comptime Type: type, @comptime callback: anytype): ares_host_callback {
+// 使用统一的 @comptime 元编程注解修饰编译期参数，使用标准 auto 语法
+pub fn hostCallbackWrapper(@comptime Type: type, @comptime callback: auto): ares_host_callback {
     @c fn handle(ctx: *!?, status: i32, timeouts: i32, hostent: *!?) {
         unsafe {
             // 使用 CP 规范的 'as' 显式强转，编译器自动安全注入底层 @ptrCast(@alignCast(...))
-            // let this_ptr = ctx.? as *Type!; // as 等同 *ctx.?!
-            callback(*ctx.?!, status, timeouts, hostent);
+            let this_ptr = ctx.? as *Type;
+            callback(this_ptr, status, timeouts, hostent);
         }
     }
     // &handle 获取静态 C-ABI 函数指针
@@ -6831,13 +7170,12 @@ fn main(): void {
 }
 ```
 
-````
-
 #### 17.10 JavaScriptCore 虚拟机事件循环与任务桥接架构模式 (JSC Event Loop & Task Bridging Architecture Patterns)
 
 在连接 JavaScriptCore (JSC) 虚拟机与系统事件循环（如 `src/jsc/event_loop.cp` 与 `src/jsc/Task.cp`）时，CP 语言提供了以下经典高并发与防泄漏架构范式：
 
 ##### 17.10.1 统一接收者 `_` 在高频任务队列排空（Drain）中的应用
+
 在主线程任务轮询与微任务深度控制（`enter` / `exit`）中，使用 `_` 作为统一接收者，彻底切除冗余解引用并确保单写多读借用安全：
 
 ```typescript
@@ -6859,7 +7197,7 @@ export class EventLoop {
         _.entered_event_loop_count -= 1;
     }
 }
-````
+```
 
 ##### 17.10.2 标记指针联合体（TaggedPointerUnion）类型分发
 
@@ -6867,16 +7205,16 @@ export class EventLoop {
 
 ```typescript
 pub fn tickQueueWithCount(_: *EventLoop, virtual_machine: *VirtualMachine, counter: *u32): bun.JSTerminated!void {
-    while (_.tasks.readItem()) |task| {
+    while (task := _.tasks.readItem()) {
         defer counter.* += 1;
         switch (task.tag()) {
             @field(Task.Tag, @typeName(CppTask)) => {
-                var any: *CppTask = task.get(CppTask).?;
-                any.run(_.global) catch |err| try reportErrorOrTerminate(_.global, err);
+                let any: *CppTask = task.get(CppTask).?;
+                any.run(_.global) catch err => reportErrorOrTerminate(_.global, err)?;
             },
             else => {},
         }
-        try _.drainMicrotasksWithGlobal(_.global, _.global.vm());
+        _.drainMicrotasksWithGlobal(_.global, _.global.vm())?;
     }
 }
 ```
@@ -6913,7 +7251,7 @@ pub fn WorkTask(comptime Context: type): type {
 export class Futex {
     pub const Word = u32;
 
-    pub fn wait(ptr: *const Atomic(Word), expect: Word, timeout_ns: ?u64): FutexError!void {
+    pub fn wait(ptr: *const Atomic(Word), expect: Word, timeout_ns: u64?): FutexError!void {
         if (comptime Environment.isWindows) {
             return waitWindows(ptr, expect, timeout_ns);
         } else if (comptime Environment.isMac) {
@@ -6933,7 +7271,7 @@ export class Futex {
         }
     }
 }
-````
+`````
 
 ##### 17.11.2 侵入式无锁并发队列（UnboundedQueue）与缓存行对齐
 
@@ -6952,8 +7290,8 @@ pub fn UnboundedQueue(comptime T: type, comptime next_field: meta.FieldEnum(T)):
             _.pushBatch(item, item);
         }
 
-        pub fn pop(_: *Self): ?*T {
-            var first = _.front.load(.acquire) orelse return null;
+        pub fn pop(_: *Self): *T? {
+            let first = _.front.load(.acquire) ?? return null;
             // 环形原子替换与 CAS 检索...
             return first;
         }
@@ -7165,3 +7503,5 @@ let buf: [16]u8 = "Hello, World!\x00";
 // 截取以 0 结尾的哨兵切片
 let slice = buf[0..13 :0];
 ```
+
+_本规范由 CP 架构设计委员会制定，作为全体编译器研发、运行时对接与开发者生态的唯一最高准则。_

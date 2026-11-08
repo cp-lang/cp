@@ -33,11 +33,11 @@ impl ParseError {
                     .with_cause("CP has completely abolished try/catch in favor of zero-cost error unions and '?' operator.")
                     .with_help("use '?' to propagate errors upward, or 'expr catch err => { ... }' / '?? fallback' to handle them.")
                     .with_suggestion("use 'let val = expr ?;' or 'expr catch err => { ... }'"),
-                Token::Mut => Diagnostic::new("E0104", "'mut' keyword is not used for local variable declarations")
+                Token::Mut => Diagnostic::new("E0104", "'mut' keyword is not used for variable declarations")
                     .with_span(*span)
-                    .with_cause("in CP, variables declared with 'let' are already mutable by default.")
-                    .with_help("use 'let' for mutable variables and 'const' for immutable bindings. To declare mutable borrow parameters, prefix with '*': '*param: Type'.")
-                    .with_suggestion("remove 'mut': use 'let x = ...' or '*param: Type'"),
+                    .with_cause("in CP, variables declared with 'let' are already mutable by default, and 'const' is used for immutable bindings.")
+                    .with_help("CP has abolished 'let mut'. Use 'let' directly for mutable variables. For mutable borrows in function parameters, prefix with '*': '*param: Type'.")
+                    .with_suggestion("remove 'mut': use 'let ...' instead"),
                 Token::Any => Diagnostic::new("E0105", "'any' type is not supported in CP")
                     .with_span(*span)
                     .with_cause("untyped 'any' is prohibited to ensure strict type safety and zero-cost runtime performance.")
@@ -50,11 +50,11 @@ impl ParseError {
             },
             ParseError::ExpectedToken(expected, found, span) => {
                 if *expected == Token::LParen {
-                    Diagnostic::new("E0101", "control flow condition must be enclosed in parentheses")
+                    Diagnostic::new("E0101", "control flow statement must be enclosed in parentheses")
                         .with_span(*span)
-                        .with_cause("in CP, control flow conditions (if/while) must be enclosed in parentheses to eliminate ambiguity with struct literal syntax.")
-                        .with_help("conditions in 'if' and 'while' must be enclosed in parentheses: if (condition) { ... }")
-                        .with_suggestion("wrap the condition in parentheses: if (condition) { ... }")
+                        .with_cause("in CP, control flow statements ('if', 'while', 'for') must be enclosed in parentheses to eliminate ambiguity with struct literal syntax and maintain syntax consistency.")
+                        .with_help("headers in 'if', 'while' and 'for' must be enclosed in parentheses: if (condition) { ... }, while (condition) { ... }, for (item of collection) { ... }")
+                        .with_suggestion("wrap the control flow expression in parentheses")
                 } else {
                     Diagnostic::new("E0111", format!("expected token '{:?}', found '{:?}'", expected, found))
                         .with_span(*span)
@@ -824,8 +824,7 @@ impl<'a> Parser<'a> {
                 | Some(Token::Unsafe)
                 | Some(Token::Export)
                 | Some(Token::Private)
-        ) || matches!(self.peek(), Some(Token::Ident(id)) if id == "inline" || id == "extern")
-        {
+        ) || matches!(self.peek(), Some(Token::Ident(id)) if id == "inline" || id == "extern") {
             if matches!(self.peek(), Some(Token::Ident(id)) if id == "inline" || id == "extern") {
                 let (tok, span) = self.bump()?;
                 let sym = match tok {
@@ -834,7 +833,10 @@ impl<'a> Parser<'a> {
                 };
                 meta.push(MetaItem {
                     span,
-                    name: Ident { span, sym },
+                    name: Ident {
+                        span,
+                        sym,
+                    },
                     args: vec![],
                 });
             } else if self.peek() == Some(&Token::Export) {
@@ -2116,9 +2118,7 @@ impl<'a> Parser<'a> {
                 let func = self.parse_function()?;
                 Ok(Stmt::Func(Box::new(func)))
             }
-            Some(Token::Let) | Some(Token::Const) | Some(Token::Var) | Some(Token::ThreadLocal) => {
-                Ok(Stmt::Var(self.parse_var_decl()?))
-            }
+            Some(Token::Let) | Some(Token::Const) | Some(Token::Var) | Some(Token::ThreadLocal) => Ok(Stmt::Var(self.parse_var_decl()?)),
             Some(Token::While) => Ok(Stmt::While(self.parse_while_stmt()?)),
             Some(Token::For) => Ok(Stmt::For(self.parse_for_stmt()?)),
             Some(Token::If) => Ok(Stmt::If(self.parse_if_stmt()?)),
@@ -2367,7 +2367,8 @@ impl<'a> Parser<'a> {
             tok => return Err(ParseError::ExpectedToken(Token::Let, tok, self.peek_span())),
         };
         if self.peek() == Some(&Token::Mut) {
-            self.bump()?;
+            let (_, span) = self.bump()?;
+            return Err(ParseError::UnexpectedToken(Token::Mut, span));
         }
 
         let pat = self.parse_pattern()?;
@@ -2443,6 +2444,10 @@ impl<'a> Parser<'a> {
 
     fn parse_single_pattern(&mut self) -> ParseResult<Pattern> {
         match self.peek() {
+            Some(Token::Mut) => {
+                let (_, span) = self.bump()?;
+                return Err(ParseError::UnexpectedToken(Token::Mut, span));
+            }
             Some(Token::Null) => {
                 self.bump()?;
                 Ok(Pattern::Null)
@@ -2522,6 +2527,12 @@ impl<'a> Parser<'a> {
                         continue;
                     }
                     let key = self.parse_ident()?;
+                    if key.sym == "mut"
+                        && self.peek() != Some(&Token::Colon)
+                        && matches!(self.peek(), Some(Token::Ident(_)))
+                    {
+                        return Err(ParseError::UnexpectedToken(Token::Mut, key.span));
+                    }
                     let mut val = None;
                     if self.peek() == Some(&Token::Colon) {
                         self.bump()?;
@@ -2999,7 +3010,15 @@ impl<'a> Parser<'a> {
         }
         self.expect(Token::LParen)?;
         let mut capture = None;
-        if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw))
+        let mut is_ptr_capture = false;
+        if (self.peek() == Some(&Token::Star) || self.peek() == Some(&Token::Mut))
+            && matches!(self.peek_next(), Some(Token::Ident(_)) | Some(Token::ErrorKw))
+        {
+            self.bump()?;
+            is_ptr_capture = true;
+            capture = Some(self.parse_ident()?);
+            self.expect(Token::ColonAssign)?;
+        } else if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw))
             && self.peek_next() == Some(&Token::ColonAssign)
         {
             capture = Some(self.parse_ident()?);
@@ -3011,6 +3030,7 @@ impl<'a> Parser<'a> {
             self.bump()?;
             if self.peek() == Some(&Token::Star) || self.peek() == Some(&Token::Mut) {
                 self.bump()?;
+                is_ptr_capture = true;
             }
             capture = Some(self.parse_ident()?);
             self.expect(Token::Pipe)?;
@@ -3021,6 +3041,7 @@ impl<'a> Parser<'a> {
             test,
             body: Box::new(body),
             capture,
+            is_ptr_capture,
         })
     }
 
@@ -3036,12 +3057,13 @@ impl<'a> Parser<'a> {
         } else {
             self.expect(Token::For)?.start
         };
-        let has_paren = if self.peek() == Some(&Token::LParen) {
-            self.bump()?;
-            true
-        } else {
-            false
-        };
+        if self.peek() != Some(&Token::LParen) {
+            return Err(ParseError::Generic(
+                "CP Syntax Error: 'for' loop statement requires parentheses.\n  = cause: 'for' loop header is missing enclosing parentheses: 'for (...)'.\n  = help: in CP, control flow statements ('if', 'while', 'for') must be enclosed in parentheses to eliminate ambiguity with struct literal syntax and maintain syntax consistency.\n  = suggestion: wrap the loop header in parentheses: for (item of collection) { ... }".to_string(),
+                self.peek_span(),
+            ));
+        }
+        self.expect(Token::LParen)?;
         if self.peek() == Some(&Token::Let) || self.peek() == Some(&Token::Const) {
             self.bump()?;
         }
@@ -3067,7 +3089,7 @@ impl<'a> Parser<'a> {
             self.bump()?;
         } else {
             return Err(ParseError::Generic(
-                "Expected 'of' in for loop, e.g. 'for x of list'".to_string(),
+                "Expected 'of' in for loop, e.g. 'for (x of list)'".to_string(),
                 self.peek_span(),
             ));
         }
@@ -3086,9 +3108,7 @@ impl<'a> Parser<'a> {
                 inclusive,
             };
         }
-        if has_paren {
-            self.expect(Token::RParen)?;
-        }
+        self.expect(Token::RParen)?;
         let body = self.parse_stmt()?;
         Ok(ForStmt {
             span: Span { start, end: 0 },
@@ -3113,13 +3133,21 @@ impl<'a> Parser<'a> {
             self.expect(Token::If)?.start
         };
         let mut capture = None;
+        let mut is_ptr_capture = false;
         let test = if self.peek() == Some(&Token::LParen) {
             self.bump()?;
             if matches!(self.peek(), Some(Token::Ident(id)) if id == "comptime") {
                 self.bump()?;
                 is_comptime = true;
             }
-            if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw))
+            if (self.peek() == Some(&Token::Star) || self.peek() == Some(&Token::Mut))
+                && matches!(self.peek_next(), Some(Token::Ident(_)) | Some(Token::ErrorKw))
+            {
+                self.bump()?;
+                is_ptr_capture = true;
+                capture = Some(self.parse_ident()?);
+                self.expect(Token::ColonAssign)?;
+            } else if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw))
                 && self.peek_next() == Some(&Token::ColonAssign)
             {
                 capture = Some(self.parse_ident()?);
@@ -3138,6 +3166,7 @@ impl<'a> Parser<'a> {
             self.bump()?;
             if self.peek() == Some(&Token::Star) || self.peek() == Some(&Token::Mut) {
                 self.bump()?;
+                is_ptr_capture = true;
             }
             capture = Some(self.parse_ident()?);
             self.expect(Token::Pipe)?;
@@ -3162,6 +3191,7 @@ impl<'a> Parser<'a> {
             alt,
             is_comptime,
             capture,
+            is_ptr_capture,
         })
     }
 
@@ -3268,10 +3298,7 @@ impl<'a> Parser<'a> {
             }
             let mut is_field_static = is_static;
             if self.peek() == Some(&Token::Static) {
-                if !matches!(
-                    self.peek_next(),
-                    Some(Token::Fn) | Some(Token::Async) | Some(Token::Colon)
-                ) {
+                if !matches!(self.peek_next(), Some(Token::Fn) | Some(Token::Async) | Some(Token::Colon)) {
                     self.bump()?;
                     is_field_static = true;
                 }
@@ -3302,7 +3329,7 @@ impl<'a> Parser<'a> {
                                 break;
                             }
                             brace_depth -= 1;
-                            if brace_depth == 0 && had_brace {
+                            if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 && had_brace {
                                 let span = self.bump()?.1;
                                 end_idx = span.end;
                                 if self.peek() == Some(&Token::Semicolon) {
@@ -3337,11 +3364,7 @@ impl<'a> Parser<'a> {
                     end_idx = span.end;
                 }
                 let raw_code = &self.input[start_idx..end_idx];
-                let pub_prefix = if member_is_pub && has_pub_or_priv {
-                    "pub "
-                } else {
-                    ""
-                };
+                let pub_prefix = if member_is_pub && has_pub_or_priv { "pub " } else { "" };
                 extra_zig.push(format!("{}{}", pub_prefix, raw_code.trim()));
                 continue;
             }
@@ -3350,12 +3373,8 @@ impl<'a> Parser<'a> {
             }
             let is_method = match self.peek() {
                 Some(Token::Fn) | Some(Token::Async) => true,
-                Some(Token::Static) => {
-                    matches!(self.peek_next(), Some(Token::Fn) | Some(Token::Async))
-                }
-                Some(Token::Ident(id)) if id == "inline" || id == "extern" => {
-                    matches!(self.peek_next(), Some(Token::Fn) | Some(Token::Async))
-                }
+                Some(Token::Static) => matches!(self.peek_next(), Some(Token::Fn) | Some(Token::Async)),
+                Some(Token::Ident(id)) if id == "inline" || id == "extern" => matches!(self.peek_next(), Some(Token::Fn) | Some(Token::Async)),
                 _ => false,
             };
             if is_method {
@@ -3860,8 +3879,7 @@ impl<'a> Parser<'a> {
                         };
                         continue;
                     }
-                    let is_prop_type_like =
-                        prop.sym.chars().next().map_or(false, |c| c.is_uppercase());
+                    let is_prop_type_like = prop.sym.chars().next().map_or(false, |c| c.is_uppercase());
                     let is_enum_variant_init = if let Expr::Ident(ref obj_id) = left {
                         obj_id
                             .sym
@@ -3873,9 +3891,7 @@ impl<'a> Parser<'a> {
                         false
                     };
 
-                    if (is_enum_variant_init || is_prop_type_like)
-                        && self.peek() == Some(&Token::LBrace)
-                    {
+                    if (is_enum_variant_init || is_prop_type_like) && self.peek() == Some(&Token::LBrace) {
                         self.bump()?;
                         let mut fields = Vec::new();
                         while self.peek() != Some(&Token::RBrace) && self.peek().is_some() {
@@ -3883,9 +3899,7 @@ impl<'a> Parser<'a> {
                                 self.bump()?;
                             }
                             let key = self.parse_ident()?;
-                            if self.peek() == Some(&Token::Colon)
-                                || self.peek() == Some(&Token::Assign)
-                            {
+                            if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Assign) {
                                 self.bump()?;
                             } else {
                                 self.expect(Token::Colon)?;
@@ -3907,8 +3921,7 @@ impl<'a> Parser<'a> {
                             };
                             (enum_name, prop)
                         } else {
-                            let left_str =
-                                expr_to_member_str(&left).unwrap_or_else(|| "Unknown".to_string());
+                            let left_str = expr_to_member_str(&left).unwrap_or_else(|| "Unknown".to_string());
                             let full_ty_sym = format!("{}.{}", left_str, prop.sym);
                             let full_ty_ident = Ident {
                                 span: Span {
@@ -4176,9 +4189,7 @@ impl<'a> Parser<'a> {
                     if self.peek() == Some(&Token::DotDot) {
                         self.bump()?;
                         is_slice = true;
-                        if self.peek() != Some(&Token::RBracket)
-                            && self.peek() != Some(&Token::Colon)
-                        {
+                        if self.peek() != Some(&Token::RBracket) && self.peek() != Some(&Token::Colon) {
                             end_idx = Some(Box::new(self.parse_expr()?));
                         }
                     } else {
@@ -4187,9 +4198,7 @@ impl<'a> Parser<'a> {
                             self.bump()?;
                             is_slice = true;
                             start_idx = Some(Box::new(idx));
-                            if self.peek() != Some(&Token::RBracket)
-                                && self.peek() != Some(&Token::Colon)
-                            {
+                            if self.peek() != Some(&Token::RBracket) && self.peek() != Some(&Token::Colon) {
                                 end_idx = Some(Box::new(self.parse_expr()?));
                             }
                         } else {
@@ -4578,8 +4587,7 @@ impl<'a> Parser<'a> {
                         };
                         continue;
                     }
-                    let is_prop_type_like =
-                        prop.sym.chars().next().map_or(false, |c| c.is_uppercase());
+                    let is_prop_type_like = prop.sym.chars().next().map_or(false, |c| c.is_uppercase());
                     let is_enum_variant_init = if let Expr::Ident(ref obj_id) = left {
                         obj_id
                             .sym
@@ -4591,9 +4599,7 @@ impl<'a> Parser<'a> {
                         false
                     };
 
-                    if (is_enum_variant_init || is_prop_type_like)
-                        && self.peek() == Some(&Token::LBrace)
-                    {
+                    if (is_enum_variant_init || is_prop_type_like) && self.peek() == Some(&Token::LBrace) {
                         self.bump()?;
                         let mut fields = Vec::new();
                         while self.peek() != Some(&Token::RBrace) && self.peek().is_some() {
@@ -4601,9 +4607,7 @@ impl<'a> Parser<'a> {
                                 self.bump()?;
                             }
                             let key = self.parse_ident()?;
-                            if self.peek() == Some(&Token::Colon)
-                                || self.peek() == Some(&Token::Assign)
-                            {
+                            if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Assign) {
                                 self.bump()?;
                             } else {
                                 self.expect(Token::Colon)?;
@@ -4625,8 +4629,7 @@ impl<'a> Parser<'a> {
                             };
                             (enum_name, prop)
                         } else {
-                            let left_str =
-                                expr_to_member_str(&left).unwrap_or_else(|| "Unknown".to_string());
+                            let left_str = expr_to_member_str(&left).unwrap_or_else(|| "Unknown".to_string());
                             let full_ty_sym = format!("{}.{}", left_str, prop.sym);
                             let full_ty_ident = Ident {
                                 span: Span {
@@ -4728,9 +4731,7 @@ impl<'a> Parser<'a> {
                     if self.peek() == Some(&Token::DotDot) {
                         self.bump()?;
                         is_slice = true;
-                        if self.peek() != Some(&Token::RBracket)
-                            && self.peek() != Some(&Token::Colon)
-                        {
+                        if self.peek() != Some(&Token::RBracket) && self.peek() != Some(&Token::Colon) {
                             end_idx = Some(Box::new(self.parse_expr()?));
                         }
                     } else {
@@ -4739,9 +4740,7 @@ impl<'a> Parser<'a> {
                             self.bump()?;
                             is_slice = true;
                             start_idx = Some(Box::new(idx));
-                            if self.peek() != Some(&Token::RBracket)
-                                && self.peek() != Some(&Token::Colon)
-                            {
+                            if self.peek() != Some(&Token::RBracket) && self.peek() != Some(&Token::Colon) {
                                 end_idx = Some(Box::new(self.parse_expr()?));
                             }
                         } else {
@@ -4902,9 +4901,7 @@ impl<'a> Parser<'a> {
                                     self.bump()?;
                                 }
                                 let key = self.parse_ident()?;
-                                if self.peek() == Some(&Token::Colon)
-                                    || self.peek() == Some(&Token::Assign)
-                                {
+                                if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Assign) {
                                     self.bump()?;
                                 } else {
                                     self.expect(Token::Colon)?;
@@ -5164,8 +5161,7 @@ impl<'a> Parser<'a> {
                             self.bump()?;
                         }
                         let key = self.parse_ident()?;
-                        if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Assign)
-                        {
+                        if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Assign) {
                             self.bump()?;
                         } else {
                             self.expect(Token::Colon)?;

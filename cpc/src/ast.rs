@@ -329,6 +329,8 @@ pub struct IfStmt {
     pub is_comptime: bool,
     #[serde(default)]
     pub capture: Option<Ident>,
+    #[serde(default)]
+    pub is_ptr_capture: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -338,6 +340,8 @@ pub struct WhileStmt {
     pub body: Box<Stmt>,
     #[serde(default)]
     pub capture: Option<Ident>,
+    #[serde(default)]
+    pub is_ptr_capture: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

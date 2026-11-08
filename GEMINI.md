@@ -385,16 +385,16 @@ export CPC_BIN=/data/dev/cp/cap/bin/cpc
 
 - 汇报正式版 `cpc` 更新完毕，供用户恢复 Bun 迁移项目继续执行任务。
 
-## 六、 多智能体并行工作流与 `cpc_dev_*` 构建规范（核心）
+### 3. 多子智能体并行工作流（核心）
 
-### 1. 多智能体并行开发cpc机制（`cpc_dev_*` vs `cpc`）
+#### 3.1 多子智能体并行开发cpc机制（`cpc_dev` vs `cpc_dev/agent_1`）
 
-cpc 源代码近2万行，修改、编译、测试非常耗时，需要修改、测试cpc 源代码实现自愈功能时，需将多个功能分派给多个子智能体在各自拷贝的沙箱目录中修改、测试，加快cpc研发速度。
+cpc 源代码几万行，修改、编译、测试非常耗时，需要修改、测试cpc 源代码实现自愈功能时，需将多个功能分派给多个子智能体在各自拷贝的沙箱目录中修改、测试，加快cpc研发速度。
 
-为避免多个智能体相互覆盖代码或阻塞等待，本项目采用 **“多缓冲隔离目录（`cpc_dev_*`）+ 乐观锁校验合并（CAS）”** 模式：
+为避免多个智能体相互覆盖代码或阻塞等待，本项目采用 **“多缓冲隔离目录（`cpc_dev/agent_1(1-9)`）+ 乐观锁校验合并（CAS）”** 模式：
 
-- 子智能体创建自己的cpc的拷贝目录， 如 `cpc_dev_1`、`cpc_dev_2`。
-- **子智能体开发与调试一律在自己的 `cpc_dev_*` 目录中进行**，与正式目录 `cpc/` 保持隔离，待测试全部通过后再按流程合并至 `cpc/`。
+- 子智能体创建自己的cpc的拷贝目录，已经准备了9个： `cpc_dev/agent_1`、`cpc_dev/agent_2`。
+- **子智能体开发与调试一律在自己的 `cpc_dev/agent_*` 目录中进行**，与正式目录 `cpc/`、`cpc/cpc_dev` 保持隔离，待测试全部通过后再按流程合并至 `cpc/cpc_dev`。
 
 ### 2. 并行开发与合并标准执行步骤
 
@@ -404,23 +404,29 @@ cpc 源代码近2万行，修改、编译、测试非常耗时，需要修改、
 - 通过注入 CPC_BIN 运行官方测试用例，其中cpc_dev_2为子智能体拷贝的工作目录：
 
 ```bash
-   env CPC_BIN=/data/dev/cp/cpc_dev_2/target/debug/cpc ./cap/bin/cap cap/test/test_err_and_move.cp
-
+   env CPC_BIN=/data/dev/cp/cpc_dev/agent_*/target/debug/cpc ./cap/bin/cap cap/test/test_err_and_move.cp
 ```
 
-3. **启动前记录状态 & 测试后校验 `cpc/src` 变更**：
+3. **启动前记录状态 & 测试后校验 `cpc_dev/src` 变更**：
 
-- 启动拷贝工作区时，记录 `cpc/src`的状态。
-- 在 `cpc_dev_*` 中修改代码（运行 `cargo check --manifest-path cpc_dev_*/Cargo.toml` 与 `cargo build --manifest-path cpc_dev_*/Cargo.toml`）并通过测试后，使用单条 Git 状态指令快速检查正式目录 `cpc/src` 在此期间是否被其他子智能体修改过：
+- 启动拷贝工作区时，记录 `cpc_dev/src`的状态。
+- 在 `cpc_dev/agent_*` 中修改代码（运行 `cargo check --manifest-path cpc_dev/agent_*/Cargo.toml` 与 `cargo build --manifest-path cpc_dev/agent_*/Cargo.toml`）并通过测试后，使用单条 Git 状态指令快速检查正式目录 `cpc_dev/src` 在此期间是否被其他子智能体修改过：
 
 ```bash
-git status --porcelain cpc/src
+git status --porcelain cpc_dev/src
 ```
 
 （或使用 `git diff cpc/src` 检查差异，避免使用复杂的 Shell 管道命令）。
 
-- 3.1 **若 `cpc/src` 无变化**：直接将工作区`cpc_dev_*`代码合并到正式`cpc/src`。
-- 3.2 **若 `cpc/src` 有变化**：先用文件读取与编辑工具将 `cpc/src` 中的新增修改同步合并到 `cpc_dev_*/src` 工作区中，重新编译 `cpc_dev_*` 并运行测试，确保兼容无误。
-- 重复 3.2，直至`cpc/src` 无变化，按 3.1 合并子工作区代码到正式'cpc/src'。合并后，删除子工作区目录。
+- 3.1 **若 `cpc_dev/src` 无变化**：直接将工作区`cpc_dev/agent_*`代码合并到`cpc_dev/src`。
+- 3.2 **若 `cpc_dev/src` 有变化**：先用文件读取与编辑工具将 `cpc_dev/src` 中的新增修改同步合并到 `cpc_dev/agent_*/src` 工作区中，重新编译 `cpc_dev/agent_*` 并运行测试，确保兼容无误。
+- 重复 3.2，直至`cpc_dev/src` 无变化，按 3.1 合并子工作区代码到'cpc_dev/src'。
 
-**注意**：以上 `cpc_dev_*`的`*`，表示各个子智能体创建的cpc 拷贝目录的数字编号，必须避免不同子智能体同时在一个工作区工作，同时修改同一个代码文件，导致代码混乱。
+**务必注意**：
+
+1. 以上 `cpc_dev_*`的`*`，表示各个子智能体创建的cpc 拷贝目录的数字编号，必须避免不同子智能体同时在一个工作区工作，同时修改同一个代码文件，导致代码混乱。
+2. 每个 智能体占用一个 `cpc_dev/agent_*` 目录， 必须同步`cpc_dev/src` 到占用`cpc_dev/agent_*` 目录，并在该目录下的`work.json`（没有则创建）写入 状态为占用（state: 'busy'）。
+3. 每个 智能体使用完 `cpc_dev/agent_*` 目录， 必须在该目录下的`work.json`（没有则创建）写入 状态为空闲（state: 'idle'）。
+4. 每个 子智能体使用 `cpc_dev/agent_*` 目录时，需检查 该目录下的`work.json`状态为空闲（state: 'idle'）， 没有文件则创建，并直接占用，状态为‘busy’。
+
+以上并发工作方案，目的是多子智能体并行工作，同时互不干扰，提高工作效率，缩短工作时间。

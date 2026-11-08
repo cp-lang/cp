@@ -649,6 +649,7 @@ pub struct Codegen {
     pub parallel_worker_count: usize,
     pub inline_closure_blk: Option<String>,
     pub inline_closure_params: HashSet<String>,
+    pub block_locals: HashSet<String>,
     pub type_aliases: HashMap<String, TypeAliasDecl>,
     pub narrowed_null_vars: HashSet<String>,
     pub const_vars: HashSet<String>,
@@ -723,6 +724,7 @@ impl Codegen {
             parallel_worker_count: 0,
             inline_closure_blk: None,
             inline_closure_params: HashSet::new(),
+            block_locals: HashSet::new(),
             type_aliases: HashMap::new(),
             narrowed_null_vars: HashSet::new(),
             const_vars: HashSet::new(),
@@ -1527,6 +1529,11 @@ impl Codegen {
                     self.globals.insert(id.sym.clone());
                     if let Some(t) = &v.ty {
                         self.var_cp_types.insert(id.sym.clone(), t.clone());
+                    }
+                    if v.kind == VarDeclKind::Const
+                        && id.sym.chars().next().map_or(false, |c| c.is_ascii_uppercase())
+                    {
+                        self.value_classes.insert(id.sym.clone());
                     }
                 }
             }
@@ -3030,8 +3037,8 @@ impl Codegen {
             self.writeln("pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return \"\"; } else if (comptime T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return \"\"; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(T) == .array)) { return v[idx]; } else { return @field(v, std.fmt.comptimePrint(\"{d}\", .{idx})); } }");
             self.writeln("pub fn CpUnpackTailType(comptime T: type, comptime offset_from_end: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; const n = @typeInfo(T).@\"struct\".fields.len; return @FieldType(T, std.fmt.comptimePrint(\"{d}\", .{n - offset_from_end})); }");
             self.writeln("pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return \"\"; } else if (comptime T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return \"\"; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .array)) { return v[v.len - offset_from_end]; } else { const n = @typeInfo(T).@\"struct\".fields.len; return @field(v, std.fmt.comptimePrint(\"{d}\", .{n - offset_from_end})); } }");
-            self.writeln("pub fn CpUnpackSliceType(comptime T: type, comptime start: usize) type { if (T == ?Message or T == Message) return []const Message; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return T; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return []const @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return []const @typeInfo(T).array.child; const fields = @typeInfo(T).@\"struct\".fields; if (fields.len == 0) return []const i32; const Elem = if (start < fields.len) fields[start].type else fields[0].type; return []const CpValType(Elem); }");
-            self.writeln("pub fn cp_unpack_slice(v: anytype, comptime start: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start + suffix_len) { return m.array[start .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime T == Message) { if (v == .array and v.array.len >= start + suffix_len) { return v.array[start .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[start .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[start .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[start .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .array)) { return v[start .. v.len - suffix_len]; } else { const fields = @typeInfo(T).@\"struct\".fields; const end = fields.len - suffix_len; const count = if (end > start) end - start else 0; const Elem = if (start < fields.len) CpValType(fields[start].type) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, std.fmt.comptimePrint(\"{d}\", .{f_idx}))); } return buf; } }");
+            self.writeln("pub fn CpUnpackSliceType(comptime T: type, comptime start_idx: usize) type { if (T == ?Message or T == Message) return []const Message; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return T; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return []const @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return []const @typeInfo(T).array.child; const fields = @typeInfo(T).@\"struct\".fields; if (fields.len == 0) return []const i32; const Elem = if (start_idx < fields.len) fields[start_idx].type else fields[0].type; return []const CpValType(Elem); }");
+            self.writeln("pub fn cp_unpack_slice(v: anytype, comptime start_idx: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start_idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start_idx + suffix_len) { return m.array[start_idx .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime T == Message) { if (v == .array and v.array.len >= start_idx + suffix_len) { return v.array[start_idx .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[start_idx .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .array)) { return v[start_idx .. v.len - suffix_len]; } else { const fields = @typeInfo(T).@\"struct\".fields; const end = fields.len - suffix_len; const count = if (end > start_idx) end - start_idx else 0; const Elem = if (start_idx < fields.len) CpValType(fields[start_idx].type) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start_idx..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, std.fmt.comptimePrint(\"{d}\", .{f_idx}))); } return buf; } }");
         }
         self.writeln("pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@\"enum\")) { return @tagName(val); } else if (comptime T == bool) { return if (val) \"true\" else \"false\"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{}\", .{val}) catch \"0\"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{d}\", .{val}) catch \"0.0\"; } else if (comptime (@typeInfo(T) == .@\"struct\" and @hasDecl(T, \"toString\"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@\"struct\" and @hasDecl(@typeInfo(T).pointer.child, \"toString\"))) { return val.toString(); } else { return @typeName(T); } }");
         self.writeln("");
@@ -4336,9 +4343,7 @@ impl Codegen {
                                     ) {
                                         return;
                                     }
-                                    if matches!(f.ty, Type::BorrowType { is_mut: false, .. })
-                                        && !op_desc.starts_with("field assignment")
-                                    {
+                                    if matches!(f.ty, Type::BorrowType { is_mut: false, .. }) && !op_desc.starts_with("field assignment") {
                                         panic!(
                                             "CP Compile Error: Cannot perform mutable operation ({}) through read-only borrow field '{}'",
                                             op_desc, id.sym
@@ -4421,9 +4426,7 @@ impl Codegen {
                     ) {
                         return;
                     }
-                    if matches!(m_ty, Type::BorrowType { is_mut: false, .. })
-                        && !op_desc.starts_with("field assignment")
-                    {
+                    if matches!(m_ty, Type::BorrowType { is_mut: false, .. }) && !op_desc.starts_with("field assignment") {
                         panic!(
                             "CP Compile Error: Cannot perform mutable operation ({}) through read-only borrow field '{}'",
                             op_desc, mem.prop.sym
@@ -4793,18 +4796,18 @@ impl Codegen {
                         })
                     });
                 }
+                if let Some(t) = self.var_cp_types.get(&id.sym) {
+                    if self.narrowed_null_vars.contains(&id.sym) {
+                        return Some(Self::unwrap_optional_type(t));
+                    }
+                    return Some(t.clone());
+                }
                 if let Some(c_name) = &self.current_class_name {
                     if let Some(cls) = self.class_defs.get(c_name) {
                         if let Some(f) = cls.fields.iter().find(|f| f.ident.sym == id.sym) {
                             return Some(f.ty.clone());
                         }
                     }
-                }
-                if let Some(t) = self.var_cp_types.get(&id.sym) {
-                    if self.narrowed_null_vars.contains(&id.sym) {
-                        return Some(Self::unwrap_optional_type(t));
-                    }
-                    return Some(t.clone());
                 }
                 None
             }
@@ -5762,6 +5765,9 @@ impl Codegen {
                     Type::ManyRawPtr(elem) => Some(Type::Array(elem)),
                     Type::FixedArray(elem, _) => Some(Type::Array(elem)),
                     Type::CStr => Some(Type::String),
+                    Type::Ref(id) if id.sym == "cstring" || id.sym == "cstr" => {
+                        Some(Type::Array(Box::new(Type::U8)))
+                    }
                     other => Some(other),
                 }
             }
@@ -5779,6 +5785,9 @@ impl Codegen {
                     Some(Type::Array(inner)) => Some(*inner),
                     Some(Type::FixedArray(inner, _)) => Some(*inner),
                     Some(Type::String) => Some(Type::U8),
+                    Some(Type::CStr) => Some(Type::U8),
+                    Some(Type::ManyRawPtr(inner)) | Some(Type::CPtr(inner)) => Some(*inner),
+                    Some(Type::Ref(id)) if id.sym == "cstring" || id.sym == "cstr" => Some(Type::U8),
                     Some(Type::Ref(id)) if id.sym == "Dict" || id.sym == "Map" => {
                         Some(Type::Optional(Box::new(Type::Ref(Ident {
                             span: Span { start: 0, end: 0 },
@@ -8285,6 +8294,10 @@ impl Codegen {
                                     || matches!(init, Expr::Lit(Lit::Str(_))))
                             {
                                 format!("@constCast({})", final_expr)
+                            } else if matches!(var.ty, Some(Type::ManyRawPtr(_)) | Some(Type::CPtr(_)))
+                                && matches!(init, Expr::Borrow(_, _))
+                            {
+                                format!("@ptrCast({})", final_expr)
                             } else {
                                 final_expr.clone()
                             };
@@ -8939,14 +8952,41 @@ impl Codegen {
                         self.narrowed_null_vars = old_narrowed;
                     }
                 } else {
-                    let saved_cap_local = if let Some(cap) = &i.capture {
+                    let (saved_cap_local, saved_cap_cp, was_mut_loop) = if let Some(cap) = &i.capture {
                         self.var_scope_depth
                             .insert(cap.sym.clone(), self.current_scope_depth + 1);
-                        self.write_to_case(&format!("if ({}) |{}| {{", test, cap.sym));
-                        self.locals.insert(cap.sym.clone(), "anytype".to_string())
+                        self.block_locals.insert(cap.sym.clone());
+                        let was_mut = if i.is_ptr_capture {
+                            !self.mut_borrow_loop_vars.insert(cap.sym.clone())
+                        } else {
+                            false
+                        };
+                        let ptr_prefix = if i.is_ptr_capture { "*" } else { "" };
+                        self.write_to_case(&format!("if ({}) |{}{}| {{", test, ptr_prefix, cap.sym));
+                        let test_cp_ty = self.infer_cp_type(&i.test);
+                        let unwrapped_ty = match &test_cp_ty {
+                            Some(Type::Optional(inner)) => (**inner).clone(),
+                            Some(Type::ErrorUnion(inner)) => (**inner).clone(),
+                            Some(Type::ResultType { ok, .. }) => (**ok).clone(),
+                            Some(other) => other.clone(),
+                            None => Type::Any,
+                        };
+                        let final_ty = if i.is_ptr_capture {
+                            Type::BorrowType {
+                                is_mut: true,
+                                inner: Box::new(unwrapped_ty.clone()),
+                                lifetimes: vec![],
+                            }
+                        } else {
+                            unwrapped_ty.clone()
+                        };
+                        let zig_ty = self.map_type(&final_ty);
+                        let prev_cp = self.var_cp_types.insert(cap.sym.clone(), final_ty);
+                        let prev_l = self.locals.insert(cap.sym.clone(), zig_ty);
+                        (prev_l, prev_cp, was_mut)
                     } else {
                         self.write_to_case(&format!("if ({}) {{", test));
-                        None
+                        (None, None, false)
                     };
                     self.indent();
                     if let Some(cap) = &i.capture {
@@ -8962,10 +9002,19 @@ impl Codegen {
                         self.generate_stmt(&i.cons);
                     }
                     if let Some(cap) = &i.capture {
+                        self.block_locals.remove(&cap.sym);
+                        if i.is_ptr_capture && !was_mut_loop {
+                            self.mut_borrow_loop_vars.remove(&cap.sym);
+                        }
                         if let Some(prev) = saved_cap_local {
                             self.locals.insert(cap.sym.clone(), prev);
                         } else {
                             self.locals.remove(&cap.sym);
+                        }
+                        if let Some(prev_cp) = saved_cap_cp {
+                            self.var_cp_types.insert(cap.sym.clone(), prev_cp);
+                        } else {
+                            self.var_cp_types.remove(&cap.sym);
                         }
                     }
                     self.narrowed_null_vars = old_narrowed.clone();
@@ -9008,13 +9057,42 @@ impl Codegen {
                 let test = self.generate_expr(&w.test);
                 let old_uninit = self.uninitialized_vars.clone();
                 let old_narrowed = self.narrowed_null_vars.clone();
-                if let Some(cap) = &w.capture {
+                let (saved_cap_local, saved_cap_cp, was_mut_loop) = if let Some(cap) = &w.capture {
                     self.var_scope_depth
                         .insert(cap.sym.clone(), self.current_scope_depth + 1);
-                    self.write_to_case(&format!("while ({}) |{}| {{", test, cap.sym));
+                    self.block_locals.insert(cap.sym.clone());
+                    let was_mut = if w.is_ptr_capture {
+                        !self.mut_borrow_loop_vars.insert(cap.sym.clone())
+                    } else {
+                        false
+                    };
+                    let ptr_prefix = if w.is_ptr_capture { "*" } else { "" };
+                    self.write_to_case(&format!("while ({}) |{}{}| {{", test, ptr_prefix, cap.sym));
+                    let test_cp_ty = self.infer_cp_type(&w.test);
+                    let unwrapped_ty = match &test_cp_ty {
+                        Some(Type::Optional(inner)) => (**inner).clone(),
+                        Some(Type::ErrorUnion(inner)) => (**inner).clone(),
+                        Some(Type::ResultType { ok, .. }) => (**ok).clone(),
+                        Some(other) => other.clone(),
+                        None => Type::Any,
+                    };
+                    let final_ty = if w.is_ptr_capture {
+                        Type::BorrowType {
+                            is_mut: true,
+                            inner: Box::new(unwrapped_ty.clone()),
+                            lifetimes: vec![],
+                        }
+                    } else {
+                        unwrapped_ty.clone()
+                    };
+                    let zig_ty = self.map_type(&final_ty);
+                    let prev_cp = self.var_cp_types.insert(cap.sym.clone(), final_ty);
+                    let prev_l = self.locals.insert(cap.sym.clone(), zig_ty);
+                    (prev_l, prev_cp, was_mut)
                 } else {
                     self.write_to_case(&format!("while ({}) {{", test));
-                }
+                    (None, None, false)
+                };
                 self.indent();
                 if let Some(cap) = &w.capture {
                     if !self.last_use_map.contains_key(&cap.sym) {
@@ -9029,6 +9107,22 @@ impl Codegen {
                     }
                 } else {
                     self.generate_stmt(&w.body);
+                }
+                if let Some(cap) = &w.capture {
+                    self.block_locals.remove(&cap.sym);
+                    if w.is_ptr_capture && !was_mut_loop {
+                        self.mut_borrow_loop_vars.remove(&cap.sym);
+                    }
+                    if let Some(prev) = saved_cap_local {
+                        self.locals.insert(cap.sym.clone(), prev);
+                    } else {
+                        self.locals.remove(&cap.sym);
+                    }
+                    if let Some(prev_cp) = saved_cap_cp {
+                        self.var_cp_types.insert(cap.sym.clone(), prev_cp);
+                    } else {
+                        self.var_cp_types.remove(&cap.sym);
+                    }
                 }
                 self.narrowed_null_vars = old_narrowed;
                 self.current_scope_depth -= 1;
@@ -9518,7 +9612,8 @@ impl Codegen {
                         };
                         if !allows_null {
                             panic!(
-                                "CP Compile Error: Cannot return 'null' from function whose return type is not optional '?T'"
+                                "CP Compile Error: Cannot return 'null' from function '{}' whose return type is not optional '?T' (actual ret ty: {:?})",
+                                self.current_fn_zig_name, self.current_fn_ret_ty
                             );
                         }
                     }
@@ -9974,7 +10069,7 @@ impl Codegen {
                 format!("return .{{ .err = {} }};", ev)
             } else if is_null_fb || (fallback_expr.is_none() && matches!(&*ok, Type::Optional(_))) {
                 if !matches!(&*ok, Type::Optional(_)) {
-                    panic!("CP Compile Error: Cannot return 'null' from function whose return type is not optional '?T'");
+                    panic!("CP Compile Error: Cannot return 'null' from function '{}' whose return type is not optional '?T' (actual ret ty: {:?})", self.current_fn_zig_name, self.current_fn_ret_ty);
                 }
                 "return .{ .ok = null };".to_string()
             } else if let Some(fb) = fallback_expr {
@@ -9992,7 +10087,7 @@ impl Codegen {
                 _ => false,
             };
             if is_null_fb && !allows_null {
-                panic!("CP Compile Error: Cannot return 'null' from function whose return type is not optional '?T'");
+                panic!("CP Compile Error: Cannot return 'null' from function '{}' whose return type is not optional '?T' (actual ret ty: {:?})", self.current_fn_zig_name, self.current_fn_ret_ty);
             }
             if let Some(fb) = fallback_expr {
                 let fb_c = self.generate_expr(fb);
@@ -10075,7 +10170,10 @@ impl Codegen {
                 {
                     i.sym.clone()
                 } else if self.locals.contains_key(&i.sym) {
-                    let base = if self.is_state_machine && !self.inline_closure_params.contains(&i.sym) {
+                    let base = if self.is_state_machine
+                        && !self.inline_closure_params.contains(&i.sym)
+                        && !self.block_locals.contains(&i.sym)
+                    {
                         format!("ctx.{}", i.sym)
                     } else {
                         i.sym.clone()
@@ -13440,6 +13538,7 @@ impl Codegen {
                         } else {
                             false
                         };
+                        let is_target_fn = matches!(resolved_ty, Type::Fn(_, _) | Type::CFn(_, _));
 
                         if is_target_int {
                             if is_src_float {
@@ -13487,6 +13586,8 @@ impl Codegen {
                             }
                         } else if is_target_enum {
                             format!("@as({}, @enumFromInt({}))", target_zig_ty, inner_code)
+                        } else if is_target_fn {
+                            format!("@as({}, @ptrCast({}))", target_zig_ty, inner_code)
                         } else if matches!(resolved_ty, Type::Any) {
                             format!(
                                 "@as({}, @ptrCast(@alignCast({})))",
@@ -13861,6 +13962,19 @@ impl Codegen {
                         return "Error".to_string();
                     }
                     return format!("*{}", id.sym);
+                }
+            }
+            if let Expr::Slice(s) = expr {
+                let obj_t = self.infer_zig_type(None, Some(&s.obj));
+                let elem_t = if let Some(Type::Array(elem)) = self.infer_cp_type(expr) {
+                    self.map_type(&elem)
+                } else {
+                    "u8".to_string()
+                };
+                if obj_t.contains("const") || obj_t.contains("[:0]const") {
+                    return format!("[]const {}", elem_t);
+                } else {
+                    return format!("[]{}", elem_t);
                 }
             }
             if let Some(cp_ty) = self.infer_cp_type(expr) {
@@ -14344,6 +14458,30 @@ impl Codegen {
                 }
                 Stmt::Block(b) | Stmt::UnsafeBlock(b) => self.extract_locals_simple(b),
                 Stmt::If(i) => {
+                    let old_v = self.var_cp_types.clone();
+                    let old_l = self.locals.clone();
+                    if let Some(cap) = &i.capture {
+                        let test_cp_ty = self.infer_cp_type(&i.test);
+                        let unwrapped_ty = match &test_cp_ty {
+                            Some(Type::Optional(inner)) => (**inner).clone(),
+                            Some(Type::ErrorUnion(inner)) => (**inner).clone(),
+                            Some(Type::ResultType { ok, .. }) => (**ok).clone(),
+                            Some(other) => other.clone(),
+                            None => Type::Any,
+                        };
+                        let final_ty = if i.is_ptr_capture {
+                            Type::BorrowType {
+                                is_mut: true,
+                                inner: Box::new(unwrapped_ty.clone()),
+                                lifetimes: vec![],
+                            }
+                        } else {
+                            unwrapped_ty.clone()
+                        };
+                        let zig_ty = self.map_type(&final_ty);
+                        self.var_cp_types.insert(cap.sym.clone(), final_ty);
+                        self.locals.insert(cap.sym.clone(), zig_ty);
+                    }
                     if let Stmt::Block(b) = &*i.cons {
                         self.extract_locals_simple(b);
                     }
@@ -14352,11 +14490,39 @@ impl Codegen {
                             self.extract_locals_simple(b);
                         }
                     }
+                    self.var_cp_types = old_v;
+                    self.locals = old_l;
                 }
                 Stmt::While(w) => {
+                    let old_v = self.var_cp_types.clone();
+                    let old_l = self.locals.clone();
+                    if let Some(cap) = &w.capture {
+                        let test_cp_ty = self.infer_cp_type(&w.test);
+                        let unwrapped_ty = match &test_cp_ty {
+                            Some(Type::Optional(inner)) => (**inner).clone(),
+                            Some(Type::ErrorUnion(inner)) => (**inner).clone(),
+                            Some(Type::ResultType { ok, .. }) => (**ok).clone(),
+                            Some(other) => other.clone(),
+                            None => Type::Any,
+                        };
+                        let final_ty = if w.is_ptr_capture {
+                            Type::BorrowType {
+                                is_mut: true,
+                                inner: Box::new(unwrapped_ty.clone()),
+                                lifetimes: vec![],
+                            }
+                        } else {
+                            unwrapped_ty.clone()
+                        };
+                        let zig_ty = self.map_type(&final_ty);
+                        self.var_cp_types.insert(cap.sym.clone(), final_ty);
+                        self.locals.insert(cap.sym.clone(), zig_ty);
+                    }
                     if let Stmt::Block(b) = &*w.body {
                         self.extract_locals_simple(b);
                     }
+                    self.var_cp_types = old_v;
+                    self.locals = old_l;
                 }
                 Stmt::For(f) => {
                     if let Stmt::Block(b) = &*f.body {
@@ -14798,14 +14964,14 @@ impl Codegen {
                     let inner = &ident.sym[6..ident.sym.len() - 1];
                     return format!("CpMutex({})", self.map_type_name(inner));
                 }
-                if ident.sym == "Mutex" {
+                if ident.sym == "Mutex" && !self.type_aliases.contains_key("Mutex") && !self.class_defs.contains_key("Mutex") {
                     return "CpBareMutex".to_string();
                 }
                 if ident.sym.starts_with("RwLock<") {
                     let inner = &ident.sym[7..ident.sym.len() - 1];
                     return format!("CpRwLock({})", self.map_type_name(inner));
                 }
-                if ident.sym == "RwLock" {
+                if ident.sym == "RwLock" && !self.type_aliases.contains_key("RwLock") && !self.class_defs.contains_key("RwLock") {
                     return "CpBareRwLock".to_string();
                 }
                 if ident.sym.starts_with("Atomic<") {
@@ -14953,7 +15119,7 @@ impl Codegen {
                 } else {
                     false
                 };
-                if inner_zig.starts_with('*') || is_trait {
+                if inner_zig.starts_with('*') || is_trait || inner_zig == "anytype" {
                     inner_zig
                 } else {
                     format!("*{}", inner_zig)

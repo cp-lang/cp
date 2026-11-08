@@ -3792,6 +3792,6 @@ return VTable {
 
 agyr --json | jq -r '.[].id'
 640a7490-6bcb-4d2f-a6af-60d7b8d6c522 最早
-8bef6f4a-c26e-465d-92a9-5acea965ca44 v
-1cbf7ce8-4f03-449e-9336-1386a194b3cb c
+8bef6f4a-c26e-465d-92a9-5acea965ca44 v 主用
+1cbf7ce8-4f03-449e-9336-1386a194b3cb c 沟通
 root@beam-01:/data/dev/bun# agy --conversation=

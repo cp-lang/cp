@@ -74,6 +74,19 @@ pub enum SemaError {
     CannotInstantiateStatic(String, Span),
     #[error("Compile Error: {0} at {1:?}")]
     InvalidPointerArithmetic(String, Span),
+    #[error("Compile Error: Index {index} is out of bounds for buffer of length {len} at {span:?}")]
+    CompileTimeIndexOutOfBounds {
+        index: i64,
+        len: usize,
+        span: Span,
+    },
+    #[error("Compile Error: Negative index {index} at {span:?}")]
+    NegativeIndex {
+        index: i64,
+        span: Span,
+    },
+    #[error("Compile Error: Mutation via unbounded raw pointer or cstr '{0}' requires 'unsafe' block at {1:?}")]
+    UnboundedRawPointerMutation(String, Span),
 }
 
 impl SemaError {
@@ -286,6 +299,33 @@ impl SemaError {
             .with_cause("attempted to invoke a non-function value with '(...)' call syntax.")
             .with_help("verify that the callee is a function, method, or callable object."),
 
+            SemaError::CompileTimeIndexOutOfBounds { index, len, span } => Diagnostic::new(
+                "E0217",
+                format!("index out of bounds: index {} is out of bounds for buffer of length {}", index, len),
+            )
+            .with_span(*span)
+            .with_cause(format!("index {} exceeds compile-time known length {} of the buffer.", index, len))
+            .with_help("accessing a fixed-size array or known-length buffer beyond its bound is a compile-time fatal error.")
+            .with_suggestion(format!("ensure index is within 0..{}, or use safe slicing: 'slice = s[0..max_len]'", len)),
+
+            SemaError::NegativeIndex { index, span } => Diagnostic::new(
+                "E0218",
+                format!("negative index {} is invalid for array indexing", index),
+            )
+            .with_span(*span)
+            .with_cause(format!("array index {} is negative.", index))
+            .with_help("array and buffer indices must be non-negative unsigned integers.")
+            .with_suggestion("use a non-negative index value: e.g. 0"),
+
+            SemaError::UnboundedRawPointerMutation(name, span) => Diagnostic::new(
+                "E0209",
+                format!("mutation via unbounded raw pointer or cstr '{}' requires 'unsafe' block", name),
+            )
+            .with_span(*span)
+            .with_cause(format!("modifying memory via unbounded pointer/cstr '{}' without statically known length is unsafe.", name))
+            .with_help("raw pointers and unbounded cstr buffers do not carry runtime length metadata. Modifying memory through them can lead to buffer overflows.")
+            .with_suggestion(format!("wrap the mutation in 'unsafe {{ {}[...] = ...; }}' or slice it first: 'let slice = {}[0..len]; slice[...] = ...;'", name, name)),
+
             _ => Diagnostic::new("E0290", format!("semantic error: {}", self))
                 .with_help("check semantic rules and types according to CP specification."),
         }
@@ -332,6 +372,8 @@ pub struct Analyzer {
     pub moved_vars: std::collections::HashSet<String>,
     pub current_class: Option<String>,
     pub type_aliases: HashMap<String, Type>,
+    pub known_lengths_stack: Vec<HashMap<String, usize>>,
+    pub const_int_vars_stack: Vec<HashMap<String, i64>>,
 }
 
 impl Analyzer {
@@ -441,6 +483,8 @@ impl Analyzer {
             moved_vars: std::collections::HashSet::new(),
             current_class: None,
             type_aliases: HashMap::new(),
+            known_lengths_stack: vec![HashMap::new()],
+            const_int_vars_stack: vec![HashMap::new()],
         }
     }
 
@@ -1121,6 +1165,7 @@ impl Analyzer {
                 alt: None,
                 is_comptime: false,
                 capture: None,
+                is_ptr_capture: false,
             }));
         }
         body.push(Stmt::Return(crate::ast::ReturnStmt {
@@ -1195,6 +1240,7 @@ impl Analyzer {
                 alt: None,
                 is_comptime: false,
                 capture: None,
+                is_ptr_capture: false,
             }));
             let gt = Expr::Bin(BinExpr {
                 span: mock_span,
@@ -1212,6 +1258,7 @@ impl Analyzer {
                 alt: None,
                 is_comptime: false,
                 capture: None,
+                is_ptr_capture: false,
             }));
         }
         body.push(Stmt::Return(crate::ast::ReturnStmt {
@@ -2054,6 +2101,30 @@ impl Analyzer {
                     self.current_fn_is_async = m.is_async;
                     self.current_fn_is_unsafe = m.is_unsafe;
                     self.enter_scope();
+                    for gp in &c.generic_params {
+                        match gp {
+                            GenericParam::Type(id) => {
+                                let _ = self.define(
+                                    id.sym.clone(),
+                                    SymbolKind::Var {
+                                        ty: Type::Ref(id.clone()),
+                                        kind: VarDeclKind::Const,
+                                    },
+                                    id.span,
+                                );
+                            }
+                            GenericParam::Const { ident, ty } => {
+                                let _ = self.define(
+                                    ident.sym.clone(),
+                                    SymbolKind::Var {
+                                        ty: ty.clone(),
+                                        kind: VarDeclKind::Const,
+                                    },
+                                    ident.span,
+                                );
+                            }
+                        }
+                    }
                     // Define receiver aliases `this` and `_`
                     let self_ty = Type::Ref(c.ident.clone());
                     let _ = self.define(
@@ -2440,7 +2511,18 @@ impl Analyzer {
                     }
                 }
                 let ty = var.ty.clone().unwrap_or(inferred_ty);
-                self.analyze_pattern(&var.pat, ty, &var.kind)?;
+                self.analyze_pattern(&var.pat, ty.clone(), &var.kind)?;
+                if let Pattern::Ident(ident) = &var.pat {
+                    let var_name = ident.sym.clone();
+                    if let Some(known_len) = self.infer_known_length(&ty, var.init.as_ref()) {
+                        self.set_known_length(var_name.clone(), known_len);
+                    }
+                    if let Some(init) = &var.init {
+                        if let Some(val) = self.eval_int_expr(init) {
+                            self.set_const_int(var_name, val);
+                        }
+                    }
+                }
             }
             Stmt::Expr(expr) => {
                 self.infer_type(expr)?;
@@ -2465,7 +2547,11 @@ impl Analyzer {
                         cap.sym.clone(),
                         SymbolKind::Var {
                             ty: Type::Any,
-                            kind: VarDeclKind::Const,
+                            kind: if i.is_ptr_capture {
+                                VarDeclKind::Let
+                            } else {
+                                VarDeclKind::Const
+                            },
                         },
                         cap.span,
                     )?;
@@ -2524,7 +2610,11 @@ impl Analyzer {
                         cap.sym.clone(),
                         SymbolKind::Var {
                             ty: Type::Any,
-                            kind: VarDeclKind::Const,
+                            kind: if w.is_ptr_capture {
+                                VarDeclKind::Let
+                            } else {
+                                VarDeclKind::Const
+                            },
                         },
                         cap.span,
                     )?;
@@ -2705,6 +2795,10 @@ impl Analyzer {
             Expr::Bin(bin) => {
                 if bin.op == BinaryOp::Assign {
                     if let Expr::Ident(id) = &*bin.left {
+                        if id.sym == "_" {
+                            self.analyze_expr(&bin.right)?;
+                            return Ok(());
+                        }
                         if let Some(SymbolKind::Var {
                             kind: VarDeclKind::Const,
                             ..
@@ -2718,7 +2812,7 @@ impl Analyzer {
                                 id.span,
                             ));
                         }
-                    } else if let Expr::Index { obj, .. } = &*bin.left {
+                    } else if let Expr::Index { obj, index } = &*bin.left {
                         if let Expr::Ident(id) = &**obj {
                             if let Some(SymbolKind::Var {
                                 kind: VarDeclKind::Const,
@@ -2728,6 +2822,7 @@ impl Analyzer {
                                 return Err(SemaError::ConstAssignment(id.sym.clone(), bin.span));
                             }
                         }
+                        self.check_index_expr(obj, index, true, bin.span)?;
                     }
                 }
                 self.analyze_expr(&bin.left)?;
@@ -2933,6 +3028,11 @@ impl Analyzer {
             Expr::Index { obj, index } => {
                 self.analyze_expr(obj)?;
                 self.analyze_expr(index)?;
+                let span = crate::Span {
+                    start: inner_span(obj).start,
+                    end: inner_span(index).end,
+                };
+                self.check_index_expr(obj, index, false, span)?;
             }
             Expr::Await(inner)
             | Expr::Question(inner)
@@ -3162,9 +3262,242 @@ impl Analyzer {
 
     fn enter_scope(&mut self) {
         self.scopes.push(HashMap::new());
+        self.known_lengths_stack.push(HashMap::new());
+        self.const_int_vars_stack.push(HashMap::new());
     }
     fn exit_scope(&mut self) {
         self.scopes.pop();
+        self.known_lengths_stack.pop();
+        self.const_int_vars_stack.pop();
+    }
+
+    pub fn get_known_length(&self, name: &str) -> Option<usize> {
+        for scope in self.known_lengths_stack.iter().rev() {
+            if let Some(len) = scope.get(name) {
+                return Some(*len);
+            }
+        }
+        None
+    }
+
+    pub fn set_known_length(&mut self, name: String, len: usize) {
+        if let Some(scope) = self.known_lengths_stack.last_mut() {
+            scope.insert(name, len);
+        }
+    }
+
+    pub fn get_const_int(&self, name: &str) -> Option<i64> {
+        for scope in self.const_int_vars_stack.iter().rev() {
+            if let Some(val) = scope.get(name) {
+                return Some(*val);
+            }
+        }
+        None
+    }
+
+    pub fn set_const_int(&mut self, name: String, val: i64) {
+        if let Some(scope) = self.const_int_vars_stack.last_mut() {
+            scope.insert(name, val);
+        }
+    }
+
+    pub fn eval_int_expr(&self, expr: &Expr) -> Option<i64> {
+        match expr {
+            Expr::Lit(Lit::Int(n)) => Some(*n),
+            Expr::Ident(id) => self.get_const_int(&id.sym),
+            Expr::Bin(bin) => {
+                let l = self.eval_int_expr(&bin.left)?;
+                let r = self.eval_int_expr(&bin.right)?;
+                match bin.op {
+                    BinaryOp::Add => Some(l.wrapping_add(r)),
+                    BinaryOp::Sub => Some(l.wrapping_sub(r)),
+                    BinaryOp::Mul => Some(l.wrapping_mul(r)),
+                    BinaryOp::Div => {
+                        if r != 0 {
+                            Some(l.wrapping_div(r))
+                        } else {
+                            None
+                        }
+                    }
+                    BinaryOp::Mod => {
+                        if r != 0 {
+                            Some(l.wrapping_rem(r))
+                        } else {
+                            None
+                        }
+                    }
+                    BinaryOp::Shl => {
+                        if (0..64).contains(&r) {
+                            Some(l << r)
+                        } else {
+                            None
+                        }
+                    }
+                    BinaryOp::Shr => {
+                        if (0..64).contains(&r) {
+                            Some(l >> r)
+                        } else {
+                            None
+                        }
+                    }
+                    BinaryOp::BitAnd => Some(l & r),
+                    BinaryOp::BitOr => Some(l | r),
+                    BinaryOp::BitXor => Some(l ^ r),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    pub fn infer_known_length(&self, ty: &Type, init_opt: Option<&Expr>) -> Option<usize> {
+        let mut curr_ty = ty;
+        while let Type::BorrowType { inner, .. } = curr_ty {
+            curr_ty = inner;
+        }
+        if let Type::FixedArray(_, len) = curr_ty {
+            return Some(*len);
+        }
+
+        if let Some(init) = init_opt {
+            match init {
+                Expr::Lit(Lit::Str(s)) => {
+                    return Some(s.len());
+                }
+                Expr::Array(elements) => {
+                    return Some(elements.len());
+                }
+                Expr::ArrayRepeat(_, count) => {
+                    if let Some(n) = self.eval_int_expr(count) {
+                        if n >= 0 {
+                            return Some(n as usize);
+                        }
+                    }
+                }
+                Expr::Borrow(inner, _) => match &**inner {
+                    Expr::Ident(id) => {
+                        if let Some(len) = self.get_known_length(&id.sym) {
+                            return Some(len);
+                        }
+                    }
+                    Expr::Index { obj, index } => {
+                        if let Expr::Ident(id) = &**obj {
+                            if let Some(buf_len) = self.get_known_length(&id.sym) {
+                                if let Some(idx_val) = self.eval_int_expr(index) {
+                                    if idx_val >= 0 && (idx_val as usize) <= buf_len {
+                                        return Some(buf_len - idx_val as usize);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                Expr::Slice(slice) => {
+                    if let (Some(s_expr), Some(e_expr)) = (&slice.start, &slice.end) {
+                        if let (Some(s_val), Some(e_val)) =
+                            (self.eval_int_expr(s_expr), self.eval_int_expr(e_expr))
+                        {
+                            if e_val >= s_val && s_val >= 0 {
+                                return Some((e_val - s_val) as usize);
+                            }
+                        }
+                    }
+                }
+                Expr::Ident(id) => {
+                    if let Some(len) = self.get_known_length(&id.sym) {
+                        return Some(len);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    pub fn check_index_expr(
+        &mut self,
+        obj: &Expr,
+        index: &Expr,
+        is_write: bool,
+        span: Span,
+    ) -> SemaResult<()> {
+        let idx_opt = self.eval_int_expr(index);
+
+        if let Some(idx) = idx_opt {
+            if idx < 0 {
+                return Err(SemaError::NegativeIndex { index: idx, span });
+            }
+        }
+
+        let mut known_len = None;
+        if let Expr::Ident(id) = obj {
+            known_len = self.get_known_length(&id.sym);
+        }
+        if known_len.is_none() {
+            if let Ok(obj_ty) = self.infer_type(obj) {
+                let mut curr_ty = &obj_ty;
+                while let Type::BorrowType { inner, .. } = curr_ty {
+                    curr_ty = inner;
+                }
+                if let Type::FixedArray(_, len) = curr_ty {
+                    known_len = Some(*len);
+                }
+            }
+        }
+        if known_len.is_none() {
+            if let Expr::Lit(Lit::Str(s)) = obj {
+                known_len = Some(s.len());
+            }
+        }
+
+        if let (Some(idx), Some(len)) = (idx_opt, known_len) {
+            if (idx as usize) >= len {
+                return Err(SemaError::CompileTimeIndexOutOfBounds {
+                    index: idx,
+                    len,
+                    span,
+                });
+            }
+        }
+
+        if is_write {
+            let obj_ty_res = self.infer_type(obj);
+            if let Ok(ty) = obj_ty_res {
+                let mut base_ty = &ty;
+                while let Type::BorrowType { inner, .. } = base_ty {
+                    base_ty = inner;
+                }
+                let is_unbounded_ptr_or_cstr = matches!(
+                    base_ty,
+                    Type::ManyRawPtr(_)
+                        | Type::CPtr(_)
+                        | Type::SentinelPtr(_, _)
+                        | Type::CStr
+                        | Type::RawPtr { .. }
+                ) || matches!(base_ty, Type::Ref(id) if id.sym == "cstring" || id.sym == "cstr");
+
+                if is_unbounded_ptr_or_cstr && !self.is_in_unsafe() {
+                    let is_statically_proven_safe =
+                        if let (Some(idx), Some(len)) = (idx_opt, known_len) {
+                            idx >= 0 && (idx as usize) < len
+                        } else {
+                            false
+                        };
+
+                    if !is_statically_proven_safe {
+                        let var_name = if let Expr::Ident(id) = obj {
+                            id.sym.clone()
+                        } else {
+                            "pointer".to_string()
+                        };
+                        return Err(SemaError::UnboundedRawPointerMutation(var_name, span));
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
     fn define(&mut self, name: String, kind: SymbolKind, _span: Span) -> SemaResult<()> {
         if self.scopes.last().unwrap().contains_key(&name) {
@@ -3571,7 +3904,9 @@ impl Analyzer {
                         }
                     }
                     Lit::Str(_) => {
-                        if matches!(target, Type::CStr) {
+                        if matches!(target, Type::CStr)
+                            || matches!(target, Type::Ref(id) if id.sym == "cstring" || id.sym == "cstr")
+                        {
                             return true;
                         }
                     }
@@ -3649,8 +3984,34 @@ impl Analyzer {
             }
         }
 
-        if matches!(target, Type::CStr) && matches!(src, Type::String) {
+        if (matches!(target, Type::CStr)
+            || matches!(target, Type::Ref(id) if id.sym == "cstring" || id.sym == "cstr"))
+            && (matches!(src, Type::String)
+                || matches!(src, Type::CStr)
+                || matches!(src, Type::Ref(id) if id.sym == "cstring" || id.sym == "cstr"))
+        {
             return true;
+        }
+        if matches!(target, Type::String)
+            && (matches!(src, Type::CStr)
+                || matches!(src, Type::Ref(id) if id.sym == "cstring" || id.sym == "cstr"))
+        {
+            return true;
+        }
+
+        if (matches!(target, Type::CStr)
+            || matches!(target, Type::Ref(id) if id.sym == "cstring" || id.sym == "cstr"))
+        {
+            if let Type::BorrowType { inner, .. } = src {
+                if matches!(**inner, Type::U8 | Type::I8) {
+                    return true;
+                }
+            }
+            if let Type::ManyRawPtr(inner) = src {
+                if matches!(**inner, Type::U8 | Type::I8) {
+                    return true;
+                }
+            }
         }
 
         // Layer 1.3: Structural wrapping (Optional, ErrorUnion, ResultType)
@@ -3730,12 +4091,16 @@ impl Analyzer {
                 return true;
             }
         }
-        if let (Type::CPtr(t_inner), Type::CPtr(s_inner)) = (target, src) {
+        if let (
+            Type::CPtr(t_inner) | Type::ManyRawPtr(t_inner),
+            Type::CPtr(s_inner) | Type::ManyRawPtr(s_inner),
+        ) = (target, src)
+        {
             if self.can_coerce(t_inner, s_inner, None) {
                 return true;
             }
         }
-        if let Type::CPtr(t_inner) = target {
+        if let Type::CPtr(t_inner) | Type::ManyRawPtr(t_inner) = target {
             if let Type::BorrowType { inner: s_inner, .. } = src {
                 if self.can_coerce(t_inner, s_inner, None) {
                     return true;
@@ -4315,6 +4680,9 @@ impl Analyzer {
                 };
                 if bin.op == BinaryOp::Assign {
                     if let Expr::Ident(ident) = &*bin.left {
+                        if ident.sym == "_" {
+                            return Ok(right);
+                        }
                         if let Some(SymbolKind::Var {
                             kind: VarDeclKind::Const,
                             ..
@@ -4483,6 +4851,9 @@ impl Analyzer {
                         Ok(Type::Array(elem))
                     }
                     Type::CStr => Ok(Type::String),
+                    Type::Ref(id) if id.sym == "cstring" || id.sym == "cstr" => {
+                        Ok(Type::Array(Box::new(Type::U8)))
+                    }
                     _ => Ok(o_ty),
                 }
             }
@@ -4588,6 +4959,7 @@ impl Analyzer {
                     }
                     Type::CStr => Ok(Type::U8),
                     Type::String => Ok(Type::U8),
+                    Type::Ref(id) if id.sym == "cstring" || id.sym == "cstr" => Ok(Type::U8),
                     Type::Tuple(tys) => Ok(tys.into_iter().next().unwrap_or(Type::Any)),
                     Type::Map(_, v) | Type::Dict(_, v) => Ok(Type::Optional(v)),
                     _ => Ok(Type::Any),
