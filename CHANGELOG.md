@@ -2378,6 +2378,21 @@
 ### 新增测试用例 (Added)
 - [`cap/test/test_type_conv_functional.cp`](file:///data/dev/cp/cap/test/test_type_conv_functional.cp): 全面覆盖枚举与整型函数风格双向构造、标量数值类型转换、布尔转换、`string(val)` / `String(val)` 以及枚举与标量的 `.toString()` 方法调用（4/4 测试项全绿灯通过）。
 
+---
+
+## 2026-11-09 (代码生成辅助模板按需 Tree-Shaking 优化与无用代码消除)
+
+### 修改文件 (Modified)
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs) / [`cpc_dev/src/codegen.rs`](file:///data/dev/cp/cpc_dev/src/codegen.rs):
+  - **消除无条件注入的 Option 解包垫片**：将 `CpOptType`、`CpUnwrapOpt`、`cp_opt_is_null`、`cp_opt_unwrap` 的生成条件由 `if true` 改为受控于 `if features.needs_opt_chaining`，仅在使用可选链操作符 `?.` 时才输出；
+  - **消除无条件注入的字符串格式化垫片**：将 `cp_string_from` 改为受控于 `if features.needs_string_helpers || features.needs_fmt`，消除基础结构体与枚举转译为 Zig 时产生的死代码；
+  - **完善字符串探测**：在 `scan_expr` 中添加对 `string.from` 与 `String.from` 的特征探测，确保显式字符串化时稳定触发辅助函数生成。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs) / [`cpc_dev/src/parser.rs`](file:///data/dev/cp/cpc_dev/src/parser.rs):
+  - 修复 `parse_postfix_type_modifiers` 在解析可选返回类型后紧跟错误类型联合（如 `string? ! FileErr`）时因非 `CStr` 类型提前中断导致未消费 `?` 的语法解析缺陷。
+- [`BUN_AGY_MIGRATION_GUIDE.md`](file:///data/dev/cp/BUN_AGY_MIGRATION_GUIDE.md):
+  - 补充第五章《最新升级：系统级底层特性与类型转换规范（消除剩余 25 个模块中的 `zig {}` 块）》。
+
+
 
 
 

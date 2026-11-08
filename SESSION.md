@@ -6653,19 +6653,41 @@ git 提交
    - `git add BUN_AGY_MIGRATION_GUIDE.md SESSION.md`
    - `git commit -m "docs: add section 5 to BUN_AGY_MIGRATION_GUIDE for bun agy migration"`
 
+---
 
+### 用户指令 (User Prompts)
+【任务：消除 cpc 转译生成 Zig 时的无用辅助死代码（RFC-002 模板按需 Tree-Shaking 优化）】
 
+在当前 Bun.js 的渐进式迁移过程中，我们发现通过 `cpc <file>.cp -o <file>.zig --lib` 转译时，每个生成的 Zig 文件头部都会无条件生成约 42~49 行未引用的死代码辅助模板（如 `CpOptType`、`cp_opt_unwrap`、`cp_string_from` 等）。这导致如 `dir.cp`、`PosixStat.cp` 等基础结构体/枚举文件行数虚增超过 800%，且累计在整个项目中制造了上千行死代码。
+请协助在 `cpc` 中完成精准的按需 Tree-Shaking 改造：
+1. 消除无条件注入的 Option 解包垫片（`CpOptType` / `CpUnwrapOpt` / `cp_opt_is_null` / `cp_opt_unwrap`），改为受控于特征探测 `features.needs_opt_chaining`；
+2. 消除无条件注入的泛型字符串格式化垫片（`cp_string_from`），改为受控于 `features.needs_string_helpers || features.needs_fmt`；
+3. 验证与回归测试：转译 `/data/dev/bun/src/sys/dir.cp` 验证死代码消除。
 
-
-
-
-
-
-
-
-
-
-
-
+### 执行汇报 (Execution Report)
+1. **代码生成层按需 Tree-Shaking 守卫改造 (`cpc_dev/src/codegen.rs` & `cpc/src/codegen.rs`)**：
+   - **消除 Option 解包死代码**：将 `CpOptType`、`CpUnwrapOpt`、`cp_opt_is_null` 与 `cp_opt_unwrap` 的无条件发射 `if true` 改为条件守卫 `if features.needs_opt_chaining`，仅在模块真正使用可选链（`?.`）时输出；
+   - **消除字符串格式化死代码**：将 `cp_string_from` 改造为仅当 `features.needs_string_helpers || features.needs_fmt` 时发射；
+   - **强化字符串方法特征检测**：在 `ModuleFeatures::scan_expr` 中添加对 `string.from` 与 `String.from` 的扫描拦截，确保需要格式化的模块不漏标。
+2. **解析器复合返回类型语法修复 (`cpc_dev/src/parser.rs` & `cpc/src/parser.rs`)**：
+   - 修复 `parse_postfix_type_modifiers` 在遇到 `string? ! FileErr` 时因误跳出循环而导致未消费 `?` 的缺陷，完美支持可选可空与错误联合复合返回类型。
+3. **真实场景生成验证对比 (`/data/dev/bun/src/sys/dir.cp`)**：
+   - 使用新版 cpc 转译 `/data/dev/bun/src/sys/dir.cp -o /tmp/dir_test.zig --lib`；
+   - 目标文件由原来的 55 行臃肿死代码直接锐减至 10 行干脆纯粹的结构体定义，死代码消除率 100%。验证完毕后已按规范清理临时测试文件。
+4. **沙盒与正式版全量构建及发布**：
+   - 执行 `cargo build --release --manifest-path cpc/Cargo.toml` 成功完成 Release 优化构建；
+   - 正式更新可执行文件至 `cap/bin/cpc` 并验证沙盒与正式源码 0 差异。
+5. **端到端测试全矩阵全绿灯回归验证**：
+   - `test_type_conv_functional.cp`: 4/4 PASS（字符串转换按需正确注入 `cp_string_from`）；
+   - `test_comptime_map.cp`: 2/2 PASS；
+   - `test_tagged_union_refcount.cp`: 2/2 PASS；
+   - `test_inline_asm.cp`: 2/2 PASS；
+   - `test_tls_global.cp`: 1/1 PASS；
+   - `test_enum_cast_smart.cp`: 2/2 PASS。
+6. **四线演进文档全量同步更新**：
+   - 同步更新 `CHANGELOG.md`、`DEVLOG.md` 以及 `SESSION.md`。
+7. **Git 一次性暂存与提交**：
+   - `git add BUN_AGY_MIGRATION_GUIDE.md CHANGELOG.md DEVLOG.md SESSION.md cpc/src/codegen.rs cpc/src/parser.rs`
+   - `git commit -m "feat(cpc): tree-shake dead helper templates and fix composite return type parsing"`
 
 

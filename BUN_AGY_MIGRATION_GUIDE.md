@@ -9,9 +9,11 @@
 ## 一、 杀手级特性 1：`@c { ... }` 直接内联吸纳 C 头文件（彻底废除手写胶水代码）
 
 ### 1. 痛点场景
+
 Bun.js 底层大量重度依赖 C 库（如 BoringSSL, uSockets, picohttpparser, c-ares, SQLite3, zlib 等）。过去迁移时，必须将 Zig 的 `@cImport` 手动翻译为几十行乃至上百行脆弱的 `extern "c" fn ...` 声明，极易因指针级数、C 结构体 padding 误判导致编译失败或内存越界。
 
 ### 2. 推荐最佳实践（极简 1 行）
+
 在 CP 模块顶层直接使用 `@c { "xxx.h" }` 引入头文件，编译器底层自动解析并导出至统一的 `c` 全局安全命名空间：
 
 ```typescript
@@ -41,12 +43,15 @@ pub fn open_database(path: cstr): *any! {
 ## 二、 杀手级特性 2：极简 3 字母 `own` 关键字（无别名单写者所有权转移）
 
 ### 1. 痛点场景
+
 在将 Zig 的手动内存分配、Buffer 及跨线程 Task 传递转换到 CP 时，为了表达“交出独占所有权、杜绝并发别名冲突”，过去容易混淆使用 `move` 或被迫写冗长的约定逻辑。
 
 ### 2. 现代推荐语法（`own` 关键字）
+
 CP 现已正式确立 **`own`**（3 字母）作为一级所有权关键字，完全替代 `move unique`：
 
 #### A. 函数形参修饰（独占单写者契约）
+
 ```typescript
 // 参数冠以 own，强制调用方必须排他转移所有权，确保函数内部拥有绝对的单写者安全
 fn process_buffer(own buf: Buffer): void {
@@ -56,6 +61,7 @@ fn process_buffer(own buf: Buffer): void {
 ```
 
 #### B. 表达式一元移交（与自动析构 Drop Flag 联动）
+
 ```typescript
 let my_buf = Buffer.alloc(4096);
 
@@ -71,9 +77,11 @@ process_buffer(own my_buf);
 ## 三、 杀手级工具：AI-First 机器自愈通道（`cpc check --json`）
 
 ### 1. 痛点场景
+
 当转换的代码存在语法微调（如缺少圆括号、const 重新赋值等）时，通过分析冷冰冰的文本终端报错往往需要多轮试错。
 
 ### 2. 推荐使用命令
+
 Bun AGY 在检查转换好的 `.cp` 文件时，请优先使用 `--json` 参数：
 
 ```bash
@@ -81,6 +89,7 @@ Bun AGY 在检查转换好的 `.cp` 文件时，请优先使用 `--json` 参数�
 ```
 
 ### 3. Machine-Readable Edits 自动自愈响应
+
 当发生错误时，编译器将直接输出结构化 JSON，内含精确计算好的 `edits` 数组（字符偏移量与插入替换建议）：
 
 ```json
@@ -102,6 +111,7 @@ Bun AGY 在检查转换好的 `.cp` 文件时，请优先使用 `--json` 参数�
   ]
 }
 ```
+
 > **自愈建议**：Bun AGY 解析此 JSON 后，可直接根据 `offset` 执行单步文件插入/替换，实现 0 秒毫秒级自愈！检查完全通过时将输出 `{"status":"ok","diagnostics":[]}`。
 
 ---
@@ -113,7 +123,7 @@ Bun AGY 在检查转换好的 `.cp` 文件时，请优先使用 `--json` 参数�
    - **CP 统一采用海象解包**：
      - 常规只读解包：`if (val := opt) { ... }` 或 `while (val := opt) { ... }`
      - 可变指针就地解包：`if (*val := opt) { val = 200; }` 或 `while (*val := opt) { val = 200; }`
-     - *（状态机内部已透明支持块级局部变量解引用，可直接就地赋值修改）*；
+     - _（状态机内部已透明支持块级局部变量解引用，可直接就地赋值修改）_；
    - **严禁使用 Zig 风格管道语法**：CP **不支持** `if (opt) |*val|` 或 `if (opt) |val|`。若误写管道语法，`cpc` 编译器将在解析期直接报 `E0101` 语法错误，并提示改用海象解包！
 3. **结构体展开更新（Spread）**：
    - 支持 TS/Zig 风格的展开构造：`let next_state = State { ...prev_state, status: 1 };`；
@@ -126,11 +136,12 @@ Bun AGY 在检查转换好的 `.cp` 文件时，请优先使用 `--json` 参数�
 
 针对 Bun 剩余 25 个模块中包含的 61 处 `zig {}` 内联代码块，CP 编译器正式版已全面完成 5 项底层特性与高级类型转换体系的升级，请直接按照以下标准纯正 CP 语法进行改写，严禁继续退回嵌入 `zig {}`。
 
-### 1. 内联汇编表达式 (`@asm` / `asm volatile`)
+### 1. 内联汇编表达式 (`@asm`)
+
 - **场景**：WebAssembly 原子等待（Futex.cp:282）、特殊硬件指令（pause, nop）。
 - **Zig 原代码**：
   ```zig
-  const result = asm volatile (
+  const result = @asm (
       "local.get %[ptr]\nlocal.get %[expected]\nlocal.get %[timeout]\nmemory.atomic.wait32 0\nlocal.set %[ret]"
       : [ret] "=r" (-> u32),
       : [ptr] "r" (&ptr.raw),
@@ -141,7 +152,7 @@ Bun AGY 在检查转换好的 `.cp` 文件时，请优先使用 `--json` 参数�
 - **纯正 CP 语法**：
   ```typescript
   // 1. 带操作数绑定的高级内联汇编（格式与 Zig 对齐，直接在 CP 中书写）
-  let result = asm volatile (
+  let result = @asm (
       "local.get %[ptr]\nlocal.get %[expected]\nlocal.get %[timeout]\nmemory.atomic.wait32 0\nlocal.set %[ret]"
       : [ret] "=r" (-> u32),
       : [ptr] "r" (&ptr.raw),
@@ -155,7 +166,8 @@ Bun AGY 在检查转换好的 `.cp` 文件时，请优先使用 `--json` 参数�
 
 ---
 
-### 2. 线程局部存储全局属性修饰符 (`@tls let` / `threadlocal let`)
+### 2. 线程局部存储全局属性修饰符 (`@tls let`)
+
 - **场景**：URL 路径高频解析无锁复用静态缓冲区（URLPath.cp:47）。
 - **Zig 原代码**：
   ```zig
@@ -164,18 +176,16 @@ Bun AGY 在检查转换好的 `.cp` 文件时，请优先使用 `--json` 参数�
   ```
 - **纯正 CP 语法**：
   > [!IMPORTANT]
-  > CP 语言**彻底废除了 `var` 关键字**，只允许 `let` 与 `const`！若误写 `threadlocal var` 编译器直接拦截。
+  > CP 语言**彻底废除了 `var` 关键字**，只允许 `let` 与 `const`！若误写 `@tls var` 编译器直接拦截。
   ```typescript
   // 推荐现代写法（@tls 修饰符）
   @tls let temp_path_buf: [1024]u8 = undefined;
-
-  // 兼容关键字写法（threadlocal 修饰符）
-  threadlocal let big_temp_path_buf: [16384]u8 = undefined;
   ```
 
 ---
 
 ### 3. 辨识联合（Tagged / Discriminated Union）
+
 - **场景**：HTTP 请求头类别判定（Header.cp:60）、带载荷状态机。
 - **Zig 原代码**：
   ```zig
@@ -205,6 +215,7 @@ Bun AGY 在检查转换好的 `.cp` 文件时，请优先使用 `--json` 参数�
 ---
 
 ### 4. 编译期静态查找表与引用计数工具 (`@map`, `.get()`, `.has()`, `.name`, `@refCount`)
+
 - **场景**：MIME 类型解析（MimeType.cp）、ACL 权限列表（acl.cp:28）、安全凭证句柄（credentials.cp:25）。
 - **Zig 原代码**：
   ```zig
@@ -254,9 +265,27 @@ Bun AGY 在检查转换好的 `.cp` 文件时，请优先使用 `--json` 参数�
   }
   ```
 
+枚举类型的name， 如`Task.Idle`， 自动作为 @map， 可直接通过枚举类型`.get() .has()` 使用， 如 `Task.get('Idle')`，`Task.has('Idle')`。
+
+```ts
+enum Task {
+  Idle: 0,
+  Busy: 1,
+};
+
+let v = Task.Idle;
+const s = v.name; // => 'Idle'
+const v1 = Task.fromName("Idle"); // => Task.Idle
+const v2 = Task.get("Idle"); // => Task.Idle
+const v3 = Task(1); // => Task.Busy
+const s1 = String(v); // => 'Idle'
+const s2 = v.toString(); // => 'Idle'
+```
+
 ---
 
 ### 5. 整型标量与枚举类型的智能双向转换 (`as EnumType` / `as i32`)
+
 - **场景**：套接字类型转换（ConnectingSocket.cp:35、SocketKind.cp:49）。
 - **纯正 CP 语法**：直接使用 `as` 显式强转，编译器根据上下文自动织入 `@enumFromInt` 或 `@intFromEnum`：
   ```typescript
@@ -281,27 +310,28 @@ Bun AGY 在检查转换好的 `.cp` 文件时，请优先使用 `--json` 参数�
 ---
 
 ### 6. 函数风格类型构造转换 (`Type(val)`) 与通用内置 `.toString()`
+
 - **场景**：优雅构造标量数值、枚举及通用字符串转换。
 - **纯正 CP 语法**：
   ```typescript
   // 1. 函数风格枚举构造与标量转换
-  let kind = SocketKind(1);       // 整型构造为 SocketKind.Datagram
-  let code = i32(kind);           // 枚举转换为 i32: 1
-  let len = usize(kind);          // 枚举转换为 usize: 1
+  let kind = SocketKind(1); // 整型构造为 SocketKind.Datagram
+  let code = i32(kind); // 枚举转换为 i32: 1
+  let len = usize(kind); // 枚举转换为 usize: 1
 
-  let int_pi = i32(3.14159);      // 浮点数截断为 3
-  let f_val = f64(42);            // 提升为 42.0
-  let is_ok = bool(1);            // 转换为 true
-  let is_zero = bool(0);          // 转换为 false
+  let int_pi = i32(3.14159); // 浮点数截断为 3
+  let f_val = f64(42); // 提升为 42.0
+  let is_ok = bool(1); // 转换为 true
+  let is_zero = bool(0); // 转换为 false
 
-  let s1 = string(12345);         // "12345"
-  let s2 = String(SocketKind.Raw);// "Raw"
+  let s1 = string(12345); // "12345"
+  let s2 = String(SocketKind.Raw); // "Raw"
 
   // 2. 通用内置 .toString()
   // 枚举调用 .toString() 底层直接发射 Zig 原生 @tagName(val)，零堆分配、零内存损耗！
   let enum_str = kind.toString(); // "Datagram"
-  let num_str = code.toString();  // "1"
-  let bool_str = is_ok.toString();// "true"
+  let num_str = code.toString(); // "1"
+  let bool_str = is_ok.toString(); // "true"
   ```
 
 > [!CAUTION]
@@ -311,4 +341,4 @@ Bun AGY 在检查转换好的 `.cp` 文件时，请优先使用 `--json` 参数�
 
 ---
 
-*祝 Bun.js 核心库迁移极速、安全、顺畅！*
+_祝 Bun.js 核心库迁移极速、安全、顺畅！_

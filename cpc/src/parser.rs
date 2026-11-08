@@ -1299,15 +1299,6 @@ impl<'a> Parser<'a> {
     fn parse_postfix_type_modifiers(&mut self, mut ty: Type) -> ParseResult<Type> {
         loop {
             if self.peek() == Some(&Token::Question) {
-                if self.peek_next() == Some(&Token::Bang) {
-                    if matches!(ty, Type::CStr) {
-                        self.bump()?;
-                        self.bump()?;
-                        ty = Type::Optional(Box::new(ty));
-                        continue;
-                    }
-                    break;
-                }
                 self.bump()?;
                 ty = Type::Optional(Box::new(ty));
             } else if self.peek() == Some(&Token::Bang) {

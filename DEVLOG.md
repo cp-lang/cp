@@ -3986,15 +3986,50 @@ Bun.js 1.3.14 的 CP 语言重构进入关键攻坚阶段：全仓库 206 个 `.
    - `test_tagged_union_refcount.cp` (辨识联合与 @refCount)：PASS (2/2)；
    - `cargo test --manifest-path cpc_dev/Cargo.toml`：PASS (2/2)。
 
+---
 
+## 2026-11-09: cpc 辅助模板按需 Tree-Shaking 优化与复合返回类型解析修复
 
+### 1. 痛点定位与工程背景
+在 Bun.js 渐进式迁移至 CP 的编译转译实践中，使用 `cpc <file>.cp -o <file>.zig --lib` 编译纯结构体与枚举定义模块（例如 `/data/dev/bun/src/sys/dir.cp`、`PosixStat.cp` 等）时，每个生成的 Zig 目标文件头部均被无条件硬编码注入约 42~49 行未引用的死代码模板：
+- 可选链垫片：`CpOptType`、`CpUnwrapOpt`、`cp_opt_is_null`、`cp_opt_unwrap`；
+- 字符串通用格式化：`cp_string_from`。
 
+这导致只有 4~5 行有效代码的基础类型文件生成的 Zig 代码虚增至 50 行以上（膨胀率超过 800%），累积在下游项目中产生了数千行死代码，严重降低了代码整洁度与下游编译解析效率。
 
+### 2. 方案设计与编译器实现原理
 
+1. **可选链模板按需条件守卫 (`codegen.rs`)**：
+   - 经审查，`CpOptType`、`CpUnwrapOpt`、`cp_opt_is_null` 与 `cp_opt_unwrap` 垫片仅在 AST 表达式存在可选链访问（`Expr::OptMember` 与 `Expr::OptCall`，即 `?.` 操作符）时被引用。
+   - `ModuleFeatures::scan` 阶段已存在完善的特征扫描逻辑（`self.needs_opt_chaining = true;`）。
+   - 将 `codegen.rs` 中原先的 `if true` 硬编码注入替换为受特征守卫控制的 `if features.needs_opt_chaining`，未发生可选链调用的模块直接跳过上述 4 个垫片生成。
 
+2. **泛型字符串格式化按需生成与扫描强化 (`codegen.rs`)**：
+   - 将原先无条件输出的 `cp_string_from` 改造为仅当 `features.needs_string_helpers || features.needs_fmt` 时才输出；
+   - 针对 `string.from` 与 `String.from` 静态方法调用，在 `ModuleFeatures::scan_expr` 中增加专属检测：
+     ```rust
+     if (id.sym == "string" || id.sym == "String") && m.prop.sym == "from" {
+         self.needs_fmt = true;
+         self.needs_string_helpers = true;
+     }
+     ```
+     确保需要执行字符串类型转换或格式化打印的模块依然能按需可靠注入该函数。
 
+3. **解析器复合返回类型语法修复 (`parser.rs`)**：
+   - 在排查全量测试用例时，发现形如 `fn readFile(...): string? ! FileErr` 的函数签名会报 `expected token 'LBrace', found 'Question'` 错误；
+   - 排查发现 `parse_postfix_type_modifiers` 内部包含一段历史判定：当检测到下一个标记为 `!` 且当前类型非 `CStr` 时直接 `break`，导致 `?` 未被作为 `Type::Optional` 消费掉，使得未消费的 `?` 残留在词法流中引发后续解析崩溃；
+   - 移除该过早的 `break` 分支，由正常的循环将 `?` 正确包裹为 `Type::Optional`，外层 `parse_type` 随后平滑解析 `!` 并构造为 `Type::ResultType`，彻底打通了可选可空与错误集合并返回签名的解析通道。
 
-
-
-
+### 3. 测试验证与产出效益
+1. **纯净度对比验证 (`/data/dev/bun/src/sys/dir.cp`)**：
+   - 优化前：生成的 Zig 文件 55 行，包含大量未使用的 `CpOptType`、`cp_opt_unwrap`、`cp_string_from` 死代码；
+   - 优化后：生成的 Zig 文件降至 10 行，仅保留必要的标准库引用、类型别名以及纯净的 `pub const Dir = struct { fd: FD, };`，代码量缩减 82%，死代码 100% 消除。
+2. **功能与回归测试矩阵**：
+   - `test_type_conv_functional.cp`: 4/4 PASS（验证在存在字符串转换时，`cp_string_from` 按需准确注入且功能完全正常）；
+   - `test_comptime_map.cp`: 2/2 PASS；
+   - `test_tagged_union_refcount.cp`: 2/2 PASS；
+   - `test_inline_asm.cp`: 2/2 PASS；
+   - `test_tls_global.cp`: 1/1 PASS；
+   - `test_enum_cast_smart.cp`: 2/2 PASS；
+   - 所有测试通过率 100%，无任何回归隐患。
 
