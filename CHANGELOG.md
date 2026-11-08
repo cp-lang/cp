@@ -2286,6 +2286,9 @@
 - [`cap/test/test_own_use_after_move_fail.cp`](file:///data/dev/cp/cap/test/test_own_use_after_move_fail.cp): 反向拦截测试，验证变量被 `own` 移出后再次读取被静态拦截并输出带自愈建议的 `error[E0203]`。
 - [`cap/test/test_json_diag_fail.cp`](file:///data/dev/cp/cap/test/test_json_diag_fail.cp): 验证 `cpc check --json` 输出包含精确 `edits` 数组的标准 JSON 诊断。
 
+### 新增文档 (Added)
+- [`BUN_AGY_MIGRATION_GUIDE.md`](file:///data/dev/cp/BUN_AGY_MIGRATION_GUIDE.md): 面向 Bun AGY 的 Zig 迁移至 CP 杀手级新语法与高效自愈指南。
+
 
 
 

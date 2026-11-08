@@ -6486,6 +6486,19 @@ bun agy 应该在修改 cpc, 审核/评估 bun agy 对 cpc 的修改, 并合并�
    - 纳入全部修改源码、新增测试夹具与四线演进文档；
    - 执行唯一原子提交：`git commit -m "feat(cpc): add @c header import, own alias-free ownership, and machine-readable json diagnostics"`。
 
+---
+
+### 用户指令 (User Prompts)
+本次更新的内容, 生成一个文本, 告知 bun 的 agy, 使用我们新增加的语法, 提高 bun agy zig转换到cp的效率与简洁
+
+### 执行汇报 (Execution Report)
+1. **生成针对 Bun AGY 的迁移协作备忘文档**：
+   - 创建 [`BUN_AGY_MIGRATION_GUIDE.md`](file:///data/dev/cp/BUN_AGY_MIGRATION_GUIDE.md)；
+   - 包含三大关键提效杀手级特性（`@c { "xxx.h" }` 彻底免写 C 胶水代码、极简 3 字母 `own` 独占单写者契约、`cpc check --json` 机器可读 edits 毫秒级自愈通道）及常见踩坑防范说明；
+2. **四线演进文档记录与提交**：
+   - 同步更新 [`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md) 与 [`SESSION.md`](file:///data/dev/cp/SESSION.md)；
+   - 执行 Git 一次性暂存与原子提交。
+
 
 
 
