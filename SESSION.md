@@ -6489,15 +6489,32 @@ bun agy 应该在修改 cpc, 审核/评估 bun agy 对 cpc 的修改, 并合并�
 ---
 
 ### 用户指令 (User Prompts)
-本次更新的内容, 生成一个文本, 告知 bun 的 agy, 使用我们新增加的语法, 提高 bun agy zig转换到cp的效率与简洁
+• 管道语法：if (opt) |*val| { val = 200; }
+cp 没有这个语法
+
+### 用户指令 (User Prompts)
+继续你的工作
 
 ### 执行汇报 (Execution Report)
-1. **生成针对 Bun AGY 的迁移协作备忘文档**：
-   - 创建 [`BUN_AGY_MIGRATION_GUIDE.md`](file:///data/dev/cp/BUN_AGY_MIGRATION_GUIDE.md)；
-   - 包含三大关键提效杀手级特性（`@c { "xxx.h" }` 彻底免写 C 胶水代码、极简 3 字母 `own` 独占单写者契约、`cpc check --json` 机器可读 edits 毫秒级自愈通道）及常见踩坑防范说明；
-2. **四线演进文档记录与提交**：
-   - 同步更新 [`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md) 与 [`SESSION.md`](file:///data/dev/cp/SESSION.md)；
-   - 执行 Git 一次性暂存与原子提交。
+1. **语法纯洁性校正：彻底废除 Zig 风格管道语法**：
+   - 遵照大师指示，全面清理废除 CP 语言对 Zig 管道解包（`|*val|`、`|val|`）的支持代码；
+   - 确立 CP 解包与就地修改的唯一官方语法规范：
+     - 常规只读解包：`if (val := opt) { ... }` 与 `while (item := iter.next()) { ... }`；
+     - 可变指针就地解包：`if (*val := opt) { val = 200; }` 与 `while (*item := iter.next()) { item.mutate(); }`；
+   - 编译器前端 Parser 增加 `Token::Pipe` 智能拦截：遇到误用管道语法时直接抛出 `E0101` 语法错误，输出详细原因、修正指引以及包含机器可读 `edits` 数组的标准 JSON 诊断，建议一键改写为海象解包。
+2. **模式匹配与嵌套解包 Bug 攻坚修复 (`in_paren_pattern`)**：
+   - 修复在解析枚举带载荷模式（如 `.Move [x, y]`、`.Compute { a, b }`）时未维护 `in_paren_pattern` 计数器导致逗号被误判为外层 Or 分支的严重缺陷；
+   - 完善代码生成器特征扫描（`needs_result_error = true`），确保按需自动生成强类型匹配与解包辅助函数。
+3. **多智能体 CAS 双向合并与 Release 发布**：
+   - 同步 Bun AGY 对 `cpc/src` 的并发修改（`is_class_method`、`LabeledBreak`、`Expr::Zig` 等特性）；
+   - 在 `cpc_dev` 沙箱中完成双向合并与测试闭环后，同步对齐至正式目录 `cpc/src`；
+   - 执行 `cargo build --release --manifest-path cpc/Cargo.toml` 完成深度优化编译构建（耗时 38.83s），产物更新至 `/data/dev/cp/cap/bin/cpc`；
+   - 使用正式版二进制通过全量测试用例（转译仅需 2ms）。
+4. **规范文档与迁移指南同步**：
+   - 更新 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md) 第 8.9 节，删除管道解包描述，增加语法纯洁性警示；
+   - 更新 [`BUN_AGY_MIGRATION_GUIDE.md`](file:///data/dev/cp/BUN_AGY_MIGRATION_GUIDE.md) 与 [`TASK.md`](file:///data/dev/cp/TASK.md)，明确通知 Bun 迁移智能体严禁使用管道语法，统一使用海象解包；
+   - 新增反向测试 [`cap/test/test_pipe_capture_fail.cp`](file:///data/dev/cp/cap/test/test_pipe_capture_fail.cp)，更新正向测试 [`cap/test/test_ptr_capture.cp`](file:///data/dev/cp/cap/test/test_ptr_capture.cp)；
+   - 四线演进文档（`SESSION.md`、`CHANGELOG.md`、`DEVLOG.md`、`cp_ref.md`）全量同步更新。
 
 
 

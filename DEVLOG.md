@@ -3858,6 +3858,36 @@ const PathnameScanner = @import("../url/url.zig").PathnameScanner;
 - 通过 `rsync` 保证 `cpc_dev/agent_1`、`agent_2`、`agent_3` 拥有最新代码基线；
 - 为每个沙箱创建/更新 `work.json` 并标记为 `state: "busy"`；各子智能体完成任务并自测通过后标记为 `state: "idle"`。
 
+---
+
+## 2026-11-08: 彻底废除 Zig 管道解包语法、确立海象指针解包唯一标准与多智能体 CAS 双向合并
+
+### 1. 语法纯洁性与架构决策
+根据用户明确指导：“管道语法：if (opt) |*val| { val = 200; }，cp 没有这个语法”，CP 语言必须保持语法纯洁性，杜绝底层 Zig 风格语法对 CP 前端心智的侵入。
+- **解包语法收敛**：
+  - 只读解包：统一采用 `if (val := opt) { ... }` 与 `while (item := iter.next()) { ... }`；
+  - 就地指针解包：统一采用 `if (*val := opt) { val = 200; }` 与 `while (*item := iter.next()) { item.mutate(); }`；
+  - 模式解包：统一采用 `.Text text => ...` / `.Move [x, y] => ...`。
+- **AI-First 友好拦截**：
+  - 前端 Parser 在 `if`、`while` 以及 `switch` 分支中拦截残留的 `Token::Pipe` 语法；
+  - 直接抛出结构化 `E0101` 诊断，明确告知因果（cause）、使用指南（help）并给出机器可读的 `edits` 数组，建议重写为海象解包。
+
+### 2. 模式匹配括号深度管理 Bug 攻坚排查 (`in_paren_pattern`)
+在模式匹配与 switch binding 测试中，发现 `.Move [x, y] => ...` 无法正确绑定内部变量并生成了错误的布尔表达式。
+- **根因分析**：
+  - 在 `parse_single_pattern` 中，`in_switch_arm` 模式下顶层逗号 `,` 用于分隔多个匹配分支（Or-Pattern）；
+  - 当解析嵌套模式（如括号 `(a, b)`、方括号 `[x, y]`、大括号 `{ k, v }`）时，之前未维护 `in_paren_pattern` 计数器，导致内部的 `,` 被外层 switch 误切分为顶层 Or 分支。
+- **修复方案**：
+  - 在 `parse_pattern` 与 `parse_single_pattern` 中，凡进入 `LParen`、`LBracket`、`LBrace` 前递增 `self.in_paren_pattern += 1`，退出时递减 `self.in_paren_pattern -= 1`；
+  - 内部嵌套逗号仅作为载荷序列分隔符，彻底修复枚举解构变量绑定缺陷。
+
+### 3. 多智能体 CAS 双向合并与 Release 发布
+- **CAS 冲突检视**：检视 Bun AGY 对 `cpc/src` 的并发修改（包含 `is_class_method`、`LabeledBreak`、`Expr::Zig` 等特性）；
+- **双向无损合并**：将 Bun AGY 新特性全部合入 `cpc_dev`，再将 `cpc_dev` 的模式匹配修复与管道语法拦截反哺合入 `cpc/src`；
+- **Release 构建与回归验证**：
+  - 通过 `cargo build --release` 耗时 38.83s 编译深度优化正式版，发布至 `cap/bin/cpc`；
+  - 验证 `test_ptr_capture.cp`、`test_switch_binding_pass.cp`、`test_pipe_capture_fail.cp`（JSON 诊断拦截）全量通过，单文件转译耗时低至 2ms。
+
 
 
 

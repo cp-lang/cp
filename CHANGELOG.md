@@ -2289,6 +2289,35 @@
 ### 新增文档 (Added)
 - [`BUN_AGY_MIGRATION_GUIDE.md`](file:///data/dev/cp/BUN_AGY_MIGRATION_GUIDE.md): 面向 Bun AGY 的 Zig 迁移至 CP 杀手级新语法与高效自愈指南。
 
+---
+
+## 2026-11-08 (彻底废除 Zig 管道解包语法、确立海象指针解包唯一标准与多智能体 CAS 双向合并)
+
+### 修改文件 (Modified)
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs):
+  - 彻底移除 `if (...) |...|`、`while (...) |...|` 与 `switch` arm `|...|` 管道解包解析分支；
+  - 遇到管道捕获语法时触发 `E0101` 智能诊断，输出标准三段式错误与单步重写为海象解包的 `edits` 建议；
+  - 修复 `parse_single_pattern` 与 `parse_pattern` 在解析 `LParen`、`LBracket`、`LBrace` 嵌套容器时未维护 `in_paren_pattern` 深度计数器的严重缺陷，杜绝枚举模式内部逗号被误断为 Or-Pattern；
+  - 移除多余的 `mut pat` 局部变量修饰。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 在 `Stmt::Match`、`Pattern::Enum` 与 `Expr::Match` 特征扫描中主动标记 `needs_result_error = true`，确保生成强类型匹配与解包辅助函数；
+  - 完整合入 Bun AGY 对 `this` / `_` 变量优先级、`Expr::LabeledBreak` 以及 `Expr::Zig` 逃逸表达式支持；
+  - 完善枚举实例化中的非枚举静态方法调用兼容。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs):
+  - 保持与 Bun AGY 常量表达式求值分支同步。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 第 8.9 节彻底废除 Zig 风格管道捕获语法，确立海象只读解包 `if (val := opt)` 与可变指针就地解包 `if (*val := opt)` 为唯一标准规范；
+  - 增加语法纯洁性保证（Alert Callout）。
+- [`BUN_AGY_MIGRATION_GUIDE.md`](file:///data/dev/cp/BUN_AGY_MIGRATION_GUIDE.md):
+  - 移除管道语法示例，明确标明 CP 严禁 Zig 管道解包，统一采用海象解包规范。
+- [`TASK.md`](file:///data/dev/cp/TASK.md):
+  - 同步修订解包语法准则，废除管道语法描述。
+- [`cap/test/test_ptr_capture.cp`](file:///data/dev/cp/cap/test/test_ptr_capture.cp):
+  - 纯化测试用例，全量采用海象语法验证指针就地覆写更新。
+
+### 新增测试用例 (Added)
+- [`cap/test/test_pipe_capture_fail.cp`](file:///data/dev/cp/cap/test/test_pipe_capture_fail.cp): 反向拦截测试，验证误用管道语法 `if (opt) |*val|` 被前端精确识别为 `E0101` 并输出包含海象解包修正建议的标准 JSON 诊断。
+
 
 
 

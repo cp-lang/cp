@@ -204,6 +204,7 @@ impl ModuleFeatures {
                 self.scan_stmt(&for_stmt.body);
             }
             Stmt::Match(m) => {
+                self.needs_result_error = true;
                 self.scan_expr(&m.disc);
                 for arm in &m.arms {
                     self.scan_pat(&arm.pat);
@@ -249,6 +250,7 @@ impl ModuleFeatures {
                 }
             }
             Pattern::Enum(ep) => {
+                self.needs_result_error = true;
                 if ep.tuple_pats.is_some() {
                     self.needs_unpack = true;
                 }
@@ -545,6 +547,7 @@ impl ModuleFeatures {
                 }
             }
             Expr::Match(m) => {
+                self.needs_result_error = true;
                 self.scan_expr(&m.disc);
                 for arm in &m.arms {
                     self.scan_pat(&arm.pat);
@@ -7705,7 +7708,7 @@ impl Codegen {
                 }
             }
             for p in &func.params {
-                if p.ident.sym == "this" || p.ident.sym == "_" || p.ident.sym == "self" {
+                if self.is_class_method && (p.ident.sym == "this" || p.ident.sym == "_" || p.ident.sym == "self") {
                     continue;
                 }
                 let mapped_ty = match &p.ty {
@@ -7731,34 +7734,44 @@ impl Codegen {
             }
             self.extract_locals_simple(&func.body);
             let is_inline = func.meta.iter().any(|m| m.name.sym == "inline");
-            let inline_kw = if is_inline { "inline " } else { "" };
+            let is_noinline = func.meta.iter().any(|m| m.name.sym == "noinline");
+            let inline_kw = if is_inline {
+                "inline "
+            } else if is_noinline {
+                "noinline "
+            } else {
+                ""
+            };
             let c_meta = func.meta.iter().find(|m| m.name.sym == "c");
             let is_c = c_meta.is_some() || func.meta.iter().any(|m| m.name.sym == "extern");
             let c_alias = c_meta.and_then(|m| match m.args.first() {
                 Some(MetaArg::Positional(Expr::Lit(Lit::Str(s)))) => Some(s.clone()),
                 _ => None,
             });
-            let callconv_clause = if is_c {
-                "callconv(.c) ".to_string()
-            } else if let Some(m) = func.meta.iter().find(|m| m.name.sym == "callconv") {
+            let callconv_clause = if let Some(m) = func.meta.iter().find(|m| m.name.sym == "callconv") {
                 let conv = match m.args.first() {
                     Some(MetaArg::Positional(Expr::Lit(Lit::Str(s)))) => {
-                        if s.starts_with('.') {
+                        if s.starts_with('.') || s.contains('.') {
                             s.clone()
                         } else {
                             format!(".{}", s)
                         }
                     }
                     Some(MetaArg::Positional(Expr::Ident(id))) => {
-                        if id.sym.starts_with('.') {
+                        if id.sym.starts_with('.') || id.sym.contains('.') {
                             id.sym.clone()
                         } else {
                             format!(".{}", id.sym)
                         }
                     }
+                    Some(MetaArg::Positional(Expr::Member(mem))) => {
+                        format!("{}.{}", self.generate_expr(&mem.obj), mem.prop.sym)
+                    }
                     _ => ".c".to_string(),
                 };
                 format!("callconv({}) ", conv)
+            } else if is_c {
+                "callconv(.c) ".to_string()
             } else {
                 String::new()
             };
@@ -7780,22 +7793,24 @@ impl Codegen {
                 if let Some(alias) = c_alias {
                     writeln!(
                         self.output,
-                        "\nextern \"c\" fn {}({}) {};",
-                        alias, params_str, zig_ret_ty
+                        "\nextern \"c\" fn {}({}) {}{};",
+                        alias, params_str, callconv_clause, zig_ret_ty
                     )
                     .unwrap();
                     writeln!(self.output, "{}const {} = {};", pub_prefix, zig_name, alias).unwrap();
                 } else {
                     writeln!(
                         self.output,
-                        "\n{}extern \"c\" fn {}({}) {};",
-                        pub_prefix, zig_name, params_str, zig_ret_ty
+                        "\n{}extern \"c\" fn {}({}) {}{};",
+                        pub_prefix, zig_name, params_str, callconv_clause, zig_ret_ty
                     )
                     .unwrap();
                 }
                 return;
             }
-            let export_kw = if is_c && !func.body.body.is_empty() {
+            let is_export = func.meta.iter().any(|m| m.name.sym == "export")
+                || (is_c && !func.body.body.is_empty());
+            let export_kw = if is_export {
                 "export "
             } else {
                 ""
@@ -10191,6 +10206,10 @@ impl Codegen {
                 if i.sym == "this" || i.sym == "_" {
                     if self.is_state_machine {
                         "ctx.self".to_string()
+                    } else if self.is_class_method {
+                        "self".to_string()
+                    } else if self.locals.contains_key(&i.sym) {
+                        i.sym.clone()
                     } else {
                         "self".to_string()
                     }
@@ -11983,6 +12002,14 @@ impl Codegen {
                             format!("(({}) orelse break)", l_code)
                         }
                     }
+                    Expr::LabeledBreak(_, label, val) => {
+                        if let Some(v) = val {
+                            let v_code = self.generate_expr(v);
+                            format!("(({}) orelse break :{} {})", l_code, label.sym, v_code)
+                        } else {
+                            format!("(({}) orelse break :{})", l_code, label.sym)
+                        }
+                    }
                     Expr::Return(_, ret_expr) => {
                         let ret_stmt = self.build_ret_stmt_for_fallback(ret_expr.as_deref());
                         format!("(({}) orelse {{ {} }})", l_code, ret_stmt)
@@ -12356,23 +12383,42 @@ impl Codegen {
                         }
                     }
                 } else if !tuple_slice.is_empty() {
-                    let is_expected_tuple = self.enum_defs.get(&ei.enum_name.sym).map_or(false, |en| {
-                        en.variants.iter().any(|v| {
-                            &v.ident.sym == &ei.variant_name.sym
-                                && matches!(v.tuple_type, Some(Type::Tuple(_)))
-                        })
-                    });
-                    if tuple_slice.len() == 1 {
-                        if is_expected_tuple {
-                            if let Expr::Array(items) = &tuple_slice[0] {
-                                let args_str: Vec<String> =
-                                    items.iter().map(|a| self.generate_expr(a)).collect();
-                                format!(
-                                    "{}{{ .{} = .{{ {} }} }}",
-                                    ei.enum_name.sym,
-                                    ei.variant_name.sym,
-                                    args_str.join(", ")
-                                )
+                    let is_enum = self.enum_defs.contains_key(&ei.enum_name.sym);
+                    if !is_enum {
+                        let args_str: Vec<String> =
+                            tuple_slice.iter().map(|a| self.generate_expr(a)).collect();
+                        format!(
+                            "{}.{}({})",
+                            ei.enum_name.sym,
+                            ei.variant_name.sym,
+                            args_str.join(", ")
+                        )
+                    } else {
+                        let is_expected_tuple = self.enum_defs.get(&ei.enum_name.sym).map_or(false, |en| {
+                            en.variants.iter().any(|v| {
+                                &v.ident.sym == &ei.variant_name.sym
+                                    && matches!(v.tuple_type, Some(Type::Tuple(_)))
+                            })
+                        });
+                        if tuple_slice.len() == 1 {
+                            if is_expected_tuple {
+                                if let Expr::Array(items) = &tuple_slice[0] {
+                                    let args_str: Vec<String> =
+                                        items.iter().map(|a| self.generate_expr(a)).collect();
+                                    format!(
+                                        "{}{{ .{} = .{{ {} }} }}",
+                                        ei.enum_name.sym,
+                                        ei.variant_name.sym,
+                                        args_str.join(", ")
+                                    )
+                                } else {
+                                    format!(
+                                        "{}{{ .{} = {} }}",
+                                        ei.enum_name.sym,
+                                        ei.variant_name.sym,
+                                        self.generate_expr(&tuple_slice[0])
+                                    )
+                                }
                             } else {
                                 format!(
                                     "{}{{ .{} = {} }}",
@@ -12382,33 +12428,31 @@ impl Codegen {
                                 )
                             }
                         } else {
+                            let args_str: Vec<String> =
+                                tuple_slice.iter().map(|a| self.generate_expr(a)).collect();
                             format!(
-                                "{}{{ .{} = {} }}",
+                                "{}{{ .{} = .{{ {} }} }}",
                                 ei.enum_name.sym,
                                 ei.variant_name.sym,
-                                self.generate_expr(&tuple_slice[0])
+                                args_str.join(", ")
                             )
                         }
-                    } else {
-                        let args_str: Vec<String> =
-                            tuple_slice.iter().map(|a| self.generate_expr(a)).collect();
-                        format!(
-                            "{}{{ .{} = .{{ {} }} }}",
-                            ei.enum_name.sym,
-                            ei.variant_name.sym,
-                            args_str.join(", ")
-                        )
                     }
                 } else if fields_slice.is_empty() {
-                    let is_pure_enum = self.enum_defs.get(&ei.enum_name.sym).map_or(false, |en| {
-                        en.variants.iter().all(|v| {
-                            v.fields.is_none() && v.tuple_type.is_none() && v.from_err.is_none()
-                        })
-                    });
-                    if is_pure_enum {
+                    let is_enum = self.enum_defs.contains_key(&ei.enum_name.sym);
+                    if !is_enum {
                         format!("{}.{}", ei.enum_name.sym, ei.variant_name.sym)
                     } else {
-                        format!("{}{{ .{} = {{}} }}", ei.enum_name.sym, ei.variant_name.sym)
+                        let is_pure_enum = self.enum_defs.get(&ei.enum_name.sym).map_or(false, |en| {
+                            en.variants.iter().all(|v| {
+                                v.fields.is_none() && v.tuple_type.is_none() && v.from_err.is_none()
+                            })
+                        });
+                        if is_pure_enum {
+                            format!("{}.{}", ei.enum_name.sym, ei.variant_name.sym)
+                        } else {
+                            format!("{}{{ .{} = {{}} }}", ei.enum_name.sym, ei.variant_name.sym)
+                        }
                     }
                 } else {
                     let mut f_str = String::new();
@@ -13849,6 +13893,7 @@ impl Codegen {
                     "return".to_string()
                 }
             }
+            Expr::Zig(z) => z.code.clone(),
             _ => "0".to_string(),
         }
     }

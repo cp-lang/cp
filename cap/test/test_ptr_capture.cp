@@ -1,6 +1,6 @@
 import { print } from "cap:io";
 
-// 测试 Bun AGY 指针捕获特性: if (*val := opt) 与 while (expr) |*val|
+// 测试 CP 指针捕获与海象解包特性: if (*val := opt)
 fn main(): void {
     let mut_val: i32? = 100;
 
@@ -13,8 +13,8 @@ fn main(): void {
         print(v);
     }
 
-    // 2. 测试 if 管道风格指针捕获: if (mut_val) |*val|
-    if (mut_val) |*val| {
+    // 2. 测试再次海象指针捕获就地修改
+    if (*val := mut_val) {
         val = 300;
     }
 

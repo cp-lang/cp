@@ -1848,6 +1848,7 @@ impl Analyzer {
         match expr {
             Expr::Lit(_) => true,
             Expr::Ident(_) => true,
+            Expr::Member(mem) => Self::is_const_expr(&mem.obj),
             Expr::Array(elements) => elements.iter().all(Self::is_const_expr),
             Expr::ArrayRepeat(val, count) => Self::is_const_expr(val) && Self::is_const_expr(count),
             Expr::Object(fields) => fields.iter().all(|f| Self::is_const_expr(&f.val)),
