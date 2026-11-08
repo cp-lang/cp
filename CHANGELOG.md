@@ -2250,6 +2250,42 @@
 ### 新增测试 (Added)
 - [`cap/test/test_ptr_capture.cp`](file:///data/dev/cp/cap/test/test_ptr_capture.cp): 端到端验证海象语法指针解包就地修改、管道语法指针解包就地修改，以及 `_ = ...` 丢弃赋值，测试 100% 成功。
 
+---
+
+## 2026-11-08 (C-FFI 头文件极简内联吸纳、AI-First 结构化 JSON 诊断自愈与极简 own 关键字实装)
+
+### 修改文件 (Modified - cpc_dev)
+- [`cpc_dev/src/ast.rs`](file:///data/dev/cp/cpc_dev/src/ast.rs):
+  - 在 `Decl` 枚举中新增 `CInclude(CIncludeDecl)` 变体与 `CIncludeDecl` 结构体，支持记录外部 C 头文件内联声明。
+- [`cpc_dev/src/lexer.rs`](file:///data/dev/cp/cpc_dev/src/lexer.rs):
+  - 新增 `#[token("own")] Own` 词法标记，确立 3 字母独占所有权关键字。
+- [`cpc_dev/src/parser.rs`](file:///data/dev/cp/cpc_dev/src/parser.rs):
+  - 在 `@c { ... }` 块解析中全面支持 C 头文件字符串字面量（如 `"stdio.h"`），支持逗号与分号分隔，并支持与自定义函数原型声明混合书写；
+  - 在 `parse_param` 与 `parse_method_sig` 中全面支持 `own param: Type`；
+  - 在 `parse_expr` 中支持 `own expr` 一元表达式所有权转移。
+- [`cpc_dev/src/diagnostic.rs`](file:///data/dev/cp/cpc_dev/src/diagnostic.rs):
+  - 实现 `DiagnosticJson`、`DiagnosticReport` 与 `DiagnosticEdit` 序列化结构；
+  - 实现基于规则与 span 计算的智能自愈代码编辑引擎（针对缺少括号、const 重新赋值、参数借用等错误输出精确字符偏移与插入替换建议）。
+- [`cpc_dev/src/main.rs`](file:///data/dev/cp/cpc_dev/src/main.rs):
+  - 为 `Commands::Check` 增加 `--json` 命令行参数支持，打通 CLI 机器自愈通道。
+- [`cpc_dev/src/sema.rs`](file:///data/dev/cp/cpc_dev/src/sema.rs):
+  - 遇到 `Decl::CInclude` 时在全局顶层作用域自动注册 `c` 全局命名空间符号；
+  - 在 `analyze_expr` 中对 `Expr::Move` 激活变量移动标记（`self.moved_vars`），当对已通过 `own` 或 `move` 移交的变量进行再次访问时触发 `E0203` 精准拦截。
+- [`cpc_dev/src/codegen.rs`](file:///data/dev/cp/cpc_dev/src/codegen.rs):
+  - 自动收集 `@c { ... }` 中的 C 头文件，生成全局安全的 `pub const c = struct { ... }`，提供常用标准 libc 函数绑定与自定义 C 函数支持；
+  - 修复 BTreeMap 内部搜索函数局部变量 `c` 遮蔽全局 `c` 的命名冲突；
+  - 在作用域退出 defer 与循环 move 生成中，对结构体值类型通过局部变量解引用调用 `release()`，杜绝 const 限定修饰符丢弃引发的编译错误。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 在 11.9.1 节补充 `@c { "header.h" }` 头文件直接吸纳语法；
+  - 在 15.3 节补充 `own` 关键字说明；
+  - 增加第十八章：AI-First 机器自愈生态（`cpc check --json`）与无别名单写者保障（`own` 关键字）。
+
+### 新增测试用例 (Added)
+- [`cap/test/test_c_inline_header.cp`](file:///data/dev/cp/cap/test/test_c_inline_header.cp): 验证 `@c { "stdio.h" }` 头文件直接内联吸纳并在 5ms 内完成转译与调用 `c.puts` 执行。
+- [`cap/test/test_own_keyword.cp`](file:///data/dev/cp/cap/test/test_own_keyword.cp): 验证函数参数 `fn consume(own res: Resource)` 与表达式 `let b = own a` 的所有权转移及自动析构联动。
+- [`cap/test/test_own_use_after_move_fail.cp`](file:///data/dev/cp/cap/test/test_own_use_after_move_fail.cp): 反向拦截测试，验证变量被 `own` 移出后再次读取被静态拦截并输出带自愈建议的 `error[E0203]`。
+- [`cap/test/test_json_diag_fail.cp`](file:///data/dev/cp/cap/test/test_json_diag_fail.cp): 验证 `cpc check --json` 输出包含精确 `edits` 数组的标准 JSON 诊断。
+
 
 
 

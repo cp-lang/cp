@@ -36,6 +36,13 @@ pub enum Decl {
     Dec(DecDef),
     Macro(MacroDef),
     TypeAlias(TypeAliasDecl),
+    CInclude(CIncludeDecl),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CIncludeDecl {
+    pub span: Span,
+    pub header: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

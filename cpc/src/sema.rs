@@ -132,7 +132,7 @@ impl SemaError {
                 "value of '{}' was moved and its ownership was transferred.",
                 name
             ))
-            .with_help("variables moved via 'move' transfer ownership and cannot be accessed afterwards.")
+            .with_help("variables moved via 'own' or 'move' transfer ownership and cannot be accessed afterwards.")
             .with_suggestion(format!(
                 "avoid moving '{}' if you need to use it later, or pass by borrow '&{}'",
                 name, name
@@ -846,6 +846,16 @@ impl Analyzer {
                             kind: VarDeclKind::Const,
                         },
                         ta.ident.span,
+                    );
+                }
+                ModuleItem::Decl(Decl::CInclude(ci)) => {
+                    let _ = self.define(
+                        "c".to_string(),
+                        SymbolKind::Var {
+                            ty: Type::Any,
+                            kind: VarDeclKind::Const,
+                        },
+                        ci.span,
                     );
                 }
                 ModuleItem::Import(imp) => {
@@ -2517,9 +2527,11 @@ impl Analyzer {
                     if let Some(known_len) = self.infer_known_length(&ty, var.init.as_ref()) {
                         self.set_known_length(var_name.clone(), known_len);
                     }
-                    if let Some(init) = &var.init {
-                        if let Some(val) = self.eval_int_expr(init) {
-                            self.set_const_int(var_name, val);
+                    if var.kind == VarDeclKind::Const {
+                        if let Some(init) = &var.init {
+                            if let Some(val) = self.eval_int_expr(init) {
+                                self.set_const_int(var_name, val);
+                            }
                         }
                     }
                 }
@@ -3037,9 +3049,14 @@ impl Analyzer {
             Expr::Await(inner)
             | Expr::Question(inner)
             | Expr::ErrWrap(inner)
-            | Expr::BoxNew(inner)
-            | Expr::Move(inner) => {
+            | Expr::BoxNew(inner) => {
                 self.analyze_expr(inner)?;
+            }
+            Expr::Move(inner) => {
+                self.analyze_expr(inner)?;
+                if let Expr::Ident(id) = &**inner {
+                    self.moved_vars.insert(id.sym.clone());
+                }
             }
             Expr::Borrow(inner, _) => {
                 self.analyze_expr(inner)?;

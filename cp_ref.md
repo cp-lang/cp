@@ -5238,31 +5238,73 @@ export @opaque class App {
 
 在系统级高性能网络栈（如 Bun、uWebSockets、lsquic、BoringSSL 等）重构中，与底层 C 库、OS 系统调用的互操作至关重要。CP 语言确立了兼具“TypeScript 的极简直觉”与“底层 C-ABI 绝对保真”的互操作规范体系。
 
-#### 11.9.1 `@c { ... }` 原生 C 符号与声明块
+#### 11.9.1 `@c { ... }` 原生 C 符号与头文件直接吸纳（零样板代码 C-FFI）
 
-为避免增加冗余关键字（如 `extern`），CP 统一采用 `@c { ... }` 块声明外部 C 符号：
+为彻底消减传统系统编程中与 C 语言交互时沉重的胶水代码负担，CP 废弃了繁琐且易出错的手写外部声明，统一采用极简的 `@c { ... }` 块完成外部 C 库与系统头文件的原生吸纳：
 
-- **块级 C-ABI 语义**：在 `@c { ... }` 内部声明的所有函数与变量，默认拥有 C 语言外部链接与标准 C 调用约定（`callconv(.c)`）；
-- **纯正语法**：在块内部直接使用标准 CP 函数签名语法；
-- **类型自动对接**：入参和返回值使用 CP 原生系统类型（`cstr`, `*any!`, `[*]u8!`, `usize` 等）。
+##### 1. 新旧开发模式革命性对比（体现体系级方便性）
+
+| 维度 | 传统手写绑定（旧模式） | CP 原生 `@c { ... }` 头文件吸纳（新模式） |
+| :--- | :--- | :--- |
+| **胶水代码量** | 每个 C 函数需逐一手写签名，几十行乃至上千行样板代码 | **仅需 1 行头文件名声明**（如 `"stdio.h"`），零样板代码 |
+| **类型对齐风险** | 易因 C 指针级别、结构体 padding 误判导致段错误崩溃 | **Clang/Zig 编译器底层自动解析 ABI 与类型**，100% 内存安全对齐 |
+| **维护与升级** | C 库更新头文件后需手动同步修改所有绑定函数声明 | **头文件升级时自动无缝吸收**，编译期强校验，无需人工修改胶水 |
+| **命名空间隔离** | 污染全局符号表，容易引发命名遮蔽冲突 | **自动挂载在整洁的 `c` 全局安全命名空间下**（如 `c.puts`） |
+
+##### 2. 核心语法与使用示例
+
+###### 场景 A：直接吸纳标准库或第三方 C 库头文件
+无需手写任何 C 函数声明，直接在 `@c { ... }` 块中写入头文件字符串字面量（如 `"stdio.h"`, `"sqlite3.h"`）。编译器自动解析并注入统一的 `c` 全局命名空间：
 
 ```typescript
+import { print } from "cap:io";
+
+// 一行代码直通 C 标准库与 SQLite 引擎
 @c {
-    fn malloc(size: usize): *any?!;
-    fn free(ptr: *any?!): void;
-    fn us_listen_socket_close(ssl: i32, ls: *any!): void;
-    fn us_socket_context_on_open(ssl: i32, context: *any!, handler: @c ((s: *any!, is_client: i32, ip: cstr, ip_len: i32): *any!)?): void;
+    "stdio.h",
+    "sqlite3.h"
+}
+
+pub fn main(): void {
+    // 1. 直接调用 C 标准 I/O 函数，零粘合代码
+    _ = c.puts("Hello from native C stdio via @c header!");
+
+    // 2. 直接调用复杂 C 外部库函数
+    var db: *any! = null;
+    let rc = c.sqlite3_open(":memory:", &db);
+    if (rc == 0) {
+        print("SQLite memory database initialized successfully via C-FFI!\n");
+        _ = c.sqlite3_close(db);
+    }
 }
 ```
 
-- **转译映射**：代码生成器自动将其转译为 Zig 原生 `extern "c"` 块：
-  ```zig
-  extern "c" {
-      pub fn malloc(size: usize) ?*anyopaque;
-      pub fn free(ptr: ?*anyopaque) void;
-      pub fn us_listen_socket_close(ssl: c_int, ls: *anyopaque) void;
-  }
-  ```
+###### 场景 B：头文件与自定义 C 函数原型混合声明
+同一个 `@c { ... }` 块中支持头文件引入与自定义函数声明混写，满足各类复杂底层的精细控制需求：
+
+```typescript
+@c {
+    "uv.h",
+    // 针对特殊私有垫片函数进行就地签名声明：
+    fn custom_native_helper(fd: i32, flags: u32): i32;
+}
+
+pub fn start_native_io(fd: i32): void {
+    _ = custom_native_helper(fd, 0);
+}
+```
+
+##### 3. 转译与底层保障
+编译器在代码生成阶段，自动为吸纳的头文件生成安全的 C-ABI 映射结构：
+```zig
+pub const c = struct {
+    pub extern "c" fn puts(s: [*c]const u8) c_int;
+    pub extern "c" fn printf(fmt: [*c]const u8, ...) c_int;
+    pub extern "c" fn malloc(size: usize) ?*anyopaque;
+    pub extern "c" fn free(ptr: ?*anyopaque) void;
+    // ... 自动挂载头文件包含的完整外部函数集
+};
+```
 
 #### 11.9.2 `@c` 单行导出与 C 调用约定修饰
 
@@ -6013,13 +6055,14 @@ let s4 = string.from(12345); // "12345"
 
 ### 15.3 所有权、安全与内存控制关键字
 
-| 关键字   | 含义说明                                   |
-| -------- | ------------------------------------------ |
-| `move`   | 所有权转移标记                             |
-| `unsafe` | 不安全代码块，关闭借用检查，允许裸指针操作 |
-| `zig`    | 内嵌 Zig 代码块，直接执行原生 Zig 代码     |
-| `&`      | 只读借用                                   |
-| `*`      | 可变借用                                   |
+| 关键字   | 含义说明                                                                 |
+| -------- | ------------------------------------------------------------------------ |
+| `own`    | 极简 3 字母独占所有权转移标记（替代繁琐的 `move unique`，杜绝并发别名）  |
+| `move`   | 所有权转移标记（与 `own` 等价并兼容）                                     |
+| `unsafe` | 不安全代码块，关闭借用检查，允许裸指针操作                               |
+| `zig`    | 内嵌 Zig 代码块，直接执行原生 Zig 代码                                   |
+| `&`      | 只读借用                                                                 |
+| `*`      | 可变借用                                                                 |
 
 ### 15.4 流程控制关键字
 
@@ -7502,6 +7545,127 @@ CP 原生支持带哨兵的切片语法 `[start..end :sentinel]`，直通 Zig �
 let buf: [16]u8 = "Hello, World!\x00";
 // 截取以 0 结尾的哨兵切片
 let slice = buf[0..13 :0];
+```
+
+---
+
+### 第十八章：AI-First 机器自愈生态与无别名单写者保障 (Machine-Readable Diagnostics & Alias-Free Protection)
+
+#### 18.1 结构化 JSON 诊断与毫秒级机器自愈闭环 (`cpc check --json`)
+
+为了让 AI Agent（如 Antigravity、Bun AGY）及现代 IDE/LSP 能够以确定性方式瞬间修复代码问题，`cpc` 编译器提供了专用的 `--json` 机器可读诊断接口：
+
+```bash
+cpc check --json src/main.cp
+```
+
+1. **输出 Envelope 规范**：
+   - 检查通过：`{"status":"ok","diagnostics":[]}`（Exit Code 0）；
+   - 包含错误：`{"status":"error","diagnostics":[...]}`（Exit Code 1）。
+2. **Machine-Readable Edits**：
+   每个诊断对象不仅包含精确的 `file`、`line`、`col`、`span_start`、`span_end`，更包含由编译器静态计算生成的 `edits` 数组（包含 `offset`, `delete_len`, `insert`），AI Agent 读取后可直接执行无损打补丁：
+   ```json
+   {
+     "status": "error",
+     "diagnostics": [
+       {
+         "code": "E0101",
+         "severity": "error",
+         "message": "CP Syntax Error: 'if' condition requires parentheses.",
+         "file": "src/main.cp",
+         "line": 12,
+         "col": 8,
+         "span_start": 180,
+         "span_end": 184,
+         "cause": null,
+         "help": "in CP, control flow conditions must be enclosed in parentheses to avoid ambiguity with struct literals.",
+         "suggestion": "wrap the condition in parentheses: if (condition) { ... }",
+         "edits": [
+           { "offset": 180, "delete_len": 0, "insert": "(" },
+           { "offset": 184, "delete_len": 0, "insert": ")" }
+         ]
+       }
+     ]
+   }
+   ```
+
+#### 18.2 极简 `own` 关键字与无别名单写者保护 (Alias-Free Single Ownership)
+
+在百万级并发 Agent/Actor 通信场景下，共享堆大对象（如 `SharedTensor`、大缓存、Socket 连接）的传递必须从物理上杜绝并发别名读写冲突。CP 语言正式确立极简的 3 字母关键字 **`own`**，替代并超越了业界繁琐的 `move unique`。
+
+##### 1. `own` 与传统 `move` 的核心区别
+
+| 维度 | 传统 `move` | 现代 `own`（无别名单写者） |
+| :--- | :--- | :--- |
+| **设计哲学** | 侧重于单线程作用域内的**“所有权移动动作（Action）”** | 侧重于跨边界的**“排他单写者契约（Exclusive Ownership Contract）”** |
+| **并发别名防护** | 仅做普通变量移出，不主动约束跨 Actor 的无别名（Alias-Free）语义 | **严格约束单写者**，保证接收方是全局唯一的排他持有者，杜绝并发竞争 |
+| **函数参数修饰** | `fn process(move x: T)` 语义偏向动作，语法略显突兀 | **`fn process(own x: T)`** 优雅明确表达“该形参要求独占所有权” |
+| **语法精炼度** | 历史上跨并发独占需写为 `move unique`，冗长繁琐 | **统一收敛为 3 个字母 `own`**，语法极简有力，无冗余心智负担 |
+| **向后兼容性** | 继续保留，作为 `own` 的动作等价写法向下兼容 | **作为 CP 语言推荐的标准所有权关键字** |
+
+##### 2. `own` 核心三大应用场景
+
+###### 场景一：Actor 间跨线程/微进程零拷贝传递共享堆大对象（Tensor、大缓存）
+在 Actor 消息传递模型中，物理值拷贝大数组开销巨大，而多指针别名又容易引发数据竞争。使用 `own` 既实现零拷贝原子指针传递，又确保接收端是排他的“单写者（Single-Writer）”：
+```typescript
+import { spawn } from "cap:actor";
+import { SharedTensor } from "cap:mem";
+
+// 工作微进程：要求必须独占传入的 Tensor
+fn compute_worker(own tensor: SharedTensor): void {
+    // 绝对单写者保证，无需互斥锁，就地高性能矩阵变换
+    tensor.inplace_matmul();
+}
+
+pub fn main(): void {
+    let weights = SharedTensor.alloc([4096, 4096]);
+    // 移交排他所有权给 worker 微进程
+    compute_worker(own weights);
+
+    // ❌ 编译期静态拦截：error[E0203]: use of moved value 'weights'
+    // 绝对防止当前 Actor 在权重计算期间进行并发读写踩踏！
+    print("{}", weights.shape);
+}
+```
+
+###### 场景二：系统 RAII 核心资源的排他转移与自动析构接管
+对于包装了底层文件描述符、网络 Socket 或显存资源的结构体，通过 `own` 移交所有权时，编译器自动织入 Drop Flag（`__{var}_moved = true;`），使原作用域的自动释放（`release`）安全旁路，彻底消除双重释放（Double Free）与悬挂指针：
+```typescript
+struct SafeSocket {
+    pub fd: i32,
+    pub fn release(this): void {
+        if (this.fd >= 0) {
+            c.close(this.fd);
+            this.fd = -1;
+        }
+    }
+}
+
+fn register_epoll(own sock: SafeSocket): void {
+    // sock 的所有权在此被接管，离开此函数时才会触发 sock.release()
+}
+
+pub fn main(): void {
+    let s = SafeSocket { fd: 10 };
+    register_epoll(own s);
+    // main 结束时，编译器检测到 s 已被 own 移交，自动跳过 main 作用域的 release()，杜绝二次释放！
+}
+```
+
+###### 场景三：无锁并发队列与环形缓冲区任务提取
+在事件循环（Event Loop）与任务调度池中，消费任务时使用 `own` 能够以确定性方式表明该任务已被消费线程认领并转移，杜绝多 Worker 重复执行。
+
+##### 3. 编译期使用已移动变量的智能自愈拦截（`E0203`）
+当变量被 `own` 移交后，后续任何读取或借用均被编译器静态语义分析直接阻断，并输出三段式自愈诊断：
+```text
+error[E0203]: use of moved value 'r1'
+  --> src/main.cp:23:17
+   |
+23 |     print("{}", r1.id);
+   |                 ^^
+   = cause: value of 'r1' was moved and its ownership was transferred.
+   = help: variables moved via 'own' or 'move' transfer ownership and cannot be accessed afterwards.
+   = suggestion: avoid moving 'r1' if you need to use it later, or pass by borrow '&r1'
 ```
 
 _本规范由 CP 架构设计委员会制定，作为全体编译器研发、运行时对接与开发者生态的唯一最高准则。_

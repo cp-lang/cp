@@ -1,5 +1,62 @@
 use crate::Span;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiagnosticEdit {
+    pub offset: usize,
+    pub delete_len: usize,
+    pub insert: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiagnosticJson {
+    pub code: String,
+    pub severity: String, // "error" | "warning"
+    pub message: String,
+    pub file: String,
+    pub line: usize,
+    pub col: usize,
+    pub span_start: usize,
+    pub span_end: usize,
+    pub cause: Option<String>,
+    pub help: Option<String>,
+    pub suggestion: Option<String>,
+    pub edits: Vec<DiagnosticEdit>,
+}
+
+impl DiagnosticJson {
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiagnosticReport {
+    pub status: String,
+    pub diagnostics: Vec<DiagnosticJson>,
+}
+
+impl DiagnosticReport {
+    pub fn ok() -> Self {
+        Self {
+            status: "ok".to_string(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    pub fn ok_json() -> String {
+        serde_json::to_string(&Self::ok())
+            .unwrap_or_else(|_| "{\"status\":\"ok\",\"diagnostics\":[]}".to_string())
+    }
+
+    pub fn error(diag: DiagnosticJson) -> Self {
+        Self {
+            status: "error".to_string(),
+            diagnostics: vec![diag],
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
@@ -101,6 +158,250 @@ impl Diagnostic {
 
         out
     }
+
+    pub fn to_diagnostic_json(
+        &self,
+        source_code: Option<&str>,
+        file_path: Option<&Path>,
+    ) -> DiagnosticJson {
+        let file = file_path
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<input>".to_string());
+
+        let (line, col, span_start, span_end) = if let Some(span) = self.span {
+            let (l, c) = if let Some(code) = source_code {
+                let (line_idx, col_idx, _) = find_line_and_col(code, span.start);
+                (line_idx + 1, col_idx + 1)
+            } else {
+                (1, 1)
+            };
+            (l, c, span.start, span.end)
+        } else {
+            (1, 1, 0, 0)
+        };
+
+        let edits = self.generate_edits(source_code);
+
+        DiagnosticJson {
+            code: self.code.clone(),
+            severity: "error".to_string(),
+            message: self.message.clone(),
+            file,
+            line,
+            col,
+            span_start,
+            span_end,
+            cause: self.cause.clone(),
+            help: self.help.clone(),
+            suggestion: self.suggestion.clone(),
+            edits,
+        }
+    }
+
+    pub fn to_json(&self, source_code: Option<&str>, file_path: Option<&Path>) -> String {
+        let diag_json = self.to_diagnostic_json(source_code, file_path);
+        let report = DiagnosticReport::error(diag_json);
+        serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    pub fn generate_edits(&self, source_code: Option<&str>) -> Vec<DiagnosticEdit> {
+        let mut edits = Vec::new();
+
+        // 1. Missing parentheses in control flow statements (E0101)
+        if self.code == "E0101"
+            || self
+                .suggestion
+                .as_ref()
+                .map_or(false, |s| s.contains("parentheses"))
+            || self.message.contains("parentheses")
+        {
+            if let Some(span) = self.span {
+                if let Some(code) = source_code {
+                    let (start, end) = find_condition_range(code, span.start);
+                    edits.push(DiagnosticEdit {
+                        offset: start,
+                        delete_len: 0,
+                        insert: "(".to_string(),
+                    });
+                    edits.push(DiagnosticEdit {
+                        offset: end,
+                        delete_len: 0,
+                        insert: ")".to_string(),
+                    });
+                } else {
+                    edits.push(DiagnosticEdit {
+                        offset: span.start,
+                        delete_len: 0,
+                        insert: "(".to_string(),
+                    });
+                    edits.push(DiagnosticEdit {
+                        offset: span.end,
+                        delete_len: 0,
+                        insert: ")".to_string(),
+                    });
+                }
+                return edits;
+            }
+        }
+
+        // 2. Abolished 'interface' keyword (E0102) -> replace with 'trait'
+        if self.code == "E0102"
+            || self
+                .suggestion
+                .as_ref()
+                .map_or(false, |s| s.contains("replace 'interface' with 'trait'"))
+        {
+            if let Some(span) = self.span {
+                edits.push(DiagnosticEdit {
+                    offset: span.start,
+                    delete_len: span.end.saturating_sub(span.start),
+                    insert: "trait".to_string(),
+                });
+                return edits;
+            }
+        }
+
+        // 3. Abolished 'mut' in var decl (E0104) -> remove 'mut'
+        if self.code == "E0104"
+            || self
+                .suggestion
+                .as_ref()
+                .map_or(false, |s| s.contains("remove 'mut'"))
+        {
+            if let Some(span) = self.span {
+                let del_len = if let Some(code) = source_code {
+                    if code.as_bytes().get(span.end) == Some(&b' ') {
+                        span.end - span.start + 1
+                    } else {
+                        span.end - span.start
+                    }
+                } else {
+                    span.end - span.start
+                };
+                edits.push(DiagnosticEdit {
+                    offset: span.start,
+                    delete_len: del_len,
+                    insert: String::new(),
+                });
+                return edits;
+            }
+        }
+
+        // 4. Parameter read-only borrow (E0201) -> add '*' for mutable borrow
+        if self.code == "E0201"
+            && self
+                .suggestion
+                .as_ref()
+                .map_or(false, |s| s.contains("Add '*'"))
+        {
+            if let Some(span) = self.span {
+                edits.push(DiagnosticEdit {
+                    offset: span.start,
+                    delete_len: 0,
+                    insert: "*".to_string(),
+                });
+                return edits;
+            }
+        }
+
+        // 5. Const reassignment (E0204) -> change 'const' to 'let'
+        if self.code == "E0204" {
+            if let (Some(code), Some(target)) = (source_code, self.message.split('\'').nth(1)) {
+                let pattern = format!("const {}", target);
+                if let Some(pos) = code.find(&pattern) {
+                    edits.push(DiagnosticEdit {
+                        offset: pos,
+                        delete_len: 5,
+                        insert: "let".to_string(),
+                    });
+                    return edits;
+                }
+            }
+        }
+
+        // 6. Undefined symbol with standard library import suggestion (E0206)
+        if self.code == "E0206" {
+            if let Some(sug) = &self.suggestion {
+                if sug.starts_with("import { ") {
+                    edits.push(DiagnosticEdit {
+                        offset: 0,
+                        delete_len: 0,
+                        insert: format!("{}\n", sug),
+                    });
+                    return edits;
+                }
+            }
+        }
+
+        edits
+    }
+}
+
+pub fn find_condition_range(code: &str, span_start: usize) -> (usize, usize) {
+    let start = span_start.min(code.len());
+    let rest = &code[start..];
+
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut in_str = None;
+    let mut escape = false;
+    let mut end_offset = None;
+
+    for (rel_idx, ch) in rest.char_indices() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if ch == '\\' {
+            escape = true;
+            continue;
+        }
+        if let Some(quote) = in_str {
+            if ch == quote {
+                in_str = None;
+            }
+            continue;
+        }
+        if ch == '"' || ch == '\'' || ch == '`' {
+            in_str = Some(ch);
+            continue;
+        }
+
+        match ch {
+            '(' => paren_depth += 1,
+            ')' => {
+                if paren_depth > 0 {
+                    paren_depth -= 1;
+                }
+            }
+            '[' => bracket_depth += 1,
+            ']' => {
+                if bracket_depth > 0 {
+                    bracket_depth -= 1;
+                }
+            }
+            '{' => {
+                if paren_depth == 0 && bracket_depth == 0 {
+                    end_offset = Some(start + rel_idx);
+                    break;
+                }
+            }
+            '\n' | ';' => {
+                if paren_depth == 0 && bracket_depth == 0 {
+                    end_offset = Some(start + rel_idx);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let raw_end = end_offset.unwrap_or(code.len());
+    let cond_str = &code[start..raw_end];
+    let trimmed_len = cond_str.trim_end().len();
+    let cond_end = start + trimmed_len;
+
+    (start, cond_end.max(start))
 }
 
 pub fn find_line_and_col(code: &str, offset: usize) -> (usize, usize, &str) {

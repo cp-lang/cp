@@ -656,6 +656,7 @@ pub struct Codegen {
     pub current_block_label: Option<String>,
     pub local_trampolines: HashSet<String>,
     pub source_dir: Option<std::path::PathBuf>,
+    pub c_includes: Vec<String>,
 }
 
 impl Codegen {
@@ -731,6 +732,7 @@ impl Codegen {
             current_block_label: None,
             local_trampolines: HashSet::new(),
             source_dir: None,
+            c_includes: Vec::new(),
         }
     }
 
@@ -1524,6 +1526,13 @@ impl Codegen {
                 self.globals.insert(ta.ident.sym.clone());
                 self.type_aliases.insert(ta.ident.sym.clone(), ta.clone());
             }
+            if let ModuleItem::Decl(Decl::CInclude(ci)) = item {
+                if !self.c_includes.contains(&ci.header) {
+                    self.c_includes.push(ci.header.clone());
+                }
+                self.globals.insert("c".to_string());
+                self.value_classes.insert("c".to_string());
+            }
             if let ModuleItem::Stmt(Stmt::Var(v)) = item {
                 if let Pattern::Ident(id) = &v.pat {
                     self.globals.insert(id.sym.clone());
@@ -1766,6 +1775,22 @@ impl Codegen {
         self.writeln("const string = []const u8;");
         if self.is_beam_mode {
             self.writeln("const beam = @import(\"beam.zig\");");
+        }
+        if !self.c_includes.is_empty() {
+            self.writeln("pub const c = struct {");
+            self.writeln("    pub extern \"c\" fn puts(s: [*c]const u8) c_int;");
+            self.writeln("    pub extern \"c\" fn printf(fmt: [*c]const u8, ...) c_int;");
+            self.writeln("    pub extern \"c\" fn snprintf(buf: [*c]u8, size: usize, fmt: [*c]const u8, ...) c_int;");
+            self.writeln("    pub extern \"c\" fn malloc(size: usize) ?*anyopaque;");
+            self.writeln("    pub extern \"c\" fn free(ptr: ?*anyopaque) void;");
+            self.writeln("    pub extern \"c\" fn exit(status: c_int) noreturn;");
+            self.writeln("    pub extern \"c\" fn getenv(name: [*c]const u8) ?[*c]u8;");
+            self.writeln("    pub extern \"c\" fn strlen(s: [*c]const u8) usize;");
+            self.writeln("    pub extern \"c\" fn strcmp(s1: [*c]const u8, s2: [*c]const u8) c_int;");
+            self.writeln("    pub extern \"c\" fn strncmp(s1: [*c]const u8, s2: [*c]const u8, n: usize) c_int;");
+            self.writeln("    pub extern \"c\" fn memcpy(dest: ?*anyopaque, src: ?*const anyopaque, n: usize) ?*anyopaque;");
+            self.writeln("    pub extern \"c\" fn memset(s: ?*anyopaque, c_val: c_int, n: usize) ?*anyopaque;");
+            self.writeln("};");
         }
         self.writeln("");
 
@@ -2334,9 +2359,9 @@ impl Codegen {
             self.writeln("        var high: usize = self.entries.items.len;");
             self.writeln("        while (low < high) {");
             self.writeln("            const mid = low + (high - low) / 2;");
-            self.writeln("            const c = cp_msg_cmp(self.entries.items[mid].key, k);");
-            self.writeln("            if (c == 0) return .{ .found = true, .index = mid };");
-            self.writeln("            if (c < 0) { low = mid + 1; } else { high = mid; }");
+            self.writeln("            const cmp_res = cp_msg_cmp(self.entries.items[mid].key, k);");
+            self.writeln("            if (cmp_res == 0) return .{ .found = true, .index = mid };");
+            self.writeln("            if (cmp_res < 0) { low = mid + 1; } else { high = mid; }");
             self.writeln("        }");
             self.writeln("        return .{ .found = false, .index = low };");
             self.writeln("    }");
@@ -7809,7 +7834,7 @@ impl Codegen {
                             "var __{}_moved = false; _ = &__{}_moved;",
                             p.ident.sym, p.ident.sym
                         ));
-                        self.writeln(&format!("defer if (!__{0}_moved) {{ const T = @TypeOf({0}); if (@typeInfo(T) == .pointer) {{ const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@\"struct\" and @hasDecl(Child, \"release\")) {{ const RType = @typeInfo(@TypeOf(Child.release)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _ = {0}.release() catch {{}}; }} else {{ {0}.release(); }} }} }} else if (@typeInfo(T) == .@\"struct\" and @hasDecl(T, \"release\")) {{ {0}.release(); }} }};", p.ident.sym));
+                        self.writeln(&format!("defer if (!__{0}_moved) {{ const T = @TypeOf({0}); if (@typeInfo(T) == .pointer) {{ const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@\"struct\" and @hasDecl(Child, \"release\")) {{ const RType = @typeInfo(@TypeOf(Child.release)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _ = {0}.release() catch {{}}; }} else {{ {0}.release(); }} }} }} else if (@typeInfo(T) == .@\"struct\" and @hasDecl(T, \"release\")) {{ var _drop_val = {0}; _drop_val.release(); }} }};", p.ident.sym));
                     }
                 }
             }
@@ -8254,10 +8279,16 @@ impl Codegen {
                                             } else if let Type::String = &**inner {
                                                 ": []u8".to_string()
                                             } else {
-                                                String::new()
+                                                format!(": {}", self.map_type(t))
                                             }
                                         } else {
-                                            String::new()
+                                            if let Type::Array(elem) = &**inner {
+                                                format!(": []const {}", self.map_type(elem))
+                                            } else if let Type::String = &**inner {
+                                                ": []const u8".to_string()
+                                            } else {
+                                                format!(": {}", self.map_type(t))
+                                            }
                                         }
                                     } else if is_trait_ty {
                                         String::new()
@@ -8340,7 +8371,7 @@ impl Codegen {
                                     "var __{}_moved = false; _ = &__{}_moved;",
                                     ident.sym, ident.sym
                                 ));
-                                self.write_to_case(&format!("defer if (!__{0}_moved) {{ const T = @TypeOf({0}); if (@typeInfo(T) == .pointer) {{ const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@\"struct\" and @hasDecl(Child, \"release\")) {{ const RType = @typeInfo(@TypeOf(Child.release)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _ = {0}.release() catch {{}}; }} else {{ {0}.release(); }} }} }} else if (@typeInfo(T) == .@\"struct\" and @hasDecl(T, \"release\")) {{ {0}.release(); }} }};", ident.sym));
+                                self.write_to_case(&format!("defer if (!__{0}_moved) {{ const T = @TypeOf({0}); if (@typeInfo(T) == .pointer) {{ const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@\"struct\" and @hasDecl(Child, \"release\")) {{ const RType = @typeInfo(@TypeOf(Child.release)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _ = {0}.release() catch {{}}; }} else {{ {0}.release(); }} }} }} else if (@typeInfo(T) == .@\"struct\" and @hasDecl(T, \"release\")) {{ var _drop_val = {0}; _drop_val.release(); }} }};", ident.sym));
                             } else if !self.is_state_machine {
                                 self.write_to_case(&format!("_ = &{};", ident.sym));
                             }
@@ -8859,7 +8890,11 @@ impl Codegen {
                 }
                 _ => {
                     let e = self.generate_expr(expr);
-                    self.write_to_case(&format!("_ = {};", e));
+                    if e.starts_with("@branchHint") {
+                        self.write_to_case(&format!("{};", e));
+                    } else {
+                        self.write_to_case(&format!("_ = {};", e));
+                    }
                 }
             },
             Stmt::Block(b) | Stmt::UnsafeBlock(b) => {
@@ -9441,7 +9476,7 @@ impl Codegen {
                             "var __{0}_moved = false; _ = &__{0}_moved;",
                             id.sym
                         ));
-                        self.write_to_case(&format!("defer if (!__{0}_moved) {{ const T = @TypeOf({0}); if (@typeInfo(T) == .pointer) {{ const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@\"struct\" and @hasDecl(Child, \"release\")) {{ const RType = @typeInfo(@TypeOf(Child.release)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _ = {0}.release() catch {{}}; }} else {{ {0}.release(); }} }} }} else if (@typeInfo(T) == .@\"struct\" and @hasDecl(T, \"release\")) {{ {0}.release(); }} }};", id.sym));
+                        self.write_to_case(&format!("defer if (!__{0}_moved) {{ const T = @TypeOf({0}); if (@typeInfo(T) == .pointer) {{ const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@\"struct\" and @hasDecl(Child, \"release\")) {{ const RType = @typeInfo(@TypeOf(Child.release)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _ = {0}.release() catch {{}}; }} else {{ {0}.release(); }} }} }} else if (@typeInfo(T) == .@\"struct\" and @hasDecl(T, \"release\")) {{ var _drop_val = {0}; _drop_val.release(); }} }};", id.sym));
                     }
                 } else {
                     let item_var = format!("__item_{}", tmp_id);
@@ -10249,6 +10284,28 @@ impl Codegen {
                     }
                 }
                 let inner_code = self.generate_expr(inner);
+                let is_type_name = match &**inner {
+                    Expr::Ident(id) => {
+                        !self.locals.contains_key(&id.sym)
+                            && !self.var_cp_types.contains_key(&id.sym)
+                            && (self.class_defs.contains_key(&id.sym)
+                                || self.value_classes.contains(&id.sym)
+                                || self.type_aliases.contains_key(&id.sym)
+                                || self.trait_defs.contains_key(&id.sym)
+                                || id.sym.chars().next().map_or(false, |c| c.is_ascii_uppercase()))
+                    }
+                    Expr::Member(mem) => {
+                        mem.prop.sym.chars().next().map_or(false, |c| c.is_ascii_uppercase())
+                    }
+                    _ => false,
+                };
+                if is_type_name {
+                    return if *is_mut {
+                        format!("*{}", inner_code)
+                    } else {
+                        format!("*const {}", inner_code)
+                    };
+                }
                 let already_ptr = if matches!(&**inner, Expr::Member(_) | Expr::Index { .. }) {
                     false
                 } else if let Expr::Ident(id) = &**inner {

@@ -3833,6 +3833,31 @@ const PathnameScanner = @import("../url/url.zig").PathnameScanner;
 - **全量回归验证**：
   - `test_bounds_fail.cp`（反向越界拦截）、`test_raw_ptr_fail.cp`（反向裸指针拦截）、`test_cstr_bounds_safe.cp`（正向切片安全）、`test_for_paren_fail.cp`（控制流括号拦截）、`test_for_paren_success.cp` 全部 100% 绿灯。
 
+---
+
+## 2026-11-08: 多子智能体并行工作流全面启动与三大新特性研发规划
+
+### 1. 现有特性求证报告
+1. **Drop / release 编译期静态析构注入**：
+   - 经审查 `cpc/src/codegen.rs#L952-L994` 与 `L8319-L8352`，CP 语言基于 `release()` 约定的通用 RAII 析构注入已完备实装；
+   - 包含变量作用域退出时的 `defer if (!__var_moved) { var.release(); }` 自动织入，以及跨变量赋值、返回、闭包捕获时的 Drop Flag (`__var_moved = true`) 移动追踪，彻底消除二次析构与悬挂指针隐患。
+2. **结构体解构更新（Struct Spread）与模式匹配卫语句（Match Guard）**：
+   - 经审查 `cpc/src/parser.rs#L2952` 与 `codegen.rs#L7088`，卫语句 `pat if (cond) => ...` 已原生实装；
+   - 经审查 `parser.rs#L5724` 与 `codegen.rs#L13304`，结构体/对象字面量构造中的 Spread（`Expr::Object` 中的 `is_spread`）已完全实装，支持字段合并与同名字段覆盖。
+
+### 2. 多子智能体并行研发任务分解与沙箱隔离
+按照 `GEMINI.md` 规范，启动三路子智能体在隔离的沙箱目录中独立并行开发与回归测试：
+
+| 子智能体 | 工作沙箱 | 核心任务 | 交付目标 |
+| :--- | :--- | :--- | :--- |
+| **Agent 1** (`87636b96`) | `cpc_dev/agent_1` | **C-FFI 头文件极简吸纳** | 在 `@c { ... }` 块中支持包含 `.h` 字符串字面量，直通 Zig `@cImport` / `@cInclude`，无需繁琐胶水代码 |
+| **Agent 2** (`a1d87ead`) | `cpc_dev/agent_2` | **AI-First 结构化 JSON 诊断** | 实现 `cpc check --json <file>` 命令，输出包含 span、edits 的结构化 JSON，支持智能体与 IDE 零误差自动打补丁自愈 |
+| **Agent 3** (`f4e00ccc`) | `cpc_dev/agent_3` | **无别名单写者保护 (`own`)** | 引入极简 3 字母关键字 `own` 替代 `move unique`，用于表达式转移所有权（`own tensor`）与函数排他单写者参数修饰（`own param: T`） |
+
+### 3. 沙箱同步与工作区状态控制
+- 通过 `rsync` 保证 `cpc_dev/agent_1`、`agent_2`、`agent_3` 拥有最新代码基线；
+- 为每个沙箱创建/更新 `work.json` 并标记为 `state: "busy"`；各子智能体完成任务并自测通过后标记为 `state: "idle"`。
+
 
 
 

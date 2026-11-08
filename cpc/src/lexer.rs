@@ -40,6 +40,8 @@ pub enum Token {
     Mut,
     #[token("move")]
     Move,
+    #[token("own")]
+    Own,
     #[token("ref")]
     Ref,
     #[token("struct")]

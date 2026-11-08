@@ -6424,6 +6424,68 @@ bun agy 应该在修改 cpc, 审核/评估 bun agy 对 cpc 的修改, 并合并�
    - 规范与演进文档：`GEMINI.md`、`cp_ref.md`、`SESSION.md`、`CHANGELOG.md`、`DEVLOG.md`；
    - 执行唯一原子提交：`git commit -m "feat(cpc): merge cpc_dev into cpc with bounds protection, ptr capture, and ai-first diagnostics"`。
 
+---
+
+### 用户指令 (User Prompts)
+1. Drop Trait 与编译期静态析构注入, 这个应该已经实现了吧! 自动析构, release
+2. 结构体解构更新（Struct Spread）与模式匹配卫语句, 这个也实现了吧
+3. C-FFI 杀手级特性：C 头文件直接内联吸纳（@c_include）—— 这个需要实现, 名称简洁写,如使用 @c {}, 里面 是 .h 文件, 表示需要引入 c的头文件
+4. AI-First 自愈闭环：结构化 JSON 诊断（Machine-Readable Edits）—— 这个可以, 需要实现
+5. 无别名单写者保护（Alias-Free Move）—— 这个可以, 除了 move unique , 是否有其他 更简洁的关键字
+
+推荐使用 own（3 字母）或纯粹的 move。
+单个 move 不是不能满足需求么, 需要 move unique对吧, 如果是这, 使 own 代替 move unique 比较简洁!
+按你的建议和方案, 启动多个子智能体, 在各自 的 cpc_dev/agent_*/ 中完成研发/调试/测试, 再合并到 cpc_dev/src 中.
+
+### 执行汇报 (Execution Report)
+1. **现有成熟语法精准求证**：
+   - **Drop / release 编译期静态析构注入**：已完整实装。`type_has_release` 自动识别 `release()` 及容器类型，退出作用域时自动注入 `defer` 释放，并通过 Drop Flag (`__{var}_moved`) 精准跟踪移动语义，彻底避免二次释放；
+   - **结构体解构更新 (Struct Spread) 与卫语句 (Match Guard)**：已 100% 实装。模式匹配原生支持 `pat if (cond) => ...`，解构支持 `{ a, ...rest }`，结构体字面量构造支持 `{ ...old, field: 1 }` 字段展开与覆盖。
+2. **三项关键演进架构确立**：
+   - **特性 1（C-FFI 内联吸纳）**：极简复用 `@c { "xxx.h" }`，直通 Zig `@cImport` / `@cInclude`，消除 C-FFI 粘合胶水代码；
+   - **特性 2（AI-First 自愈闭环）**：增加 `cpc check --json` 输出机器可读 edits，支持智能体与 IDE 微秒级自动打补丁；
+   - **特性 3（无别名单写者保护）**：采纳极简 3 字母关键字 `own` 替代 `move unique`，用于表达式转移所有权（`own tensor`）与函数排他参数修饰（`own param: T`）。
+3. **多子智能体并行工作流全面启动**：
+   - 沙箱准备与状态对齐：`rsync` 保证 `cpc_dev/agent_1`、`agent_2`、`agent_3` 与最新 baseline 100% 同步；
+   - 写入 `work.json` 状态为 `busy`，分别派发：
+     - **Agent 1 (`87636b96-2c3c-4060-a986-d38c6847c3c9`)**：负责 `@c { "xxx.h" }` 头文件内联导入研发与测试；
+     - **Agent 2 (`a1d87ead-243b-46e1-a6b8-b8e043f806f7`)**：负责 `cpc check --json` 结构化机器自愈输出研发与测试；
+     - **Agent 3 (`f4e00ccc-9884-4007-9282-a6aa92089dc2`)**：负责 `own` 关键字（所有权转移与单写者保证）研发与测试。
+
+---
+
+### 用户指令 (User Prompts)
+继续你的工作
+
+### 执行汇报 (Execution Report)
+1. **多子智能体成果汇总与自愈攻坚完成**：
+   - **特性 1（C-FFI 头文件极简吸纳）**：在 `cpc_dev` 中扩展 `@c { "xxx.h" }` 语法，直通底层 C 头文件，自动导出统一 `pub const c = struct { ... }` 安全命名空间；修复 BTreeMap 内部搜索函数局部变量名 `c` 遮蔽全局命名空间的冲突；
+   - **特性 2（AI-First 结构化 JSON 诊断自愈）**：全面落地 `cpc check --json <file>` 命令，支持输出包含标准 envelope（`status`、`diagnostics`）与精确 `edits` 数组（`offset`、`delete_len`、`insert`），实现智能体零误差自动打补丁自愈；
+   - **特性 3（极简 `own` 关键字）**：全面落地 3 字母关键字 `own` 替代 `move unique`；支持表达式所有权转移（`own expr`）与函数排他单写者参数修饰（`own param: Type`）；在语义分析中联动移动变量检查拦截 `E0203`（use of moved value）；在代码生成中完善值类型结构体自动析构 defer 注入（避免 const 限定符丢弃错误）。
+2. **测试矩阵全量验证通过**：
+   - 正向测试 1 (`test_c_inline_header.cp`)：5ms 转译，链接并调用 C `puts` 输出成功；
+   - 正向测试 2 (`test_own_keyword.cp`)：参数所有权转移与表达式转移成功，输出预期结果；
+   - 反向测试 1 (`test_own_use_after_move_fail.cp`)：移动后再次访问被静态精准拦截并输出 `error[E0203]`；
+   - 反向测试 2 (`test_json_diag_fail.cp`)：`cpc check --json` 输出合法的结构化自愈 JSON 诊断；
+   - 全套回归测试（`test_cstr_bounds_safe.cp`、`test_ptr_capture.cp`、`test_for_paren_success.cp` 等）全绿灯通过。
+---
+
+### 用户指令 (User Prompts)
+很好, 将上述实现的功能, 写入 cp_ref.md 设计规范,特别是新增的 own 与 之前 move的区别, own 用于什么场景. @c{} 引用 c的头文件,也要补充使用示例, 体系 方便性.
+合并到 cpc 正式版本, 并 git 提交
+
+### 执行汇报 (Execution Report)
+1. **规范演进与深度设计手册补充 (`cp_ref.md`)**：
+   - **`@c { ... }` 引用 C 头文件体系级方便性**：在第 11.9.1 节详尽阐述新旧开发模式对比表格（零胶水代码量、ABI/Padding 零风险、升级无感吸收、`c` 全局安全命名空间隔离）；补充直接调用 C 标准库与 SQLite 引擎端到端示例，以及头文件与自定义 C 声明混写示例；
+   - **`own` 与之前 `move` 的核心区别与应用场景**：在第 18.2 节深度剖析两者在设计哲学（动作 vs 契约）、并发别名防护（严格无别名单写者保证）、函数参数修饰（`own param: T` 显式排他契约）以及语法精炼度（3 字母替代 `move unique`）上的巨大飞跃；详细剖析三大典型场景（Actor 间跨线程零拷贝传递 Tensor、系统 RAII 资源排他接管与 Drop Flag 析构联动、无锁并发队列任务消费），并展示 `E0203` 移动后使用拦截的 AI 友好自愈诊断。
+2. **正式版 Release 代码合并与构建**：
+   - 将 `cpc_dev/src` 的 7 个核心源码文件（`ast.rs`, `lexer.rs`, `parser.rs`, `diagnostic.rs`, `main.rs`, `sema.rs`, `codegen.rs`）100% 对齐同步合并至正式目录 `cpc/src`；
+   - 执行 `cargo build --release --manifest-path cpc/Cargo.toml` 成功完成深度优化编译构建（耗时 39.04s）；
+   - 更新正式二进制文件到 `/data/dev/cp/cap/bin/cpc` 并通过全量测试用例（转译仅需 2ms）。
+3. **Git 一次性原子暂存与提交**：
+   - 纳入全部修改源码、新增测试夹具与四线演进文档；
+   - 执行唯一原子提交：`git commit -m "feat(cpc): add @c header import, own alias-free ownership, and machine-readable json diagnostics"`。
+
 
 
 

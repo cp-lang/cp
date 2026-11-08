@@ -276,6 +276,7 @@ impl<'a> Parser<'a> {
             Token::Static => "static".to_string(),
             Token::Mut => "mut".to_string(),
             Token::Move => "move".to_string(),
+            Token::Own => "own".to_string(),
             Token::Import => "import".to_string(),
             Token::Export => "export".to_string(),
             Token::TypeKw => "type".to_string(),
@@ -311,6 +312,7 @@ impl<'a> Parser<'a> {
                 | Some(Token::Static)
                 | Some(Token::Mut)
                 | Some(Token::Move)
+                | Some(Token::Own)
                 | Some(Token::Import)
                 | Some(Token::Export)
                 | Some(Token::TypeKw)
@@ -566,21 +568,34 @@ impl<'a> Parser<'a> {
                 self.expect(Token::LBrace)?;
                 let mut items = Vec::new();
                 while self.peek() != Some(&Token::RBrace) && self.peek().is_some() {
-                    let mut f = self.parse_function()?;
-                    if is_pub {
-                        f.is_pub = true;
-                    }
-                    if !f.meta.iter().any(|m| m.name.sym == "c") {
-                        f.meta.push(MetaItem {
-                            span: c_ident.span,
-                            name: Ident {
+                    if matches!(self.peek(), Some(Token::StringLiteral(_))) {
+                        let (tok, span) = self.bump()?;
+                        if let Token::StringLiteral(header) = tok {
+                            items.push(ModuleItem::Decl(Decl::CInclude(CIncludeDecl {
+                                span,
+                                header,
+                            })));
+                            if self.peek() == Some(&Token::Comma) || self.peek() == Some(&Token::Semicolon) {
+                                self.bump()?;
+                            }
+                        }
+                    } else {
+                        let mut f = self.parse_function()?;
+                        if is_pub {
+                            f.is_pub = true;
+                        }
+                        if !f.meta.iter().any(|m| m.name.sym == "c") {
+                            f.meta.push(MetaItem {
                                 span: c_ident.span,
-                                sym: "c".to_string(),
-                            },
-                            args: c_args.clone(),
-                        });
+                                name: Ident {
+                                    span: c_ident.span,
+                                    sym: "c".to_string(),
+                                },
+                                args: c_args.clone(),
+                            });
+                        }
+                        items.push(ModuleItem::Decl(Decl::Func(f)));
                     }
-                    items.push(ModuleItem::Decl(Decl::Func(f)));
                 }
                 self.expect(Token::RBrace)?;
                 return Ok(items);
@@ -916,7 +931,7 @@ impl<'a> Parser<'a> {
             if self.peek() == Some(&Token::Mut) {
                 self.bump()?;
                 is_mut = true;
-            } else if self.peek() == Some(&Token::Move) {
+            } else if self.peek() == Some(&Token::Move) || self.peek() == Some(&Token::Own) {
                 self.bump()?;
                 is_move = true;
             } else if self.peek() == Some(&Token::Star) {
@@ -1034,7 +1049,7 @@ impl<'a> Parser<'a> {
                 Type::Any
             } else if self.peek() == Some(&Token::Colon) {
                 self.bump()?;
-                if self.peek() == Some(&Token::Move) {
+                if self.peek() == Some(&Token::Move) || self.peek() == Some(&Token::Own) {
                     self.bump()?;
                     is_move = true;
                 }
@@ -3304,6 +3319,7 @@ impl<'a> Parser<'a> {
                 }
             }
             if self.peek() == Some(&Token::Const)
+                || self.peek() == Some(&Token::Var)
                 || self.peek() == Some(&Token::TypeKw)
                 || self.peek() == Some(&Token::Union)
                 || self.peek() == Some(&Token::Struct)
@@ -3580,6 +3596,72 @@ impl<'a> Parser<'a> {
                     method_is_pub = false;
                 }
                 self.bump()?;
+            }
+            if self.peek() == Some(&Token::Const)
+                || self.peek() == Some(&Token::Var)
+                || self.peek() == Some(&Token::TypeKw)
+                || self.peek() == Some(&Token::Union)
+                || self.peek() == Some(&Token::Struct)
+                || self.peek() == Some(&Token::Enum)
+                || self.peek() == Some(&Token::Class)
+                || self.peek() == Some(&Token::Interface)
+                || self.peek() == Some(&Token::Trait)
+            {
+                let start_idx = self.peek_span().start;
+                let mut brace_depth: i32 = 0;
+                let mut paren_depth: i32 = 0;
+                let mut bracket_depth: i32 = 0;
+                let mut had_brace = false;
+                let mut end_idx = start_idx;
+                while let Some(tok) = self.peek() {
+                    match tok {
+                        Token::LBrace => {
+                            brace_depth += 1;
+                            had_brace = true;
+                        }
+                        Token::RBrace => {
+                            if brace_depth == 0 {
+                                break;
+                            }
+                            brace_depth -= 1;
+                            if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 && had_brace {
+                                let span = self.bump()?.1;
+                                end_idx = span.end;
+                                if self.peek() == Some(&Token::Semicolon) {
+                                    let s_span = self.bump()?.1;
+                                    end_idx = s_span.end;
+                                }
+                                break;
+                            }
+                        }
+                        Token::LParen => paren_depth += 1,
+                        Token::RParen => {
+                            if paren_depth > 0 {
+                                paren_depth -= 1;
+                            }
+                        }
+                        Token::LBracket => bracket_depth += 1,
+                        Token::RBracket => {
+                            if bracket_depth > 0 {
+                                bracket_depth -= 1;
+                            }
+                        }
+                        Token::Semicolon => {
+                            if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 {
+                                let span = self.bump()?.1;
+                                end_idx = span.end;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    let span = self.bump()?.1;
+                    end_idx = span.end;
+                }
+                let raw_code = &self.input[start_idx..end_idx];
+                let pub_prefix = if method_is_pub { "pub " } else { "" };
+                extra_zig.push(format!("{}{}", pub_prefix, raw_code.trim()));
+                continue;
             }
             if matches!(
                 self.peek(),
@@ -5508,7 +5590,7 @@ impl<'a> Parser<'a> {
                 let expr = self.parse_expr()?;
                 Ok(Expr::Await(Box::new(expr)))
             }
-            Token::Move => {
+            Token::Move | Token::Own => {
                 let expr = self.parse_postfix_expr()?;
                 Ok(Expr::Move(Box::new(expr)))
             }
@@ -5860,6 +5942,7 @@ impl<'a> Parser<'a> {
             Token::Break => "break".to_string(),
             Token::Continue => "continue".to_string(),
             Token::Move => "move".to_string(),
+            Token::Own => "own".to_string(),
             Token::Fn => "fn".to_string(),
             _ => {
                 return Err(ParseError::ExpectedToken(

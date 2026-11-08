@@ -51,7 +51,11 @@ enum Commands {
         lib: bool,
     },
     /// Perform static syntax and borrow-checker check
-    Check { input: PathBuf },
+    Check {
+        input: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     /// Emit .d.cp type declarations
     EmitTypes {
         input: PathBuf,
@@ -166,21 +170,52 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             } => {
                 compile_file(&input, output.as_ref(), &include, beam, lib)?;
             }
-            Commands::Check { input } => {
-                let code = fs::read_to_string(&input)?;
+            Commands::Check { input, json } => {
+                let code = match fs::read_to_string(&input) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        if json {
+                            let diag = cpc::diagnostic::Diagnostic::new(
+                                "E0001",
+                                format!("failed to read input file '{}': {}", input.display(), e),
+                            );
+                            println!("{}", diag.to_json(None, Some(&input)));
+                            std::process::exit(1);
+                        } else {
+                            return Err(anyhow::anyhow!("failed to read file {:?}: {}", input, e));
+                        }
+                    }
+                };
                 let mut parser = CPParser::new(&code);
-                let mut module = parser.parse_module().map_err(|e| {
-                    anyhow::anyhow!("{}", e.to_diagnostic().render(Some(&code), Some(&input)))
-                })?;
+                let mut module = match parser.parse_module() {
+                    Ok(m) => m,
+                    Err(e) => {
+                        let diag = e.to_diagnostic();
+                        if json {
+                            println!("{}", diag.to_json(Some(&code), Some(&input)));
+                            std::process::exit(1);
+                        } else {
+                            return Err(anyhow::anyhow!("{}", diag.render(Some(&code), Some(&input))));
+                        }
+                    }
+                };
                 let mut analyzer = Analyzer::new();
-                analyzer.analyze_module(&mut module).map_err(|e| {
+                if let Err(e) = analyzer.analyze_module(&mut module) {
                     let known = analyzer.get_known_symbols();
-                    anyhow::anyhow!(
-                        "{}",
-                        e.to_diagnostic(&known).render(Some(&code), Some(&input))
-                    )
-                })?;
-                println!("Check successful");
+                    let diag = e.to_diagnostic(&known);
+                    if json {
+                        println!("{}", diag.to_json(Some(&code), Some(&input)));
+                        std::process::exit(1);
+                    } else {
+                        return Err(anyhow::anyhow!("{}", diag.render(Some(&code), Some(&input))));
+                    }
+                }
+                if json {
+                    println!("{}", cpc::diagnostic::DiagnosticReport::ok_json());
+                    std::process::exit(0);
+                } else {
+                    println!("Check successful");
+                }
             }
             Commands::EmitTypes { input, output } => {
                 let code = fs::read_to_string(&input)?;
