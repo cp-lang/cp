@@ -91,6 +91,7 @@ impl LanguageServer for Backend {
             CompletionItem::new_simple("error".to_string(), "Error set definition".to_string()),
             CompletionItem::new_simple("match".to_string(), "Pattern matching".to_string()),
             CompletionItem::new_simple("defer".to_string(), "Defer execution".to_string()),
+            CompletionItem::new_simple("arena".to_string(), "Scoped Arena memory pool block".to_string()),
             CompletionItem::new_simple(
                 "errdefer".to_string(),
                 "Defer execution on error".to_string(),

@@ -240,6 +240,7 @@ pub enum Stmt {
     ComptimeBlock(BlockStmt),
     Block(BlockStmt),
     UnsafeBlock(BlockStmt),
+    ArenaBlock(BlockStmt),
     TryCatch {
         span: Span,
         try_block: BlockStmt,
@@ -357,6 +358,8 @@ pub struct WhileStmt {
     pub capture: Option<Ident>,
     #[serde(default)]
     pub is_ptr_capture: bool,
+    #[serde(default)]
+    pub label: Option<Ident>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -375,6 +378,8 @@ pub struct ForStmt {
     pub body: Box<Stmt>,
     #[serde(default)]
     pub is_comptime: bool,
+    #[serde(default)]
+    pub label: Option<Ident>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -455,6 +460,7 @@ pub enum Expr {
     BitNot(Box<Expr>),
     Unsafe(BlockStmt),
     Comptime(BlockStmt),
+    Arena(BlockStmt),
     If {
         span: Span,
         test: Box<Expr>,
@@ -463,6 +469,7 @@ pub enum Expr {
         is_comptime: bool,
     },
     Continue(Span),
+    LabeledContinue(Span, Ident),
     Break(Span, Option<Box<Expr>>),
     LabeledBreak(Span, Ident, Option<Box<Expr>>),
     LabeledBlock {
@@ -996,8 +1003,10 @@ impl Expr {
             Expr::BitNot(b) => b.span(),
             Expr::Unsafe(b) => b.span,
             Expr::Comptime(b) => b.span,
+            Expr::Arena(b) => b.span,
             Expr::If { span, .. } => *span,
             Expr::Continue(span) => *span,
+            Expr::LabeledContinue(span, _) => *span,
             Expr::Break(span, _) => *span,
             Expr::LabeledBreak(span, _, _) => *span,
             Expr::LabeledBlock { block, .. } => block.span,
@@ -1026,6 +1035,7 @@ impl Stmt {
             Stmt::ComptimeBlock(b) => b.span,
             Stmt::Block(b) => b.span,
             Stmt::UnsafeBlock(b) => b.span,
+            Stmt::ArenaBlock(b) => b.span,
             Stmt::TryCatch { span, .. } => *span,
             Stmt::Func(f) => f.span,
         }

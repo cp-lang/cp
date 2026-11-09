@@ -174,7 +174,7 @@ impl ModuleFeatures {
                 self.scan_pat(&v.pat);
             }
             Stmt::Expr(e) => self.scan_expr(e),
-            Stmt::Block(b) | Stmt::UnsafeBlock(b) => self.scan_block(b),
+            Stmt::Block(b) | Stmt::UnsafeBlock(b) | Stmt::ArenaBlock(b) => self.scan_block(b),
             Stmt::If(i) => {
                 self.scan_expr(&i.test);
                 self.scan_stmt(&i.cons);
@@ -591,7 +591,7 @@ impl ModuleFeatures {
                 ArrowBody::Expr(e) => self.scan_expr(e),
                 ArrowBody::Block(b) => self.scan_block(b),
             },
-            Expr::Unsafe(b) | Expr::Comptime(b) => self.scan_block(b),
+            Expr::Unsafe(b) | Expr::Comptime(b) | Expr::Arena(b) => self.scan_block(b),
             Expr::LabeledBlock { block, .. } => self.scan_block(block),
             Expr::LabeledBreak(_, _, val) => {
                 if let Some(v) = val {
@@ -650,7 +650,7 @@ pub struct Codegen {
     pub global_var_types: HashMap<String, Type>,
     pub current_scope_depth: usize,
     pub var_scope_depth: HashMap<String, usize>,
-    pub var_borrow_sources: HashMap<String, (Vec<String>, bool)>,
+    pub var_borrow_sources: HashMap<String, (Vec<(String, Option<String>)>, bool)>,
     pub var_is_ref_struct: HashSet<String>,
     pub current_fn_params: HashSet<String>,
     pub current_fn_ret_ty: Option<Type>,
@@ -680,6 +680,7 @@ pub struct Codegen {
     pub line_starts: Vec<usize>,
     pub source_map_entries: Vec<crate::source_map::SourceMapEntry>,
     pub current_func_name: Option<String>,
+    pub arena_allocator_stack: Vec<String>,
 }
 
 impl Codegen {
@@ -762,6 +763,17 @@ impl Codegen {
             line_starts: Vec::new(),
             source_map_entries: Vec::new(),
             current_func_name: None,
+            arena_allocator_stack: Vec::new(),
+        }
+    }
+
+    pub fn current_allocator(&self) -> String {
+        if let Some(alloc) = self.arena_allocator_stack.last() {
+            alloc.clone()
+        } else if self.is_state_machine {
+            "ctx.arena.?.allocator()".to_string()
+        } else {
+            "std.heap.page_allocator".to_string()
         }
     }
 
@@ -1250,7 +1262,7 @@ impl Codegen {
                     self.check_type_validity_and_collect_errors(t);
                 }
             }
-            Stmt::Block(b) | Stmt::UnsafeBlock(b) => {
+            Stmt::Block(b) | Stmt::UnsafeBlock(b) | Stmt::ArenaBlock(b) => {
                 for s in &b.body {
                     self.scan_stmt_types(s);
                 }
@@ -2014,6 +2026,26 @@ impl Codegen {
                     _ => {}
                 }
                 self.expected_array_elem_type = old_array_elem;
+            }
+        }
+
+        // --- Top-Level Comptime Blocks ---
+        for item in &module.body {
+            if let ModuleItem::Stmt(Stmt::ComptimeBlock(b)) = item {
+                let saved = self.current_case_content.clone();
+                let saved_sm = self.is_state_machine;
+                let saved_comptime = self.is_comptime;
+                self.is_state_machine = false;
+                self.is_comptime = true;
+                self.current_case_content.clear();
+                for s in &b.body {
+                    self.generate_stmt(s);
+                }
+                let body_str = self.current_case_content.clone();
+                self.current_case_content = saved;
+                self.is_state_machine = saved_sm;
+                self.is_comptime = saved_comptime;
+                self.writeln(&format!("comptime {{\n{}\n}}", body_str));
             }
         }
 
@@ -4388,7 +4420,7 @@ impl Codegen {
                 }
             }
             Stmt::Break | Stmt::Continue => {}
-            Stmt::Block(b) | Stmt::UnsafeBlock(b) => self.compute_last_uses_block(b, counter),
+            Stmt::Block(b) | Stmt::UnsafeBlock(b) | Stmt::ArenaBlock(b) => self.compute_last_uses_block(b, counter),
             Stmt::If(i) => {
                 crate::ast_visitor::find_referenced_vars_in_expr(&i.test, &mut refs);
                 for r in refs {
@@ -4471,7 +4503,7 @@ impl Codegen {
 
     fn check_active_borrows_before_move(&self, var_name: &str) {
         for (borrower, (sources, _)) in &self.var_borrow_sources {
-            if sources.contains(&var_name.to_string()) {
+            if sources.iter().any(|(s, _)| s == var_name || ((s == "this" || s == "_") && (var_name == "this" || var_name == "_"))) {
                 let last_use = self.last_use_map.get(borrower).copied().unwrap_or(0);
                 if last_use > self.current_stmt_idx {
                     panic!(
@@ -4484,12 +4516,27 @@ impl Codegen {
     }
 
     fn check_borrow_conflict(&self, target_var: &str, req_mut: bool) {
-        self.check_borrow_conflict_excluding(target_var, "", req_mut);
+        self.check_borrow_conflict_field_excluding(target_var, None, "", req_mut);
     }
 
+    fn check_borrow_conflict_field(&self, target_var: &str, target_field: Option<&str>, req_mut: bool) {
+        self.check_borrow_conflict_field_excluding(target_var, target_field, "", req_mut);
+    }
+
+    #[allow(dead_code)]
     fn check_borrow_conflict_excluding(
         &self,
         target_var: &str,
+        exclude_borrower: &str,
+        req_mut: bool,
+    ) {
+        self.check_borrow_conflict_field_excluding(target_var, None, exclude_borrower, req_mut);
+    }
+
+    fn check_borrow_conflict_field_excluding(
+        &self,
+        target_var: &str,
+        target_field: Option<&str>,
         exclude_borrower: &str,
         req_mut: bool,
     ) {
@@ -4497,13 +4544,25 @@ impl Codegen {
             if borrower == exclude_borrower {
                 continue;
             }
-            if sources.contains(&target_var.to_string()) {
-                let last_use = self.last_use_map.get(borrower).copied().unwrap_or(0);
-                if last_use >= self.current_stmt_idx {
-                    if req_mut || *is_mut_borrow {
+            let last_use = self.last_use_map.get(borrower).copied().unwrap_or(0);
+            if last_use >= self.current_stmt_idx {
+                for (src_var, src_field) in sources {
+                    if Self::targets_conflict(
+                        target_var,
+                        target_field,
+                        req_mut,
+                        src_var,
+                        src_field.as_deref(),
+                        *is_mut_borrow,
+                    ) {
+                        let target_desc = if let Some(f) = target_field {
+                            format!("{}.{}", target_var, f)
+                        } else {
+                            target_var.to_string()
+                        };
                         panic!(
                             "CP Compile Error: Borrow conflict on '{}': cannot borrow as {} while '{}' is still active",
-                            target_var,
+                            target_desc,
                             if req_mut { "mutable" } else { "immutable" },
                             borrower
                         );
@@ -4511,6 +4570,96 @@ impl Codegen {
                 }
             }
         }
+    }
+
+    fn targets_conflict(
+        target_a: &str,
+        field_a: Option<&str>,
+        is_mut_a: bool,
+        target_b: &str,
+        field_b: Option<&str>,
+        is_mut_b: bool,
+    ) -> bool {
+        let is_same_root = target_a == target_b
+            || ((target_a == "this" || target_a == "_") && (target_b == "this" || target_b == "_"));
+        if !is_same_root {
+            return false;
+        }
+        if !is_mut_a && !is_mut_b {
+            return false;
+        }
+        match (field_a, field_b) {
+            (None, _) | (_, None) => true,
+            (Some(fa), Some(fb)) => {
+                if fa == fb {
+                    return true;
+                }
+                if fa.starts_with(fb) && fa.as_bytes().get(fb.len()) == Some(&b'.') {
+                    return true;
+                }
+                if fb.starts_with(fa) && fb.as_bytes().get(fa.len()) == Some(&b'.') {
+                    return true;
+                }
+                false
+            }
+        }
+    }
+
+    fn extract_member_path(&self, expr: &Expr) -> (Option<String>, Option<String>) {
+        match expr {
+            Expr::Ident(id) => (Some(id.sym.clone()), None),
+            Expr::Member(mem) => {
+                let mut parts = vec![mem.prop.sym.clone()];
+                let mut curr = &*mem.obj;
+                loop {
+                    match curr {
+                        Expr::Member(inner_mem) => {
+                            parts.push(inner_mem.prop.sym.clone());
+                            curr = &*inner_mem.obj;
+                        }
+                        Expr::Ident(id) => {
+                            parts.reverse();
+                            return (Some(id.sym.clone()), Some(parts.join(".")));
+                        }
+                        Expr::Deref(inner) | Expr::Unwrap(inner) => {
+                            curr = inner;
+                        }
+                        _ => return (None, None),
+                    }
+                }
+            }
+            Expr::Deref(inner) | Expr::Unwrap(inner) => self.extract_member_path(inner),
+            _ => (None, None),
+        }
+    }
+
+    fn resolve_borrow_source_field(
+        &self,
+        root: &str,
+        field: Option<&str>,
+    ) -> Vec<(String, Option<String>)> {
+        if root == "this" || root == "_" {
+            return vec![
+                ("this".to_string(), field.map(|f| f.to_string())),
+                ("_".to_string(), field.map(|f| f.to_string())),
+            ];
+        }
+        if let Some((orig_sources, _)) = self.var_borrow_sources.get(root) {
+            if !orig_sources.is_empty() {
+                let mut resolved = Vec::new();
+                for (orig_root, orig_field) in orig_sources {
+                    let combined_field = match (orig_field, field) {
+                        (Some(of), Some(f)) => Some(format!("{}.{}", of, f)),
+                        (Some(of), None) => Some(of.clone()),
+                        (None, Some(f)) => Some(f.to_string()),
+                        (None, None) => None,
+                    };
+                    resolved.push((orig_root.clone(), combined_field));
+                }
+                return resolved;
+            }
+        }
+        vec![(root.to_string(), field.map(|f| f.to_string()))]
     }
 
     fn is_zig_heap_ptr_type(&self, ty: &Type) -> bool {
@@ -4599,14 +4748,14 @@ impl Codegen {
                         );
                     }
                     self.check_borrow_conflict(&id.sym, true);
-                    for src in sources {
+                    for (src, src_f) in sources {
                         if self.loop_borrowed_containers.contains(src) {
                             panic!(
                                 "CP Compile Error: Cannot perform mutable operation ({}) on '{}' while '{}' is borrowed in a 'for' loop",
                                 op_desc, id.sym, src
                             );
                         }
-                        self.check_borrow_conflict_excluding(src, &id.sym, true);
+                        self.check_borrow_conflict_field_excluding(src, src_f.as_deref(), &id.sym, true);
                     }
                 } else {
                     if self.current_fn_params.contains(&id.sym)
@@ -4646,7 +4795,56 @@ impl Codegen {
                         );
                     }
                 }
-                self.check_mutation_allowed(&mem.obj, op_desc);
+                let (root_opt, field_opt) = self.extract_member_path(target_expr);
+                if let Some(root) = root_opt {
+                    if self.loop_borrowed_containers.contains(&root) {
+                        panic!(
+                            "CP Compile Error: Cannot perform mutable operation ({}) on container '{}' while it is borrowed in a 'for' loop",
+                            op_desc, root
+                        );
+                    }
+                    if let Some((sources, is_mut)) = self.var_borrow_sources.get(&root) {
+                        if !*is_mut {
+                            panic!(
+                                "CP Compile Error: Cannot perform mutable operation ({}) through read-only borrow '{}'",
+                                op_desc, root
+                            );
+                        }
+                        self.check_borrow_conflict_field(&root, field_opt.as_deref(), true);
+                        for (src, src_f) in sources {
+                            let combined_field = match (src_f, &field_opt) {
+                                (Some(sf), Some(f)) => Some(format!("{}.{}", sf, f)),
+                                (Some(sf), None) => Some(sf.clone()),
+                                (None, Some(f)) => Some(f.clone()),
+                                (None, None) => None,
+                            };
+                            self.check_borrow_conflict_field_excluding(src, combined_field.as_deref(), &root, true);
+                        }
+                    } else {
+                        if self.current_fn_params.contains(&root)
+                            && !self.mutable_fn_params.contains(&root)
+                        {
+                            let is_ptr_or_mut_borrow =
+                                if let Some(param_ty) = self.var_cp_types.get(&root) {
+                                    matches!(
+                                        param_ty,
+                                        Type::RawPtr { .. } | Type::BorrowType { is_mut: true, .. }
+                                    )
+                                } else {
+                                    false
+                                };
+                            if !is_ptr_or_mut_borrow {
+                                panic!(
+                                    "CP Compile Error: Cannot perform mutable operation ({}) on read-only parameter '{}' (mark parameter with '*{}' or 'mut {}')",
+                                    op_desc, root, root, root
+                                );
+                            }
+                        }
+                        self.check_borrow_conflict_field(&root, field_opt.as_deref(), true);
+                    }
+                } else {
+                    self.check_mutation_allowed(&mem.obj, op_desc);
+                }
             }
             Expr::Deref(inner) | Expr::Unwrap(inner) => {
                 self.check_mutation_allowed(inner, op_desc);
@@ -4666,16 +4864,26 @@ impl Codegen {
             if !self.var_borrow_sources.contains_key(&id.sym) {
                 self.check_borrow_conflict(&id.sym, false);
             }
+        } else if let Expr::Member(_) = target_expr {
+            let (root_opt, field_opt) = self.extract_member_path(target_expr);
+            if let Some(root) = root_opt {
+                if self.moved_vars.contains(&root) {
+                    panic!("CP Compile Error: Use of moved value '{}'", root);
+                }
+                if !self.var_borrow_sources.contains_key(&root) {
+                    self.check_borrow_conflict_field(&root, field_opt.as_deref(), false);
+                }
+            }
         }
     }
 
-    fn extract_expr_borrow_info(&self, expr: &Expr) -> (Vec<String>, bool, bool) {
+    fn extract_expr_borrow_info(&self, expr: &Expr) -> (Vec<(String, Option<String>)>, bool, bool) {
         // Returns: (source_vars, is_mut_borrow, is_ref_struct)
         match expr {
             Expr::Downcast { obj, is_mut, .. } => {
                 if let Expr::Ident(id) = &**obj {
                     self.check_borrow_conflict(&id.sym, *is_mut);
-                    let mut sources = vec![id.sym.clone()];
+                    let mut sources = vec![(id.sym.clone(), None)];
                     if let Some((orig, _)) = self.var_borrow_sources.get(&id.sym) {
                         if !orig.is_empty() {
                             sources = orig.clone();
@@ -4703,10 +4911,26 @@ impl Codegen {
                                     id.sym
                                 );
                             }
-                            return (vec!["this".to_string(), "_".to_string()], *is_mut, false);
+                            if self.is_class_field(&id.sym) {
+                                self.check_borrow_conflict_field("this", Some(&id.sym), *is_mut);
+                                return (
+                                    vec![
+                                        ("this".to_string(), Some(id.sym.clone())),
+                                        ("_".to_string(), Some(id.sym.clone())),
+                                    ],
+                                    *is_mut,
+                                    false,
+                                );
+                            }
+                            self.check_borrow_conflict("this", *is_mut);
+                            return (
+                                vec![("this".to_string(), None), ("_".to_string(), None)],
+                                *is_mut,
+                                false,
+                            );
                         }
                         self.check_borrow_conflict(&id.sym, *is_mut);
-                        let mut sources = vec![id.sym.clone()];
+                        let mut sources = vec![(id.sym.clone(), None)];
                         if let Some((orig, _)) = self.var_borrow_sources.get(&id.sym) {
                             if !orig.is_empty() {
                                 sources = orig.clone();
@@ -4714,44 +4938,45 @@ impl Codegen {
                         }
                         return (sources, *is_mut, false);
                     }
-                    Expr::Member(mem) => {
-                        let mut root_obj = &*mem.obj;
-                        while let Expr::Member(inner_mem) = root_obj {
-                            root_obj = &*inner_mem.obj;
-                        }
-                        if let Expr::Ident(obj_id) = root_obj {
-                            if obj_id.sym == "this" || obj_id.sym == "_" {
+                    Expr::Member(_) => {
+                        let (root_opt, field_opt) = self.extract_member_path(inner);
+                        if let Some(root) = root_opt {
+                            if root == "this" || root == "_" {
                                 if *is_mut && self.current_receiver_mode == ReceiverMode::ReadOnly {
                                     panic!(
                                         "CP Compile Error: Cannot take mutable borrow '&mut {}.{}' in a read-only method (add 'mut _' as first parameter)",
-                                        obj_id.sym, mem.prop.sym
+                                        root, field_opt.as_deref().unwrap_or("")
                                     );
                                 }
-                                return (vec!["this".to_string(), "_".to_string()], *is_mut, false);
+                                self.check_borrow_conflict_field("this", field_opt.as_deref(), *is_mut);
+                                return (
+                                    vec![
+                                        ("this".to_string(), field_opt.clone()),
+                                        ("_".to_string(), field_opt),
+                                    ],
+                                    *is_mut,
+                                    false,
+                                );
                             }
-                            let is_obj_ptr = self.locals.get(&obj_id.sym).map_or(false, |t| {
+                            let is_obj_ptr = self.locals.get(&root).map_or(false, |t| {
                                 t.starts_with('*') || t.starts_with("?*") || t.contains("=> *") || t.contains("=> ?*")
                             })
-                            || self.var_cp_types.get(&obj_id.sym).map_or(false, |t| matches!(t, Type::RawPtr { .. } | Type::BorrowType { .. } | Type::CPtr(_) | Type::ManyRawPtr(_)));
+                            || self.var_cp_types.get(&root).map_or(false, |t| matches!(t, Type::RawPtr { .. } | Type::BorrowType { .. } | Type::CPtr(_) | Type::ManyRawPtr(_)));
+
+                            self.check_borrow_conflict_field(&root, field_opt.as_deref(), *is_mut);
+                            let resolved = self.resolve_borrow_source_field(&root, field_opt.as_deref());
                             if is_obj_ptr {
-                                if let Some((orig, _)) = self.var_borrow_sources.get(&obj_id.sym) {
+                                if let Some((orig, _)) = self.var_borrow_sources.get(&root) {
                                     if !orig.is_empty() {
-                                        return (orig.clone(), *is_mut, false);
+                                        return (resolved, *is_mut, false);
                                     }
                                 }
-                                if self.current_fn_params.contains(&obj_id.sym) {
-                                    return (vec![obj_id.sym.clone()], *is_mut, false);
+                                if self.current_fn_params.contains(&root) {
+                                    return (resolved, *is_mut, false);
                                 }
                                 return (vec![], *is_mut, false);
                             }
-                            self.check_borrow_conflict(&obj_id.sym, *is_mut);
-                            let mut sources = vec![obj_id.sym.clone()];
-                            if let Some((orig, _)) = self.var_borrow_sources.get(&obj_id.sym) {
-                                if !orig.is_empty() {
-                                    sources = orig.clone();
-                                }
-                            }
-                            return (sources, *is_mut, false);
+                            return (resolved, *is_mut, false);
                         }
                     }
                     _ => {}
@@ -4764,7 +4989,7 @@ impl Codegen {
                     return (sources.clone(), *is_m, is_ref_st);
                 }
                 if self.current_fn_params.contains(&id.sym) {
-                    return (vec![id.sym.clone()], false, is_ref_st);
+                    return (vec![(id.sym.clone(), None)], false, is_ref_st);
                 }
                 (vec![], false, is_ref_st)
             }
@@ -4776,15 +5001,11 @@ impl Codegen {
                         for arg in &call.args {
                             match arg {
                                 Expr::Borrow(inner, is_m) => {
-                                    if let Expr::Ident(aid) = &**inner {
-                                        self.check_borrow_conflict(&aid.sym, *is_m);
-                                        if let Some((orig, _)) =
-                                            self.var_borrow_sources.get(&aid.sym)
-                                        {
-                                            sources.extend(orig.clone());
-                                        } else {
-                                            sources.push(aid.sym.clone());
-                                        }
+                                    let (root_opt, field_opt) = self.extract_member_path(inner);
+                                    if let Some(root) = root_opt {
+                                        self.check_borrow_conflict_field(&root, field_opt.as_deref(), *is_m);
+                                        let resolved = self.resolve_borrow_source_field(&root, field_opt.as_deref());
+                                        sources.extend(resolved);
                                     }
                                     if *is_m {
                                         any_mut = true;
@@ -4799,7 +5020,7 @@ impl Codegen {
                                             any_mut = true;
                                         }
                                     } else {
-                                        sources.push(aid.sym.clone());
+                                        sources.push((aid.sym.clone(), None));
                                     }
                                 }
                                 _ => {}
@@ -4831,14 +5052,14 @@ impl Codegen {
                                             || lifetimes.iter().any(|l| l == "this" || l == "_")
                                         {
                                             if obj_id.sym == "this" || obj_id.sym == "_" {
-                                                sources.push("this".to_string());
-                                                sources.push("_".to_string());
+                                                sources.push(("this".to_string(), None));
+                                                sources.push(("_".to_string(), None));
                                             } else if let Some((orig, _)) =
                                                 self.var_borrow_sources.get(&obj_id.sym)
                                             {
                                                 sources.extend(orig.clone());
                                             } else {
-                                                sources.push(obj_id.sym.clone());
+                                                sources.push((obj_id.sym.clone(), None));
                                             }
                                         }
                                         // Tier 3: Explicit parameter binding on method (e.g. `: &other Tensor`)
@@ -4854,7 +5075,7 @@ impl Codegen {
                                                         {
                                                             sources.extend(orig.clone());
                                                         } else {
-                                                            sources.push(arg_id.sym.clone());
+                                                            sources.push((arg_id.sym.clone(), None));
                                                         }
                                                     }
                                                 }
@@ -4865,14 +5086,14 @@ impl Codegen {
                                     Type::Ref(cid) if self.ref_classes.contains(&cid.sym) => {
                                         let mut sources = Vec::new();
                                         if obj_id.sym == "this" || obj_id.sym == "_" {
-                                            sources.push("this".to_string());
-                                            sources.push("_".to_string());
+                                            sources.push(("this".to_string(), None));
+                                            sources.push(("_".to_string(), None));
                                         } else if let Some((orig, _)) =
                                             self.var_borrow_sources.get(&obj_id.sym)
                                         {
                                             sources.extend(orig.clone());
                                         } else {
-                                            sources.push(obj_id.sym.clone());
+                                            sources.push((obj_id.sym.clone(), None));
                                         }
                                         return (sources, recv_mode == ReceiverMode::Mut, true);
                                     }
@@ -4900,14 +5121,14 @@ impl Codegen {
                                 match ret_ty {
                                     Type::BorrowType { is_mut, .. } => {
                                         return (
-                                            vec!["this".to_string(), "_".to_string()],
+                                            vec![("this".to_string(), None), ("_".to_string(), None)],
                                             is_mut,
                                             false,
                                         );
                                     }
                                     Type::Ref(cid) if self.ref_classes.contains(&cid.sym) => {
                                         return (
-                                            vec!["this".to_string(), "_".to_string()],
+                                            vec![("this".to_string(), None), ("_".to_string(), None)],
                                             recv_mode == ReceiverMode::Mut,
                                             true,
                                         );
@@ -4951,7 +5172,7 @@ impl Codegen {
                                                         {
                                                             sources.extend(orig.clone());
                                                         } else {
-                                                            sources.push(arg_id.sym.clone());
+                                                            sources.push((arg_id.sym.clone(), None));
                                                         }
                                                     }
                                                 }
@@ -4974,7 +5195,7 @@ impl Codegen {
                                                     {
                                                         sources.extend(orig.clone());
                                                     } else {
-                                                        sources.push(arg_id.sym.clone());
+                                                        sources.push((arg_id.sym.clone(), None));
                                                     }
                                                 }
                                             }
@@ -4992,7 +5213,7 @@ impl Codegen {
                                                 {
                                                     sources.extend(orig.clone());
                                                 } else {
-                                                    sources.push(arg_id.sym.clone());
+                                                    sources.push((arg_id.sym.clone(), None));
                                                 }
                                             }
                                         }
@@ -5224,6 +5445,9 @@ impl Codegen {
                     }
                     if (fid.sym == "string" || fid.sym == "String") && c.args.len() == 1 {
                         return Some(Type::String);
+                    }
+                    if fid.sym == "@alloc" {
+                        return Some(Type::ManyRawPtr(Box::new(Type::U8)));
                     }
                     match fid.sym.as_str() {
                         "i8" => return Some(Type::I8),
@@ -6115,7 +6339,7 @@ impl Codegen {
                 sym: "TypeInfo".to_string(),
             })),
             Expr::Range { .. } => Some(Type::I32),
-            Expr::Comptime(b) | Expr::Unsafe(b) => {
+            Expr::Comptime(b) | Expr::Unsafe(b) | Expr::Arena(b) => {
                 let mut local_mocks = mock_types.clone();
                 for s in &b.body {
                     if let Stmt::Var(v) = s {
@@ -7426,7 +7650,7 @@ impl Codegen {
                         self.current_case_content = saved;
                         ret_s
                     }
-                    Stmt::Block(b) | Stmt::UnsafeBlock(b) => {
+                    Stmt::Block(b) | Stmt::UnsafeBlock(b) | Stmt::ArenaBlock(b) => {
                         let saved = self.current_case_content.clone();
                         self.current_case_content.clear();
                         let len = b.body.len();
@@ -7838,7 +8062,7 @@ impl Codegen {
                         return true;
                     }
                 }
-                Stmt::Block(b) | Stmt::UnsafeBlock(b) | Stmt::ComptimeBlock(b) => {
+                Stmt::Block(b) | Stmt::UnsafeBlock(b) | Stmt::ComptimeBlock(b) | Stmt::ArenaBlock(b) => {
                     if Self::block_contains_ident(b, id) {
                         return true;
                     }
@@ -8405,7 +8629,7 @@ impl Codegen {
                 }
             }
             Stmt::Break | Stmt::Continue => {}
-            Stmt::Block(b) | Stmt::UnsafeBlock(b) => {
+            Stmt::Block(b) | Stmt::UnsafeBlock(b) | Stmt::ArenaBlock(b) => {
                 for s in &b.body {
                     self.collect_stmt_error_types(s, out);
                 }
@@ -8742,7 +8966,7 @@ impl Codegen {
                                             if let Some((srcs, _)) =
                                                 self.var_borrow_sources.get(&id.sym)
                                             {
-                                                for s in srcs {
+                                                for (s, _) in srcs {
                                                     let s_depth = self
                                                         .var_scope_depth
                                                         .get(s)
@@ -9095,7 +9319,7 @@ impl Codegen {
                         }
                         self.uninitialized_vars.remove(&lhs_id.sym);
                         let lhs_depth = self.var_scope_depth.get(&lhs_id.sym).copied().unwrap_or(1);
-                        for src in &borrow_sources {
+                        for (src, _) in &borrow_sources {
                             let src_depth = self.var_scope_depth.get(src).copied().unwrap_or(1);
                             if src_depth > lhs_depth {
                                 if is_ref_st || self.var_is_ref_struct.contains(&lhs_id.sym) {
@@ -9220,6 +9444,9 @@ impl Codegen {
                         self.write_to_case(&format!("break :{};", label.sym));
                     }
                 }
+                Expr::LabeledContinue(_, label) => {
+                    self.write_to_case(&format!("continue :{};", label.sym));
+                }
                 Expr::Break(_, val) => {
                     let cur_blk = self.current_block_label.clone();
                     if let Some(v) = val {
@@ -9259,6 +9486,32 @@ impl Codegen {
                     self.dedent();
                     self.write_to_case("}");
                 }
+                self.current_scope_depth -= 1;
+            }
+            Stmt::ArenaBlock(b) => {
+                self.current_scope_depth += 1;
+                let arena_id = self.tmp_counter;
+                self.tmp_counter += 1;
+                let arena_var = format!("__arena_{}", arena_id);
+                let alloc_var = format!("__arena_alloc_{}", arena_id);
+                self.write_to_case("{");
+                self.indent();
+                self.write_to_case(&format!(
+                    "var {} = std.heap.ArenaAllocator.init(std.heap.page_allocator);",
+                    arena_var
+                ));
+                self.write_to_case(&format!("defer {}.deinit();", arena_var));
+                self.write_to_case(&format!(
+                    "const {} = {}.allocator(); _ = &{};",
+                    alloc_var, arena_var, alloc_var
+                ));
+                self.arena_allocator_stack.push(alloc_var);
+                for s in &b.body {
+                    self.generate_stmt(s);
+                }
+                self.arena_allocator_stack.pop();
+                self.dedent();
+                self.write_to_case("}");
                 self.current_scope_depth -= 1;
             }
             Stmt::ComptimeBlock(b) => {
@@ -9441,6 +9694,11 @@ impl Codegen {
                 let test = self.generate_expr(&w.test);
                 let old_uninit = self.uninitialized_vars.clone();
                 let old_narrowed = self.narrowed_null_vars.clone();
+                let lbl_prefix = if let Some(lbl) = &w.label {
+                    format!("{}: ", lbl.sym)
+                } else {
+                    String::new()
+                };
                 let (saved_cap_local, saved_cap_cp, was_mut_loop) = if let Some(cap) = &w.capture {
                     self.var_scope_depth
                         .insert(cap.sym.clone(), self.current_scope_depth + 1);
@@ -9451,7 +9709,7 @@ impl Codegen {
                         false
                     };
                     let ptr_prefix = if w.is_ptr_capture { "*" } else { "" };
-                    self.write_to_case(&format!("while ({}) |{}{}| {{", test, ptr_prefix, cap.sym));
+                    self.write_to_case(&format!("{}while ({}) |{}{}| {{", lbl_prefix, test, ptr_prefix, cap.sym));
                     let test_cp_ty = self.infer_cp_type(&w.test);
                     let unwrapped_ty = match &test_cp_ty {
                         Some(Type::Optional(inner)) => (**inner).clone(),
@@ -9474,7 +9732,7 @@ impl Codegen {
                     let prev_l = self.locals.insert(cap.sym.clone(), zig_ty);
                     (prev_l, prev_cp, was_mut)
                 } else {
-                    self.write_to_case(&format!("while ({}) {{", test));
+                    self.write_to_case(&format!("{}while ({}) {{", lbl_prefix, test));
                     (None, None, false)
                 };
                 self.indent();
@@ -9647,7 +9905,7 @@ impl Codegen {
                     if let Expr::Ident(coll_id) = &f.expr {
                         self.loop_borrowed_containers.insert(coll_id.sym.clone());
                         if let Some((srcs, _)) = self.var_borrow_sources.get(&coll_id.sym) {
-                            for s in srcs.clone() {
+                            for (s, _) in srcs.clone() {
                                 self.loop_borrowed_containers.insert(s);
                             }
                         }
@@ -9773,7 +10031,7 @@ impl Codegen {
                 }
 
                 let is_native_slice =
-                    expr_code.ends_with(".items") || expr_code.ends_with(".values()");
+                    f.is_comptime || expr_code.ends_with(".items") || expr_code.ends_with(".values()");
                 let (for_target, ptr_star) = match f.mode {
                     IterMode::MutBorrow => {
                         if is_native_slice {
@@ -9804,6 +10062,8 @@ impl Codegen {
                     }
                 };
 
+                let inline_prefix = if f.is_comptime { "inline " } else { "" };
+
                 if let Pattern::Ident(id) = &f.pat {
                     self.var_scope_depth
                         .insert(id.sym.clone(), self.current_scope_depth);
@@ -9820,8 +10080,8 @@ impl Codegen {
                         }
                     }
                     self.write_to_case(&format!(
-                        "for ({}) |{}{}| {{",
-                        for_target, ptr_star, id.sym
+                        "{}for ({}) |{}{}| {{",
+                        inline_prefix, for_target, ptr_star, id.sym
                     ));
                     self.indent();
                     self.current_scope_depth += 1;
@@ -9836,8 +10096,8 @@ impl Codegen {
                 } else {
                     let item_var = format!("__item_{}", tmp_id);
                     self.write_to_case(&format!(
-                        "for ({}) |{}{}| {{",
-                        for_target, ptr_star, item_var
+                        "{}for ({}) |{}{}| {{",
+                        inline_prefix, for_target, ptr_star, item_var
                     ));
                     self.indent();
                     self.current_scope_depth += 1;
@@ -10012,7 +10272,7 @@ impl Codegen {
 
                     // Check for dangling local reference return or ref struct escape!
                     let (borrow_sources, _, is_ref_st) = self.extract_expr_borrow_info(arg);
-                    for src in &borrow_sources {
+                    for (src, _) in &borrow_sources {
                         if self.local_trampolines.contains(src) {
                             continue;
                         }
@@ -11299,15 +11559,15 @@ impl Codegen {
                         }
                     } else if prop == "toLowerCase" {
                         let obj = self.generate_expr(&mem.obj);
-                        return format!("(blk: {{ var out = std.heap.page_allocator.alloc(u8, {}.len) catch unreachable; for ({}, 0..) |c, i| out[i] = @import(\"std\").ascii.toLower(c); break :blk out; }})", obj, obj);
+                        return format!("(blk: {{ var out = {}.alloc(u8, {}.len) catch unreachable; for ({}, 0..) |c, i| out[i] = @import(\"std\").ascii.toLower(c); break :blk out; }})", self.current_allocator(), obj, obj);
                     } else if prop == "toUpperCase" {
                         let obj = self.generate_expr(&mem.obj);
-                        return format!("(blk: {{ var out = std.heap.page_allocator.alloc(u8, {}.len) catch unreachable; for ({}, 0..) |c, i| out[i] = @import(\"std\").ascii.toUpper(c); break :blk out; }})", obj, obj);
+                        return format!("(blk: {{ var out = {}.alloc(u8, {}.len) catch unreachable; for ({}, 0..) |c, i| out[i] = @import(\"std\").ascii.toUpper(c); break :blk out; }})", self.current_allocator(), obj, obj);
                     } else if prop == "replace" && call.args.len() >= 2 {
                         let obj = self.generate_expr(&mem.obj);
                         let arg = self.generate_expr(&call.args[0]);
                         let replacement = self.generate_expr(&call.args[1]);
-                        return format!("@import(\"std\").mem.replaceOwned(u8, std.heap.page_allocator, {}, {}, {}) catch unreachable", obj, arg, replacement);
+                        return format!("@import(\"std\").mem.replaceOwned(u8, {}, {}, {}, {}) catch unreachable", self.current_allocator(), obj, arg, replacement);
                     } else if prop == "charCodeAt" && !call.args.is_empty() {
                         let obj = self.generate_expr(&mem.obj);
                         let arg = self.generate_expr(&call.args[0]);
@@ -12531,7 +12791,7 @@ impl Codegen {
                         self.current_case_content = saved;
                         ret_s
                     }
-                    Stmt::Block(b) | Stmt::UnsafeBlock(b) => {
+                    Stmt::Block(b) | Stmt::UnsafeBlock(b) | Stmt::ArenaBlock(b) => {
                         let saved = self.current_case_content.clone();
                         self.current_case_content.clear();
                         let len = b.body.len();
@@ -13027,7 +13287,7 @@ impl Codegen {
                         args.push_str(", ");
                     }
                 }
-                format!("(blk: {{ const _obj = {}._create(std.heap.page_allocator) catch unreachable; if (@hasDecl({}, \"init\")) {{ const RType = @typeInfo(@TypeOf({}.init)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _obj.init({}) catch unreachable; }} else {{ _obj.init({}); }} }} break :blk _obj; }})", class_name, class_name, class_name, args, args)
+                format!("(blk: {{ const _obj = {}._create({}) catch unreachable; if (@hasDecl({}, \"init\")) {{ const RType = @typeInfo(@TypeOf({}.init)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _obj.init({}) catch unreachable; }} else {{ _obj.init({}); }} }} break :blk _obj; }})", class_name, self.current_allocator(), class_name, class_name, args, args)
             }
             Expr::Await(inner) => {
                 if let Expr::Call(call) = &**inner {
@@ -13589,7 +13849,7 @@ impl Codegen {
                 }
                 "@alloc" => {
                     let s = self.generate_expr(&call.args[0]);
-                    format!("(blk: {{ const ptr = std.heap.page_allocator.alloc(u8, {}) catch unreachable; break :blk ptr.ptr; }})", s)
+                    format!("(blk: {{ const __alloc_res = {}.alloc(u8, {}) catch unreachable; break :blk __alloc_res.ptr; }})", self.current_allocator(), s)
                 }
                 "@free" => "(blk: { break :blk {}; })".to_string(),
                 "@expect_eq" if call.args.len() == 2 => {
@@ -13602,7 +13862,9 @@ impl Codegen {
                     let lambda = self.generate_expr(&call.args[1]);
                     format!("(blk: {{ _ = {}; _ = {}; break :blk {{}}; }})", name, lambda)
                 }
-                "@get_arena" => "(blk: { break :blk 0; })".to_string(),
+                "@get_arena" | "@arena" => {
+                    format!("(blk: {{ break :blk {}; }})", self.current_allocator())
+                }
                 "@shared_tensor_init" => "(blk: { break :blk 0; })".to_string(),
                 "@json_parse" => {
                     let json_str = self.generate_expr(&call.args[0]);
@@ -13881,7 +14143,7 @@ impl Codegen {
                         sets.push_str(&format!("_ = _dict.set(\"{}\", {}); ", key.sym, val_code));
                     }
                 }
-                format!("(blk: {{ const _dict = Dict._create(std.heap.page_allocator) catch unreachable; {}break :blk _dict; }})", sets)
+                format!("(blk: {{ const _dict = Dict._create({}) catch unreachable; {}break :blk _dict; }})", self.current_allocator(), sets)
             }
             Expr::Index { obj, index } => {
                 self.check_read_allowed(obj);
@@ -14239,6 +14501,47 @@ impl Codegen {
                 self.is_comptime = saved_comptime;
                 format!("comptime (blk: {{\n{}\n}})", body_str)
             }
+            Expr::Arena(b) => {
+                let arena_id = self.tmp_counter;
+                self.tmp_counter += 1;
+                let blk_label = format!("blk_arena_{}", arena_id);
+                let arena_var = format!("__arena_{}", arena_id);
+                let alloc_var = format!("__arena_alloc_{}", arena_id);
+                let saved = self.current_case_content.clone();
+                self.current_case_content.clear();
+                self.write_to_case(&format!(
+                    "var {} = std.heap.ArenaAllocator.init(std.heap.page_allocator);",
+                    arena_var
+                ));
+                self.write_to_case(&format!("defer {}.deinit();", arena_var));
+                self.write_to_case(&format!(
+                    "const {} = {}.allocator(); _ = &{};",
+                    alloc_var, arena_var, alloc_var
+                ));
+                self.arena_allocator_stack.push(alloc_var);
+                let len = b.body.len();
+                if len == 0 {
+                    self.write_to_case(&format!("break :{} {{}};", blk_label));
+                } else {
+                    for (idx, s) in b.body.iter().enumerate() {
+                        if idx + 1 == len {
+                            if let Stmt::Expr(e) = s {
+                                let ec = self.generate_expr(e);
+                                self.write_to_case(&format!("break :{} {};", blk_label, ec));
+                            } else {
+                                self.generate_stmt(s);
+                                self.write_to_case(&format!("break :{} {{}};", blk_label));
+                            }
+                        } else {
+                            self.generate_stmt(s);
+                        }
+                    }
+                }
+                self.arena_allocator_stack.pop();
+                let body_str = self.current_case_content.clone();
+                self.current_case_content = saved;
+                format!("({}: {{\n{}\n}})", blk_label, body_str)
+            }
             Expr::Template(t) => {
                 if t.expressions.is_empty() {
                     if t.quasis.is_empty() {
@@ -14285,7 +14588,8 @@ impl Codegen {
                 }
 
                 format!(
-                    "(std.fmt.allocPrint(std.heap.page_allocator, \"{}\", .{{ {} }}) catch unreachable)",
+                    "(std.fmt.allocPrint({}, \"{}\", .{{ {} }}) catch unreachable)",
+                    self.current_allocator(),
                     fmt_pattern,
                     args_code.join(", ")
                 )
@@ -14314,6 +14618,9 @@ impl Codegen {
                 } else {
                     format!("break :{}", label.sym)
                 }
+            }
+            Expr::LabeledContinue(_, label) => {
+                format!("continue :{}", label.sym)
             }
             Expr::LabeledBlock { label, block } => {
                 let saved = self.current_case_content.clone();
@@ -14674,6 +14981,9 @@ impl Codegen {
                         if id.sym == "hash" {
                             return "[]const u8".to_string();
                         }
+                        if id.sym == "@alloc" {
+                            return "[*]u8".to_string();
+                        }
                         if id.sym == "self_pid" || id.sym == "sender" || id.sym == "spawn" {
                             return "PID".to_string();
                         }
@@ -14794,6 +15104,9 @@ impl Codegen {
                     {
                         return "PID".to_string();
                     }
+                    if call.name == "@alloc" {
+                        return "[*]u8".to_string();
+                    }
                     if call.name == "@receive" {
                         return "Message".to_string();
                     }
@@ -14903,7 +15216,7 @@ impl Codegen {
                         return self.map_type(&cp_ty);
                     }
                 }
-                Expr::Comptime(_) | Expr::Unsafe(_) => {
+                Expr::Comptime(_) | Expr::Unsafe(_) | Expr::Arena(_) => {
                     if let Some(cp_ty) = self.infer_cp_type(expr) {
                         return self.map_type(&cp_ty);
                     }
@@ -14913,6 +15226,39 @@ impl Codegen {
         }
 
         "*anyopaque".to_string() // Fallback
+    }
+
+    fn extract_locals_from_expr_simple(&mut self, expr: &Expr) {
+        match expr {
+            Expr::Arena(b) | Expr::Unsafe(b) | Expr::Comptime(b) => {
+                self.extract_locals_simple(b);
+            }
+            Expr::Bin(bin) => {
+                self.extract_locals_from_expr_simple(&bin.left);
+                self.extract_locals_from_expr_simple(&bin.right);
+            }
+            Expr::Call(c) | Expr::OptCall(c) | Expr::New(c) => {
+                self.extract_locals_from_expr_simple(&c.callee);
+                for a in &c.args {
+                    self.extract_locals_from_expr_simple(a);
+                }
+            }
+            Expr::Deref(inner)
+            | Expr::Unwrap(inner)
+            | Expr::Question(inner)
+            | Expr::Cast { expr: inner, .. } => {
+                self.extract_locals_from_expr_simple(inner);
+            }
+            Expr::Member(m) => {
+                self.extract_locals_from_expr_simple(&m.obj);
+            }
+            Expr::Array(items) => {
+                for item in items {
+                    self.extract_locals_from_expr_simple(item);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn extract_locals_simple(&mut self, block: &BlockStmt) {
@@ -15089,8 +15435,41 @@ impl Codegen {
                         _ => {}
                     }
                     self.expected_box_trait = old_box;
+                    if let Some(init) = &v.init {
+                        self.extract_locals_from_expr_simple(init);
+                    }
                 }
-                Stmt::Block(b) | Stmt::UnsafeBlock(b) => self.extract_locals_simple(b),
+                Stmt::Expr(e) => {
+                    if let Expr::Match(m) = e {
+                        let disc_ty = self.infer_cp_type(&m.disc);
+                        for arm in &m.arms {
+                            let old_v = self.var_cp_types.clone();
+                            if let Pattern::Err(inner_p) = &arm.pat {
+                                if let Pattern::Ident(id) = &**inner_p {
+                                    if let Some(Type::ResultType { err, .. }) = &disc_ty {
+                                        self.var_cp_types
+                                            .insert(id.sym.clone(), self.error_type_to_cp_type(err));
+                                    }
+                                }
+                            } else if let Pattern::Ident(id) = &arm.pat {
+                                if let Some(Type::ResultType { ok, .. }) = &disc_ty {
+                                    self.var_cp_types.insert(id.sym.clone(), (**ok).clone());
+                                } else if let Some(t) = &disc_ty {
+                                    self.var_cp_types.insert(id.sym.clone(), t.clone());
+                                }
+                            }
+                            if let Stmt::Block(b) | Stmt::ArenaBlock(b) = &*arm.body {
+                                self.extract_locals_simple(b);
+                            }
+                            for (k, v) in old_v {
+                                self.var_cp_types.insert(k, v);
+                            }
+                        }
+                    } else {
+                        self.extract_locals_from_expr_simple(e);
+                    }
+                }
+                Stmt::Block(b) | Stmt::UnsafeBlock(b) | Stmt::ArenaBlock(b) => self.extract_locals_simple(b),
                 Stmt::If(i) => {
                     let old_v = self.var_cp_types.clone();
                     let old_l = self.locals.clone();
@@ -15116,11 +15495,11 @@ impl Codegen {
                         self.var_cp_types.insert(cap.sym.clone(), final_ty);
                         self.locals.insert(cap.sym.clone(), zig_ty);
                     }
-                    if let Stmt::Block(b) = &*i.cons {
+                    if let Stmt::Block(b) | Stmt::ArenaBlock(b) = &*i.cons {
                         self.extract_locals_simple(b);
                     }
                     if let Some(alt) = &i.alt {
-                        if let Stmt::Block(b) = &**alt {
+                        if let Stmt::Block(b) | Stmt::ArenaBlock(b) = &**alt {
                             self.extract_locals_simple(b);
                         }
                     }
@@ -15152,14 +15531,14 @@ impl Codegen {
                         self.var_cp_types.insert(cap.sym.clone(), final_ty);
                         self.locals.insert(cap.sym.clone(), zig_ty);
                     }
-                    if let Stmt::Block(b) = &*w.body {
+                    if let Stmt::Block(b) | Stmt::ArenaBlock(b) = &*w.body {
                         self.extract_locals_simple(b);
                     }
                     self.var_cp_types = old_v;
                     self.locals = old_l;
                 }
                 Stmt::For(f) => {
-                    if let Stmt::Block(b) = &*f.body {
+                    if let Stmt::Block(b) | Stmt::ArenaBlock(b) = &*f.body {
                         self.extract_locals_simple(b);
                     }
                 }
@@ -15173,7 +15552,7 @@ impl Codegen {
                     self.extract_locals_simple(try_block);
                     self.in_try_region = old_try;
                     if let Some(cb) = catch_body {
-                        if let Stmt::Block(b) = &**cb {
+                        if let Stmt::Block(b) | Stmt::ArenaBlock(b) = &**cb {
                             self.extract_locals_simple(b);
                         }
                     }
@@ -15196,33 +15575,7 @@ impl Codegen {
                                 self.var_cp_types.insert(id.sym.clone(), t.clone());
                             }
                         }
-                        if let Stmt::Block(b) = &*arm.body {
-                            self.extract_locals_simple(b);
-                        }
-                        for (k, v) in old_v {
-                            self.var_cp_types.insert(k, v);
-                        }
-                    }
-                }
-                Stmt::Expr(Expr::Match(m)) => {
-                    let disc_ty = self.infer_cp_type(&m.disc);
-                    for arm in &m.arms {
-                        let old_v = self.var_cp_types.clone();
-                        if let Pattern::Err(inner_p) = &arm.pat {
-                            if let Pattern::Ident(id) = &**inner_p {
-                                if let Some(Type::ResultType { err, .. }) = &disc_ty {
-                                    self.var_cp_types
-                                        .insert(id.sym.clone(), self.error_type_to_cp_type(err));
-                                }
-                            }
-                        } else if let Pattern::Ident(id) = &arm.pat {
-                            if let Some(Type::ResultType { ok, .. }) = &disc_ty {
-                                self.var_cp_types.insert(id.sym.clone(), (**ok).clone());
-                            } else if let Some(t) = &disc_ty {
-                                self.var_cp_types.insert(id.sym.clone(), t.clone());
-                            }
-                        }
-                        if let Stmt::Block(b) = &*arm.body {
+                        if let Stmt::Block(b) | Stmt::ArenaBlock(b) = &*arm.body {
                             self.extract_locals_simple(b);
                         }
                         for (k, v) in old_v {
@@ -15232,6 +15585,39 @@ impl Codegen {
                 }
                 _ => {}
             }
+        }
+    }
+
+    fn extract_local_vars_from_expr_to_str(&mut self, expr: &Expr, output: &mut String) {
+        match expr {
+            Expr::Arena(b) | Expr::Unsafe(b) | Expr::Comptime(b) => {
+                self.extract_local_vars_to_str(b, output);
+            }
+            Expr::Bin(bin) => {
+                self.extract_local_vars_from_expr_to_str(&bin.left, output);
+                self.extract_local_vars_from_expr_to_str(&bin.right, output);
+            }
+            Expr::Call(c) | Expr::OptCall(c) | Expr::New(c) => {
+                self.extract_local_vars_from_expr_to_str(&c.callee, output);
+                for a in &c.args {
+                    self.extract_local_vars_from_expr_to_str(a, output);
+                }
+            }
+            Expr::Deref(inner)
+            | Expr::Unwrap(inner)
+            | Expr::Question(inner)
+            | Expr::Cast { expr: inner, .. } => {
+                self.extract_local_vars_from_expr_to_str(inner, output);
+            }
+            Expr::Member(m) => {
+                self.extract_local_vars_from_expr_to_str(&m.obj, output);
+            }
+            Expr::Array(items) => {
+                for item in items {
+                    self.extract_local_vars_from_expr_to_str(item, output);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -15418,18 +15804,24 @@ impl Codegen {
                         }
                         _ => {}
                     }
+                    if let Some(init) = &var.init {
+                        self.extract_local_vars_from_expr_to_str(init, output);
+                    }
                 }
-                Stmt::Block(b) | Stmt::UnsafeBlock(b) => self.extract_local_vars_to_str(b, output),
+                Stmt::Expr(e) => {
+                    self.extract_local_vars_from_expr_to_str(e, output);
+                }
+                Stmt::Block(b) | Stmt::UnsafeBlock(b) | Stmt::ArenaBlock(b) => self.extract_local_vars_to_str(b, output),
                 Stmt::If(i) => {
                     match &*i.cons {
-                        Stmt::Block(b) | Stmt::UnsafeBlock(b) => {
+                        Stmt::Block(b) | Stmt::UnsafeBlock(b) | Stmt::ArenaBlock(b) => {
                             self.extract_local_vars_to_str(b, output)
                         }
                         _ => {}
                     }
                     if let Some(alt) = &i.alt {
                         match &**alt {
-                            Stmt::Block(b) | Stmt::UnsafeBlock(b) => {
+                            Stmt::Block(b) | Stmt::UnsafeBlock(b) | Stmt::ArenaBlock(b) => {
                                 self.extract_local_vars_to_str(b, output)
                             }
                             _ => {}
@@ -15437,13 +15829,13 @@ impl Codegen {
                     }
                 }
                 Stmt::While(w) => match &*w.body {
-                    Stmt::Block(b) | Stmt::UnsafeBlock(b) => {
+                    Stmt::Block(b) | Stmt::UnsafeBlock(b) | Stmt::ArenaBlock(b) => {
                         self.extract_local_vars_to_str(b, output)
                     }
                     _ => {}
                 },
                 Stmt::For(f) => {
-                    if let Stmt::Block(b) = &*f.body {
+                    if let Stmt::Block(b) | Stmt::ArenaBlock(b) = &*f.body {
                         self.extract_local_vars_to_str(b, output);
                     }
                 }
@@ -15455,8 +15847,18 @@ impl Codegen {
                     self.extract_local_vars_to_str(try_block, output);
                     if let Some(cb) = catch_body {
                         match &**cb {
-                            Stmt::Block(b) | Stmt::UnsafeBlock(b) => {
+                            Stmt::Block(b) | Stmt::UnsafeBlock(b) | Stmt::ArenaBlock(b) => {
                                 self.extract_local_vars_to_str(b, output)
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Stmt::Match(m) => {
+                    for arm in &m.arms {
+                        match &*arm.body {
+                            Stmt::Block(b) | Stmt::UnsafeBlock(b) | Stmt::ArenaBlock(b) => {
+                                self.extract_local_vars_to_str(b, output);
                             }
                             _ => {}
                         }

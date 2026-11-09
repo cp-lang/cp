@@ -4193,36 +4193,91 @@ Bun.js 1.3.14 的 CP 语言重构进入关键攻坚阶段：全仓库 206 个 `.
 
 ---
 
-## 2026-11-10: Bun agy 并发更新深度审核、双主干融合与规范同步
+## 2026-11-10: P0 第三项完成 — Scoped Arena 区域内存池语法与运行时实现
 
-### 1. 深度安全与合理性审核报告
-针对 Bun.js 迁移智能体在 `cpc/src` 中并发提交的 7 项修改，进行了逐行代码级审计：
-1. **多重元注解合并 (`parser.rs`)**：
-   - *变更*：将 `f.meta = meta;` 改为 `f.meta.extend(meta);`；
-   - *审核结论*：**合理且必要**。原直接赋值会导致在带有外部装饰器（如 `@noinline`、`@export`）与内部注解/doc 注释时，前置元数据被后者覆盖覆盖丢失。改为 `extend` 实现了无损合并，符合 AST 元注解正交设计。
-2. **定长切片元素类型推导修复 (`parser.rs`)**：
-   - *变更*：修复 `[N]T` 定长切片字符串构建中未知类型回退为 `u8` 的隐性缺陷，增加 `Type::Bool` 并调用 `Self::type_to_str(&elem_ty)` 递归推导；
-   - *审核结论*：**无缺陷、无隐患**。彻底避免了非 `u8` 定长切片（如 `[4]f32`、`[16]Point`）类型名被错误构建为 `[N]u8` 的潜在转译错误。
-3. **原生可选链解包生成 (`codegen.rs`)**：
-   - *变更*：使用 `({}).?.{}` 替代 `cp_opt_unwrap` 垫片；
-   - *审核结论*：**极度合理**。与 RFC-002 消除辅助死代码契合，使每个结构体文件减少无用垫片，生成的 Zig 代码更地道原生。
-4. **负整数十六进制安全输出 (`codegen.rs`)**：
-   - *变更*：对负整型字面量输出为 `0x{:x}` 格式；
-   - *审核结论*：**合理**。消除了 C-FFI 中 `-1` 位掩码在 Zig 无符号上下文中的符号性溢出报错。
-5. **字节切片向不可变字符串自然流转 (`sema.rs`)**：
-   - *变更*：允许 `[u8]`、`[u8; N]` 与 `cstring` 在只读上下文中无损流转为 `string`；
-   - *审核结论*：**完备无隐患**。CP 的 `string` 底层为 `[]const u8`，在系统编程与 I/O 读取时将字节缓冲区视作不可变字符串是完全零拷贝安全的。
-6. **任意位宽整型支持 (`sema.rs`)**：
-   - *变更*：支持 `u1`~`u128` 与 `i1`~`i128` 位级标量；
-   - *审核结论*：**合理**。完美对接硬件寄存器与 `packed struct` 位字段。
-7. **枚举富成员方法推导 (`sema.rs`)**：
-   - *变更*：在 `Expr::Member` 与 `Expr::Call` 中支持枚举成员方法解析与返回值推导；
-   - *审核结论*：**完备**。
+### 1. 任务背景与核心技术哲学
+高并发服务器与海量 AI Agent 系统中，小对象（中间 AST 节点、局部 JSON 报文、临时动态字典、字符串拼接结果）生命周期极短。若对每个对象调用全局堆 `malloc`/`free`，会造成严重的堆锁竞争与内存碎片化。
+Scoped Arena 引入局部作用域内存池：
+- **语法形式**：支持语句级 `arena { ... }` 与表达式级 `let result: i32 = arena { ... }`；
+- **分配机制**：在 arena 块内的所有动态分配（`new Class()`、`new Dict()`、模板字符串插值拼接、`@alloc(size)`）自动切换为当前活跃的 Arena 分配器；
+- **确定性释放**：离开作用域时，底层 Zig `std.heap.ArenaAllocator` 调用 `.deinit()`，实现 **O(1) 整块瞬间销毁**，零内存泄漏、零单对象释放开销。
 
-### 2. 双主干融合与规范同步
-- 将 Bun agy 的上述改进完整融合到 `cpc_dev/src/` 与正式版 `cpc/src/`，两边代码比对 0 差异；
-- 在 `cp_ref.md` 第 3.1、3.3.1、5.16、5.17 节同步更新规范条目；
-- 构建正式版二进制部署至 `cap/bin/cpc` 并通过全量回归测试。
+### 2. 深度突破与编译器架构落地
+
+#### 2.1 词法、语法与 AST 扩展
+- **词法**：在 `lexer.rs` 中注册 `arena` 核心关键字为 `Token::Arena`；
+- **AST**：在 `ast.rs` 中新增 `Stmt::ArenaBlock(BlockStmt)` 与 `Expr::Arena(BlockStmt)`；
+- **Parser**：在 `parse_stmt` 解析独立语句块，在 `parse_primary_expr` 解析表达式块，在 `ast_visitor.rs` 中递归遍历。
+
+#### 2.2 动态分配器栈与代码生成 (`codegen.rs`)
+- 在 `Codegen` 中引入 `pub arena_allocator_stack: Vec<String>` 与 `current_allocator(&self) -> String`：
+  - 默认栈为空时返回 `"std.heap.page_allocator"`；
+  - 进入 arena 块时生成局部 `var __arena_{id} = std.heap.ArenaAllocator.init(...)`、`defer __arena_{id}.deinit()` 以及分配器别名 `__arena_alloc_{id}`，并将其推入分配器栈；
+  - 离开块时弹出，动态分配器栈恢复到外层状态；
+- 全面替换 `Expr::New`、`Expr::Dict`、`Expr::Template`、`@alloc`、字符串大写/小写转换中的硬编码 `page_allocator` 为 `self.current_allocator()`。
+
+#### 2.3 状态机上下文字段提取（攻坚关键突破点）
+- **问题根因**：`main` 函数与异步函数在 CP 中被编译为 CPS 状态机 `_Context` 结构体。原编译器只在 `Stmt::Block` 与 `Stmt::UnsafeBlock` 中提取局部变量，忽略了 `Stmt::ArenaBlock` 以及表达式内部的 `Expr::Arena`。导致 arena 块内的局部变量未被记录在 `_Context` 字段和 `self.locals` 符号表中，被误降级为裸标识符引发 Zig `use of undeclared identifier` 报错；
+- **技术突破**：在 `extract_locals_simple` 与 `extract_local_vars_to_str` 中实现了对 `Stmt::ArenaBlock` 的递归遍历，并新增 `extract_locals_from_expr_simple` 与 `extract_local_vars_from_expr_to_str` 深度递归穿透表达式内部的 `Expr::Arena`，确保状态机上下文字段 100% 完整提取；
+- **@alloc 语义推导与命名空间防遮蔽**：在 `sema.rs` 与 `codegen.rs` 将 `@alloc` 正确识别为 `[*]u8`（`Type::ManyRawPtr(Box::new(Type::U8))`），支持下标直接索引，并将内部临时常量重命名为 `__alloc_res`，彻底杜绝遮蔽外层函数参数 `ptr`。
+
+### 3. 测试与验证
+1. 在 `cap/test/test_scoped_arena.cp` 编写 5 组全量回归用例：
+   - 语句块基础分配与对象创建验证；
+   - 表达式块计算并安全返回值；
+   - 多层嵌套 arena 作用域；
+   - `@alloc` 连续字节申请与下标读写；
+   - `Dict` 容器在 arena 内的分配与键值操作。
+2. 运行 `./cap/bin/cap cap/test/test_scoped_arena.cp`，5 组测试 **100% PASS**（转译耗时 44ms，编译耗时 659ms）；
+---
+
+## 2026-11-10: 跨模块循环引用解耦验证 & 多字段分离借用 (Disjoint Field Borrowing) 深度实装
+
+### 1. 跨模块循环引用解耦 (Two-Pass Resolution) 深入排查与验证
+- **排查结果**：用户观察极为精准！经深入审计 `cpc` 架构与源码，CP 编译器已经完整内建了两阶段符号与模块解析机制：
+  1. `resolver.rs`：采用规范路径集合 `HashSet<PathBuf>` 对模块导入路径进行去重和记忆化缓存，在遇到 `circ_a` 与 `circ_b` 互相引用时，自动规避递归调用栈溢出；
+  2. `sema.rs`：Pass 1 阶段预扫描 AST 收集所有模块的 `class`、`trait`、`enum` 符号契约，建立全局类型字典；Pass 2 建立模块拓扑关系；Pass 3 才深入方法体内进行具体的语句分析和类型检查；
+  3. `codegen.rs`：Zig 编译后端天然支持结构体类型的无序依赖声明，交叉引用指针/可选类型（如 `b: ?NodeB` 与 `a: ?NodeA`）无需手动前置声明；
+- **回归实测**：
+  - 构造 `cap/test/fixtures/circ_a.cp`（`NodeA` 包含 `?NodeB`）与 `cap/test/fixtures/circ_b.cp`（`NodeB` 包含 `?NodeA`）；
+  - 编写并运行集成测试用例 `cap/test/test_circular_modules.cp`，一次性通过编译、链接与执行（转译 4ms，编译 604ms），100% 验证无死锁。
+
+### 2. 多字段分离借用 (Disjoint Field Borrowing) 架构设计与攻坚落地
+
+#### 2.1 痛点根因与问题复现
+- 在高性能网络协议栈（`HTTPContext`）与事件循环（`InternalLoopData`）中，同一个结构体实例通常包含多个独立的控制流与数据字段（如 `q_len`、`active_timer`、`max_batch`、`header`、`body_read`）；
+- 旧版借用检查器将借用来源粗粒度记录为变量标识符名字符串（`var_borrow_sources: HashMap<String, (Vec<String>, bool)>`）。当开发者对 `data.q_len` 产生可变借用 `let q = &mut data.q_len` 时，系统将整个 `data` 实例标记为已借出，后续执行 `let t = &mut data.active_timer` 时，直接触发 `error[E0202]: Borrow conflict on 'data': cannot borrow as mutable while 'q' is still active`，迫使开发者打散结构体，极度不便。
+
+#### 2.2 解决方案与编译器核心修改 (`cpc_dev/src/codegen.rs`)
+1. **借用元组升级与字段路径提取**：
+   - 将 `var_borrow_sources` 升级为 `HashMap<String, (Vec<(String, Option<String>)>, bool)>`，其中 `Option<String>` 存储形如 `Some("q_len")` 或 `Some("header.content_len")` 的多级成员路径；
+   - 编写 `extract_member_path(&self, expr: &Expr) -> (Option<String>, Option<String>)` 递归提取点号成员路径与解引用根对象；
+   - 编写 `resolve_borrow_source_field` 支持借用别名链的传递性路径结合（若 `b` 借用自 `a.child`，则 `b.val` 借用溯源为 `a.child.val`）。
+2. **正交字段冲突判定算法 (`targets_conflict`)**：
+   - 根对象不同（且非 `this`/`_` 别名）：无冲突；
+   - 均为不可变借用（共享读）：无冲突；
+   - 至少一方为可变借用时：
+     - 若任意一方未指定具体字段（即对整个结构体借用）：判定为冲突；
+     - 若双方均指定具体字段：
+       - 字段名完全相同：判定为冲突；
+       - 一方是另一方的前缀路径（如 `header` 与 `header.len`）：判定为包含关系，产生冲突；
+       - 字段名互不相同且非前缀包含：**判定为正交字段（Disjoint Fields），零冲突放行！**
+3. **读写保护与整体验证联动**：
+   - 在 `check_mutation_allowed` 中对 `Expr::Member` 仅校验当前特定字段，允许在某一字段被借用时安全就地赋值其他正交字段；
+   - 在 `check_read_allowed` 中支持字段级共享读；
+   - 保持严格安全底线：对同一字段的重复可变借用，或者结构体整体可变借用与子字段借用之间，依然严格报出 `error[E0202]`。
+
+### 3. 测试与验证全线通过
+1. 编写 [`cap/test/test_disjoint_field_borrow.cp`](file:///data/dev/cp/cap/test/test_disjoint_field_borrow.cp)，覆盖：
+   - 结构体多字段并行可变借用并修改原字段；
+   - 方法内 `this` 的多个正交字段借用；
+   - 多级嵌套结构体（`ctx.header.content_len` 与 `ctx.body_read`）字段借用；
+2. 运行 `./cap/bin/cap cap/test/test_disjoint_field_borrow.cp`，**100% PASS**（转译 41ms，编译 623ms）；
+3. 负向测试验证：对相同字段 `d.val` 重复可变借用，精准拦截并输出自愈提示：
+   `error[E0202]: Borrow conflict on 'd.val': cannot borrow as mutable while 'a' is still active`；
+4. 全量运行现有核心测试（`test_scoped_arena.cp`、`test_circular_modules.cp`），全部 **100% PASS**。
+
+
 
 
 

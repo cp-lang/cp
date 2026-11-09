@@ -978,7 +978,18 @@ impl Analyzer {
                         );
                     }
                 }
-                _ => {}
+                ModuleItem::Stmt(Stmt::Var(v)) => {
+                    if let Pattern::Ident(id) = &v.pat {
+                        let _ = self.define(
+                            id.sym.clone(),
+                            SymbolKind::Var {
+                                ty: v.ty.clone().unwrap_or(Type::Any),
+                                kind: v.kind.clone(),
+                            },
+                            id.span,
+                        );
+                    }
+                }
                 _ => {}
             }
         }
@@ -2770,6 +2781,7 @@ impl Analyzer {
                 self.unsafe_depth -= 1;
                 res?;
             }
+            Stmt::ArenaBlock(block) => self.analyze_block(block)?,
             Stmt::If(i) => {
                 self.infer_type(&i.test)?;
                 self.analyze_expr(&i.test)?;
@@ -3526,6 +3538,9 @@ impl Analyzer {
                 res?;
             }
             Expr::Comptime(block) => {
+                self.analyze_block(block)?;
+            }
+            Expr::Arena(block) => {
                 self.analyze_block(block)?;
             }
             Expr::Template(t) => {
@@ -4413,7 +4428,6 @@ impl Analyzer {
                     }
                 }
                 _ => {}
-                _ => {}
             }
         }
 
@@ -4862,8 +4876,10 @@ impl Analyzer {
     fn analyze_pattern(&mut self, pat: &Pattern, ty: Type, kind: &VarDeclKind) -> SemaResult<()> {
         match pat {
             Pattern::Ident(ident) => {
-                if let Some(SymbolKind::Var { .. }) = self.scopes.last().unwrap().get(&ident.sym) {
-                    return Err(SemaError::DuplicateVarDecl(ident.sym.clone(), ident.span));
+                if self.scopes.len() > 1 {
+                    if let Some(SymbolKind::Var { .. }) = self.scopes.last().unwrap().get(&ident.sym) {
+                        return Err(SemaError::DuplicateVarDecl(ident.sym.clone(), ident.span));
+                    }
                 }
                 self.define(
                     ident.sym.clone(),
@@ -5310,6 +5326,9 @@ impl Analyzer {
                             sym: "Task".to_string(),
                         }));
                     }
+                    if fid.sym == "@alloc" {
+                        return Ok(Type::ManyRawPtr(Box::new(Type::U8)));
+                    }
                     if let Some(SymbolKind::Func { ret: Some(ret), .. }) = self.resolve(&fid.sym) {
                         return Ok(ret.clone());
                     }
@@ -5609,7 +5628,7 @@ impl Analyzer {
                 "@net_connect" => Ok(Type::I32),
                 "@self" => Ok(Type::PID),
                 "@yield_to_beam" | "@json_parse" | "@alloc" => Ok(Type::Any),
-                "@get_arena" => Ok(Type::Ref(Ident {
+                "@get_arena" | "@arena" => Ok(Type::Ref(Ident {
                     span: Span { start: 0, end: 0 },
                     sym: "Arena".to_string(),
                 })),
@@ -5683,7 +5702,7 @@ impl Analyzer {
                     other => Ok(other),
                 }
             }
-            Expr::Unsafe(b) | Expr::Comptime(b) => {
+            Expr::Unsafe(b) | Expr::Comptime(b) | Expr::Arena(b) => {
                 if let Some(Stmt::Expr(e)) = b.body.last() {
                     return Ok(self.infer_type(e).unwrap_or(Type::Any));
                 } else if let Some(Stmt::Return(r)) = b.body.last() {

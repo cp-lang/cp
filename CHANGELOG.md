@@ -2463,17 +2463,61 @@
 
 ---
 
-## 2026-11-10 (合并并审核 Bun agy 提交的 cpc 优化与规范更新)
+## 2026-11-10 (P0 第三项完成：Scoped Arena 区域内存池语法与运行时实现)
 
-### 审计与合并说明 (Audit & Integration)
-- **多重元注解合并 (`parser.rs`)**：使用 `f.meta.extend(meta)` 替代直接赋值，确保装饰器、doc 注解与内部编译期元注解不发生覆盖丢失；
-- **定长切片元素类型推导修复 (`parser.rs`)**：修复 `[N]T` 定长切片字符串构建中未知类型回退为 `u8` 的缺陷，支持 `bool` 与任意类型递归推导；
-- **原生可选链解包生成 (`codegen.rs`)**：使用 `({}).?.{}` 原生语法替代 `cp_opt_unwrap` 垫片，彻底消除无用死代码；
-- **负整数十六进制安全输出 (`codegen.rs`)**：优化位掩码及负数整型字面量在 Zig 端生成，避免符号性溢出报错；
-- **字节切片向不可变字符串自然流转 (`sema.rs`)**：支持 `[u8]` / `[u8; N]` 向 `string` 零开销自然流转；
-- **任意位宽整型支持 (`sema.rs`)**：支持 `u1`~`u128` 与 `i1`~`i128` 位级标量；
-- **枚举富成员方法推导 (`sema.rs`)**：支持枚举内自定义成员方法与语义类型推导；
-- **规范同步 (`cp_ref.md`)**：同步第 3.1 节（任意位宽整型）、第 3.3.1 节（字节切片自然流转）、第 5.16 节（枚举成员方法）与第 5.17 节（packed/extern/opaque 内存布局）。
+### 新增文件 (Added)
+- [`cap/test/test_scoped_arena.cp`](file:///data/dev/cp/cap/test/test_scoped_arena.cp):
+  - 涵盖语句级块作用域 `arena { ... }`、表达式作用域 `let val: i32 = arena { ... }`、多层嵌套 arena、`@alloc` 底层动态申请与 Dict/Map 容器作用域分配的 5 组端到端全量回归测试用例。
+
+### 修改文件 (Modified)
+- [`cpc/src/lexer.rs`](file:///data/dev/cp/cpc/src/lexer.rs) / [`cpc_dev/src/lexer.rs`](file:///data/dev/cp/cpc_dev/src/lexer.rs):
+  - 注册 `arena` 核心关键字，新增 `Token::Arena`。
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs) / [`cpc_dev/src/ast.rs`](file:///data/dev/cp/cpc_dev/src/ast.rs):
+  - 在 `Stmt` 中新增 `Stmt::ArenaBlock(BlockStmt)`；
+  - 在 `Expr` 中新增 `Expr::Arena(BlockStmt)`；
+  - 为两者实装 `span(&self)` 方法。
+- [`cpc/src/ast_visitor.rs`](file:///data/dev/cp/cpc/src/ast_visitor.rs) / [`cpc_dev/src/ast_visitor.rs`](file:///data/dev/cp/cpc_dev/src/ast_visitor.rs):
+  - 递归遍历 `Stmt::ArenaBlock` 与 `Expr::Arena` 内部的变量引用与声明。
+- [`cpc/src/lsp.rs`](file:///data/dev/cp/cpc/src/lsp.rs) / [`cpc_dev/src/lsp.rs`](file:///data/dev/cp/cpc_dev/src/lsp.rs):
+  - 在补全建议列表中追加 `"arena"` 关键字。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs) / [`cpc_dev/src/parser.rs`](file:///data/dev/cp/cpc_dev/src/parser.rs):
+  - 在 `parse_stmt` 中解析独立语句块 `arena { ... }` 为 `Stmt::ArenaBlock`；
+  - 在 `parse_primary_expr` 中解析表达式块 `let v = arena { ... }` 为 `Expr::Arena`；
+  - 在 `left_span` / `right_span` 中覆盖 `Expr::Arena`。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs) / [`cpc_dev/src/sema.rs`](file:///data/dev/cp/cpc_dev/src/sema.rs):
+  - 在 `analyze_stmt` 中处理 `Stmt::ArenaBlock`；
+  - 在 `analyze_expr` 与 `infer_type` 中推导 `Expr::Arena` 返回值类型；
+  - 支持 `@alloc` 与 `@arena` 原语类型识别（`@alloc` 返回 `[*]u8` 即 `Type::ManyRawPtr(Box::new(Type::U8))`）。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs) / [`cpc_dev/src/codegen.rs`](file:///data/dev/cp/cpc_dev/src/codegen.rs):
+  - 新增 `arena_allocator_stack`，提供 `current_allocator(&self)` 动态获取当前活跃 Arena；
+  - 为 `Stmt::ArenaBlock` 生成 Zig `std.heap.ArenaAllocator.init(...)` 与 `defer __arena.deinit()`；
+  - 为 `Expr::Arena` 生成带标签的代码块 `(blk_arena: { ... break :blk_arena res; })`；
+  - 全面穿透 CPS 状态机变量收集：在 `extract_locals_simple` 与 `extract_local_vars_to_str` 中递归遍历 `Stmt::ArenaBlock` 以及表达式内部的 `Expr::Arena`，保证异步函数/`main` 状态机 `_Context` 字段和符号表 100% 完整提取；
+  - 修复 `@alloc` 局部常量名导致遮蔽外层 `cp_main` 参数 `ptr` 的问题（重命名为 `__alloc_res`）。
+---
+
+## 2026-11-10 (跨模块循环引用解耦 Two-Pass Resolution 验证 & 多字段分离借用 Disjoint Field Borrowing 实现)
+
+### 新增文件 (Added)
+- [`cap/test/fixtures/circ_a.cp`](file:///data/dev/cp/cap/test/fixtures/circ_a.cp): 互相循环引用的模块 A 测试夹具 (`NodeA` 包含 `?NodeB`)。
+- [`cap/test/fixtures/circ_b.cp`](file:///data/dev/cp/cap/test/fixtures/circ_b.cp): 互相循环引用的模块 B 测试夹具 (`NodeB` 包含 `?NodeA`)。
+- [`cap/test/test_circular_modules.cp`](file:///data/dev/cp/cap/test/test_circular_modules.cp): 跨模块循环引用（Two-Pass Resolution）端到端集成测试，验证类型推导与交叉引用无死锁。
+- [`cap/test/test_disjoint_field_borrow.cp`](file:///data/dev/cp/cap/test/test_disjoint_field_borrow.cp): 多字段分离借用（Disjoint Field Borrowing）测试用例，覆盖结构体多字段并行可变借用、多级嵌套字段借用、方法内 `this` 正交字段借用及字段级读写冲突防护。
+
+### 修改文件 (Modified)
+- [`cpc_dev/src/codegen.rs`](file:///data/dev/cp/cpc_dev/src/codegen.rs):
+  - 将 `var_borrow_sources` 从 `HashMap<String, (Vec<String>, bool)>` 升级为 `HashMap<String, (Vec<(String, Option<String>)>, bool)>`，实现细粒度字段级借用源与借用路径跟踪；
+  - 新增 `targets_conflict(target_a, field_a, is_mut_a, target_b, field_b, is_mut_b) -> bool`：精准判定正交字段（Disjoint Fields），同一根对象的不同字段互不冲突，允许同时持有多个可变借用；若涉及全对象或同一字段则严格互斥；
+  - 新增 `check_borrow_conflict_field` 与 `check_borrow_conflict_field_excluding` 校验函数；
+  - 新增 `extract_member_path(&self, expr: &Expr) -> (Option<String>, Option<String>)` 递归提取多级成员路径（如 `header.content_len`）；
+  - 新增 `resolve_borrow_source_field` 处理借用别名链的传递性路径结合；
+  - 增强 `check_mutation_allowed` 与 `check_read_allowed`：支持字段级借用冲突判定，允许在某一字段被借用时安全读写其他正交字段；
+  - 适配 `check_active_borrows_before_move`、`for` 循环容器借用、函数返回值悬垂引用检查等所有调用点。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 第 20.4 节补充《跨模块循环引用解耦 (Two-Pass Resolution)》架构机制、规范定义与示例代码；
+  - 第 20.5 节补充《多字段分离借用 (Disjoint Field Borrowing)》正交字段借用规则、互斥防线与示例代码。
+
+
 
 
 

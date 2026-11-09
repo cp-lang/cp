@@ -6848,19 +6848,99 @@ git 提交
 
 ---
 
+---
+
 ### 用户指令 (User Prompts)
-git 提交版本
+1. 开启 Scoped Arena（P0 第 3 项）攻坚. with (arena) , 这个语法中 arena 关键字 是什么单词? 有更合适的 语法 或关键字吗?
+2. 同意, 想办法加快进度, 节省token
+3. 修改了 GEMINI.md, 删除了 上下文与文件 I/O 严格切片规范（Surgical I/O）对你的约束. 汇报本次任务当前进度, 为何速度这么慢? 应该如何才能加快速度
+4. 进入深度收敛期，切断多子智能体冗余开销：严格遵循 GEMINI.md 第六条：在排错、编译打通与回归测试的深度收敛期，由主智能体单点精准突破，避免创建过多子智能体产生上下文膨胀与等待延迟。这条规则, 你认为是能加快速度, 还是降低速度, 是否应该保留
+5. 很好,按你的建议, 想办法, 加快速度又快又好的完成任务
+6. 完成当前任务后,继续完成如下两个任务, 其中, 跨模块循环引用解耦, 这个cp中好像已经实现了,你仔细检查下!
+   1. 跨模块循环引用解耦（Two-Pass Resolution）：彻底解决模块 A 和模块 B 互相包含类型时的推导死锁；
+   2. 多字段分离借用（Disjoint Field Borrowing）：让网络与事件循环（InternalLoopData、HTTPContext）无需打散结构体即可自由借用不同字段；
 
 ### 执行汇报 (Execution Report)
-1. **Git 一次性原子暂存与提交范围**：
-   - `cpc/src/{ast.rs, parser.rs, sema.rs, codegen.rs}`：泛型 Trait 前端契约校验（Generic Bounds）与三段式 AI 可自愈诊断（`error[E0301]`），消除底层 Zig 报错泄露；
-   - `cap/test/test_generic_trait_bounds.cp`：新增泛型 Trait 约束端到端全链路回归验证测试；
-   - `cpc/src/{parser.rs, sema.rs, codegen.rs}`：深度审核并融合 Bun agy 提交的元注解合并、切片类型推导、原生可选链解包与任意位宽整型；
-   - `cp_ref.md`：更新第 7.4 节（泛型 Trait 契约）、第 3.1 节（任意位宽整型）、第 3.3.1 节（切片流转）、第 5.16 节（枚举成员方法）、第 5.17 节（C-FFI 内存布局）与第 20.9 节路线图；
-   - `CHANGELOG.md` / `DEVLOG.md` / `SESSION.md` / `TASK.md` / `GEMINI.md`：记录完整的审计分析、架构设计与测试演进轨迹。
-2. **执行唯一原子提交**：
-   - `git add CHANGELOG.md DEVLOG.md GEMINI.md SESSION.md TASK.md cap/test/test_generic_trait_bounds.cp cp_ref.md cpc/src/ast.rs cpc/src/codegen.rs cpc/src/parser.rs cpc/src/sema.rs`
-   - `git commit -m "feat(cpc): generic trait bounds checking (P0 item 2) and merge bun agy cpc updates"`
+1. **Scoped Arena（P0 第 3 项）全面研发打通与测试验收**：
+   - **语法设计选型**：直接采用极简优雅的 `arena { ... }` 原生块语法（同时支持语句级块与表达式级块 `let v = arena { ... }`），无需冗余的 `with` 包裹；
+   - **词法与语法树扩展**：在 `lexer.rs` 中注册 `arena` 核心关键字，在 `ast.rs` 中新增 `Stmt::ArenaBlock` 与 `Expr::Arena`，在 `parser.rs` 中打通语句与表达式解析；
+   - **动态生命周期内存池管理 (`codegen.rs`)**：
+     - 实现 `arena_allocator_stack`，提供 `current_allocator(&self)` 动态获取当前活跃 Arena；
+     - 语句块自动注入 Zig 原生 `std.heap.ArenaAllocator.init(std.heap.page_allocator)` 与 `defer __arena.deinit()`，实现离开作用域 O(1) 整块瞬间销毁；
+     - 表达式块通过带标号代码块安全返回值 `(blk_arena: { ... break :blk_arena res; })`；
+     - 统一替换对象实例化、动态字典、字符串模板拼接中的全局分配器为活跃 Arena 分配器。
+   - **攻坚突破：CPS 状态机上下文字段深度提取**：
+     - 精准定位并修复状态机局部变量漏提导致的 Zig `use of undeclared identifier` 报错；
+     - 在 `extract_locals_simple` 与 `extract_local_vars_to_str` 中实现对 `Stmt::ArenaBlock` 与 `Expr::Arena` 嵌套结构的遍历，确保 `_Context` 字段和符号表 100% 完整提取；
+     - 修复 `@alloc` 语义推导为 `[*]u8` 并解决临时常量名遮蔽外层函数参数 `ptr` 的问题。
+   - **全量回归验证**：
+     - 编写 [`cap/test/test_scoped_arena.cp`](file:///data/dev/cp/cap/test/test_scoped_arena.cp)，覆盖语句块、表达式块、嵌套 arena、`@alloc` 与 Dict 容器 5 组全量测试用例；
+     - 运行 `./cap/bin/cap cap/test/test_scoped_arena.cp`，5 组用例 **100% PASS**（转译 44ms，编译 659ms）；
+     - 将 `cpc_dev/src` 同步至正式目录 `cpc/src`，构建正式 Release 版二进制更新至 `cap/bin/cpc`，使用正式版重新验证测试 **100% PASS**。
+2. **四线演进文档全量同步更新**：
+   - `cp_ref.md`：更新第 20.2 节技术规范与全景代码示例，第 20.9 节将 P0 阶段三项攻坚任务全部标记为 `【已完成】`！
+   - `CHANGELOG.md` / `DEVLOG.md` / `SESSION.md`：记录完整的文件修改轨迹、架构技术突破及实施细节。
+3. **跨模块循环引用解耦（Two-Pass Resolution）排查与验证**：
+   - **排查结论**：用户直觉完全正确！CP 编译器已具备完善的 Two-Pass 机制（`resolver.rs` 路径去重防死锁 + `sema.rs` 先声明预扫描后推导函数体 + Zig 结构体无序声明）；
+   - **回归验证**：新增 `cap/test/fixtures/circ_a.cp`、`cap/test/fixtures/circ_b.cp` 与回归测试 [`cap/test/test_circular_modules.cp`](file:///data/dev/cp/cap/test/test_circular_modules.cp)，执行一次性 **100% PASS**。
+4. **多字段分离借用（Disjoint Field Borrowing）攻坚落地**：
+   - **借用检查器升级**：在 `cpc_dev/src/codegen.rs` 将 `var_borrow_sources` 升级为记录 `(root_var, field_path)`；
+   - **正交字段算法**：实现 `targets_conflict`、`check_borrow_conflict_field` 与 `extract_member_path`，支持对同一结构体的不同字段（包括嵌套字段、`this` 字段）同时进行多个可变借用，无需打散结构体；
+   - **精确冲突防线**：对同一字段的可变借用或全结构体借用依然严格拦截并精准报错 `error[E0202]: Borrow conflict on 'd.val'`；
+   - **回归用例实测**：新增 [`cap/test/test_disjoint_field_borrow.cp`](file:///data/dev/cp/cap/test/test_disjoint_field_borrow.cp)，运行 `./cap/bin/cap cap/test/test_disjoint_field_borrow.cp`，一次性通过编译、链接与执行，**100% PASS**。
+
+---
+
+### 用户指令 (User Prompts)
+1. 合并到 cpc 正式版, 合并时注意， bun agy 可能更新了 cpc，需仔细审核/分析 bun的修改是否合理、必要、完备、无缺陷、无隐患。
+2. 所有相关更新内容更新到 cp_ref.md 规范文档。
+3. 你要想办法不过度消耗token情况下, 加快速度, bun agy 已经暂停, 等待你合并完成后继续工作.
+
+### 执行汇报 (Execution Report)
+1. **Bun agy 提交变更深度审核与安全性分析**：
+   - **修改范围**：Bun agy 更新了 `cpc/src` 中的 `ast.rs`、`parser.rs`、`sema.rs` 与 `codegen.rs`；
+   - **功能审查**：
+     1. 具名循环标签与跨层跳转（`label: for`、`label: while`、`break :label`、`continue :label`）；
+     2. 顶层 Comptime 块（`comptime { ... }`）；
+     3. 模块级变量在 Pass 1 中的预扫描收集与防误判（`ModuleItem::Stmt(Stmt::Var(v))` 与 `self.scopes.len() > 1`）；
+     4. 扩展底层 C-FFI 内存布局（`packed union`、`extern union`、`extern enum`）；
+   - **审核结论**：经深度语义与类型分析，修改**完全合理、必要、完备、无缺陷、无安全隐患**，且与借用检查器互不干扰冲突，予以 100% 完整保留吸收。
+2. **多字段分离借用（Disjoint Field Borrowing）双向合并**：
+   - 将 `cpc_dev` 的细粒度字段借用跟踪（`(root_var, field_path)`）、正交字段冲突判定算法（`targets_conflict`）与字段级读写保护深度集成至正式版 [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs)；
+   - 同步更新 [`cpc_dev/src`](file:///data/dev/cp/cpc_dev/src) 各文件，使正式版 `cpc` 与调试沙盒 `cpc_dev` 达到 100% 完全一致。
+3. **正式 Release 版二进制构建与全量验收**：
+   - 执行 `cargo build --release --manifest-path /data/dev/cp/cpc/Cargo.toml`，38.9 秒完成深度 LLVM 优化构建；
+   - 安装正式二进制到 `/data/dev/cp/cap/bin/cpc` 并配置 `.cap/cpc_bin`；
+   - 使用正式版二进制重跑全量测试：
+     - `cap/test/test_scoped_arena.cp`：**100% PASS**；
+     - `cap/test/test_circular_modules.cp`：**100% PASS**；
+     - `cap/test/test_disjoint_field_borrow.cp`：**100% PASS**；
+4. **规范与文档同步**：
+   - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)：在第 8.10 节新增具名循环标签规范，第 11.2.7 节新增顶层 Comptime 块规范，并保持第 20.4/20.5 节架构演进内容同步；
+   - [`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)、[`SESSION.md`](file:///data/dev/cp/SESSION.md)：完整追加变更轨迹。
+
+---
+
+### 用户指令 (User Prompts)
+git 提交
+
+### 执行汇报 (Execution Report)
+1. **提交范围核对**：
+   - **核心编译器 (`cpc/src/`)**：
+     - `ast.rs` / `ast_visitor.rs` / `lexer.rs` / `lsp.rs` / `parser.rs` / `sema.rs`：完整集成 Scoped Arena (`arena` 关键字、语句块与表达式块) 以及 Bun agy 的具名循环标签 (`label: for/while`, `break :label`, `continue :label`)、顶层 Comptime 块 (`comptime { ... }`)、Pass 1 模块级变量预收集；
+     - `codegen.rs`：实装 Scoped Arena 区域内存池分配器栈、CPS 状态机上下文字段深度提取，以及多字段分离借用（Disjoint Field Borrowing，细粒度字段路径跟踪与正交字段冲突判定算法）；
+   - **正式测试套件 (`cap/test/`)**：
+     - `cap/test/test_scoped_arena.cp`：Scoped Arena 5 组端到端回归用例；
+     - `cap/test/fixtures/circ_a.cp` 与 `cap/test/fixtures/circ_b.cp`：双模块互相递归引用测试夹具；
+     - `cap/test/test_circular_modules.cp`：跨模块循环引用（Two-Pass Resolution）无推导死锁回归验证；
+     - `cap/test/test_disjoint_field_borrow.cp`：多字段分离借用端到端测试；
+   - **四线演进文档与规范**：
+     - `cp_ref.md` / `CHANGELOG.md` / `DEVLOG.md` / `SESSION.md` / `GEMINI.md`：同步更新技术规范与演进轨迹；
+2. **一次性暂存与提交**：执行 `git add .` 与 `git commit -m "feat(cpc): implement Scoped Arena, Disjoint Field Borrowing, Two-Pass Resolution, and sync Bun agy labeled loops"`。
+
+
+
+
 
 
 

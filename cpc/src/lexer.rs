@@ -114,6 +114,8 @@ pub enum Token {
     Defer,
     #[token("errdefer")]
     ErrDefer,
+    #[token("arena")]
+    Arena,
     #[token("void")]
     Void,
     #[token("any")]

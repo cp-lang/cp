@@ -3215,7 +3215,35 @@ _ = flush_socket(); // 显式丢弃结果，抑制未捕获警告
 
 ---
 
-### 8.10 行末分号可选（Optional Semicolons）与 ASI 换行断句规范
+### 8.10 具名循环标签与跨层跳出 (`label: for` / `label: while` 与 `break :label` / `continue :label`)
+
+在深层嵌套遍历（如二维矩阵搜索、协议分帧解析、嵌套事件循环）中，直接 `break` 或 `continue` 只能作用于最内层循环。CP 语言原生支持具名循环标签与跨层跳转：
+
+1. **语法定义**：
+   - 可以在 `while` 或 `for` 语句前直接指定标签：`label: while (...) { ... }` 或 `label: for (...) { ... }`；
+   - 跨层跳出外层循环：`break :label;`；
+   - 跨层跳转到外层循环的下一次迭代：`continue :label;`；
+   - 具名代码块带值提前跳出：`label: { ... break :label value; }`。
+2. **底层映射**：
+   - 编译器将其零开销映射为 Zig 原生带标号循环 `:label while (...)` 与 `:label for (...)` 以及 `break :label` / `continue :label`，完全没有额外布尔标志位与多次判断开销。
+
+```typescript
+outer: for (i of 0..10) {
+    inner: for (j of 0..10) {
+        if (matrix[i][j] == target) {
+            found = true;
+            break :outer; // 👈 瞬时跳出最外层循环
+        }
+        if (matrix[i][j] < 0) {
+            continue :outer; // 👈 跨层进入外层循环的下一轮迭代
+        }
+    }
+}
+```
+
+---
+
+### 8.11 行末分号可选（Optional Semicolons）与 ASI 换行断句规范
 
 CP 采用符合现代前端（TypeScript/ES6）与系统语言（Go/Swift）直觉的分号机制：
 
@@ -4160,6 +4188,32 @@ CP 语言原生提供与底层无缝对接的编译期内省与诊断指令：
 | `@field(obj, name)`    | 编译期字段反射访问与赋值         | `@field(u, "name")`                         |
 | `@compileError(msg)`   | 在编译期主动抛出编译失败错误     | `@compileError("Unsupported architecture")` |
 | `@compileLog(args...)` | 在编译期向控制台打印编译诊断信息 | `@compileLog("Type size:", @sizeOf(T))`     |
+
+#### 11.2.7 顶层与局部 Comptime 块 (`comptime { ... }` 与 `inline for`)
+
+CP 支持在模块顶层与局部函数内使用 `comptime { ... }` 块（等价于 `@ { ... }`）：
+
+1. **顶层 Comptime 块**：
+   - 允许在模块顶层执行静态初始化、平台探测与编译期断言；
+   - 编译器将其发射至 Zig 的顶层 `comptime { ... }`；
+2. **`inline for` / `comptime for` 循环**：
+   - 支持在循环前标注 `inline` 或 `comptime`，强制编译器在编译期对静态范围（如 `0..4` 或数组字段）进行完全内联展开。
+
+```typescript
+// 顶层编译期校验
+comptime {
+    if (@sizeOf(usize) < 8) {
+        @compileError("CP 64-bit architecture is required");
+    }
+}
+
+// 局部内联展开
+fn unroll_example() {
+    inline for (i of 0..4) {
+        print(i);
+    }
+}
+```
 
 ---
 
@@ -8200,27 +8254,43 @@ flowchart TD
 
 ---
 
-#### 20.2 可插拔内存分配器体系与区域作用域 (Pluggable Allocators & Scoped Arena)
+#### 20.2 可插拔内存分配器体系与区域作用域 (Pluggable Allocators & Scoped Arena) 【已完成】
 
 ##### 1. 痛点场景
 系统级高并发场景（如高吞吐 Web 服务、百万 Agent 工具调用流）严禁对每一次请求都走全局堆 `malloc`，否则将诱发严重的堆锁竞争与内存碎片。
 
-##### 2. 演进技术规范
+##### 2. 技术规范与已落地实现
 1. **一等公民 Allocator 注入契约**：
    - 标准库容器与大型对象支持显式传入自定义 `Allocator`。
-2. **作用域区域分配器（`with (arena)` / `@arena` 语法糖）**：
-   - 在局部作用域内申请的大量临时字符串、中间解析树、动态字典，随作用域退出实现 **O(1) 批量瞬间释放**：
+2. **作用域区域分配器（`arena { ... }` 原生语法）**：
+   - 支持**语句级**与**表达式级**作用域 Arena：
      ```typescript
-     pub fn handle_request(req: Request): Response {
-         with (arena) {
-             let temp_json = parse_json(req.body); // 👈 在当前作用域 Arena 内高速分配
-             let intermediate = transform(temp_json);
-             let result = compute(intermediate);
-             return result.clone_to(req.allocator); // 👈 仅必要结果过户给调用方
-         } // 👈 离开代码块时，Arena 整块瞬时清空，零碎片、零逐个 free 损耗！
+     // 1. 语句块作用域 Arena
+     arena {
+         let temp = new Dict();
+         temp.set("key", "val");
+         let msg = `Processing: ${100 + 23}`;
+         print(msg);
+     } // 👈 离开作用域时，内部 Arena 整块 O(1) 瞬时清空释放！零碎片、零逐个 free 损耗！
+
+     // 2. 表达式作用域 Arena（支持返回值向外传递）
+     let computed_val: i32 = arena {
+         let a = 10;
+         let b = 20;
+         let temp_node = new BufferNode(a + b, "temp");
+         temp_node.val * 2 // 👈 纯标量值/结果安全返回，临时对象随块销毁
+     };
+
+     // 3. 原生底层动态分配支持
+     arena {
+         let raw_ptr = @alloc(64); // 👈 自动绑定当前活跃的作用域 Arena 分配器
+         raw_ptr[0] = 77;
      }
      ```
-3. **静态逃逸分析与栈分配提升 (Escape Analysis)**：
+3. **状态机与生命周期无缝集成**：
+   - 编译器前端在 `extract_locals_simple` 与 `extract_local_vars_to_str` 完整支持 `ArenaBlock` 与 `Expr::Arena` 嵌套提取，确保异步协程/状态机上下文字段安全注入；
+   - 底层精准映射为 Zig `std.heap.ArenaAllocator.init(std.heap.page_allocator)` 并自动注入 `defer __arena.deinit()`，兼顾极致性能与强异常安全。
+4. **静态逃逸分析与栈分配提升 (Escape Analysis)**：
    - 编译器前端自动检测局部对象生命周期，未逃逸出当前栈帧的对象自动提升为栈分配。
 
 ---
@@ -8256,8 +8326,25 @@ flowchart TD
 ##### 2. 演进技术规范
 1. **基于内容哈希的模块级增量转译缓存**：
    - 引入 Content-Addressable Cache：根据 AST 语法指纹缓存模块产物，仅转译发生变更的源码及其受影响的下游依赖。
-2. **跨模块循环引用解耦 (Two-pass Declaration Resolution)**：
-   - 符号收集与类型分析两阶段分离，原生支持 A、B 模块间的类型交叉递归引用。
+2. **跨模块循环引用解耦 (Two-Pass Declaration Resolution) 【已实装】**：
+   - **两阶段解析机制**：符号收集与类型分析两阶段严格分离（Pass 1 预扫描并收集所有模块的 `class`、`trait`、`enum` 与类型别名声明；Pass 2 建立模块拓扑图；Pass 3 深度进行函数体与方法体的类型推导与借用检查）；
+   - **拓扑解耦与死锁消除**：`resolver.rs` 采用规范路径追踪（`HashSet<PathBuf>`）杜绝循环导入时的递归栈溢出，底层 Zig 代码发射无序依赖结构体定义，彻底解决模块 A 和模块 B 互相包含类型时的推导死锁；
+   - **示例**：
+     ```typescript
+     // circ_a.cp
+     import { NodeB } from "./circ_b";
+     export class NodeA {
+         id: i32;
+         b: ?NodeB;
+     }
+
+     // circ_b.cp
+     import { NodeA } from "./circ_a";
+     export class NodeB {
+         tag: string;
+         a: ?NodeA;
+     }
+     ```
 3. **稳定 C-ABI 导出与动态插件热加载 (Dynamic Plugins)**：
    - 支持 `@export("c")` 规范与 `.so` / `.dylib` 运行时安全动态加载，为 Agent 容器的热插拔插件提供稳定接口。
 
@@ -8271,8 +8358,29 @@ flowchart TD
 ##### 2. 演进技术规范
 1. **泛型 Trait 静态契约拦截 (Generic Bounds)**：
    - 在 CP 前端直接校验泛型约束（如 `fn sort<T: Comparable>(arr: &mut [T])`），类型不满足时立即给出精准自愈建议，彻底避免底层晦涩报错。
-2. **多字段分离借用 (Disjoint Field Borrowing)**：
-   - 支持对同一结构体的不同独立字段进行并行借用（如 `&mut state.queue` 与 `&state.config`），消除不必要的假性借用冲突。
+2. **多字段分离借用 (Disjoint Field Borrowing) 【已实装】**：
+   - **细粒度字段借用跟踪**：借用检查器将结构体借用追踪升级为 `(root_var, field_path)` 元组，不再一刀切锁定整个根对象；
+   - **正交字段无冲突并发借用**：只要两个借用指向同一对象的不同字段（如 `&mut data.q_len` 与 `&mut data.active_timer`，或多级嵌套 `&mut ctx.header.content_len` 与 `&mut ctx.body_read`），编译器判定为 Disjoint 独立访问，允许同时存在多个可变借用；
+   - **整体验证与前缀覆盖保护**：借用整个结构体（`&mut data`）依然与任何活动中的子字段借用保持互斥；借用父字段（`&mut data.header`）依然与子字段（`&mut data.header.len`）保持互斥；同一字段的可变借用仍然严格保证排他性；
+   - **示例**：
+     ```typescript
+     class InternalLoopData {
+         q_len: i32;
+         active_timer: i32;
+         max_batch: i32;
+     }
+
+     fn process_loop(*data: InternalLoopData): void {
+         // 多字段分离借用：无需打散结构体即可自由借用不同字段
+         let q = &mut data.q_len;
+         let t = &mut data.active_timer;
+         let b = &mut data.max_batch;
+
+         q.* = 42;
+         t.* = 100;
+         b.* = 1024;
+     }
+     ```
 3. **常量泛型与定长张量 (Const Generics)**：
    - 原生支持参数化常量类型，如 `Tensor<f32, [1, 4096]>`、`Buffer<1024>`，使张量与网络缓冲区在编译期确定物理尺寸。
 
@@ -8324,7 +8432,7 @@ flowchart TD
 
 | 阶段 | 重点领域 | 核心任务 | 交付价值与验收标准 |
 | :--- | :--- | :--- | :--- |
-| **P0 阶段（近期待攻坚）** | **调试与工程稳定性** | 1. 源码行号指示与 DWARF 映射注入 (`.zig.map` / Source Map & Demangle 反解器)【已完成】<br/>2. 泛型 Trait 前端契约校验（消除底层报错泄露）【已完成】<br/>3. Scoped Arena 区域内存池语法与运行时实现 | 极大降低大型项目与 Bun 迁移调试门槛，实现断点与崩溃堆栈精准映射到 `.cp` 源码，消灭高频小对象内存碎片 |
+| **P0 阶段（已全面攻坚完成）** | **调试与工程稳定性** | 1. 源码行号指示与 DWARF 映射注入 (`.zig.map` / Source Map & Demangle 反解器)【已完成】<br/>2. 泛型 Trait 前端契约校验（消除底层报错泄露）【已完成】<br/>3. Scoped Arena 区域内存池语法与运行时实现【已完成】 | 极大降低大型项目与 Bun 迁移调试门槛，实现断点与崩溃堆栈精准映射到 `.cp` 源码，消灭高频小对象内存碎片 |
 | **P1 阶段（中期生产化）** | **并发调度与工程规模** | 1. 循环回边 Auto-Reduction 抢占计数自动注入<br/>2. 跨 await 线程安全静态借用拦截<br/>3. 基于内容哈希的模块级增量编译与缓存 | 真正实现百万 Agent 抗死循环与防单点饥饿，十万行以上超大工程秒级极速构建 |
 | **P2 阶段（生态成熟期）** | **工具链与标准库基座** | 1. 完整生产级 LSP（跳转/引用/重命名/补全）<br/>2. 官方权威代码格式化工具 `cpc fmt`<br/>3. 统一零拷贝 I/O 流与无锁并发容器标准库 | 开发者与 AI 协同体验全面媲美 TS/Rust，具备承载国家级超高并发与关键系统服务的能力 |
 
