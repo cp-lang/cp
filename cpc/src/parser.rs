@@ -1842,18 +1842,48 @@ impl<'a> Parser<'a> {
             self.lexer = checkpoint.clone();
             self.peeked = p1.clone();
             self.peeked2 = p2.clone();
-            self.bump()?;
-            if let Some(Token::IntLiteral(n)) = self.peek() {
-                let size = *n as usize;
-                self.bump()?;
+            let (_, span) = self.bump()?;
+            if let Some(Token::IntLiteral(_)) | Some(Token::Ident(_)) = self.peek() {
+                let size_tok = self.bump()?.0;
+                let size_str = match size_tok {
+                    Token::IntLiteral(n) => n.to_string(),
+                    Token::Ident(s) => s,
+                    _ => unreachable!(),
+                };
                 if self.peek() == Some(&Token::RBracket) {
                     self.bump()?;
+                    let has_const = if self.peek() == Some(&Token::Const) {
+                        self.bump()?;
+                        true
+                    } else {
+                        false
+                    };
                     let elem_ty = if self.peek() == Some(&Token::Bang) {
                         Type::Any
                     } else {
                         self.parse_base_type()?
                     };
-                    let ty = Type::FixedArray(Box::new(elem_ty), size);
+                    let base_str = match &elem_ty {
+                        Type::U8 => "u8".to_string(),
+                        Type::I8 => "i8".to_string(),
+                        Type::U16 => "u16".to_string(),
+                        Type::I16 => "i16".to_string(),
+                        Type::U32 => "u32".to_string(),
+                        Type::I32 => "i32".to_string(),
+                        Type::U64 => "u64".to_string(),
+                        Type::I64 => "i64".to_string(),
+                        Type::Ref(id) => id.sym.clone(),
+                        _ => "u8".to_string(),
+                    };
+                    let elem_str = if has_const {
+                        format!("const {}", base_str)
+                    } else {
+                        base_str
+                    };
+                    let ty = Type::Ref(Ident {
+                        span,
+                        sym: format!("[{}]{}", size_str, elem_str),
+                    });
                     return self.parse_postfix_type_modifiers(ty);
                 }
             }
@@ -1861,6 +1891,51 @@ impl<'a> Parser<'a> {
             self.peeked = p1.clone();
             self.peeked2 = p2.clone();
             self.bump()?;
+            if self.peek() == Some(&Token::Colon) {
+                self.bump()?;
+                let sentinel = match self.bump()?.0 {
+                    Token::IntLiteral(n) => n.to_string(),
+                    Token::Ident(s) => s,
+                    Token::Null => "null".to_string(),
+                    _ => "0".to_string(),
+                };
+                self.expect(Token::RBracket)?;
+                let has_const = if self.peek() == Some(&Token::Const) {
+                    self.bump()?;
+                    true
+                } else {
+                    false
+                };
+                let elem_ty = self.parse_base_type()?;
+                let mut is_optional = false;
+                if self.peek() == Some(&Token::Question)
+                    && self.peek_next() == Some(&Token::Bang)
+                {
+                    self.bump()?;
+                    self.bump()?;
+                    is_optional = true;
+                } else if self.peek() == Some(&Token::Bang) {
+                    self.bump()?;
+                    if self.peek() == Some(&Token::Question) {
+                        self.bump()?;
+                        is_optional = true;
+                    }
+                }
+                let (elem_ty, has_elem_opt) = match elem_ty {
+                    Type::Optional(inner) => (*inner, true),
+                    other => (other, false),
+                };
+                let s_val = if has_const {
+                    format!("{}:const", sentinel)
+                } else {
+                    sentinel
+                };
+                let mut ty = Type::SentinelSlice(Box::new(elem_ty), s_val);
+                if is_optional || has_elem_opt {
+                    ty = Type::Optional(Box::new(ty));
+                }
+                return self.parse_postfix_type_modifiers(ty);
+            }
             if self.peek() == Some(&Token::RBracket) {
                 self.bump()?;
                 let has_const = if self.peek() == Some(&Token::Const) {
@@ -2160,6 +2235,20 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type(&mut self) -> ParseResult<Type> {
+        if self.peek() == Some(&Token::If) {
+            self.bump()?; // consume 'if'
+            self.expect(Token::LParen)?;
+            let cond = self.parse_expr()?;
+            self.expect(Token::RParen)?;
+            let cons = self.parse_type()?;
+            self.expect(Token::Else)?;
+            let alt = self.parse_type()?;
+            return Ok(Type::Conditional(
+                Box::new(cond),
+                Box::new(cons),
+                Box::new(alt),
+            ));
+        }
         if self.peek() == Some(&Token::At) {
             let mut clone = self.clone_lookahead();
             let _ = clone.bump();
@@ -2261,6 +2350,7 @@ impl<'a> Parser<'a> {
             Type::ManyRawPtr(inner) => format!("[*]{}", Self::type_to_str(inner)),
             Type::CPtr(inner) => format!("[*c]{}", Self::type_to_str(inner)),
             Type::SentinelPtr(inner, n) => format!("[*:{n}]{}", Self::type_to_str(inner)),
+            Type::SentinelSlice(inner, n) => format!("[:{n}]{}", Self::type_to_str(inner)),
             Type::Optional(inner) => format!("{}?", Self::type_to_str(inner)),
             Type::Shared(inner) => format!("Shared<{}>", Self::type_to_str(inner)),
             Type::Ref(id) => id.sym.clone(),
@@ -3503,7 +3593,9 @@ impl<'a> Parser<'a> {
             }
             let mut is_field_static = is_static;
             if self.peek() == Some(&Token::Static) {
-                if !matches!(self.peek_next(), Some(Token::Fn) | Some(Token::Async) | Some(Token::Colon)) {
+                if !matches!(self.peek_next(), Some(Token::Fn) | Some(Token::Async) | Some(Token::Colon))
+                    && !matches!(self.peek_next(), Some(Token::Ident(id)) if id == "inline" || id == "extern" || id == "noinline")
+                {
                     self.bump()?;
                     is_field_static = true;
                 }
@@ -3580,7 +3672,8 @@ impl<'a> Parser<'a> {
             }
             let is_method = match self.peek() {
                 Some(Token::Fn) | Some(Token::Async) => true,
-                Some(Token::Static) => matches!(self.peek_next(), Some(Token::Fn) | Some(Token::Async)),
+                Some(Token::Static) => matches!(self.peek_next(), Some(Token::Fn) | Some(Token::Async))
+                    || matches!(self.peek_next(), Some(Token::Ident(id)) if id == "inline" || id == "extern" || id == "noinline"),
                 Some(Token::Ident(id)) if id == "inline" || id == "extern" || id == "noinline" => matches!(self.peek_next(), Some(Token::Fn) | Some(Token::Async)),
                 _ => false,
             };
@@ -3970,10 +4063,26 @@ impl<'a> Parser<'a> {
             }
         }
         let end = self.expect(Token::RBrace)?.end;
+        let mut unions = Vec::new();
+        while self.peek() == Some(&Token::PipePipe) || self.peek() == Some(&Token::Pipe) {
+            self.bump()?;
+            let mut u_name = self.parse_ident()?.sym;
+            while self.peek() == Some(&Token::Dot) {
+                self.bump()?;
+                let next = self.parse_ident()?;
+                u_name.push('.');
+                u_name.push_str(&next.sym);
+            }
+            unions.push(u_name);
+        }
+        if self.peek() == Some(&Token::Semicolon) {
+            self.bump()?;
+        }
         Ok(ErrorSetDecl {
             span: Span { start, end },
             ident,
             variants,
+            unions,
         })
     }
 
@@ -5166,7 +5275,7 @@ impl<'a> Parser<'a> {
             Token::Dot => {
                 if self.peek() == Some(&Token::LBrace) {
                     self.bump()?;
-                    let fields = self.parse_object_fields()?;
+                    let fields = self.parse_object_fields(true)?;
                     return Ok(Expr::Object(fields));
                 }
                 if self.in_pipeline_rhs > 0 {
@@ -5328,7 +5437,10 @@ impl<'a> Parser<'a> {
                     self.expect(Token::RParen)?;
                     return Ok(Expr::ErrWrap(Box::new(first)));
                 }
-                if (text == "err" || text == "error") && self.peek() == Some(&Token::Dot) {
+                let is_error_literal = (text == "err" || text == "error")
+                    && self.peek() == Some(&Token::Dot)
+                    && matches!(self.peek_next(), Some(Token::Ident(id)) if id.chars().next().map_or(false, |c| c.is_ascii_uppercase()));
+                if is_error_literal {
                     Ok(Expr::Ident(Ident {
                         span,
                         sym: "error".to_string(),
@@ -5767,17 +5879,21 @@ impl<'a> Parser<'a> {
                         content,
                     });
                 }
-                if name == "@map" || name == "@comptimeMap" {
+                if name == "@map" || name == "@comptimeMap" || name == "@comptime_map" {
                     self.expect(Token::LParen)?;
                     let (target_ty, entries) = if self.peek() == Some(&Token::LBrace) {
                         self.bump()?; // consume '{'
-                        let fields = self.parse_object_fields()?;
+                        let fields = self.parse_object_fields(false)?;
                         (None, fields)
                     } else {
-                        let ty = self.parse_type()?;
+                        let mut ty = self.parse_type()?;
                         self.expect(Token::Comma)?;
+                        if self.peek() != Some(&Token::LBrace) {
+                            ty = self.parse_type()?;
+                            self.expect(Token::Comma)?;
+                        }
                         self.expect(Token::LBrace)?;
-                        let fields = self.parse_object_fields()?;
+                        let fields = self.parse_object_fields(false)?;
                         (Some(ty), fields)
                     };
                     let end = self.expect(Token::RParen)?.end;
@@ -6020,11 +6136,11 @@ impl<'a> Parser<'a> {
                 }
             }
             Token::HashLBrace => {
-                let fields = self.parse_object_fields()?;
+                let fields = self.parse_object_fields(false)?;
                 Ok(Expr::Dict(fields))
             }
             Token::LBrace => {
-                let fields = self.parse_object_fields()?;
+                let fields = self.parse_object_fields(false)?;
                 Ok(Expr::Object(fields))
             }
             Token::Await => {
@@ -6216,6 +6332,53 @@ impl<'a> Parser<'a> {
                     self.bump()?;
                     return Ok(Expr::Array(Vec::new()));
                 }
+                if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Star) {
+                    let is_sentinel_slice = self.peek() == Some(&Token::Colon);
+                    self.bump()?; // consume ':' or '*'
+                    let mut is_c_ptr = false;
+                    let mut sentinel = String::new();
+                    if is_sentinel_slice {
+                        sentinel = match self.bump()?.0 {
+                            Token::IntLiteral(n) => n.to_string(),
+                            Token::Ident(s) => s,
+                            Token::Null => "null".to_string(),
+                            _ => "0".to_string(),
+                        };
+                    } else {
+                        if matches!(self.peek(), Some(Token::Ident(id)) if id == "c") {
+                            self.bump()?;
+                            is_c_ptr = true;
+                        } else if self.peek() == Some(&Token::Colon) {
+                            self.bump()?;
+                            sentinel = match self.bump()?.0 {
+                                Token::IntLiteral(n) => n.to_string(),
+                                Token::Ident(s) => s,
+                                Token::Null => "null".to_string(),
+                                _ => "0".to_string(),
+                            };
+                        }
+                    }
+                    self.expect(Token::RBracket)?;
+                    let has_const = if self.peek() == Some(&Token::Const) {
+                        self.bump()?;
+                        true
+                    } else {
+                        false
+                    };
+                    let elem_ty = self.parse_base_type()?;
+                    let elem_str = Self::type_to_str(&elem_ty);
+                    let const_prefix = if has_const { "const " } else { "" };
+                    let ty_sym = if is_sentinel_slice {
+                        format!("[:{}]{}{}", sentinel, const_prefix, elem_str)
+                    } else if is_c_ptr {
+                        format!("[*c]{}{}", const_prefix, elem_str)
+                    } else if !sentinel.is_empty() {
+                        format!("[*:{sentinel}]{}{}", const_prefix, elem_str)
+                    } else {
+                        format!("[*]{}{}", const_prefix, elem_str)
+                    };
+                    return Ok(Expr::Ident(Ident { span, sym: ty_sym }));
+                }
                 let first = self.parse_expr()?;
                 if self.peek() == Some(&Token::Semicolon) {
                     self.bump()?;
@@ -6303,7 +6466,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_object_fields(&mut self) -> ParseResult<Vec<ObjectField>> {
+    fn parse_object_fields(&mut self, is_dot_brace: bool) -> ParseResult<Vec<ObjectField>> {
         let mut fields = Vec::new();
         while self.peek() != Some(&Token::RBrace) && self.peek().is_some() {
             if self.peek() == Some(&Token::DotDotDot) {
@@ -6314,10 +6477,28 @@ impl<'a> Parser<'a> {
                     val,
                     is_spread: true,
                 });
-            } else {
-                if self.peek() == Some(&Token::Dot) {
+            } else if is_dot_brace && self.peek() == Some(&Token::Dot) && self.peek_next() != Some(&Token::LBrace) {
+                self.bump()?;
+                let key = self.parse_ident()?;
+                if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Assign) {
                     self.bump()?;
+                } else {
+                    self.expect(Token::Colon)?;
                 }
+                let val = self.parse_expr()?;
+                fields.push(ObjectField {
+                    key: Some(key),
+                    val,
+                    is_spread: false,
+                });
+            } else if is_dot_brace {
+                let val = self.parse_expr()?;
+                fields.push(ObjectField {
+                    key: None,
+                    val,
+                    is_spread: false,
+                });
+            } else {
                 let is_str = matches!(self.peek(), Some(Token::StringLiteral(_)));
                 let key = if is_str {
                     let (tok, span) = self.bump()?;
@@ -6467,6 +6648,8 @@ impl<'a> Parser<'a> {
             Some(Token::WrappingAdd) => Some(BinaryOp::WrappingAdd),
             Some(Token::WrappingSub) => Some(BinaryOp::WrappingSub),
             Some(Token::WrappingMul) => Some(BinaryOp::WrappingMul),
+            Some(Token::SaturatingAdd) => Some(BinaryOp::SaturatingAdd),
+            Some(Token::SaturatingSub) => Some(BinaryOp::SaturatingSub),
             Some(Token::Slash) => Some(BinaryOp::Div),
             Some(Token::Percent) => Some(BinaryOp::Mod),
             Some(Token::Ampersand) => Some(BinaryOp::BitAnd),
@@ -6502,7 +6685,7 @@ impl<'a> Parser<'a> {
             BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq => 8,
             BinaryOp::Pipe => 9,
             BinaryOp::Shl | BinaryOp::Shr => 10,
-            BinaryOp::Add | BinaryOp::Sub | BinaryOp::WrappingAdd | BinaryOp::WrappingSub => 11,
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::WrappingAdd | BinaryOp::WrappingSub | BinaryOp::SaturatingAdd | BinaryOp::SaturatingSub => 11,
             BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod | BinaryOp::WrappingMul => 12,
         }
     }

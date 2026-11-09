@@ -241,6 +241,10 @@ pub enum Token {
     WrappingSub,
     #[token("*%")]
     WrappingMul,
+    #[token("+|")]
+    SaturatingAdd,
+    #[token("-|")]
+    SaturatingSub,
     #[token("+")]
     Plus,
     #[token("-")]

@@ -94,6 +94,8 @@ pub fn main(init: std.process.Init) !void {
         try handleTest(allocator, args[2..]);
     } else if (std.mem.eql(u8, cmd, "bench")) {
         try handleBench(allocator, args[2..]);
+    } else if (std.mem.eql(u8, cmd, "demangle")) {
+        try handleDemangle(allocator, args[2..]);
     } else if (std.mem.eql(u8, cmd, "sniff")) {
         try sniffHardware();
     } else if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) {
@@ -164,6 +166,7 @@ fn usage() void {
         \\  cap clean                     Clean intermediate Zig code and build caches
         \\  cap test [dir]                Run test suite (default: test/)
         \\  cap bench <file.cp>           Run microsecond benchmark (ReleaseFast)
+        \\  cap demangle [trace_file]     Demangle Zig stack traces to original CP lines
         \\  cap init [app|agent|lib]      Initialize a new CP project template
         \\  cap add <package> [-g] [-d]   Add a dependency (-g global, -d dev)
         \\  cap remove <package>          Remove a dependency
@@ -1397,4 +1400,20 @@ fn handleBench(allocator: std.mem.Allocator, args: []const []const u8) !void {
     } else {
         std.debug.print("Target must be a .cp file: cap bench <file.cp>\n", .{});
     }
+}
+
+fn handleDemangle(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    const cpc_bin = getCpcBin();
+    var cmd_list: [16][]const u8 = undefined;
+    var argc: usize = 0;
+    cmd_list[argc] = cpc_bin; argc += 1;
+    cmd_list[argc] = "demangle"; argc += 1;
+    for (args) |arg| {
+        if (argc < 16) {
+            cmd_list[argc] = arg; argc += 1;
+        }
+    }
+    var child = try std.process.spawn(global_io, .{ .argv = cmd_list[0..argc] });
+    _ = try child.wait(global_io);
+    _ = allocator;
 }

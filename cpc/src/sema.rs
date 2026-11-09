@@ -4153,6 +4153,40 @@ impl Analyzer {
                 return true;
             }
         }
+        if let (Type::SentinelSlice(t_inner, t_s), Type::SentinelSlice(s_inner, s_s)) = (target, src) {
+            let t_clean = t_s.split(':').next().unwrap_or(t_s);
+            let s_clean = s_s.split(':').next().unwrap_or(s_s);
+            if t_clean == s_clean && self.can_coerce(t_inner, s_inner, None) {
+                return true;
+            }
+        }
+        if let Type::SentinelSlice(t_inner, t_s) = target {
+            let t_clean = t_s.split(':').next().unwrap_or(t_s);
+            if **t_inner == Type::U8 && t_clean == "0" && src == &Type::String {
+                return true;
+            }
+        }
+        if let Type::Array(t_inner) = target {
+            if let Type::SentinelSlice(s_inner, _) = src {
+                if self.can_coerce(t_inner, s_inner, None) {
+                    return true;
+                }
+            }
+        }
+        if let Type::SentinelSlice(_, _) = target {
+            if let Type::BorrowType { inner, .. } = src {
+                if self.can_coerce(target, inner, init_expr) {
+                    return true;
+                }
+            }
+        }
+        if let Type::BorrowType { inner, .. } = target {
+            if let Type::SentinelSlice(_, _) = src {
+                if self.can_coerce(inner, src, init_expr) {
+                    return true;
+                }
+            }
+        }
         if let (Type::ManyRawPtr(t_inner), Type::CPtr(s_inner))
         | (Type::CPtr(t_inner), Type::ManyRawPtr(s_inner)) = (target, src)
         {
@@ -4307,6 +4341,11 @@ impl Analyzer {
             (Type::SentinelPtr(i1, s1), Type::SentinelPtr(i2, s2)) => {
                 s1 == s2 && self.types_eq(i1, i2)
             }
+            (Type::SentinelSlice(i1, s1), Type::SentinelSlice(i2, s2)) => {
+                s1.split(':').next() == s2.split(':').next() && self.types_eq(i1, i2)
+            }
+            (Type::SentinelSlice(i1, _), Type::Array(i2))
+            | (Type::Array(i2), Type::SentinelSlice(i1, _)) => self.types_eq(i1, i2),
             (Type::Array(t1), Type::Array(t2)) => self.types_eq(t1, t2),
             (Type::FixedArray(t1, s1), Type::FixedArray(t2, s2)) => {
                 s1 == s2 && self.types_eq(t1, t2)
@@ -4900,16 +4939,35 @@ impl Analyzer {
             Expr::Spawn(_) => Ok(Type::PID),
             Expr::Receive(ty) => Ok(ty.as_ref().map(|t| (**t).clone()).unwrap_or(Type::I32)),
             Expr::Slice(slice) => {
-                let o_ty = self.infer_type(&slice.obj)?;
-                match o_ty {
-                    Type::ManyRawPtr(elem) | Type::CPtr(elem) | Type::SentinelPtr(elem, _) => {
-                        Ok(Type::Array(elem))
-                    }
-                    Type::CStr => Ok(Type::String),
+                let mut o_ty = self.infer_type(&slice.obj)?;
+                while let Type::BorrowType { inner, .. } | Type::RawPtr { inner, .. } = o_ty {
+                    o_ty = *inner;
+                }
+                let elem = match o_ty {
+                    Type::ManyRawPtr(elem)
+                    | Type::CPtr(elem)
+                    | Type::SentinelPtr(elem, _)
+                    | Type::SentinelSlice(elem, _)
+                    | Type::Array(elem)
+                    | Type::FixedArray(elem, _) => elem,
+                    Type::CStr => Box::new(Type::U8),
                     Type::Ref(id) if id.sym == "cstring" || id.sym == "cstr" => {
-                        Ok(Type::Array(Box::new(Type::U8)))
+                        Box::new(Type::U8)
                     }
-                    _ => Ok(o_ty),
+                    Type::String => Box::new(Type::U8),
+                    Type::Ref(id) if id.sym.ends_with("WPathBuffer") || id.sym.contains("u16") => {
+                        Box::new(Type::U16)
+                    }
+                    _ => Box::new(Type::Auto),
+                };
+                if let Some(s_expr) = &slice.sentinel {
+                    let sentinel_str = match &**s_expr {
+                        Expr::Lit(Lit::Int(n)) => n.to_string(),
+                        _ => "0".to_string(),
+                    };
+                    Ok(Type::SentinelSlice(elem, sentinel_str))
+                } else {
+                    Ok(Type::Array(elem))
                 }
             }
             Expr::Question(inner) => {
@@ -5009,9 +5067,10 @@ impl Analyzer {
                 match o_ty {
                     Type::Array(elem) => Ok(*elem),
                     Type::FixedArray(elem, _) => Ok(*elem),
-                    Type::ManyRawPtr(elem) | Type::CPtr(elem) | Type::SentinelPtr(elem, _) => {
-                        Ok(*elem)
-                    }
+                    Type::ManyRawPtr(elem)
+                    | Type::CPtr(elem)
+                    | Type::SentinelPtr(elem, _)
+                    | Type::SentinelSlice(elem, _) => Ok(*elem),
                     Type::CStr => Ok(Type::U8),
                     Type::String => Ok(Type::U8),
                     Type::Ref(id) if id.sym == "cstring" || id.sym == "cstr" => Ok(Type::U8),
@@ -5153,27 +5212,29 @@ impl Analyzer {
             Expr::Match(m) => {
                 for arm in &m.arms {
                     let arm_ty = match &*arm.body {
+                        Stmt::Expr(Expr::Return(..))
+                        | Stmt::Expr(Expr::Break(..))
+                        | Stmt::Expr(Expr::LabeledBreak(..))
+                        | Stmt::Expr(Expr::Continue(..)) => Type::Void,
                         Stmt::Expr(e) => self.infer_type(e).unwrap_or(Type::Any),
                         Stmt::Block(b) => {
-                            if let Some(Stmt::Expr(e)) = b.body.last() {
-                                self.infer_type(e).unwrap_or(Type::Any)
-                            } else if let Some(Stmt::Return(r)) = b.body.last() {
-                                if let Some(arg) = &r.arg {
-                                    self.infer_type(arg).unwrap_or(Type::Any)
-                                } else {
-                                    Type::Void
+                            if let Some(last) = b.body.last() {
+                                match last {
+                                    Stmt::Expr(Expr::Return(..))
+                                    | Stmt::Expr(Expr::Break(..))
+                                    | Stmt::Expr(Expr::LabeledBreak(..))
+                                    | Stmt::Expr(Expr::Continue(..))
+                                    | Stmt::Return(..)
+                                    | Stmt::Break
+                                    | Stmt::Continue => Type::Void,
+                                    Stmt::Expr(e) => self.infer_type(e).unwrap_or(Type::Any),
+                                    _ => Type::Void,
                                 }
                             } else {
                                 Type::Void
                             }
                         }
-                        Stmt::Return(r) => {
-                            if let Some(arg) = &r.arg {
-                                self.infer_type(arg).unwrap_or(Type::Any)
-                            } else {
-                                Type::Void
-                            }
-                        }
+                        Stmt::Return(_) | Stmt::Break | Stmt::Continue => Type::Void,
                         _ => Type::Void,
                     };
                     if arm_ty != Type::Any && arm_ty != Type::Unknown && arm_ty != Type::Void {
@@ -5221,7 +5282,7 @@ impl Analyzer {
                         }
                     } else if (*base_ty == Type::String
                         || *base_ty == Type::CStr
-                        || matches!(base_ty, Type::Array(_) | Type::FixedArray(_, _)))
+                        || matches!(base_ty, Type::Array(_) | Type::FixedArray(_, _) | Type::SentinelSlice(_, _) | Type::SentinelPtr(_, _)))
                         && (mem.prop.sym == "len" || mem.prop.sym == "length")
                     {
                         return Ok(Type::USize);

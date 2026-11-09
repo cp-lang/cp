@@ -8003,21 +8003,37 @@ flowchart TD
     end
 ```
 
-#### 20.1 源码映射、可观测性与生产级调试 (Source Maps, DWARF Debuginfo & Demangling)
+#### 20.1 源码映射、可观测性与生产级调试 (Source Maps, DWARF Debuginfo & Demangling) 【已实装】
 
-##### 1. 痛点场景
-目前 `cpc` 将 `.cp` 转译为 `.zig` 并调用底层 LLVM 生成二进制。当生产环境发生崩溃（Panic）或段错误（Segfault）时，回溯日志（Backtrace）显示的是生成的中间态 `.zig` 文件行号，开发者无法通过 GDB / LLDB / VSCode 直接在 `.cp` 原生代码上单步调试或断点。
+##### 1. 痛点场景与设计考量
+`cpc` 将 `.cp` 转译为 `.zig` 并由底层 LLVM 生成机器码二进制。由于 Zig 语言原生不提供 C 语言风格的 `#line` 预处理宏指令（遇到 `#line` 会直接作为语法错误拒绝），直接在转译文件中写 `#line` 无法通过 Zig 解析。
+因此，CP 采用现代工业级架构方案：**前端 AST Span 精确映射 + 自动伴随生成 JSON Source Map (`.zig.map`) + 工具链原生堆栈反解器 (`cpc demangle` / `cap demangle`)**。
 
-##### 2. 演进技术规范
-1. **源码映射 (Source Map) 与 DWARF 映射注入**：
-   - 在生成的 Zig 代码中注入标准 `#line <line> "<file.cp>"` 行定位指示或生成 DWARF `.debug_line` 映射；
-   - 调试器（GDB / LLDB / VSCode）直接捕获 `.cp` 源代码行号与局部变量符号。
-2. **生产崩溃堆栈反解工具 (CP Demangler)**：
-   - 生产环境中捕获异常与 Panic 时，将底层 CPS 状态机标签符号还原为人类可读的堆栈追踪：
+##### 2. 演进技术规范与落地架构
+1. **源码映射 (Source Map) 自动伴随生成**：
+   - 编译器 `Codegen` 在生成每一个函数定义和语句（`generate_stmt` / `generate_function_decorated`）时，自动根据 AST `Span` 将 CP 源码行号、列号与生成的 Zig 代码行号精准记录；
+   - 转译输出 `<target>.zig` 时，自动在同一目录下伴随生成 `<target>.zig.map` 标准映射文件：
+     ```json
+     {
+       "version": 1,
+       "cp_source": "cap/test/test_source_map_demangle.cp",
+       "zig_target": ".cap/zig/cap/test/test_source_map_demangle.zig",
+       "mappings": [
+         { "zig_line": 23, "zig_col": 1, "cp_file": "cap/test/test_source_map_demangle.cp", "cp_line": 3, "cp_col": 1, "symbol": "trigger_crash" },
+         { "zig_line": 24, "zig_col": 1, "cp_file": "cap/test/test_source_map_demangle.cp", "cp_line": 4, "cp_col": 5, "symbol": "trigger_crash" }
+       ]
+     }
+     ```
+2. **生产崩溃堆栈反解工具 (CP Demangler - `cpc demangle` / `cap demangle`)**：
+   - 当运行时发生 panic 产生堆栈跟踪（如 `.cap/zig/cap/test/test_xxx.zig:24:5`）时，运行 `cap demangle [trace_file]` 或管道输入 `cat trace.txt | cap demangle`：
+   - Demangler 会自动加载关联的 `.zig.map`，瞬间将堆栈重构反解为原生 `.cp` 文件名、行号与列号，并输出上下文代码切片与指针 `^`：
      ```text
-     panic: connection timed out
-       at TcpStream.connect (src/net/tcp.cp:128:15)
-       at AgentWorker.execute (src/agent/worker.cp:45:9)
+     /data/dev/cp/cap/test/test_source_map_demangle.cp:4:5: 0x1034f72 in trigger_crash (test_source_map_demangle)
+         panic("explicit crash test");
+         ^
+     /data/dev/cp/cap/test/test_source_map_demangle.cp:10:26: 0x103513a in test_0 (test_source_map_demangle)
+         let res = trigger_crash();
+                                  ^
      ```
 3. **原生性能分析与 eBPF 集成**：
    - 标准化函数符号修饰规则（Symbol Mangling），使 Linux `perf`、`pprof` 生成的火焰图清晰识读 CP 模块名与函数。
@@ -8148,7 +8164,7 @@ flowchart TD
 
 | 阶段 | 重点领域 | 核心任务 | 交付价值与验收标准 |
 | :--- | :--- | :--- | :--- |
-| **P0 阶段（近期待攻坚）** | **调试与工程稳定性** | 1. 源码行号指示与 DWARF 映射注入 (`#line`)<br/>2. 泛型 Trait 前端契约校验（消除底层报错泄露）<br/>3. Scoped Arena 区域内存池语法与运行时实现 | 极大降低大型项目与 Bun 迁移调试门槛，实现断点单步调试 `.cp`，消灭高频小对象内存碎片 |
+| **P0 阶段（近期待攻坚）** | **调试与工程稳定性** | 1. 源码行号指示与 DWARF 映射注入 (`.zig.map` / Source Map & Demangle 反解器)【已完成】<br/>2. 泛型 Trait 前端契约校验（消除底层报错泄露）<br/>3. Scoped Arena 区域内存池语法与运行时实现 | 极大降低大型项目与 Bun 迁移调试门槛，实现断点与崩溃堆栈精准映射到 `.cp` 源码，消灭高频小对象内存碎片 |
 | **P1 阶段（中期生产化）** | **并发调度与工程规模** | 1. 循环回边 Auto-Reduction 抢占计数自动注入<br/>2. 跨 await 线程安全静态借用拦截<br/>3. 基于内容哈希的模块级增量编译与缓存 | 真正实现百万 Agent 抗死循环与防单点饥饿，十万行以上超大工程秒级极速构建 |
 | **P2 阶段（生态成熟期）** | **工具链与标准库基座** | 1. 完整生产级 LSP（跳转/引用/重命名/补全）<br/>2. 官方权威代码格式化工具 `cpc fmt`<br/>3. 统一零拷贝 I/O 流与无锁并发容器标准库 | 开发者与 AI 协同体验全面媲美 TS/Rust，具备承载国家级超高并发与关键系统服务的能力 |
 

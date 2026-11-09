@@ -314,7 +314,8 @@ impl ModuleFeatures {
             | Type::FixedArray(inner, _)
             | Type::ManyRawPtr(inner)
             | Type::CPtr(inner)
-            | Type::SentinelPtr(inner, _) => self.scan_type(inner),
+            | Type::SentinelPtr(inner, _)
+            | Type::SentinelSlice(inner, _) => self.scan_type(inner),
             Type::Tuple(ts) => {
                 for item in ts {
                     self.scan_type(item);
@@ -674,6 +675,11 @@ pub struct Codegen {
     pub local_trampolines: HashSet<String>,
     pub source_dir: Option<std::path::PathBuf>,
     pub c_includes: Vec<String>,
+    pub source_file_name: Option<String>,
+    pub source_code: Option<String>,
+    pub line_starts: Vec<usize>,
+    pub source_map_entries: Vec<crate::source_map::SourceMapEntry>,
+    pub current_func_name: Option<String>,
 }
 
 impl Codegen {
@@ -751,7 +757,79 @@ impl Codegen {
             local_trampolines: HashSet::new(),
             source_dir: None,
             c_includes: Vec::new(),
+            source_file_name: None,
+            source_code: None,
+            line_starts: Vec::new(),
+            source_map_entries: Vec::new(),
+            current_func_name: None,
         }
+    }
+
+    pub fn init_source(&mut self, file_name: Option<&str>, code: Option<&str>) {
+        if let Some(f) = file_name {
+            self.source_file_name = Some(f.to_string());
+        }
+        if let Some(c) = code {
+            self.source_code = Some(c.to_string());
+            let mut starts = vec![0];
+            for (idx, b) in c.bytes().enumerate() {
+                if b == b'\n' {
+                    starts.push(idx + 1);
+                }
+            }
+            self.line_starts = starts;
+        }
+    }
+
+    pub fn current_generated_line(&self) -> u32 {
+        let out_newlines = self.output.bytes().filter(|&b| b == b'\n').count();
+        let case_newlines = self.current_case_content.bytes().filter(|&b| b == b'\n').count();
+        (out_newlines + case_newlines + 1) as u32
+    }
+
+    pub fn offset_to_line_col(&self, offset: usize) -> (u32, u32) {
+        if self.line_starts.is_empty() {
+            return (0, 0);
+        }
+        match self.line_starts.binary_search(&offset) {
+            Ok(line) => ((line + 1) as u32, 1),
+            Err(line) => {
+                let line_idx = line.saturating_sub(1);
+                let col = offset.saturating_sub(self.line_starts[line_idx]) + 1;
+                ((line_idx + 1) as u32, col as u32)
+            }
+        }
+    }
+
+    pub fn record_source_location(&mut self, span: crate::Span) {
+        if span.start == 0 && span.end == 0 {
+            return;
+        }
+        if let Some(file) = &self.source_file_name {
+            let (cp_line, cp_col) = self.offset_to_line_col(span.start);
+            if cp_line > 0 {
+                let zig_line = self.current_generated_line();
+                if let Some(last) = self.source_map_entries.last() {
+                    if last.zig_line == zig_line && last.cp_line == cp_line {
+                        return;
+                    }
+                }
+                self.source_map_entries.push(crate::source_map::SourceMapEntry {
+                    zig_line,
+                    zig_col: 1,
+                    cp_file: file.clone(),
+                    cp_line,
+                    cp_col,
+                    symbol: self.current_func_name.clone(),
+                });
+            }
+        }
+    }
+
+    pub fn build_source_map(&self, cp_source: String, zig_target: String) -> crate::source_map::SourceMap {
+        let mut sm = crate::source_map::SourceMap::new(cp_source, zig_target);
+        sm.mappings = self.source_map_entries.clone();
+        sm
     }
 
     pub fn unwrap_optional_type(ty: &Type) -> Type {
@@ -1023,7 +1101,7 @@ impl Codegen {
             }
             match &arm.pat {
                 Pattern::Lit(_) | Pattern::Wildcard | Pattern::Range { .. } => {}
-                Pattern::Ident(id) if id.sym == "_" || id.sym == "else" => {}
+                Pattern::Ident(_) => {}
                 Pattern::Enum(ep)
                     if ep.fields.is_none()
                         && (ep.tuple_pats.is_none()
@@ -2863,7 +2941,10 @@ impl Codegen {
             self.writeln("fn cp_unwrap_err_val(v: anytype) CpUnwrapErrType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_cp_result(T)) return v.err; if (comptime @typeInfo(T) == .error_union) { if (v) |_| unreachable else |e| return e; } return v; }");
             self.writeln("fn cp_is_null_val(v: anytype) bool { const T = @TypeOf(v); if (comptime is_cp_result(T)) { if (v != .ok) return false; const OkT = @FieldType(T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok == null; } else { return false; } } else if (comptime @typeInfo(T) == .optional) { return v == null; } else { return false; } }");
             self.writeln("fn cp_convert_err(comptime TargetErr: type, err_val: anytype) TargetErr { const SrcType = @TypeOf(err_val); if (comptime SrcType == TargetErr) { return err_val; } else if (comptime TargetErr == Err or TargetErr == Error) { if (comptime @typeInfo(SrcType) == .@\"union\") { return Err{ .code = @intCast(@intFromEnum(std.meta.activeTag(err_val))), .msg = @tagName(err_val) }; } else if (comptime @typeInfo(SrcType) == .@\"enum\") { return Err{ .code = @intCast(@intFromEnum(err_val)), .msg = @tagName(err_val) }; } else if (comptime @typeInfo(SrcType) == .error_set) { return Err{ .code = 0, .msg = @errorName(err_val) }; } else if (comptime @typeInfo(SrcType) == .@\"struct\") { var c: i32 = 0; var m: []const u8 = \"\"; if (comptime @hasField(SrcType, \"code\")) { c = @as(i32, @intCast(err_val.code)); } if (comptime @hasField(SrcType, \"msg\")) { m = to_string_slice(err_val.msg); } else if (comptime @hasField(SrcType, \"message\")) { m = to_string_slice(err_val.message); } else if (comptime @hasDecl(SrcType, \"message\")) { m = to_string_slice(err_val.message()); } else { m = @typeName(SrcType); } return Err.init(c, m); } else if (comptime @typeInfo(SrcType) == .pointer and @typeInfo(@typeInfo(SrcType).pointer.child) == .@\"struct\") { const Child = @typeInfo(SrcType).pointer.child; var c: i32 = 0; var m: []const u8 = \"\"; if (comptime @hasField(Child, \"code\")) { c = @as(i32, @intCast(err_val.code)); } if (comptime @hasField(Child, \"msg\")) { m = to_string_slice(err_val.msg); } else if (comptime @hasField(Child, \"message\")) { m = to_string_slice(err_val.message); } else if (comptime @hasDecl(Child, \"message\")) { m = to_string_slice(err_val.message()); } else { m = @typeName(Child); } return Err.init(c, m).with_cause(err_val); } else { return Err{ .code = -1, .msg = \"error\" }; } } else if (comptime @typeInfo(TargetErr) == .pointer and @typeInfo(SrcType) != .pointer) { return @ptrCast(@constCast(&err_val)); } else if (comptime @typeInfo(SrcType) == .pointer and @typeInfo(TargetErr) != .pointer and @typeInfo(SrcType).pointer.child == TargetErr) { return err_val.*; } else if (comptime @typeInfo(TargetErr) == .@\"union\" and @hasDecl(TargetErr, \"__from\")) { return TargetErr.__from(err_val); } else if (comptime @hasDecl(TargetErr, \"from\")) { return TargetErr.from(err_val); } else { return err_val; } }");
-            self.writeln("fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@\"enum\") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime T == Err or T == Error or (@typeInfo(T) == .@\"struct\" and @hasField(T, \"msg\"))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@\"union\") { return std.meta.activeTag(val) == tag; } else { return false; } }");
+        }
+
+        if features.needs_result_error {
+            self.writeln("fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@\"enum\") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), \"Err\") and T == @field(@This(), \"Err\")) or (@hasDecl(@This(), \"Error\") and T == @field(@This(), \"Error\")) or (@typeInfo(T) == .@\"struct\" and @hasField(T, \"msg\")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@\"union\") { return std.meta.activeTag(val) == tag; } else { return false; } }");
         }
 
         if features.needs_not {
@@ -3133,13 +3214,18 @@ impl Codegen {
                 self.generate_enum(e);
             }
             if let ModuleItem::Decl(Decl::ErrorSet(es)) = item {
+                let union_suffix = if es.unions.is_empty() {
+                    String::new()
+                } else {
+                    format!(" || {}", es.unions.join(" || "))
+                };
                 self.writeln(&format!("pub const {} = error{{", es.ident.sym));
                 self.indent();
                 for v in &es.variants {
                     self.writeln(&format!("{},", v.sym));
                 }
                 self.dedent();
-                self.writeln("};\n");
+                self.writeln(&format!("}}{};\n", union_suffix));
             }
         }
         // Emit synthesized AnonSet and Union error sets
@@ -3548,10 +3634,22 @@ impl Codegen {
                 line.push(',');
                 self.writeln(&line);
             }
-            self.writeln("pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }");
-            self.writeln("pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }");
-            self.writeln("pub fn fromName(s: []const u8) ?@This() { return get(s); }");
-            self.writeln("pub fn name(self: @This()) []const u8 { return @tagName(self); }");
+            let has_get = e.methods.iter().any(|m| m.ident.sym == "get") || e.extra_zig.iter().any(|z| z.contains("fn get("));
+            let has_has = e.methods.iter().any(|m| m.ident.sym == "has") || e.extra_zig.iter().any(|z| z.contains("fn has("));
+            let has_from_name = e.methods.iter().any(|m| m.ident.sym == "fromName") || e.extra_zig.iter().any(|z| z.contains("fn fromName("));
+            let has_name = e.methods.iter().any(|m| m.ident.sym == "name") || e.extra_zig.iter().any(|z| z.contains("fn name("));
+            if !has_get {
+                self.writeln("pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }");
+            }
+            if !has_has {
+                self.writeln("pub fn has(s: []const u8) bool { return std.meta.stringToEnum(@This(), s) != null; }");
+            }
+            if !has_from_name {
+                self.writeln("pub fn fromName(s: []const u8) ?@This() { return get(s); }");
+            }
+            if !has_name {
+                self.writeln("pub fn name(self: @This()) []const u8 { return @tagName(self); }");
+            }
             if !e.methods.is_empty() {
                 for m in &e.methods {
                     self.generate_function_decorated(m, Some(&e.ident.sym));
@@ -3619,8 +3717,12 @@ impl Codegen {
             self.dedent();
             self.writeln("}");
         }
-        self.writeln("pub fn has(s: []const u8) bool { if (comptime @typeInfo(@This()).@\"union\".tag_type) |TagType| { return std.meta.stringToEnum(TagType, s) != null; } return false; }");
-        self.writeln("pub fn name(self: @This()) []const u8 { return @tagName(self); }");
+        if !e.methods.iter().any(|m| m.ident.sym == "has") && !e.extra_zig.iter().any(|z| z.contains("fn has(")) {
+            self.writeln("pub fn has(s: []const u8) bool { if (comptime @typeInfo(@This()).@\"union\".tag_type) |TagType| { return std.meta.stringToEnum(TagType, s) != null; } return false; }");
+        }
+        if !e.methods.iter().any(|m| m.ident.sym == "name") && !e.extra_zig.iter().any(|z| z.contains("fn name(")) {
+            self.writeln("pub fn name(self: @This()) []const u8 { return @tagName(self); }");
+        }
         if !e.methods.is_empty() {
             for m in &e.methods {
                 self.generate_function_decorated(m, Some(&e.ident.sym));
@@ -7046,6 +7148,11 @@ impl Codegen {
                             format!("{} =>", base)
                         }
                     }
+                    Pattern::Ident(id) if id.sym != "_" && id.sym != "else" => {
+                        has_else = true;
+                        bound_ident = Some(id.sym.clone());
+                        format!("else => |{}|", id.sym)
+                    }
                     other => {
                         let s = Self::format_simple_pat(other, &mut has_else);
                         format!("{} =>", s)
@@ -7866,8 +7973,19 @@ impl Codegen {
                     } else {
                         c.clone()
                     };
-                    let ptr_type = if is_val && self.current_receiver_mode == ReceiverMode::ReadOnly
-                    {
+                    let ptr_type = if let Some(first) = func.params.first().filter(|p| p.ident.sym == "this" || p.ident.sym == "_") {
+                        if matches!(&first.ty, Type::BorrowType { is_mut: false, .. }) {
+                            format!("*const {}", type_name)
+                        } else if matches!(&first.ty, Type::BorrowType { is_mut: true, .. } | Type::RawPtr { .. }) {
+                            format!("*{}", type_name)
+                        } else if is_val && self.current_receiver_mode == ReceiverMode::ReadOnly {
+                            type_name
+                        } else if self.current_receiver_mode == ReceiverMode::ReadOnly {
+                            format!("*const {}", type_name)
+                        } else {
+                            format!("*{}", type_name)
+                        }
+                    } else if is_val && self.current_receiver_mode == ReceiverMode::ReadOnly {
                         type_name
                     } else if self.current_receiver_mode == ReceiverMode::ReadOnly {
                         format!("*const {}", type_name)
@@ -7986,6 +8104,8 @@ impl Codegen {
             } else {
                 ""
             };
+            self.current_func_name = Some(func.ident.sym.clone());
+            self.record_source_location(func.span);
             writeln!(
                 self.output,
                 "\n{}{}{}fn {}({}) {}{} {{",
@@ -8323,6 +8443,7 @@ impl Codegen {
 
     fn generate_stmt(&mut self, stmt: &Stmt) {
         self.current_stmt_idx += 1;
+        self.record_source_location(stmt.span());
         match stmt {
             Stmt::Var(var) => {
                 if let Some(init) = &var.init {
@@ -8435,16 +8556,18 @@ impl Codegen {
                             if expr_code == "undefined" && !self.is_lib_mode {
                                 self.uninitialized_vars.insert(ident.sym.clone());
                             }
+                            let is_const = var.kind == crate::ast::VarDeclKind::Const
+                                || matches!(init, Expr::Builtin(b) if b.name == "@typeOf" || b.name == "@typeInfo" || b.name == "@TypeOf" || b.name == "@TypeInfo")
+                                || matches!(init, Expr::Call(c) if matches!(&*c.callee, Expr::Ident(id) if id.sym == "@typeOf" || id.sym == "@TypeOf" || id.sym == "@typeInfo" || id.sym == "@TypeInfo"));
                             let lhs = if self.is_state_machine {
                                 format!("ctx.{}", ident.sym)
                             } else {
                                 let keyword = if var.is_threadlocal {
                                     "threadlocal var"
+                                } else if is_const {
+                                    "const"
                                 } else {
-                                    match var.kind {
-                                        crate::ast::VarDeclKind::Const => "const",
-                                        _ => "var",
-                                    }
+                                    "var"
                                 };
                                 let ty_annot = if expr_code == "undefined" {
                                     if let Some(t) = &var.ty {
@@ -8559,7 +8682,9 @@ impl Codegen {
                                 ));
                                 self.write_to_case(&format!("defer if (!__{0}_moved) {{ const T = @TypeOf({0}); if (@typeInfo(T) == .pointer) {{ const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@\"struct\" and @hasDecl(Child, \"release\")) {{ const RType = @typeInfo(@TypeOf(Child.release)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _ = {0}.release() catch {{}}; }} else {{ {0}.release(); }} }} }} else if (@typeInfo(T) == .@\"struct\" and @hasDecl(T, \"release\")) {{ var _drop_val = {0}; _drop_val.release(); }} }};", ident.sym));
                             } else if !self.is_state_machine {
-                                self.write_to_case(&format!("_ = &{};", ident.sym));
+                                if !is_const {
+                                    self.write_to_case(&format!("_ = &{};", ident.sym));
+                                }
                             }
                             if let Expr::Ident(id) = init {
                                 // Only move if `id` is an owned local pointer, Box<dyn Trait>, or `move` parameter (not a borrow)
@@ -10396,6 +10521,7 @@ impl Codegen {
                     || i.sym == "false"
                     || i.sym == "null"
                     || i.sym.starts_with('@')
+                    || i.sym.starts_with('[')
                     || i.sym.starts_with("__pipe_")
                     || i.sym.ends_with("_Context")
                     || self.is_comptime
@@ -10810,6 +10936,8 @@ impl Codegen {
                             BinaryOp::WrappingAdd => "+%",
                             BinaryOp::WrappingSub => "-%",
                             BinaryOp::WrappingMul => "*%",
+                            BinaryOp::SaturatingAdd => "+|",
+                            BinaryOp::SaturatingSub => "-|",
                             _ => "",
                         };
                         format!("({} {} {})", l, op, r)
@@ -12335,7 +12463,7 @@ impl Codegen {
                             code
                         } else {
                             let ec = self.generate_expr(e);
-                            if ec == "unreachable" || ec.starts_with("@panic") || ec.starts_with("@compileError") {
+                            if ec == "unreachable" || ec.starts_with("@panic") || ec.starts_with("@compileError") || ec.starts_with("break") || ec.starts_with("return") || ec.starts_with("continue") {
                                 format!("{};", ec)
                             } else if let Some(ty_str) = &target_payload_ty {
                                 format!("break :{} @as({}, {});", blk_label, ty_str, ec)
@@ -12992,7 +13120,7 @@ impl Codegen {
             }
             Expr::Member(member) => {
                 if let Expr::Ident(id) = &*member.obj {
-                    if id.sym == "err" || id.sym == "error" {
+                    if id.sym == "error" && member.prop.sym.chars().next().map_or(false, |c| c.is_ascii_uppercase()) {
                         return format!("error.{}", member.prop.sym);
                     }
                     if id.sym == "Math" {
@@ -13631,6 +13759,17 @@ impl Codegen {
                 lambda_name
             }
             Expr::Object(fields) => {
+                if !fields.is_empty() && fields.iter().all(|f| f.key.is_none() && !f.is_spread) {
+                    let mut s = String::from(".{ ");
+                    for (idx, f) in fields.iter().enumerate() {
+                        s.push_str(&self.generate_expr(&f.val));
+                        if idx + 1 < fields.len() {
+                            s.push_str(", ");
+                        }
+                    }
+                    s.push_str(" }");
+                    return s;
+                }
                 let mut prop_map: Vec<(String, String)> = Vec::new();
                 for field in fields {
                     if field.is_spread {
@@ -13917,6 +14056,8 @@ impl Codegen {
                                     "cp_cast_int({}, @intFromEnum({}))",
                                     target_zig_ty, inner_code
                                 )
+                            } else if inner_code.starts_with("@intCast(") {
+                                format!("@as({}, {})", target_zig_ty, inner_code)
                             } else {
                                 format!(
                                     "(if (comptime @typeInfo(@TypeOf({0})) == .@\"enum\") cp_cast_int({1}, @intFromEnum({0})) else cp_cast_int({1}, {0}))",
@@ -15450,6 +15591,9 @@ impl Codegen {
                 if ident.sym == "cstring" {
                     return "[:0]const u8".to_string();
                 }
+                if ident.sym.starts_with('[') {
+                    return ident.sym.clone();
+                }
                 let is_custom_int = (ident.sym.starts_with('u') || ident.sym.starts_with('i'))
                     && ident.sym.len() > 1
                     && ident.sym[1..].chars().all(|c| c.is_ascii_digit());
@@ -15651,6 +15795,13 @@ impl Codegen {
             Type::SentinelPtr(inner, val) => {
                 let base = self.map_raw_ptr_base(inner);
                 format!("[*:{val}]{}", base)
+            }
+            Type::SentinelSlice(inner, val) => {
+                if let Some(s) = val.strip_suffix(":const") {
+                    format!("[:{s}]const {}", self.map_type(inner))
+                } else {
+                    format!("[:{val}]{}", self.map_type(inner))
+                }
             }
             Type::CStr => "[*:0]const u8".to_string(),
             Type::CFn(params, ret) => {

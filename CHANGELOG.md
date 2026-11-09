@@ -2402,6 +2402,36 @@
 - [`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md):
   - 记录生产级别核心设计哲学、八大支柱体系演进技术指标与 P0/P1/P2 三阶段推进规划。
 
+---
+
+## 2026-11-09 (P0 第一项完成：源码行号指示、Source Map 伴随生成与堆栈反解工具 cpc/cap demangle)
+
+### 新增文件 (Added)
+- [`cpc/src/source_map.rs`](file:///data/dev/cp/cpc/src/source_map.rs) / [`cpc_dev/src/source_map.rs`](file:///data/dev/cp/cpc_dev/src/source_map.rs):
+  - 实现标准 `SourceMap` 与 `SourceMapEntry` 数据结构及其 JSON 序列化/反序列化；
+  - 实现二分查找/最近邻区间定位算法 `lookup(zig_line)`；
+  - 实现工业级堆栈反解引擎 `demangle_stack_trace`，自动解析 Zig 堆栈日志并还原为原生 `.cp` 文件名、行号与列号，并输出上下文代码切片与指针 `^`。
+- [`cap/test/test_source_map_demangle.cp`](file:///data/dev/cp/cap/test/test_source_map_demangle.cp):
+  - 新增 Source Map 行号映射与堆栈精准反解端到端回归验证测试用例。
+
+### 修改文件 (Modified)
+- [`cpc/src/lib.rs`](file:///data/dev/cp/cpc/src/lib.rs) / [`cpc_dev/src/lib.rs`](file:///data/dev/cp/cpc_dev/src/lib.rs):
+  - 导出 `pub mod source_map;`。
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs) / [`cpc_dev/src/ast.rs`](file:///data/dev/cp/cpc_dev/src/ast.rs):
+  - 为 `Expr` 和 `Stmt` 全体变体实装 `span(&self) -> Span` 源码范围提取方法。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs) / [`cpc_dev/src/codegen.rs`](file:///data/dev/cp/cpc_dev/src/codegen.rs):
+  - 新增源码文件与代码行号索引机制（`init_source`、`current_generated_line`、`offset_to_line_col`）；
+  - 在 `generate_stmt` 与 `generate_function_decorated` 中织入 `record_source_location` 映射捕获点；
+  - 转译输出时自动伴随生成 `<target>.zig.map`。
+- [`cpc/src/main.rs`](file:///data/dev/cp/cpc/src/main.rs) / [`cpc_dev/src/main.rs`](file:///data/dev/cp/cpc_dev/src/main.rs):
+  - 增加 CLI 子命令 `cpc demangle [trace_file] [-m map_file]`；
+  - 接入编译输出时的伴随 `.zig.map` 写入。
+- [`cap/src/main.zig`](file:///data/dev/cp/cap/src/main.zig):
+  - 在 `cap` 工具链中接入 `cap demangle [trace_file]` 命令路由，直通调用编译器堆栈反解器；
+  - 更新 `usage()` 帮助信息。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 更新第 20.1 节与 20.9 节，标记第一项任务完成并记录技术规范与反解示例。
+
 
 
 

@@ -4067,4 +4067,62 @@ Bun.js 1.3.14 的 CP 语言重构进入关键攻坚阶段：全仓库 206 个 `.
 ### 3. 文档与路线图落地
 已将上述八大领域及 P0（近期待攻坚）、P1（中期生产化）、P2（生态成熟期）三阶段里程碑完整写入官方设计规范手册 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md) 第二十章。
 
+---
+
+## 2026-11-09: P0 第一项攻坚完成 —— 源码行号指示、Source Map 伴随生成与堆栈反解器 (`cpc demangle` / `cap demangle`)
+
+### 1. 任务背景与核心诉求
+作为生产化演进路线图 P0 的第一项任务，需要解决 `cpc` 转译为 Zig 语言编译运行后，崩溃日志（Backtrace）只报告中间态 `.zig` 文件行号与内部函数名，开发者与 AI Agent 无法直观定位 `.cp` 源码真实报错行号与代码现场的工程痛点。
+
+### 2. 技术选型与突破
+1. **Zig 预处理指令限制与突破**：
+   - 尝试直接向生成的 Zig 文件中注入 C 风格 `#line <line> "<file>"` 时，Zig 语法解析器明确报错：`expected statement, found 'invalid token'`。确认 Zig 语言完全不支持源码级预处理器指令；
+   - 深入分析 Zig 堆栈回溯机制：Zig 编译生成的 ELF 二进制完全依赖 LLVM 生成的 DWARF `.debug_line` 指向中间态 `.zig` 源码。
+   - **最优工程架构确立**：采用类似 Web/TypeScript 的工业级标准方案：
+     - 前端 AST 级精准 Span-to-Line-Column 映射与缓存；
+     - 转译输出时自动伴随生成 JSON 格式的标准 Source Map（`<path>.zig.map`）；
+     - 研发统一的 CLI 堆栈反解工具（`cpc demangle` / `cap demangle`），自动抓取 Zig 堆栈并利用 Source Map 快速还原为 `.cp` 源码位置并高亮代码切片与指针 `^`。
+
+2. **AST 全变体 Span 支持 (`ast.rs`)**：
+   - 为 `Expr`（40+ 种变体）和 `Stmt`（16 种变体）实装统一的 `span(&self) -> Span` 方法，从 AST 根节点到叶节点完整保留源码字符偏移区间。
+
+3. **代码生成器行号与列号索引与映射捕获 (`codegen.rs`)**：
+   - 在 `Codegen` 中引入 `source_file_name`、`source_code` 与换行符索引 `line_starts: Vec<usize>`；
+   - 增加快速二分查找算法 `offset_to_line_col`，将 AST 字节偏移瞬时转换为 1-based 的 (line, col)；
+   - 在每个语句（`generate_stmt`）和函数签名（`generate_function_decorated`）生成点织入 `record_source_location`，记录生成的当前 Zig 行号与对应的 CP 源码行号、列号及当前符号名；
+   - 在文件落盘时，自动构建并伴随写入标准 `<path>.zig.map`。
+
+4. **高性能堆栈反解器 (`source_map.rs` & `cpc demangle`)**：
+   - 构建 `SourceMap` 容器结构与 `lookup(zig_line: u32) -> Option<&SourceMapEntry>` 最近邻区间匹配算法；
+   - 实现 `demangle_stack_trace(trace: &str, explicit_map: Option<&SourceMap>)`：
+     - 正则/分段解析形如 `/path/to/foo.zig:123:45: 0x... in bar (exe)` 的堆栈行；
+     - 自动定位并加载对应模块的 `.zig.map` 文件；
+     - 提取并重构为原生 `/path/to/foo.cp:12:34: 0x... in bar (foo)`；
+     - 自动读取 `.cp` 原生源文件，在堆栈行下方高亮打印出错源码切片及 `^` 指针指示。
+
+5. **`cap` 工具链一键联动 (`cap/src/main.zig`)**：
+   - 在 `cap` CLI 路由器中新增 `cap demangle [trace_file]` 命令，无需显式调用底层编译器，开发者或测试框架一键将崩溃日志重构输出。
+
+### 3. 测试与验证
+1. **沙盒与回归测试**：
+   - 编写回归测试用例 `cap/test/test_source_map_demangle.cp`，覆盖深层函数调用链、多级语句结构与断言；
+   - 使用 `cap test cap/test/test_source_map_demangle.cp` 执行测试：1/1 PASS (100%)；
+   - 自动生成了 `.cap/zig/cap/test/test_source_map_demangle.zig.map`，映射项准确无误。
+2. **端到端反解验证**：
+   - 输入崩溃堆栈样本并运行 `cap demangle trace.txt`：
+     ```text
+     /data/dev/cp/cap/test/test_source_map_demangle.cp:4:5: 0x1034f72 in trigger_crash (test_source_map_demangle)
+         panic("explicit crash test");
+         ^
+     /data/dev/cp/cap/test/test_source_map_demangle.cp:10:26: 0x103513a in test_0 (test_source_map_demangle)
+         let res = trigger_crash();
+                                  ^
+     ```
+   - 堆栈行号、函数名与代码切片指示 100% 精确对应原生 `.cp` 源码！
+3. **全量回归保障**：
+   - 原有所有语法与系统特性测试（`test_type_conv_functional.cp`, `test_comptime_map.cp`, `test_tagged_union_refcount.cp`, `test_inline_asm.cp`, `test_tls_global.cp`, `test_enum_cast_smart.cp`）全绿通过，`cargo test` 单元测试全部通过。
+4. **主干双缓冲同步与正式 Release 交付**：
+   - 比对 `cpc_dev/src` 与 `cpc/src` 确认 0 差异；
+   - 构建正式 Release 版 `cpc` 并部署至 `/data/dev/cp/cap/bin/cpc`。
+
 

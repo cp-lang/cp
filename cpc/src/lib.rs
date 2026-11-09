@@ -8,6 +8,7 @@ pub mod lsp;
 pub mod parser;
 pub mod resolver;
 pub mod sema;
+pub mod source_map;
 
 pub use lexer::{Lexer, Token};
 

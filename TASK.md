@@ -3920,6 +3920,6 @@ Bun AGY 在检查转换好的 .cp 文件时，请优先使用 --json 参数：
 祝 Bun.js 核心库迁移极速、安全、顺畅！
 
 topt99755@gmail.com 138h 30m
-walteryu99@gmail.com 3h 49m
-walteryu66@gmail.com 2h 31m
+walteryu99@gmail.com 3h 49m v
+walteryu66@gmail.com 2h 31m x
 walteryu33@gmail.com 3h 9m

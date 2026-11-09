@@ -62,6 +62,14 @@ enum Commands {
         #[arg(short = 'o', long)]
         output: Option<PathBuf>,
     },
+    /// Demangle runtime stack trace using source maps
+    Demangle {
+        /// Optional stack trace file (reads stdin if omitted)
+        input: Option<PathBuf>,
+        /// Optional explicit source map path
+        #[arg(short = 'm', long)]
+        map: Option<PathBuf>,
+    },
     /// Run Language Server Protocol daemon
     Lsp,
 }
@@ -102,16 +110,21 @@ fn compile_file(
         )
     })?;
 
+    let code_str = fs::read_to_string(input).ok();
     let zig_code_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut codegen = Codegen::new();
         codegen.is_beam_mode = beam;
         codegen.is_lib_mode = lib;
         codegen.source_dir = input.parent().map(|p| p.to_path_buf());
-        codegen.generate_module(&module)
+        if let Some(ref c) = code_str {
+            codegen.init_source(Some(&input.display().to_string()), Some(c));
+        }
+        let code = codegen.generate_module(&module);
+        (code, codegen.source_map_entries)
     }));
 
-    let zig_code = match zig_code_result {
-        Ok(code) => code,
+    let (zig_code, map_entries) = match zig_code_result {
+        Ok(res) => res,
         Err(err) => {
             let msg = if let Some(s) = err.downcast_ref::<&str>() {
                 s.to_string()
@@ -131,12 +144,22 @@ fn compile_file(
 
     match output {
         Some(path) => {
+            let mut need_write = true;
             if let Ok(existing) = fs::read_to_string(path) {
                 if existing == zig_code {
-                    return Ok(());
+                    need_write = false;
                 }
             }
-            fs::write(path, zig_code)?;
+            if need_write {
+                fs::write(path, &zig_code)?;
+            }
+            let mut sm = cpc::source_map::SourceMap::new(
+                input.display().to_string(),
+                path.display().to_string(),
+            );
+            sm.mappings = map_entries;
+            let map_path = path.with_extension("zig.map");
+            let _ = fs::write(map_path, sm.to_json());
         }
         None => println!("{}", zig_code),
     }
@@ -231,6 +254,23 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                     fs::create_dir_all(parent)?;
                 }
                 fs::write(&out_path, type_defs)?;
+            }
+            Commands::Demangle { input, map } => {
+                let trace = match input {
+                    Some(p) => fs::read_to_string(&p)?,
+                    None => {
+                        use std::io::Read;
+                        let mut buf = String::new();
+                        std::io::stdin().read_to_string(&mut buf)?;
+                        buf
+                    }
+                };
+                let sm = match map {
+                    Some(m_path) => Some(cpc::source_map::SourceMap::from_file(&m_path)?),
+                    None => None,
+                };
+                let demangled = cpc::source_map::demangle_stack_trace(&trace, sm.as_ref());
+                print!("{}", demangled);
             }
             Commands::Lsp => {
                 let rt = tokio::runtime::Runtime::new()?;

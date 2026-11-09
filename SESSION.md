@@ -6729,6 +6729,61 @@ git 提交
    - `git add CHANGELOG.md DEVLOG.md SESSION.md cp_ref.md`
    - `git commit -m "docs: establish production-grade roadmap in cp_ref.md"`
 
+---
+
+### 用户指令 (User Prompts)
+完成第一项
+
+### 执行汇报 (Execution Report)
+1. **任务目标**：
+   - 攻坚路线图 P0 第一项：《源码行号指示与 DWARF 调试映射注入（#line / Source Maps）》；
+   - 彻底解决生产环境崩溃报错仅显示中间态 Zig 文件行号、无法精确定位原生 `.cp` 源码报错行与代码现场的工程痛点。
+2. **核心技术选型与实现突破**：
+   - **Zig 预处理指令局限诊断**：证实 Zig 语言原生不提供 C 语言风格 `#line` 预处理语法（直接写 `#line` 会报语法错误），底层 ELF 回溯依赖 LLVM 产生的 DWARF 映射；
+   - **工业级 Source Map 与堆栈反解架构落地**：
+     - ① **AST 全变体 Span 支持 (`ast.rs`)**：实装 `Expr::span(&self)` 与 `Stmt::span(&self)`，全量保留源码起止偏移；
+     - ② **行号与列号索引与映射捕获 (`codegen.rs`)**：在 `Codegen` 中引入源码行起始偏移表 `line_starts` 与二分换算 `offset_to_line_col`，在函数签名与语句生成点织入 `record_source_location`，记录 (zig_line -> cp_file, cp_line, cp_col)；
+     - ③ **伴随 Source Map JSON 生成 (`source_map.rs` & `codegen.rs`)**：转译输出 `<file>.zig` 时自动伴随生成 `<file>.zig.map` 标准映射文件；
+     - ④ **工业级堆栈反解器 (`cpc demangle` / `cap demangle`)**：输入运行时崩溃 Backtrace 日志，自动加载关联的 `.zig.map`，瞬间重构为原生 `.cp` 文件名、行号与列号，并自动提取 `.cp` 源码上下文切片高亮显示 `^` 指针；
+     - ⑤ **`cap` 工具链一键联动 (`cap/src/main.zig`)**：新增 `cap demangle [trace_file]`，支持文件输入与管道标准输入无缝接入。
+3. **验证与回归测试**：
+   - 编写回归测试用例 `cap/test/test_source_map_demangle.cp`，`cap test` 验证 1/1 PASS (100%)；
+   - 自动生成了 `.cap/zig/cap/test/test_source_map_demangle.zig.map`，映射项准确无误；
+   - 运行 `cap demangle` 验证崩溃日志反解：成功输出精确的原生 `.cp:4:5` 和 `.cp:10:26` 源码行号、符号与代码行预览指针；
+   - 全量回归测试（类型转换、编译期 map、Tagged Union 引用计数、内联汇编、TLS、枚举强转等）全绿通过，`cargo test` 单元测试全部通过。
+4. **主干并线与正式构建**：
+   - 双缓冲隔离检验：`git diff --no-index cpc/src cpc_dev/src` 确认 0 差异；
+   - 构建正式 Release 版 `cargo build --release --manifest-path cpc/Cargo.toml` 并更新至 `cap/bin/cpc`；
+   - 使用正式版二进制重跑测试，100% 通过。
+5. **四线演进文档全量同步更新**：
+   - `cp_ref.md`：第 20.1 节更新技术规范与反解示例，第 20.9 节标记第一项完成；
+   - `DEVLOG.md`：详细记录架构设计与落地日志；
+   - `CHANGELOG.md`：记录相关文件变更；
+   - `SESSION.md`：记录指令与执行报告。
+
+---
+
+### 用户指令 (User Prompts)
+git 提交
+
+### 执行汇报 (Execution Report)
+1. **Git 一次性原子暂存与提交范围**：
+   - `cpc/src/source_map.rs`：新增标准 Source Map 生成与堆栈反解器（`SourceMap`, `demangle_stack_trace`）；
+   - `cpc/src/ast.rs`：全变体 `Expr::span(&self)` 与 `Stmt::span(&self)` 源码区间追踪；
+   - `cpc/src/codegen.rs`：语句/函数签名生成位置索引记录与自动伴随 `.zig.map` 生成；
+   - `cpc/src/lib.rs` / `cpc/src/main.rs`：新增 `cpc demangle` CLI 命令；
+   - `cap/src/main.zig`：新增 `cap demangle [trace_file]` CLI 命令集成；
+   - `cap/test/test_source_map_demangle.cp`：新增端到端源码映射与堆栈反解回归测试；
+   - `cpc/src/{lexer.rs, parser.rs, sema.rs}`：兼容并合并 Bun 迁移项目并发更新（饱和算术 `+|`, `-|`、哨兵切片 `[:0]` 等）；
+   - `cp_ref.md`：第 20.1 节与 20.9 节更新技术规范，标记第一项任务完成；
+   - `CHANGELOG.md` / `DEVLOG.md` / `SESSION.md`：记录完整的变更日志与研发过程；
+   - `TASK.md`：同步工作区标记更新。
+2. **执行唯一原子提交**：
+   - `git add CHANGELOG.md DEVLOG.md SESSION.md TASK.md cap/src/main.zig cap/test/test_source_map_demangle.cp cp_ref.md cpc/src/ast.rs cpc/src/codegen.rs cpc/src/lexer.rs cpc/src/lib.rs cpc/src/main.rs cpc/src/parser.rs cpc/src/sema.rs cpc/src/source_map.rs`
+   - `git commit -m "feat(cpc): source map generation and stack trace demangler (P0 item 1)"`
+
+
+
 
 
 

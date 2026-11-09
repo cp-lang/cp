@@ -157,6 +157,8 @@ pub struct ErrorSetDecl {
     pub span: Span,
     pub ident: Ident,
     pub variants: Vec<Ident>,
+    #[serde(default)]
+    pub unions: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -574,6 +576,8 @@ pub enum BinaryOp {
     WrappingAdd,
     WrappingSub,
     WrappingMul,
+    SaturatingAdd,
+    SaturatingSub,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -935,6 +939,87 @@ pub fn transform_pipeline_rhs(right: &Expr, pipe_var: &str) -> Expr {
                 Expr::Question(Box::new(transformed_inner))
             }
             _ => right.clone(),
+        }
+    }
+}
+
+impl Expr {
+    pub fn span(&self) -> Span {
+        match self {
+            Expr::Ident(id) => id.span,
+            Expr::Lit(_) => Span { start: 0, end: 0 },
+            Expr::Bin(b) => b.span,
+            Expr::Call(c) => c.span,
+            Expr::New(n) => n.span,
+            Expr::Member(m) => m.span,
+            Expr::OptMember(m) => m.span,
+            Expr::OptCall(c) => c.span,
+            Expr::Slice(s) => s.span,
+            Expr::Match(m) => m.span,
+            Expr::Spawn(s) => s.span,
+            Expr::Receive(_) => Span { start: 0, end: 0 },
+            Expr::Zig(z) => z.span,
+            Expr::Question(q) => q.span(),
+            Expr::QuestionFallback { expr, .. } => expr.span(),
+            Expr::NullCoalesce { left, .. } => left.span(),
+            Expr::Catch { expr, .. } => expr.span(),
+            Expr::ErrWrap(e) => e.span(),
+            Expr::BoxNew(b) => b.span(),
+            Expr::Downcast { obj, .. } => obj.span(),
+            Expr::Array(items) => items.first().map(|i| i.span()).unwrap_or(Span { start: 0, end: 0 }),
+            Expr::ArrayRepeat(val, _) => val.span(),
+            Expr::Object(_) => Span { start: 0, end: 0 },
+            Expr::Dict(_) => Span { start: 0, end: 0 },
+            Expr::Index { obj, .. } => obj.span(),
+            Expr::Arrow(a) => a.span,
+            Expr::EnumInit(e) => e.span,
+            Expr::Template(t) => t.span,
+            Expr::Await(a) => a.span(),
+            Expr::Move(m) => m.span(),
+            Expr::Borrow(b, _) => b.span(),
+            Expr::Builtin(b) => b.span,
+            Expr::ReflectType { span, .. } => *span,
+            Expr::ReflectOf { span, .. } => *span,
+            Expr::PipePlaceholder(span) => *span,
+            Expr::Range { span, .. } => *span,
+            Expr::Cast { span, .. } => *span,
+            Expr::Deref(d) => d.span(),
+            Expr::Unwrap(u) => u.span(),
+            Expr::BitNot(b) => b.span(),
+            Expr::Unsafe(b) => b.span,
+            Expr::Comptime(b) => b.span,
+            Expr::If { span, .. } => *span,
+            Expr::Continue(span) => *span,
+            Expr::Break(span, _) => *span,
+            Expr::LabeledBreak(span, _, _) => *span,
+            Expr::LabeledBlock { block, .. } => block.span,
+            Expr::Return(span, _) => *span,
+            Expr::InlineAsm { span, .. } => *span,
+            Expr::ComptimeMap { span, .. } => *span,
+        }
+    }
+}
+
+impl Stmt {
+    pub fn span(&self) -> Span {
+        match self {
+            Stmt::Expr(e) => e.span(),
+            Stmt::Var(v) => v.span,
+            Stmt::Return(r) => r.span,
+            Stmt::Break => Span { start: 0, end: 0 },
+            Stmt::Continue => Span { start: 0, end: 0 },
+            Stmt::If(i) => i.span,
+            Stmt::While(w) => w.span,
+            Stmt::For(f) => f.span,
+            Stmt::Match(m) => m.span,
+            Stmt::Spawn(s) => s.span,
+            Stmt::Defer(d) => d.span(),
+            Stmt::ErrDefer(d) => d.span(),
+            Stmt::ComptimeBlock(b) => b.span,
+            Stmt::Block(b) => b.span,
+            Stmt::UnsafeBlock(b) => b.span,
+            Stmt::TryCatch { span, .. } => *span,
+            Stmt::Func(f) => f.span,
         }
     }
 }
