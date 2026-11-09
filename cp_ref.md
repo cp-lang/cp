@@ -8357,11 +8357,11 @@ flowchart TD
 
 ##### 2. 演进技术规范
 1. **泛型 Trait 静态契约拦截 (Generic Bounds)**：
-   - 在 CP 前端直接校验泛型约束（如 `fn sort<T: Comparable>(arr: &mut [T])`），类型不满足时立即给出精准自愈建议，彻底避免底层晦涩报错。
+   - 在 CP 前端直接校验泛型约束（如 `fn sort<T: Comparable>(*arr: [T])`），类型不满足时立即给出精准自愈建议，彻底避免底层晦涩报错。
 2. **多字段分离借用 (Disjoint Field Borrowing) 【已实装】**：
    - **细粒度字段借用跟踪**：借用检查器将结构体借用追踪升级为 `(root_var, field_path)` 元组，不再一刀切锁定整个根对象；
-   - **正交字段无冲突并发借用**：只要两个借用指向同一对象的不同字段（如 `&mut data.q_len` 与 `&mut data.active_timer`，或多级嵌套 `&mut ctx.header.content_len` 与 `&mut ctx.body_read`），编译器判定为 Disjoint 独立访问，允许同时存在多个可变借用；
-   - **整体验证与前缀覆盖保护**：借用整个结构体（`&mut data`）依然与任何活动中的子字段借用保持互斥；借用父字段（`&mut data.header`）依然与子字段（`&mut data.header.len`）保持互斥；同一字段的可变借用仍然严格保证排他性；
+   - **正交字段无冲突并发借用**：只要两个借用指向同一对象的不同字段（如 `*data.q_len` 与 `*data.active_timer`，或多级嵌套 `*ctx.header.content_len` 与 `*ctx.body_read`），编译器判定为 Disjoint 独立访问，允许同时存在多个可变借用；
+   - **整体验证与前缀覆盖保护**：借用整个结构体（`*data`）依然与任何活动中的子字段借用保持互斥；借用父字段（`*data.header`）依然与子字段（`*data.header.len`）保持互斥；同一字段的可变借用仍然严格保证排他性；
    - **示例**：
      ```typescript
      class InternalLoopData {
@@ -8371,10 +8371,10 @@ flowchart TD
      }
 
      fn process_loop(*data: InternalLoopData): void {
-         // 多字段分离借用：无需打散结构体即可自由借用不同字段
-         let q = &mut data.q_len;
-         let t = &mut data.active_timer;
-         let b = &mut data.max_batch;
+         // 多字段分离借用：无需打散结构体即可自由借用不同字段（CP 可变借用前缀为 *）
+         let q = *data.q_len;
+         let t = *data.active_timer;
+         let b = *data.max_batch;
 
          q.* = 42;
          t.* = 100;

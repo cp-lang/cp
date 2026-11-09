@@ -6938,6 +6938,47 @@ git 提交
      - `cp_ref.md` / `CHANGELOG.md` / `DEVLOG.md` / `SESSION.md` / `GEMINI.md`：同步更新技术规范与演进轨迹；
 2. **一次性暂存与提交**：执行 `git add .` 与 `git commit -m "feat(cpc): implement Scoped Arena, Disjoint Field Borrowing, Two-Pass Resolution, and sync Bun agy labeled loops"`。
 
+---
+
+### 用户指令 (User Prompts)
+1. let q = &mut data.q_len; 你写错了, cp 没有 mut, 可变借用为 let q = *data.q_len;
+2. 跨模块循环引用解耦, 这个功能是以前就有,还是本次新增,需要通知 bun agy吗?
+3. 具名循环标签与跨层跳出, 这个功能是本次实现的吗? 我记得之前就实现了标签功能, 是本次完善了吗?
+4. 支持在文件顶层书写 comptime { ... } 执行架构与常量静态检查；cp 好像没有 comptime {}, 有 @comptime 宏, 有 !{} 编译期执行代码块, 你这段话是指什么? 增加了新的关键字吗?
+5. 支持 inline for (i of 0..4) { ... } 编译期强制内联展开；inline 是本次新增的关键字吗? 是使用 inline 还是 @inline ?
+6. C-FFI 内存布局容器：已原生打通 packed union、extern union、packed enum、extern enum 的完整语法与 AST 解析，对接系统级原始数据包更直接。具体是指什么, 打通这些, cp 增加了新的 宏还是关键字, cp 语法有什么变化?
+7. 函数返回类型简化：支持 fn handle_event() void { ... }（冒号可省略）。你是指省略 : void 吗? 这个功能cp 不是很早就实现了吗? 并在 cp_ref.md中有明确说明.
+
+### 执行汇报 (Execution Report)
+1. **纯正 CP 借用语法彻底纠错与规范对齐**：
+   - 严肃承认并纠正文档汇报中的 Rust 习惯笔误：CP 语言彻底废除了 `mut` 关键字（`error[E0104]`）；可变借用正统前缀为 `*`（`let q = *data.q_len;`），不可变借用为 `&`，解引用为后缀 `.*`；
+   - 全面修复 `cp_ref.md` 第 20.5 节、`DEVLOG.md` 以及 `CHANGELOG.md` 中残留的 `&mut`，保持与真实通过测试的代码用例 100% 严谨一致。
+2. **7 项编译器机制与语法裁定逐一明确**：
+   - **Q1 (可变借用)**：已全量校正为 `let q = *data.q_len;`；
+   - **Q2 (跨模块循环引用)**：确为 CP 早已内建的核心机制（`resolver.rs` 路径去重防死锁 + `sema.rs` Multi-pass 声明预收集 + Zig 结构体无序声明），本次是建立测试夹具与回归防线（100% 验证无死锁），无需作为“新功能”通知 Bun agy，仅作为“已知稳定特性提示”即可；
+   - **Q3 (具名循环标签)**：此前仅支持表达式级具名块（`label: { break :label val; }`）；本次 Bun agy 在 `parser.rs` 与 `ast.rs` 中为 `while`/`for` 语句打通了循环标签与 `continue :label` / `break :label`，属于在原有基础上的循环控制流完善；
+   - **Q4 (`comptime { ... }`)**：CP 未增加任何新保留关键字！正统编译期语法为 `!{ ... }` 与 `@comptime`。Bun agy 仅在解析器中通过上下文标识符前瞻匹配（Contextual Lookahead）支持 `comptime { ... }` 作为 Zig 源码迁移兼容别名；
+   - **Q5 (`inline for`)**：未增加保留字（`inline` 非 Token 关键字）；CP 正统展开为 `@for`，`inline for` 是上下文修饰语法，便利 Zig 代码迁移；
+   - **Q6 (C-FFI 复合布局)**：未增加任何新关键字或宏；纯粹在解析底层 C/Zig 布局时放宽了检查条件，允许将 `packed` / `extern` 修饰词作用于 `union` 与 `enum`，消除了网络数据包结构体解析报错；
+   - **Q7 (函数返回类型省略冒号)**：CP 早就原生支持完全省略 `: void`；Bun agy 本次改动实际是“在显式指定返回类型时允许省略冒号 `:`”（例如 `fn foo() i32`，兼容 Zig 风格函数签名）。
+3. **重构交付给 Bun agy 的极简权威说明**：
+   - 清晰划分“CP 正式原生特性”与“Zig 迁移兼容特性”，提供 100% 纯正合规的 CP 示例代码。
+
+---
+
+### 用户指令 (User Prompts)
+git 提交
+
+### 执行汇报 (Execution Report)
+1. **提交范围核对与四线文档对齐**：
+   - **`cp_ref.md`**：彻底清除第 20.5 节文档中残留的 Rust 风格 `&mut` 笔误，全量对齐为标准 CP 可变借用前缀 `*` 语法（`let q = *data.q_len;`，`fn process_loop(*data: InternalLoopData)`）；
+   - **`DEVLOG.md`**：记录 7 项编译器机制与语法裁定分析，纠正借用描述；
+   - **`CHANGELOG.md`**：记录规范文档修正轨迹与 7 项机制裁定；
+   - **`SESSION.md`**：完整记录本次问答推演、纠偏细节与 Git 提交闭环；
+2. **一次性暂存与提交**：执行 `git add .` 与 `git commit -m "docs: correct mutable borrow syntax in cp_ref and clarify Bun agy compatibility rules"`，保持工作区绝对整洁。
+
+
+
 
 
 

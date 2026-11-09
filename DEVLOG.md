@@ -4246,7 +4246,7 @@ Scoped Arena 引入局部作用域内存池：
 
 #### 2.1 痛点根因与问题复现
 - 在高性能网络协议栈（`HTTPContext`）与事件循环（`InternalLoopData`）中，同一个结构体实例通常包含多个独立的控制流与数据字段（如 `q_len`、`active_timer`、`max_batch`、`header`、`body_read`）；
-- 旧版借用检查器将借用来源粗粒度记录为变量标识符名字符串（`var_borrow_sources: HashMap<String, (Vec<String>, bool)>`）。当开发者对 `data.q_len` 产生可变借用 `let q = &mut data.q_len` 时，系统将整个 `data` 实例标记为已借出，后续执行 `let t = &mut data.active_timer` 时，直接触发 `error[E0202]: Borrow conflict on 'data': cannot borrow as mutable while 'q' is still active`，迫使开发者打散结构体，极度不便。
+- 旧版借用检查器将借用来源粗粒度记录为变量标识符名字符串（`var_borrow_sources: HashMap<String, (Vec<String>, bool)>`）。当开发者对 `data.q_len` 产生可变借用 `let q = *data.q_len` 时，系统将整个 `data` 实例标记为已借出，后续执行 `let t = *data.active_timer` 时，直接触发 `error[E0202]: Borrow conflict on 'data': cannot borrow as mutable while 'q' is still active`，迫使开发者打散结构体，极度不便。
 
 #### 2.2 解决方案与编译器核心修改 (`cpc_dev/src/codegen.rs`)
 1. **借用元组升级与字段路径提取**：
@@ -4276,6 +4276,29 @@ Scoped Arena 引入局部作用域内存池：
 3. 负向测试验证：对相同字段 `d.val` 重复可变借用，精准拦截并输出自愈提示：
    `error[E0202]: Borrow conflict on 'd.val': cannot borrow as mutable while 'a' is still active`；
 4. 全量运行现有核心测试（`test_scoped_arena.cp`、`test_circular_modules.cp`），全部 **100% PASS**。
+
+---
+
+## 2026-11-10: 编译器特性规范复核、语法准确性校正与 Bun agy 协同说明重构
+
+### 1. 语法准确性严格校正 (CP 借用语法对齐)
+- **纠错项**：文档与汇报中误用了 Rust 风格的 `let q = &mut data.q_len;`。
+- **CP 原生权威规范确认**：
+  - CP 语言彻底废除了 `mut` 关键字（`error[E0104]`）；
+  - `let` 变量默认可变，`const` 为不可变；
+  - 只读借用前缀为 `&`，可变借用前缀为 `*`（例如 `let q = *data.q_len;`，函数参数 `*data: LoopData`）；
+  - 解引用统一为后缀 `.*`（例如 `q.* = 42;`）；
+  - 全面纠正 `cp_ref.md` 第 20.5 节中残留的 `&mut` 语法，使其与实际通过测试的纯正 CP 源码保持 100% 严谨一致。
+
+### 2. 7 项编译器行为与语法机制深度裁定
+1. **可变借用语法**：CP 正统可变借用为 `*expr`，绝无 `mut` / `&mut`；
+2. **跨模块循环引用解耦**：CP 早期即已内建（`resolver.rs` 规范路径去重 + `sema.rs` Multi-pass 声明预扫描 + Zig 结构体无序声明），本次为测试防线建立与端到端回归验证（100% PASS）；
+3. **具名循环标签**：CP 此前仅支持表达式级具名块（`label: { break :label val; }`）；本次 Bun agy 完善了循环语句级标签（`label: while` / `label: for`）以及跨层跳转（`break :label` / `continue :label`）；
+4. **顶层 `comptime { ... }`**：CP 正统语法为 `!{ ... }` 与 `@comptime`；Bun agy 未新增关键字，仅通过上下文标识符前瞻匹配支持 `comptime { ... }` 作为 Zig 源码迁移兼容别名；
+5. **`inline for`**：CP 正统为 `@for`；`inline` 非新增保留关键字，仅作为紧随 `for` 的上下文修饰词，便利 Zig 源码直译；
+6. **C-FFI 复合布局支持**：未新增任何关键字或宏；在 C/Zig 布局表达式解析中放宽了对 `packed union`、`extern union`、`packed enum`、`extern enum` 的前置合法性检查，消除系统结构体报文的解析报错；
+7. **函数显式返回类型省略冒号**：CP 原生规范早已支持省略 `: void`（如 `fn foo() { ... }`）；Bun agy 本次新增的是允许在显式指定任何返回类型时省略冒号（Zig 签名风格兼容：`fn foo() i32`）。
+
 
 
 

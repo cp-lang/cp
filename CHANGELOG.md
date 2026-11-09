@@ -2515,7 +2515,11 @@
   - 适配 `check_active_borrows_before_move`、`for` 循环容器借用、函数返回值悬垂引用检查等所有调用点。
 - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
   - 第 20.4 节补充《跨模块循环引用解耦 (Two-Pass Resolution)》架构机制、规范定义与示例代码；
-  - 第 20.5 节补充《多字段分离借用 (Disjoint Field Borrowing)》正交字段借用规则、互斥防线与示例代码。
+  - 第 20.5 节补充《多字段分离借用 (Disjoint Field Borrowing)》正交字段借用规则、互斥防线与示例代码；
+  - 纠正第 20.5 节文档中残留的 Rust 风格 `&mut` 笔误，全面统一为标准 CP 可变借用前缀 `*` 语法（`*data.q_len`）。
+- [`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md):
+  - 纠正开发日志中 `&mut` 语法表述为标准 `*` 借用；
+  - 深度复核并记录 7 项语法机制裁定分析（可变借用语法、Two-pass 历史架构、具名循环标签增强、顶层 comptime 上下文兼容、inline for 上下文修饰词、C-FFI 复合布局放行、显式返回类型省略冒号）。
 
 
 
