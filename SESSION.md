@@ -6782,6 +6782,89 @@ git 提交
    - `git add CHANGELOG.md DEVLOG.md SESSION.md TASK.md cap/src/main.zig cap/test/test_source_map_demangle.cp cp_ref.md cpc/src/ast.rs cpc/src/codegen.rs cpc/src/lexer.rs cpc/src/lib.rs cpc/src/main.rs cpc/src/parser.rs cpc/src/sema.rs cpc/src/source_map.rs`
    - `git commit -m "feat(cpc): source map generation and stack trace demangler (P0 item 1)"`
 
+---
+
+### 用户指令 (User Prompts)
+继续 第二项, 注意同步更新 cp_ref.md 设计规范, 包括示例等
+继续你的工作
+
+### 执行汇报 (Execution Report)
+1. **任务达成目标**：
+   - 完成路线图 P0 第二项核心攻坚：“泛型 Trait 前端契约校验（Generic Bounds，消除底层 Zig 报错泄露）”；
+   - 彻底解决泛型类型不匹配时报错下渗泄露到底层 Zig 编译器、生成数十行晦涩虚表报错的痛点，升级为 Rustc / TS 级前端三段式 AI 可自愈诊断（`error[E0301]`）。
+2. **核心技术选型与实现突破**：
+   - **AST 与 Parser 全面升级**：
+     - 重构 `GenericParam::Type { ident, bounds }`，支持多重约束 `<T: TraitA + TraitB>` 与常量泛型 `<const N: usize>`；
+     - 扩展 `Function` 与 `MethodSig`，为全局函数、类方法与 Trait 签名赋予原生泛型参数定义支持；
+     - 实装 `parse_generic_params`，精准接入 `parse_function`、`parse_class` 与 `parse_trait`。
+   - **Sema 前端契约校验与三段式可自愈诊断**：
+     - `error[E0301]: type '{type}' does not satisfy trait bound '{trait}'`：在函数调用（`Expr::Call`）与实例化（`Expr::New`）处前端强力拦截，附带清晰原因、引导与代码修复建议；
+     - `error[E0301]: class '{class}' does not satisfy trait '{trait}'`：在类定义阶段静态拦截缺失未实现方法的类，直接给出方法原型代码模板建议；
+     - 维护作用域活跃泛型约束表 `active_generic_bounds`，支持泛型参数嵌套传递校验；
+     - 建立内置 Trait（`Comparable`, `ToString`, `Clone`, `Hash`, `Debug`）对原生标量类型（`i32`, `f64`, `bool`, `string` 等）及约定方法的自愈规则；
+     - 在 `infer_type` 中实装基于实参的泛型返回值动态推导与单态化。
+   - **Codegen 零开销单态化与 CPS 状态机上下文自愈**：
+     - 泛型参数映射为 Zig 原生 `anytype`，返回值映射为 `@TypeOf(param)`，享受编译期零成本抽象与极端优化；
+     - 在 `infer_cp_type_with_mock` 中根据调用实参准确推导具体泛型返回类型，使 CPS 状态机上下文结构体（如 `_Context`）中的局部变量拥有确切的单态化类型（生成 `m1: i32` 而非 `m1: T`）。
+3. **验证与回归测试**：
+   - 编写长期回归测试用例 `cap/test/test_generic_trait_bounds.cp`（覆盖 Trait 契约 `<T: Printable>`、内置标量约束 `<T: Comparable>`、类多态与单态化）；
+   - 执行测试 `./cap/bin/cap cap/test/test_generic_trait_bounds.cp`，输出 100% 正确；
+   - 验证负向测试：类缺失方法及传递不满足约束类型均被前端精准拦截，生成标准 `E0301` 诊断，底层 Zig 0 报错泄露；
+   - 确认主干双缓冲无差异后，使用 `cargo install --path cpc --root cap --force` 构建并部署正式 Release 版本至 `/data/dev/cp/cap/bin/cpc`，切换回正式二进制验证测试通过。
+4. **四线演进文档全量同步更新**：
+   - `cp_ref.md`：第 7.4 节详细扩写泛型 Trait 前端契约校验技术规范与自愈诊断代码示例，第 20.9 节将第二项标记为 `【已完成】`；
+   - `DEVLOG.md`：详细记录技术架构、原理、测试与实施细节；
+   - `CHANGELOG.md`：记录相关文件变更轨迹；
+   - `SESSION.md`：完整追加本轮指令与执行结果汇报。
+
+---
+
+### 用户指令 (User Prompts)
+1. 合并到 cpc 正式版, 合并时注意， bun agy 可能更新了 cpc，需仔细审核 bun的修改是否合理、必要、完备、无缺陷、无隐患。相关内容更新到 cp_ref.md 规范文档。
+继续你的工作, 加快进度
+
+### 执行汇报 (Execution Report)
+1. **Bun agy 并发更新项系统性审核**：
+   - **合理性与必要性**：
+     - ① 多重元注解合并 (`f.meta.extend(meta)`)：解决函数声明前有修饰注解、doc 注释时被内部注解覆盖丢失的缺陷，完全合理且必须；
+     - ② 定长切片元素类型推导修复 (`parser.rs`)：修复未知元素类型回退为 `u8` 的严重隐性 bug，支持 `bool` 与任意类型递归推导；
+     - ③ 原生可选链解包生成 (`codegen.rs`)：使用 `({}).?.{}` 原生语法替代 `cp_opt_unwrap` 垫片，消除无用死代码；
+     - ④ 负整数十六进制安全输出 (`codegen.rs`)：避免位掩码与负整数在 Zig 端符号溢出报错；
+     - ⑤ 字节切片向不可变字符串自然流转 (`sema.rs`)：支持 `[u8]` / `[u8; N]` 向 `string` 零开销自然流转；
+     - ⑥ 任意位宽整型支持 (`sema.rs`)：支持 `u1`~`u128` 与 `i1`~`i128` 位级标量；
+     - ⑦ 枚举富成员方法推导 (`sema.rs`)：支持枚举内自定义成员方法与语义类型推导；
+   - **完备性与无隐患验证**：
+     - 词法解析检查点（Checkpoint）完整保存与恢复，无状态污染与词法流泄露；
+     - 任意位宽匹配限定为整型前缀且全数字，无命名冲突；
+     - 全量双缓冲同步：`cpc_dev/src` 与 `cpc/src` 4 个核心文件比对确认为 0 差异。
+2. **规范文档同步 (`cp_ref.md`)**：
+   - 第 3.1 节补充任意位宽整型说明；
+   - 第 3.3.1 节补充字节切片向不可变字符串自然流转协定；
+   - 第 5.16 节新增枚举富成员方法规范与示例；
+   - 第 5.17 节新增 C-FFI 底层内存布局与联合体规范（`packed struct`, `extern struct`, `packed union`, `extern union`, `opaque struct`）。
+3. **正式版 Release 构建与验证**：
+   - 构建正式 Release 版二进制并安装至 `/data/dev/cp/cap/bin/cpc`；
+   - 运行端到端测试用例 `./cap/bin/cap cap/test/test_generic_trait_bounds.cp` 验证 100% PASS。
+
+---
+
+### 用户指令 (User Prompts)
+git 提交版本
+
+### 执行汇报 (Execution Report)
+1. **Git 一次性原子暂存与提交范围**：
+   - `cpc/src/{ast.rs, parser.rs, sema.rs, codegen.rs}`：泛型 Trait 前端契约校验（Generic Bounds）与三段式 AI 可自愈诊断（`error[E0301]`），消除底层 Zig 报错泄露；
+   - `cap/test/test_generic_trait_bounds.cp`：新增泛型 Trait 约束端到端全链路回归验证测试；
+   - `cpc/src/{parser.rs, sema.rs, codegen.rs}`：深度审核并融合 Bun agy 提交的元注解合并、切片类型推导、原生可选链解包与任意位宽整型；
+   - `cp_ref.md`：更新第 7.4 节（泛型 Trait 契约）、第 3.1 节（任意位宽整型）、第 3.3.1 节（切片流转）、第 5.16 节（枚举成员方法）、第 5.17 节（C-FFI 内存布局）与第 20.9 节路线图；
+   - `CHANGELOG.md` / `DEVLOG.md` / `SESSION.md` / `TASK.md` / `GEMINI.md`：记录完整的审计分析、架构设计与测试演进轨迹。
+2. **执行唯一原子提交**：
+   - `git add CHANGELOG.md DEVLOG.md GEMINI.md SESSION.md TASK.md cap/test/test_generic_trait_bounds.cp cp_ref.md cpc/src/ast.rs cpc/src/codegen.rs cpc/src/parser.rs cpc/src/sema.rs`
+   - `git commit -m "feat(cpc): generic trait bounds checking (P0 item 2) and merge bun agy cpc updates"`
+
+
+
+
 
 
 

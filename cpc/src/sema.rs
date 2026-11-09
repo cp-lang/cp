@@ -87,12 +87,97 @@ pub enum SemaError {
     },
     #[error("Compile Error: Mutation via unbounded raw pointer or cstr '{0}' requires 'unsafe' block at {1:?}")]
     UnboundedRawPointerMutation(String, Span),
+    #[error("Compile Error: Type '{type_name}' does not satisfy trait bound '{trait_name}' at {span:?}")]
+    TraitBoundNotSatisfied {
+        type_name: String,
+        trait_name: String,
+        missing_method: Option<String>,
+        span: Span,
+    },
+    #[error("Compile Error: Class '{class_name}' does not satisfy trait '{trait_name}' at {span:?}")]
+    TraitMissingMethod {
+        class_name: String,
+        trait_name: String,
+        missing_method: String,
+        span: Span,
+    },
 }
 
 impl SemaError {
     pub fn to_diagnostic(&self, known_symbols: &[String]) -> Diagnostic {
         match self {
             SemaError::Diagnostic(d) => d.clone(),
+            SemaError::TraitBoundNotSatisfied {
+                type_name,
+                trait_name,
+                missing_method,
+                span,
+            } => {
+                let (cause, help, suggestion) = if let Some(method) = missing_method {
+                    (
+                        format!(
+                            "type '{}' is missing required method '{}' from trait '{}'.",
+                            type_name, method, trait_name
+                        ),
+                        format!(
+                            "trait '{}' requires method '{}'. Ensure '{}' implements it.",
+                            trait_name, method, type_name
+                        ),
+                        format!(
+                            "implement method '{}' on '{}':\n  fn {}(...): void {{ ... }}",
+                            method, type_name, method
+                        ),
+                    )
+                } else {
+                    (
+                        format!(
+                            "type '{}' does not satisfy trait bound '{}'.",
+                            type_name, trait_name
+                        ),
+                        format!(
+                            "generic parameter requires a type satisfying trait '{}'.",
+                            trait_name
+                        ),
+                        format!(
+                            "pass an argument whose type satisfies trait '{}'.",
+                            trait_name
+                        ),
+                    )
+                };
+                Diagnostic::new(
+                    "E0301",
+                    format!(
+                        "type '{}' does not satisfy trait bound '{}'",
+                        type_name, trait_name
+                    ),
+                )
+                .with_span(*span)
+                .with_cause(cause)
+                .with_help(help)
+                .with_suggestion(suggestion)
+            }
+            SemaError::TraitMissingMethod {
+                class_name,
+                trait_name,
+                missing_method,
+                span,
+            } => Diagnostic::new(
+                "E0301",
+                format!("class '{}' does not satisfy trait '{}'", class_name, trait_name),
+            )
+            .with_span(*span)
+            .with_cause(format!(
+                "class '{}' declares 'implements {}' but is missing required method '{}'.",
+                class_name, trait_name, missing_method
+            ))
+            .with_help(format!(
+                "all methods declared in trait '{}' without default implementations must be implemented.",
+                trait_name
+            ))
+            .with_suggestion(format!(
+                "implement method '{}' in class '{}':\n  fn {}(...): void {{ ... }}",
+                missing_method, class_name, missing_method
+            )),
             SemaError::CannotMutateReadOnlyBorrow(name, span) => Diagnostic::new(
                 "E0201",
                 format!("cannot mutate read-only borrow '{}'", name),
@@ -360,6 +445,10 @@ pub enum SymbolKind {
 pub struct Analyzer {
     scopes: Vec<HashMap<String, SymbolKind>>,
     classes: HashMap<String, Class>,
+    pub traits: HashMap<String, TraitDecl>,
+    pub impls: Vec<ImplDecl>,
+    pub functions: HashMap<String, Function>,
+    pub active_generic_bounds: HashMap<String, Vec<String>>,
     current_fn_is_async: bool,
     current_fn_is_unsafe: bool,
     unsafe_depth: usize,
@@ -471,6 +560,10 @@ impl Analyzer {
         Self {
             scopes: vec![HashMap::new()],
             classes: HashMap::new(),
+            traits: HashMap::new(),
+            impls: Vec::new(),
+            functions: HashMap::new(),
+            active_generic_bounds: HashMap::new(),
             current_fn_is_async: false,
             current_fn_is_unsafe: false,
             unsafe_depth: 0,
@@ -808,6 +901,7 @@ impl Analyzer {
                         .insert(c.ident.span, SymbolKind::Class(c.clone()));
                 }
                 ModuleItem::Decl(Decl::Trait(t)) => {
+                    self.traits.insert(t.ident.sym.clone(), t.clone());
                     self.define(
                         t.ident.sym.clone(),
                         SymbolKind::Trait(t.clone()),
@@ -815,6 +909,9 @@ impl Analyzer {
                     )?;
                     self.symbol_map
                         .insert(t.ident.span, SymbolKind::Trait(t.clone()));
+                }
+                ModuleItem::Decl(Decl::Impl(i)) => {
+                    self.impls.push(i.clone());
                 }
                 ModuleItem::Decl(Decl::Enum(e)) => {
                     self.define(
@@ -826,6 +923,7 @@ impl Analyzer {
                         .insert(e.ident.span, SymbolKind::Enum(e.clone()));
                 }
                 ModuleItem::Decl(Decl::Func(f)) => {
+                    self.functions.insert(f.ident.sym.clone(), f.clone());
                     let params = f.params.iter().map(|p| p.ty.clone()).collect();
                     let kind = SymbolKind::Func {
                         params,
@@ -1044,6 +1142,7 @@ impl Analyzer {
                                 span: mock_span,
                                 sym: "init".to_string(),
                             },
+                            generic_params: vec![],
                             params: init_params,
                             return_type: Some(Type::Void),
                             body: BlockStmt {
@@ -1118,6 +1217,7 @@ impl Analyzer {
                 span: mock_span,
                 sym: "clone".to_string(),
             },
+            generic_params: vec![],
             params: vec![],
             return_type: Some(Type::Ref(cls.ident.clone())),
             body: BlockStmt {
@@ -1188,6 +1288,7 @@ impl Analyzer {
                 span: mock_span,
                 sym: "eq".to_string(),
             },
+            generic_params: vec![],
             params: vec![Param {
                 span: mock_span,
                 ident: Ident {
@@ -1281,6 +1382,7 @@ impl Analyzer {
                 span: mock_span,
                 sym: "cmp".to_string(),
             },
+            generic_params: vec![],
             params: vec![Param {
                 span: mock_span,
                 ident: Ident {
@@ -1331,6 +1433,7 @@ impl Analyzer {
                 span: mock_span,
                 sym: "hash".to_string(),
             },
+            generic_params: vec![],
             params: vec![],
             return_type: Some(Type::USize),
             body: BlockStmt {
@@ -1435,6 +1538,7 @@ impl Analyzer {
                 span: mock_span,
                 sym: "toJson".to_string(),
             },
+            generic_params: vec![],
             params: vec![],
             return_type: Some(Type::String),
             body: BlockStmt {
@@ -1469,6 +1573,7 @@ impl Analyzer {
                 span: mock_span,
                 sym: "getTableName".to_string(),
             },
+            generic_params: vec![],
             params: vec![],
             return_type: Some(Type::String),
             body: BlockStmt {
@@ -1528,6 +1633,7 @@ impl Analyzer {
                 span: mock_span,
                 sym: "toString".to_string(),
             },
+            generic_params: vec![],
             params: vec![],
             return_type: Some(Type::String),
             body: BlockStmt {
@@ -1568,6 +1674,7 @@ impl Analyzer {
                 span: mock_span,
                 sym: method_name,
             },
+            generic_params: vec![],
             params: vec![],
             return_type: Some(Type::String),
             body: BlockStmt {
@@ -2072,11 +2179,46 @@ impl Analyzer {
                 self.define(f.ident.sym.clone(), kind.clone(), f.ident.span)?;
                 self.symbol_map.insert(f.ident.span, kind);
 
+                let mut added_generic_bounds = Vec::new();
+                for gp in &f.generic_params {
+                    if let GenericParam::Type { ident, bounds } = gp {
+                        self.active_generic_bounds.insert(
+                            ident.sym.clone(),
+                            bounds.iter().map(|b| b.sym.clone()).collect(),
+                        );
+                        added_generic_bounds.push(ident.sym.clone());
+                    }
+                }
+
                 let old_async = self.current_fn_is_async;
                 let old_unsafe = self.current_fn_is_unsafe;
                 self.current_fn_is_async = f.is_async;
                 self.current_fn_is_unsafe = f.is_unsafe;
                 self.enter_scope();
+                for gp in &f.generic_params {
+                    match gp {
+                        GenericParam::Type { ident: id, .. } => {
+                            let _ = self.define(
+                                id.sym.clone(),
+                                SymbolKind::Var {
+                                    ty: Type::Ref(id.clone()),
+                                    kind: VarDeclKind::Const,
+                                },
+                                id.span,
+                            );
+                        }
+                        GenericParam::Const { ident, ty } => {
+                            let _ = self.define(
+                                ident.sym.clone(),
+                                SymbolKind::Var {
+                                    ty: ty.clone(),
+                                    kind: VarDeclKind::Const,
+                                },
+                                ident.span,
+                            );
+                        }
+                    }
+                }
                 for p in &f.params {
                     let p_kind = SymbolKind::Var {
                         ty: p.ty.clone(),
@@ -2089,6 +2231,9 @@ impl Analyzer {
                     self.analyze_stmt(stmt)?;
                 }
                 self.exit_scope();
+                for k in added_generic_bounds {
+                    self.active_generic_bounds.remove(&k);
+                }
                 self.current_fn_is_async = old_async;
                 self.current_fn_is_unsafe = old_unsafe;
             }
@@ -2104,9 +2249,55 @@ impl Analyzer {
                         self.validate_meta_items(&p.meta, "param")?;
                     }
                 }
+                // Verify that all declared 'implements' traits have their required methods implemented
+                for imp in &c.implements {
+                    if let Some(tr) = self.traits.get(&imp.sym) {
+                        for tm in &tr.methods {
+                            if tm.default_body.is_none() {
+                                let has_m = c.methods.iter().any(|m| m.ident.sym == tm.ident.sym)
+                                    || self.impls.iter().any(|i| {
+                                        i.trait_name.sym == imp.sym
+                                            && i.target_name.sym == c.ident.sym
+                                            && i.methods.iter().any(|m| m.ident.sym == tm.ident.sym)
+                                    });
+                                if !has_m {
+                                    return Err(SemaError::TraitMissingMethod {
+                                        class_name: c.ident.sym.clone(),
+                                        trait_name: imp.sym.clone(),
+                                        missing_method: tm.ident.sym.clone(),
+                                        span: c.ident.span,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let mut added_class_bounds = Vec::new();
+                for gp in &c.generic_params {
+                    if let GenericParam::Type { ident, bounds } = gp {
+                        self.active_generic_bounds.insert(
+                            ident.sym.clone(),
+                            bounds.iter().map(|b| b.sym.clone()).collect(),
+                        );
+                        added_class_bounds.push(ident.sym.clone());
+                    }
+                }
+
                 let old_class = self.current_class.clone();
                 self.current_class = Some(c.ident.sym.clone());
                 for m in &c.methods {
+                    let mut added_method_bounds = Vec::new();
+                    for gp in &m.generic_params {
+                        if let GenericParam::Type { ident, bounds } = gp {
+                            self.active_generic_bounds.insert(
+                                ident.sym.clone(),
+                                bounds.iter().map(|b| b.sym.clone()).collect(),
+                            );
+                            added_method_bounds.push(ident.sym.clone());
+                        }
+                    }
+
                     let old_async = self.current_fn_is_async;
                     let old_unsafe = self.current_fn_is_unsafe;
                     self.current_fn_is_async = m.is_async;
@@ -2114,7 +2305,31 @@ impl Analyzer {
                     self.enter_scope();
                     for gp in &c.generic_params {
                         match gp {
-                            GenericParam::Type(id) => {
+                            GenericParam::Type { ident: id, .. } => {
+                                let _ = self.define(
+                                    id.sym.clone(),
+                                    SymbolKind::Var {
+                                        ty: Type::Ref(id.clone()),
+                                        kind: VarDeclKind::Const,
+                                    },
+                                    id.span,
+                                );
+                            }
+                            GenericParam::Const { ident, ty } => {
+                                let _ = self.define(
+                                    ident.sym.clone(),
+                                    SymbolKind::Var {
+                                        ty: ty.clone(),
+                                        kind: VarDeclKind::Const,
+                                    },
+                                    ident.span,
+                                );
+                            }
+                        }
+                    }
+                    for gp in &m.generic_params {
+                        match gp {
+                            GenericParam::Type { ident: id, .. } => {
                                 let _ = self.define(
                                     id.sym.clone(),
                                     SymbolKind::Var {
@@ -2240,8 +2455,14 @@ impl Analyzer {
                     }
                     self.exit_scope();
                     self.exit_scope();
+                    for k in added_method_bounds {
+                        self.active_generic_bounds.remove(&k);
+                    }
                     self.current_fn_is_async = old_async;
                     self.current_fn_is_unsafe = old_unsafe;
+                }
+                for k in added_class_bounds {
+                    self.active_generic_bounds.remove(&k);
                 }
                 self.current_class = old_class;
             }
@@ -2952,6 +3173,71 @@ impl Analyzer {
                         }
                     }
                 }
+                // Generic trait bounds checking
+                if let Expr::Ident(id) = &*call.callee {
+                    if let Some(func) = self.functions.get(&id.sym).cloned() {
+                        if !func.generic_params.is_empty() {
+                            for gp in &func.generic_params {
+                                if let GenericParam::Type { ident: gp_id, bounds } = gp {
+                                    if !bounds.is_empty() {
+                                        for (idx, p) in func.params.iter().enumerate() {
+                                            let mut p_ty = &p.ty;
+                                            while let Type::BorrowType { inner, .. } = p_ty {
+                                                p_ty = inner;
+                                            }
+                                            if let Type::Ref(pid) = p_ty {
+                                                if pid.sym == gp_id.sym && idx < call.args.len() {
+                                                    if let Ok(arg_ty) = self.infer_type(&call.args[idx]) {
+                                                        for bound in bounds {
+                                                            self.check_trait_bound(&arg_ty, &bound.sym, call.args[idx].span())?;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if let Expr::Member(mem) = &*call.callee {
+                    if let Ok(obj_ty) = self.infer_type(&mem.obj) {
+                        let mut base_ty = &obj_ty;
+                        while let Type::BorrowType { inner, .. } = base_ty {
+                            base_ty = inner;
+                        }
+                        if let Type::Ref(cid) = base_ty {
+                            if let Some(cls) = self.classes.get(&cid.sym).cloned() {
+                                if let Some(m) = cls.methods.iter().find(|m| m.ident.sym == mem.prop.sym) {
+                                    if !m.generic_params.is_empty() {
+                                        for gp in &m.generic_params {
+                                            if let GenericParam::Type { ident: gp_id, bounds } = gp {
+                                                if !bounds.is_empty() {
+                                                    let method_params: Vec<&Param> = m.params.iter().filter(|p| p.ident.sym != "this" && p.ident.sym != "_" && p.ident.sym != "self").collect();
+                                                    for (idx, p) in method_params.iter().enumerate() {
+                                                        let mut p_ty = &p.ty;
+                                                        while let Type::BorrowType { inner, .. } = p_ty {
+                                                            p_ty = inner;
+                                                        }
+                                                        if let Type::Ref(pid) = p_ty {
+                                                            if pid.sym == gp_id.sym && idx < call.args.len() {
+                                                                if let Ok(arg_ty) = self.infer_type(&call.args[idx]) {
+                                                                    for bound in bounds {
+                                                                        self.check_trait_bound(&arg_ty, &bound.sym, call.args[idx].span())?;
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 self.analyze_expr(&call.callee)?;
                 for arg in &call.args {
                     self.analyze_expr(arg)?;
@@ -2959,12 +3245,38 @@ impl Analyzer {
             }
             Expr::New(call) => {
                 if let Expr::Ident(id) = &*call.callee {
-                    if let Some(cls) = self.classes.get(&id.sym) {
+                    if let Some(cls) = self.classes.get(&id.sym).cloned() {
                         if cls.is_static {
                             return Err(SemaError::CannotInstantiateStatic(
                                 id.sym.clone(),
                                 call.span,
                             ));
+                        }
+                        if !cls.generic_params.is_empty() {
+                            for gp in &cls.generic_params {
+                                if let GenericParam::Type { ident: gp_id, bounds } = gp {
+                                    if !bounds.is_empty() {
+                                        if let Some(init_m) = cls.methods.iter().find(|m| m.ident.sym == "init") {
+                                            let init_params: Vec<&Param> = init_m.params.iter().filter(|p| p.ident.sym != "this" && p.ident.sym != "_" && p.ident.sym != "self").collect();
+                                            for (idx, p) in init_params.iter().enumerate() {
+                                                let mut p_ty = &p.ty;
+                                                while let Type::BorrowType { inner, .. } = p_ty {
+                                                    p_ty = inner;
+                                                }
+                                                if let Type::Ref(pid) = p_ty {
+                                                    if pid.sym == gp_id.sym && idx < call.args.len() {
+                                                        if let Ok(arg_ty) = self.infer_type(&call.args[idx]) {
+                                                            for bound in bounds {
+                                                                self.check_trait_bound(&arg_ty, &bound.sym, call.args[idx].span())?;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -3853,6 +4165,152 @@ impl Analyzer {
         false
     }
 
+    fn is_builtin_trait(name: &str) -> bool {
+        matches!(name, "Comparable" | "ToString" | "Clone" | "Hash" | "Debug")
+    }
+
+    fn is_primitive_scalar(ty: &Type) -> bool {
+        matches!(
+            ty,
+            Type::U8
+                | Type::I8
+                | Type::U16
+                | Type::I16
+                | Type::I32
+                | Type::U32
+                | Type::I64
+                | Type::U64
+                | Type::I128
+                | Type::U128
+                | Type::USize
+                | Type::ISize
+                | Type::F32
+                | Type::F64
+                | Type::Bool
+                | Type::String
+        )
+    }
+
+    pub fn check_trait_bound(&self, ty: &Type, bound_name: &str, span: Span) -> SemaResult<()> {
+        if bound_name == "Any" {
+            return Ok(());
+        }
+
+        let mut actual_ty = ty;
+        while let Type::BorrowType { inner, .. } = actual_ty {
+            actual_ty = inner;
+        }
+
+        // 1. If actual_ty is a generic type parameter in the current scope with this bound
+        if let Type::Ref(id) = actual_ty {
+            if let Some(bounds) = self.active_generic_bounds.get(&id.sym) {
+                if bounds.iter().any(|b| b == bound_name) {
+                    return Ok(());
+                }
+            }
+        }
+
+        // 2. Built-in traits inherently satisfied by primitive scalar types
+        if Self::is_builtin_trait(bound_name) && Self::is_primitive_scalar(actual_ty) {
+            return Ok(());
+        }
+
+        // 3. For classes/structs (Type::Ref)
+        if let Type::Ref(id) = actual_ty {
+            if let Some(cls) = self.classes.get(&id.sym) {
+                // A. Explicit 'implements'
+                if cls.implements.iter().any(|i| i.sym == bound_name) {
+                    return Ok(());
+                }
+
+                // B. External 'impl Trait for Target'
+                if self
+                    .impls
+                    .iter()
+                    .any(|i| i.trait_name.sym == bound_name && i.target_name.sym == id.sym)
+                {
+                    return Ok(());
+                }
+
+                // C. Trait declared in code: check required methods
+                if let Some(tr) = self.traits.get(bound_name) {
+                    let mut missing = None;
+                    for tm in &tr.methods {
+                        if tm.default_body.is_none() {
+                            let has_m = cls.methods.iter().any(|m| m.ident.sym == tm.ident.sym)
+                                || self.impls.iter().any(|i| {
+                                    i.trait_name.sym == bound_name
+                                        && i.target_name.sym == id.sym
+                                        && i.methods.iter().any(|m| m.ident.sym == tm.ident.sym)
+                                });
+                            if !has_m {
+                                missing = Some(tm.ident.sym.clone());
+                                break;
+                            }
+                        }
+                    }
+                    if missing.is_none() {
+                        return Ok(());
+                    } else {
+                        return Err(SemaError::TraitBoundNotSatisfied {
+                            type_name: id.sym.clone(),
+                            trait_name: bound_name.to_string(),
+                            missing_method: missing,
+                            span,
+                        });
+                    }
+                }
+
+                // D. Built-in traits satisfied by method conventions on classes
+                match bound_name {
+                    "ToString"
+                        if cls
+                            .methods
+                            .iter()
+                            .any(|m| m.ident.sym == "toString" || m.ident.sym == "to_string") =>
+                    {
+                        return Ok(());
+                    }
+                    "Comparable"
+                        if cls
+                            .methods
+                            .iter()
+                            .any(|m| m.ident.sym == "compare" || m.ident.sym == "cmp") =>
+                    {
+                        return Ok(());
+                    }
+                    "Clone" if cls.methods.iter().any(|m| m.ident.sym == "clone") => {
+                        return Ok(());
+                    }
+                    "Hash" if cls.methods.iter().any(|m| m.ident.sym == "hash") => {
+                        return Ok(());
+                    }
+                    "Debug"
+                        if cls
+                            .methods
+                            .iter()
+                            .any(|m| m.ident.sym == "debug" || m.ident.sym == "format") =>
+                    {
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // 4. Any / Auto / Unknown
+        if matches!(actual_ty, Type::Any | Type::Auto | Type::Unknown) {
+            return Ok(());
+        }
+
+        Err(SemaError::TraitBoundNotSatisfied {
+            type_name: Self::type_repr(actual_ty),
+            trait_name: bound_name.to_string(),
+            missing_method: None,
+            span,
+        })
+    }
+
     pub fn resolve_type(&self, ty: &Type) -> Type {
         let mut curr = ty.clone();
         for _ in 0..16 {
@@ -4018,7 +4476,9 @@ impl Analyzer {
         }
         if matches!(target, Type::String)
             && (matches!(src, Type::CStr)
-                || matches!(src, Type::Ref(id) if id.sym == "cstring" || id.sym == "cstr"))
+                || matches!(src, Type::Ref(id) if id.sym == "cstring" || id.sym == "cstr")
+                || matches!(src, Type::Array(inner) if **inner == Type::U8)
+                || matches!(src, Type::FixedArray(inner, _) if **inner == Type::U8))
         {
             return true;
         }
@@ -4668,6 +5128,7 @@ impl Analyzer {
                     || ident.sym == "reflect"
                     || ident.sym == "unreachable"
                     || ident.sym.starts_with("c_")
+                    || ((ident.sym.starts_with('u') || ident.sym.starts_with('i')) && ident.sym.len() > 1 && ident.sym[1..].chars().all(|c| c.is_ascii_digit()))
                     || matches!(
                         ident.sym.as_str(),
                         "u8" | "i8"
@@ -4891,7 +5352,10 @@ impl Analyzer {
                                 return Ok(Type::Bool);
                             }
                         }
-                        if let Some(SymbolKind::Enum(_)) = self.resolve(&oid.sym) {
+                        if let Some(SymbolKind::Enum(e)) = self.resolve(&oid.sym) {
+                            if let Some(m) = e.methods.iter().find(|m| m.ident.sym == mem.prop.sym) {
+                                return Ok(m.return_type.clone().unwrap_or(Type::Void));
+                            }
                             if mem.prop.sym == "fromName" || mem.prop.sym == "fromString" || mem.prop.sym == "get" {
                                 return Ok(Type::Optional(Box::new(Type::Ref(oid.clone()))));
                             }
@@ -4913,8 +5377,28 @@ impl Analyzer {
                         callee_ty = target;
                     }
                 }
+                while let Type::RawPtr { inner, .. } | Type::BorrowType { inner, .. } = &callee_ty {
+                    callee_ty = *inner.clone();
+                }
                 match callee_ty {
-                    Type::Fn(_, ret) => Ok(*ret),
+                    Type::Fn(params, ret) => {
+                        if let Type::Ref(rid) = &*ret {
+                            for (idx, p) in params.iter().enumerate() {
+                                let mut p_ty = p;
+                                while let Type::BorrowType { inner, .. } = p_ty {
+                                    p_ty = inner;
+                                }
+                                if let Type::Ref(pid) = p_ty {
+                                    if pid.sym == rid.sym && idx < call.args.len() {
+                                        if let Ok(arg_ty) = self.infer_type(&call.args[idx]) {
+                                            return Ok(arg_ty);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Ok(*ret)
+                    }
                     Type::CFn(_, ret) => Ok(*ret),
                     Type::Any | Type::Auto => Ok(Type::Any),
                     _ => Err(SemaError::NotAFunction(call.span)),
@@ -5248,7 +5732,13 @@ impl Analyzer {
                     return Ok(Type::Fn(vec![], Box::new(Type::String)));
                 }
                 if let Expr::Ident(id) = &*mem.obj {
-                    if let Some(SymbolKind::Enum(_)) = self.resolve(&id.sym) {
+                    if let Some(SymbolKind::Enum(e)) = self.resolve(&id.sym) {
+                        if let Some(m) = e.methods.iter().find(|m| m.ident.sym == mem.prop.sym) {
+                            return Ok(Type::Fn(
+                                m.params.iter().map(|p| p.ty.clone()).collect(),
+                                Box::new(m.return_type.clone().unwrap_or(Type::Void)),
+                            ));
+                        }
                         return Ok(Type::Ref(id.clone()));
                     }
                 }

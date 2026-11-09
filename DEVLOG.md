@@ -4125,4 +4125,105 @@ Bun.js 1.3.14 的 CP 语言重构进入关键攻坚阶段：全仓库 206 个 `.
    - 比对 `cpc_dev/src` 与 `cpc/src` 确认 0 差异；
    - 构建正式 Release 版 `cpc` 并部署至 `/data/dev/cp/cap/bin/cpc`。
 
+---
+
+## 2026-11-09: 工业级生产化路线图 P0 第二项完成 —— 泛型 Trait 前端契约校验与 Generic Bounds (消除底层 Zig 报错泄露)
+
+### 1. 背景与工程目标
+- 在先前的 `cpc` 实现中，泛型函数与泛型类并未在前端（Rust AST/Sema 阶段）进行 Trait 契约的静态校验，而是直接交由 Zig 编译器后端的 `anytype` 推导与编译。
+- 一旦调用者传入不满足 Trait 接口约束的类型，或类声明 `implements Trait` 却缺失具体方法实现，错误将向下渗透并在转译生成的 Zig 状态机源码处爆发，产生长达 50 行包含虚表、对齐和内部展开标记的晦涩报错，严重违反 CP 语言“机器自愈诊断、AI-First 友好”的设计哲学。
+- **本项工程目标**：
+  1. 在 AST 与 Parser 层面全面支持 `<T: Printable>`、`<T: TraitA + TraitB>` 以及常量泛型 `<const N: usize>` 在函数、方法、类与 Trait 签名的声明；
+  2. 在 Sema 语义分析层建立泛型约束作用域与主动跟踪（`active_generic_bounds`）；
+  3. 对 `class implements Trait` 进行编译期静态完备性校验；
+  4. 对泛型函数调用（`Expr::Call`）与泛型类实例化（`Expr::New`）进行调用实参 Trait 约束前端契约拦截校验；
+  5. 接入三段式可自愈诊断系统（`error[E0301]`），附带清晰的原因分析（cause）、引导（help）与代码修正方案（suggestion）；
+  6. 在 Zig 代码生成端保持零开销（Zero-Cost）编译期单态化，并在 CPS 状态机上下文推导中基于调用实参准确推断返回类型，确保局部变量结构体字段（如 `_Context`）精准单态化。
+
+### 2. 核心架构与关键实现
+
+1. **AST 升级与泛型参数扩展 (`ast.rs`)**：
+   - 将 `GenericParam::Type(Ident)` 重构为 `GenericParam::Type { ident: Ident, bounds: Vec<Ident> }`，为泛型类型参数赋予任意数量 Trait 约束的能力；
+   - 在 `Function` 与 `MethodSig` 结构体中新增 `pub generic_params: Vec<GenericParam>`，实现全语法树的一等公民泛型支持。
+
+2. **泛型语法与约束解析器 (`parser.rs`)**：
+   - 实现 `parse_generic_params(&mut self) -> ParseResult<Vec<GenericParam>>`：
+     - 精准处理尖括号泛型列表 `<...>`；
+     - 支持常量泛型参数声明：`const N: usize`；
+     - 支持带多约束的泛型参数：`T: Printable + Hash`；
+   - 将该解析器无缝接入 `parse_function`、`parse_class` 与 `parse_trait`。
+
+3. **前端语义分析与契约拦截 (`sema.rs`)**：
+   - **三段式自愈诊断接入**：
+     - `TraitBoundNotSatisfied`：捕获类型不满足泛型约束的情况，生成 `error[E0301]: type '{type_name}' does not satisfy trait bound '{trait_name}'`，并附带缺失方法与调用修改建议；
+     - `TraitMissingMethod`：捕获类未实现接口方法的错误，生成 `error[E0301]: class '{class_name}' does not satisfy trait '{trait_name}'`，直接输出缺失方法的具体签名骨架建议。
+   - **`implements Trait` 静态完备性检查**：在 `Decl::Class` 分析阶段，遍历所有非默认实现的 Trait 方法，静态检查类自身方法及显式 `impl Trait for Target` 中是否存在匹配定义。
+   - **活跃泛型约束跟踪**：在函数与类方法分析生命周期中维护 `active_generic_bounds: HashMap<String, Vec<String>>`，支持泛型参数在嵌套调用时的传递。
+   - **内置 Trait 标量自愈规则**：
+     - 内置 Trait（`Comparable`, `ToString`, `Clone`, `Hash`, `Debug`）对所有原生标量类型（`i32`, `u64`, `f64`, `bool`, `string` 等）原生自动满足；
+     - 结构体/类中若具备符合约定的同名方法（如 `compare`/`cmp`、`toString`/`to_string` 等），同样自动视为满足对应内置 Trait。
+   - **调用点前端拦截检查**：在 `analyze_expr` 的 `Expr::Call` 与 `Expr::New` 分支，提取被调用函数的泛型参数与形参类型；当实参传入时，比对其推导类型与约束；若违规，立即在前端拦截并输出 `E0301`，彻底阻断任何底层 Zig 编译器报错泄露。
+   - **泛型返回类型单态化推导**：在 `infer_type` 中，若函数返回泛型类型参数 `T`，根据实参列表中对应参数的推导类型，动态替换推导出的返回类型。
+
+4. **Codegen 零开销单态化与状态机上下文修复 (`codegen.rs`)**：
+   - 泛型参数映射为 Zig 原生 `anytype`；泛型返回值映射为 `@TypeOf(param)`，由底层 Zig 编译器进行极致的编译期单态化与内联优化；
+   - 在 `infer_cp_type_with_mock` 中，遇到返回泛型类型 `T` 的函数调用（如 `let m1 = max_val(10, 20);`），根据实参类型推导具体类型（`i32`），使得被提取到 `cp_main_Context` 中的变量拥有精准的单态化类型（`m1: i32` 而非虚拟类型 `m1: T`）。
+
+### 3. 测试与验证
+1. **端到端测试用例 (`cap/test/test_generic_trait_bounds.cp`)**：
+   - 定义 `trait Printable { fn display(): void; }`；
+   - 定义 `class Cat implements Printable`，实现 `display()`；
+   - 编写泛型约束函数 `fn show<T: Printable>(item: T): void { item.display(); }`；
+   - 编写内置约束泛型函数 `fn max_val<T: Comparable>(a: T, b: T): T`；
+   - 分别使用 `Cat` 实例调用 `show`，使用 `(10, 20)` 与 `(3.14, 2.71)` 调用 `max_val`；
+   - 运行 `./cap/bin/cap cap/test/test_generic_trait_bounds.cp` 验证，输出 100% 正确：
+     ```
+     Luna
+     20
+     3.14
+     generic trait bounds test passed!
+     ```
+2. **负向测试（自愈诊断验证）**：
+   - 验证类遗漏 Trait 方法 -> 产生 `error[E0301]: class 'Dog' does not satisfy trait 'Printable'`，附带 `fn display(...): void` 修正建议；
+   - 验证向 `show<T: Printable>` 传入未实现 Trait 的 `Rock` -> 产生 `error[E0301]: type 'Rock' does not satisfy trait bound 'Printable'`，前端直接拦截，0 底层 Zig 报错泄露。
+3. **正式 Release 构建与全量发布**：
+   - 校验 `cpc_dev/src` 与 `cpc/src` 4 个核心源码文件 100% 无差异；
+   - `cargo build --release` 编译正式版，更新安装到 `/data/dev/cp/cap/bin/cpc`；
+   - 使用正式版二进制重跑测试，100% PASS。
+
+---
+
+## 2026-11-10: Bun agy 并发更新深度审核、双主干融合与规范同步
+
+### 1. 深度安全与合理性审核报告
+针对 Bun.js 迁移智能体在 `cpc/src` 中并发提交的 7 项修改，进行了逐行代码级审计：
+1. **多重元注解合并 (`parser.rs`)**：
+   - *变更*：将 `f.meta = meta;` 改为 `f.meta.extend(meta);`；
+   - *审核结论*：**合理且必要**。原直接赋值会导致在带有外部装饰器（如 `@noinline`、`@export`）与内部注解/doc 注释时，前置元数据被后者覆盖覆盖丢失。改为 `extend` 实现了无损合并，符合 AST 元注解正交设计。
+2. **定长切片元素类型推导修复 (`parser.rs`)**：
+   - *变更*：修复 `[N]T` 定长切片字符串构建中未知类型回退为 `u8` 的隐性缺陷，增加 `Type::Bool` 并调用 `Self::type_to_str(&elem_ty)` 递归推导；
+   - *审核结论*：**无缺陷、无隐患**。彻底避免了非 `u8` 定长切片（如 `[4]f32`、`[16]Point`）类型名被错误构建为 `[N]u8` 的潜在转译错误。
+3. **原生可选链解包生成 (`codegen.rs`)**：
+   - *变更*：使用 `({}).?.{}` 替代 `cp_opt_unwrap` 垫片；
+   - *审核结论*：**极度合理**。与 RFC-002 消除辅助死代码契合，使每个结构体文件减少无用垫片，生成的 Zig 代码更地道原生。
+4. **负整数十六进制安全输出 (`codegen.rs`)**：
+   - *变更*：对负整型字面量输出为 `0x{:x}` 格式；
+   - *审核结论*：**合理**。消除了 C-FFI 中 `-1` 位掩码在 Zig 无符号上下文中的符号性溢出报错。
+5. **字节切片向不可变字符串自然流转 (`sema.rs`)**：
+   - *变更*：允许 `[u8]`、`[u8; N]` 与 `cstring` 在只读上下文中无损流转为 `string`；
+   - *审核结论*：**完备无隐患**。CP 的 `string` 底层为 `[]const u8`，在系统编程与 I/O 读取时将字节缓冲区视作不可变字符串是完全零拷贝安全的。
+6. **任意位宽整型支持 (`sema.rs`)**：
+   - *变更*：支持 `u1`~`u128` 与 `i1`~`i128` 位级标量；
+   - *审核结论*：**合理**。完美对接硬件寄存器与 `packed struct` 位字段。
+7. **枚举富成员方法推导 (`sema.rs`)**：
+   - *变更*：在 `Expr::Member` 与 `Expr::Call` 中支持枚举成员方法解析与返回值推导；
+   - *审核结论*：**完备**。
+
+### 2. 双主干融合与规范同步
+- 将 Bun agy 的上述改进完整融合到 `cpc_dev/src/` 与正式版 `cpc/src/`，两边代码比对 0 差异；
+- 在 `cp_ref.md` 第 3.1、3.3.1、5.16、5.17 节同步更新规范条目；
+- 构建正式版二进制部署至 `cap/bin/cpc` 并通过全量回归测试。
+
+
+
 

@@ -2432,6 +2432,50 @@
 - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
   - 更新第 20.1 节与 20.9 节，标记第一项任务完成并记录技术规范与反解示例。
 
+---
+
+## 2026-11-09 (P0 第二项完成：泛型 Trait 前端契约校验与 Generic Bounds)
+
+### 新增文件 (Added)
+- [`cap/test/test_generic_trait_bounds.cp`](file:///data/dev/cp/cap/test/test_generic_trait_bounds.cp):
+  - 泛型 Trait 约束端到端全链路测试用例（含自定义 Trait 契约约束 `<T: Printable>`、内置标量约束 `<T: Comparable>`、多态类实例化与泛型单态化执行验证）。
+
+### 修改文件 (Modified)
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs) / [`cpc_dev/src/ast.rs`](file:///data/dev/cp/cpc_dev/src/ast.rs):
+  - 升级 `GenericParam::Type` 变体为 `{ ident: Ident, bounds: Vec<Ident> }`，原生支持类型约束列表；
+  - 为 `Function` 与 `MethodSig` 增加 `generic_params: Vec<GenericParam>` 字段，支持函数级与方法级泛型定义。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs) / [`cpc_dev/src/parser.rs`](file:///data/dev/cp/cpc_dev/src/parser.rs):
+  - 新增 `parse_generic_params`，完整解析 `<T>`, `<T: Trait>`, `<T: TraitA + TraitB>`, `<const N: usize>`；
+  - 将泛型解析器正交接入全局函数（`parse_function`）、类定义（`parse_class`）与 Trait 契约（`parse_trait`）。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs) / [`cpc_dev/src/sema.rs`](file:///data/dev/cp/cpc_dev/src/sema.rs):
+  - 新增三段式 AI 自愈诊断错误：`error[E0301]: type 'X' does not satisfy trait bound 'Y'` 与 `class 'X' does not satisfy trait 'Y'`；
+  - 实装 `Decl::Class` 的 `implements Trait` 编译期静态方法完备性校验；
+  - 实装全局函数与类方法作用域活跃泛型约束跟踪 `active_generic_bounds`；
+  - 实装内置 Trait 标量自愈规则（`Comparable`、`ToString`、`Clone`、`Hash`、`Debug`）；
+  - 实装 `Expr::Call` 与 `Expr::New` 调用实参前端 Trait 约束拦截检查与三段式报错自愈提示，彻底阻断底层 Zig 编译器 50 行隐晦报错泄露；
+  - 在 `infer_type` 中实装基于调用实参的泛型返回值类型动态推导与单态化。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs) / [`cpc_dev/src/codegen.rs`](file:///data/dev/cp/cpc_dev/src/codegen.rs):
+  - 泛型参数映射为 Zig 原生 `anytype`；泛型返回值映射为 `@TypeOf(param)` 实现零开销编译期单态化；
+  - 在 `infer_cp_type_with_mock` 中根据调用实参推导具体泛型返回类型，确保 CPS 状态机上下文变量结构体字段（如 `_Context`）精准单态化（生成 `m1: i32` 而非虚拟类型 `m1: T`）。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 详实扩充第 7.4 节《泛型 Trait 前端契约校验与单态化规范 (Generic Bounds)》，提供完整语法定义、内置 Trait 规则、自愈诊断示例与 Zig 单态化架构说明；
+  - 更新第 20.9 节路线图状态表，将第 2 项标记为 `【已完成】`。
+
+---
+
+## 2026-11-10 (合并并审核 Bun agy 提交的 cpc 优化与规范更新)
+
+### 审计与合并说明 (Audit & Integration)
+- **多重元注解合并 (`parser.rs`)**：使用 `f.meta.extend(meta)` 替代直接赋值，确保装饰器、doc 注解与内部编译期元注解不发生覆盖丢失；
+- **定长切片元素类型推导修复 (`parser.rs`)**：修复 `[N]T` 定长切片字符串构建中未知类型回退为 `u8` 的缺陷，支持 `bool` 与任意类型递归推导；
+- **原生可选链解包生成 (`codegen.rs`)**：使用 `({}).?.{}` 原生语法替代 `cp_opt_unwrap` 垫片，彻底消除无用死代码；
+- **负整数十六进制安全输出 (`codegen.rs`)**：优化位掩码及负数整型字面量在 Zig 端生成，避免符号性溢出报错；
+- **字节切片向不可变字符串自然流转 (`sema.rs`)**：支持 `[u8]` / `[u8; N]` 向 `string` 零开销自然流转；
+- **任意位宽整型支持 (`sema.rs`)**：支持 `u1`~`u128` 与 `i1`~`i128` 位级标量；
+- **枚举富成员方法推导 (`sema.rs`)**：支持枚举内自定义成员方法与语义类型推导；
+- **规范同步 (`cp_ref.md`)**：同步第 3.1 节（任意位宽整型）、第 3.3.1 节（字节切片自然流转）、第 5.16 节（枚举成员方法）与第 5.17 节（packed/extern/opaque 内存布局）。
+
+
 
 
 

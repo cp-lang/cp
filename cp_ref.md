@@ -583,6 +583,7 @@ CP 是一门严格无 GC 的静态类型编译型语言，禁止任何隐式类�
 | `u64`     | 64-bit 无符号整型          | 高精度时间戳、大计数器                                             |
 | `i128`    | 128-bit 有符号整型         | 超大整型计算、高精度中间量                                         |
 | `u128`    | 128-bit 无符号整型         | 超大整型计算、位运算混淆计算                                       |
+| `u1`~`u128` / `i1`~`i128` | 任意位宽原生整型 | 精准位宽标量，零开销映射硬件寄存器与 `packed struct` 位字段 |
 | `usize`   | 无符号系统字长 (32/64-bit) | 内存偏移量、容器长度                                               |
 | `isize`   | 与符号系统字长 (32/64-bit) | 内存偏移量、容器长度                                               |
 | `f32`     | 32-bit 单精度浮点          | 图形计算、Tensor 运算基准                                          |
@@ -720,6 +721,8 @@ let big: usize = small; // 100% 静态安全无损，直接流转
 5.  面向对象与 Trait 向上多态：
     • 子类实例可直接赋给基类变量；
     • 实现了 Trait 的结构体借用可直接赋给 &dyn Trait 契约指针。
+6.  字节切片向不可变字符串自然流转 (Byte Slice to String Coercion)：
+    • 原生动态字节切片 [u8]、定长字节数组 [u8; N] 以及 cstring 在只读上下文中直接自然流转为 string（底层不可变 []const u8 视图），享受零开销自然适配，无需显式转换或内存深拷贝。
     ──────
 
 ##### 第二层：有损/重新解释转换（Explicit Cast - 强制必须写 as）
@@ -1730,6 +1733,71 @@ let empty = StringHelper.is_empty("");
 
 ---
 
+### 5.16 枚举与富方法扩展 (Enums with Methods)
+
+CP 语言将 `enum` 提升为一等行为实体，不仅支持命名变体与数值绑定，还允许直接为枚举声明成员方法与静态方法：
+
+```typescript
+enum LogLevel {
+    Debug = 0,
+    Info = 1,
+    Error = 2,
+
+    pub fn is_critical(this): bool {
+        return this == LogLevel.Error;
+    }
+
+    pub fn tag(this): string {
+        if (this == LogLevel.Error) return "[ERR]";
+        if (this == LogLevel.Info) return "[INF]";
+        return "[DBG]";
+    }
+}
+
+let level = LogLevel.Error;
+let critical = level.is_critical(); // 返回 true
+let label = level.tag();            // 返回 "[ERR]"
+```
+
+- **语义分析推导**：`sema.rs` 自动在 `Expr::Member` 与 `Expr::Call` 中索引枚举方法签名，精准推导返回值类型，彻底杜绝类型退化为 `any`；
+- **底层零成本映射**：枚举方法直接映射为 Zig 编译期内联函数，无需虚表分配，享受零运行时开销。
+
+---
+
+### 5.17 C-FFI 底层内存布局与联合体 (packed/extern struct & union)
+
+针对操作系统内核对接、网络协议栈与 POSIX 原生绑定场景，CP 原生支持 C 兼容与位级紧凑内存布局：
+
+```typescript
+// 1. 位级紧凑对齐（用于硬件寄存器与网络二进制协议帧）
+packed struct Header {
+    version: u4,
+    ihl: u4,
+    tos: u8,
+    total_len: u16,
+}
+
+// 2. 严格遵循 C ABI 内存对齐
+extern struct PosixStat {
+    dev: u64,
+    ino: u64,
+    mode: u32,
+}
+
+// 3. 联合体：多成员共享同一物理内存
+packed union SocketAddr {
+    raw: [16]u8,
+    v4: u32,
+}
+
+// 4. 不透明指针结构体（仅持有句柄指针，外部不展开成员）
+opaque struct us_loop_t {}
+```
+
+- **词法与解析安全**：解析器内建检查点（Checkpoint）机制，自动区分带字段名结构体字面量 `.{ .key = val }` 与顺序列表 `.{ val }`，并在遇到 `packed`/`extern`/`opaque` 时精准提取原始布局，零解析歧义。
+
+---
+
 ## 六、所有权、借用检查与内存安全模型（Zero-Friction Memory Safety）
 
 > 底层模型借鉴Rust所有权系统，但是语法采用CP自定义借用标记：`&T` 只读借用、`*T` 可变借用；显式 `move` 关键字转移所有权。
@@ -2386,16 +2454,108 @@ trait Logger {
 
 ---
 
-### 7.4 泛型与 Trait 约束
+### 7.4 泛型与 Trait 约束 (Generic Bounds)
 
+CP 语言在前端 AST 与语义分析（Sema）层原生支持完整的泛型与 Trait 约束契约校验，实现编译期 0 开销的单态化原生计算（Monomorphization）与 100% 友好的 AI 自愈诊断。
+
+#### 7.4.1 核心语法与约束形式
+
+1. **单 Trait 约束函数与方法**：
+   ```typescript
+   fn show<T: Printable>(item: T): void {
+       item.display();
+   }
+   ```
+2. **多 Trait 复合约束 (`+`)**：
+   ```typescript
+   fn sync_data<T: Reader + Writer>(stream: *T): void {
+       // 要求类型 T 同时满足 Reader 与 Writer 行为契约
+   }
+   ```
+3. **泛型类容器**：
+   ```typescript
+   class Box<T: Printable> {
+       item: T;
+       fn init(item: T) {
+           this.item = item;
+       }
+       fn show(): void {
+           this.item.display();
+       }
+   }
+   ```
+4. **编译期标量与常量泛型**：
+   ```typescript
+   class StaticBuffer<const N: usize> {
+       data: [u8; N];
+   }
+   ```
+
+#### 7.4.2 内置 Trait 体系 (Built-in Traits)
+
+CP 编译器内置以下基础 Trait 契约，由标量基础类型天然满足或通过方法约定满足：
+- **`Comparable`**：基础标量数值类型（`u8`~`u128`, `i8`~`i128`, `usize`, `isize`, `f32`, `f64`, `bool`, `string`）天生满足比较契约；类定义中实现 `compare` 或 `cmp` 方法（或显式声明 `implements Comparable`）亦满足；
+- **`ToString`**：基础标量类型天生满足；类定义中提供 `toString` / `to_string` 方法即满足；
+- **`Clone`**：基础标量类型天生满足；类提供 `clone` 方法即满足；
+- **`Hash`**：基础标量类型天生满足；类提供 `hash` 方法即满足；
+- **`Debug`**：基础标量类型天生满足；类提供 `debug` 或 `format` 方法即满足。
+
+示例：泛型比较器函数天然支持强类型数值与浮点：
 ```typescript
-fn print_distance<T: Measurable>(item: T) {
-    print("Distance:", item.distance_to_origin());
+fn max_val<T: Comparable>(a: T, b: T): T {
+    if (a > b) {
+        return a;
+    }
+    return b;
 }
 
-// 多 Trait 约束组合
-fn sync_data<T: Reader + Writer>(stream: *T) {
-    // ...
+let m1 = max_val(10, 20);       // T 推导为 i32，返回 20
+let m2 = max_val(3.14, 2.71);   // T 推导为 f32，返回 3.14
+```
+
+#### 7.4.3 前端拦截与 AI-First 自愈诊断 (`E0301`)
+
+彻底消除底层 Zig 编译器在单态展开时泄露的数十行难懂 VTable / missing field 报错。所有未满足 Trait 契约的调用均在 `sema` 前端精准拦截：
+
+1. **类声明未实现 Trait 必需方法拦截**：
+   若类声明 `class Dog implements Printable`，但遗漏了 Trait 的无默认实现方法 `display`，前端直接发出自愈建议：
+   ```text
+   error[E0301]: class 'Dog' does not satisfy trait 'Printable'
+     --> src/animal.cp:5:7
+      |
+      5 | class Dog implements Printable {
+      |       ^^^
+      |
+      = cause: class 'Dog' declares 'implements Printable' but is missing required method 'display'.
+      = help: all methods declared in trait 'Printable' without default implementations must be implemented.
+      = suggestion: implement method 'display' in class 'Dog':
+     fn display(...): void { ... }
+   ```
+
+2. **泛型函数实参不满足约束拦截**：
+   若向 `show<T: Printable>(item: T)` 传入未实现 `Printable` 的 `Rock` 实例：
+   ```text
+   error[E0301]: type 'Rock' does not satisfy trait bound 'Printable'
+     --> src/main.cp:15:10
+      |
+     15 |     show(r);
+      |          ^
+      |
+      = cause: type 'Rock' is missing required method 'display' from trait 'Printable'.
+      = help: trait 'Printable' requires method 'display'. Ensure 'Rock' implements it.
+      = suggestion: implement method 'display' on 'Rock':
+     fn display(...): void { ... }
+   ```
+
+#### 7.4.4 底层 Native 单态化转译机制
+
+在转译为 Zig 时，泛型参数映射为 Zig 原生高性能 `anytype` 编译期内联参数，泛型返回类型自动使用 Zig 原生 `@TypeOf(param)` 精确推导返回类型，实现 100% 原生零成本抽象，不产生任何运行时虚表寻址开销：
+```zig
+pub fn max_val(a: anytype, b: anytype) @TypeOf(a) {
+    if ((a > b)) {
+        return a;
+    }
+    return b;
 }
 ```
 
@@ -8164,7 +8324,7 @@ flowchart TD
 
 | 阶段 | 重点领域 | 核心任务 | 交付价值与验收标准 |
 | :--- | :--- | :--- | :--- |
-| **P0 阶段（近期待攻坚）** | **调试与工程稳定性** | 1. 源码行号指示与 DWARF 映射注入 (`.zig.map` / Source Map & Demangle 反解器)【已完成】<br/>2. 泛型 Trait 前端契约校验（消除底层报错泄露）<br/>3. Scoped Arena 区域内存池语法与运行时实现 | 极大降低大型项目与 Bun 迁移调试门槛，实现断点与崩溃堆栈精准映射到 `.cp` 源码，消灭高频小对象内存碎片 |
+| **P0 阶段（近期待攻坚）** | **调试与工程稳定性** | 1. 源码行号指示与 DWARF 映射注入 (`.zig.map` / Source Map & Demangle 反解器)【已完成】<br/>2. 泛型 Trait 前端契约校验（消除底层报错泄露）【已完成】<br/>3. Scoped Arena 区域内存池语法与运行时实现 | 极大降低大型项目与 Bun 迁移调试门槛，实现断点与崩溃堆栈精准映射到 `.cp` 源码，消灭高频小对象内存碎片 |
 | **P1 阶段（中期生产化）** | **并发调度与工程规模** | 1. 循环回边 Auto-Reduction 抢占计数自动注入<br/>2. 跨 await 线程安全静态借用拦截<br/>3. 基于内容哈希的模块级增量编译与缓存 | 真正实现百万 Agent 抗死循环与防单点饥饿，十万行以上超大工程秒级极速构建 |
 | **P2 阶段（生态成熟期）** | **工具链与标准库基座** | 1. 完整生产级 LSP（跳转/引用/重命名/补全）<br/>2. 官方权威代码格式化工具 `cpc fmt`<br/>3. 统一零拷贝 I/O 流与无锁并发容器标准库 | 开发者与 AI 协同体验全面媲美 TS/Rust，具备承载国家级超高并发与关键系统服务的能力 |
 

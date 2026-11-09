@@ -1758,6 +1758,7 @@ impl Codegen {
                             let synth_fn = Function {
                                 span: tm.span,
                                 ident: tm.ident.clone(),
+                                generic_params: tm.generic_params.clone(),
                                 params: tm.params.clone(),
                                 return_type: tm.return_type.clone(),
                                 body: default_body.clone(),
@@ -3892,8 +3893,8 @@ impl Codegen {
             let mut params_str = Vec::new();
             for gp in &class.generic_params {
                 match gp {
-                    crate::ast::GenericParam::Type(id) => {
-                        params_str.push(format!("comptime {}: type", id.sym))
+                    crate::ast::GenericParam::Type { ident, .. } => {
+                        params_str.push(format!("comptime {}: type", ident.sym))
                     }
                     crate::ast::GenericParam::Const { ident, ty } => {
                         params_str.push(format!("comptime {}: {}", ident.sym, self.map_type(ty)));
@@ -5247,6 +5248,23 @@ impl Codegen {
                     }
                     if let Some(sig) = self.fn_sigs.get(&fid.sym) {
                         if let Some(rt) = &sig.return_type {
+                            if let Type::Ref(rid) = rt {
+                                for (idx, p) in sig.params.iter().enumerate() {
+                                    let mut p_ty = &p.ty;
+                                    while let Type::BorrowType { inner, .. } = p_ty {
+                                        p_ty = inner;
+                                    }
+                                    if let Type::Ref(pid) = p_ty {
+                                        if pid.sym == rid.sym && idx < c.args.len() {
+                                            if let Some(arg_ty) =
+                                                self.infer_cp_type_with_mock(&c.args[idx], mock_types)
+                                            {
+                                                return Some(arg_ty);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             if self.in_try_region {
                                 if let Type::ResultType { ok, .. } = rt {
                                     return Some((**ok).clone());
@@ -7776,6 +7794,7 @@ impl Codegen {
                     span: func.ident.span,
                     sym: wrapper_name,
                 },
+                generic_params: func.generic_params.clone(),
                 params: func.params.clone(),
                 return_type: func.return_type.clone(),
                 body: BlockStmt {
@@ -7882,7 +7901,22 @@ impl Codegen {
         let ret_ty = func
             .return_type
             .as_ref()
-            .map(|t| self.map_type(t))
+            .map(|t| {
+                if let Type::Ref(id) = t {
+                    if func.generic_params.iter().any(|gp| match gp {
+                        GenericParam::Type { ident, .. } => ident.sym == id.sym,
+                        _ => false,
+                    }) {
+                        if let Some(param) = func.params.iter().find(|p| match &p.ty {
+                            Type::Ref(pid) => pid.sym == id.sym,
+                            _ => false,
+                        }) {
+                            return format!("@TypeOf({})", param.ident.sym);
+                        }
+                    }
+                }
+                self.map_type(t)
+            })
             .unwrap_or("void".to_string());
         self.current_fn_is_async = func.is_async;
 
@@ -8002,6 +8036,10 @@ impl Codegen {
                 }
                 let mapped_ty = match &p.ty {
                     Type::Ref(id) if self.trait_defs.contains_key(&id.sym) => "anytype".to_string(),
+                    Type::Ref(id) if func.generic_params.iter().any(|gp| match gp {
+                        GenericParam::Type { ident, .. } => ident.sym == id.sym,
+                        _ => false,
+                    }) => "anytype".to_string(),
                     Type::CStr => {
                         if p.is_mut {
                             "[*:0]u8".to_string()
@@ -10454,7 +10492,13 @@ impl Codegen {
 
     fn generate_expr(&mut self, expr: &Expr) -> String {
         match expr {
-            Expr::Lit(Lit::Int(v)) => v.to_string(),
+            Expr::Lit(Lit::Int(v)) => {
+                if *v < 0 {
+                    format!("0x{:x}", *v as u64)
+                } else {
+                    v.to_string()
+                }
+            }
             Expr::Lit(Lit::Float(f)) => {
                 let s = f.to_string();
                 if s.contains('.') {
@@ -12077,6 +12121,11 @@ impl Codegen {
                                                     c.implements
                                                         .iter()
                                                         .any(|i| i.sym == t_id.sym)
+                                                        || if let Some(tr) = self.trait_defs.get(&t_id.sym) {
+                                                            tr.methods.iter().all(|tm| tm.default_body.is_some() || c.methods.iter().any(|m| m.ident.sym == tm.ident.sym))
+                                                        } else {
+                                                            false
+                                                        }
                                                 });
                                             if !implements {
                                                 panic!(
@@ -13208,7 +13257,7 @@ impl Codegen {
                         format!("{}.data.{}", obj, safe_prop)
                     }
                 } else if obj_ty.starts_with('?') {
-                    format!("cp_opt_unwrap({}).{}", obj, safe_prop)
+                    format!("({}).?.{}", obj, safe_prop)
                 } else if obj_ty.starts_with("*[]") {
                     format!("{}.*.{}", obj, safe_prop)
                 } else {
@@ -14056,7 +14105,7 @@ impl Codegen {
                                     "cp_cast_int({}, @intFromEnum({}))",
                                     target_zig_ty, inner_code
                                 )
-                            } else if inner_code.starts_with("@intCast(") {
+                            } else if inner_code.starts_with("@intCast(") || inner_code.starts_with("@truncate(") {
                                 format!("@as({}, {})", target_zig_ty, inner_code)
                             } else {
                                 format!(
@@ -15629,6 +15678,8 @@ impl Codegen {
                     if !cls.generic_params.is_empty() {
                         return ident.sym.clone();
                     }
+                } else if !self.ref_classes.contains(base_name) {
+                    return ident.sym.clone();
                 }
                 if let Some(ta) = self.type_aliases.get(&ident.sym) {
                     let target_base = match &ta.target_ty {

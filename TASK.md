@@ -3790,12 +3790,6 @@ return VTable {
 - **产物分发**：正式编译生成 release `cpc` 并覆盖安装至 `/data/dev/cp/cap/bin/cpc`；
 - **测试状态**：`test_c_union_and_comptime.cp`、`test_all_libs.cp`、`test_cptr_and_ai.cp` 全部 100% 绿灯全通。
 
-agyr --json | jq -r '.[].id'
-640a7490-6bcb-4d2f-a6af-60d7b8d6c522 最早
-8bef6f4a-c26e-465d-92a9-5acea965ca44 v 主用
-1cbf7ce8-4f03-449e-9336-1386a194b3cb c 沟通
-root@beam-01:/data/dev/bun# agy --conversation=
-
 # Bun AGY 开发者协作备忘：CP 编译器新语法特性与高效迁移指南
 
     > **致 Bun.js 迁移智能体（Bun AGY）**：
@@ -3919,7 +3913,150 @@ Bun AGY 在检查转换好的 .cp 文件时，请优先使用 --json 参数：
 ──────
 祝 Bun.js 核心库迁移极速、安全、顺畅！
 
+### 一、 调试、崩溃可观测性与生产诊断（生产环境的“第一生命线”）
+
+目前 cpc 转译生成的 Zig 代码交由底层 LLVM 编译。在当前阶段，如果线上或本地发生崩溃/Panic，堆栈回溯显示的是生成的 .zig 文件行号，开发者无法直接单步调试
+.cp。在生产级中，必须补齐：
+
+1. 源码映射（Source Map / DWARF #line 映射）：
+   • 在生成的 Zig 代码中注入标准源码行定位标记（或直接生成 DWARF .debug_line 映射段）。
+   • 效果：开发者使用 gdb、lldb 或 VSCode 断点调试时，断点停在 .cp 的具体源码行，单步单走、检查变量时看到的是 CP 原生局部变量，而不是底层生成的 CPS 状态机字段。
+2. 生产级崩溃还原（Stack Trace Demangler）：
+   • 生产环境中进程崩溃时，自动将底层符号与十六进制地址还原为人类可读的 at UserTask.run (src/task.cp:42:15)。
+3. 原生性能分析集成（Profiling & Flamegraph）：
+   • 标准化函数符号修饰（Symbol Mangling），确保 Linux perf、pprof 生成的火焰图能够清晰识读 CP 的模块与函数名，杜绝被混淆为底层状态机匿名标签。
+
+──────
+
+### 二、 系统级内存管理与可插拔 Allocator 体系（拒绝“单一全局堆”）
+
+在千万级并发或微秒级系统服务中，频繁调用全局堆分配（malloc）会造成严重的多线程锁竞争与内存碎片。生产级系统语言必须提供细粒度内存控制：
+
+1. 可插拔 Allocator 契约（显式传递与注入）：
+   • 借鉴 Zig 的现代系统编程哲学，将 Allocator 作为核心标准库契约，允许容器（List, Map, SharedTensor）显式接受分配器实例。
+2. 作用域区域分配器（Scoped Arena Allocator 原生语法糖）：
+   • 为高频短生命周期任务（如处理一个 HTTP 请求、一次 Agent 对话反思工具调用）提供作用域内存池：
+   with (arena) {
+   // 在此块内申请的所有临时对象（数百个字符串、中间字典等）
+   let temp_json = parse_json(input);
+   let result = process(temp_json);
+   return result.clone_to(parent_allocator);
+   } // 👈 离开作用域时，Arena 整个内存块 O(1) 瞬间批量释放，彻底杜绝单对象释放开销与内存碎片！
+
+3. 编译期零堆逃逸分析（Stack Escape Analysis）：
+   • 编译器前端静态分析变量生命周期，若未发生逃逸，优先在函数栈帧上分配，零运行时堆申请开销。
+
+──────
+
+### 三、 工业级异步运行时与抢占式调度（真正兑现 Nest/BEAM 并发）
+
+1. 循环回边与函数序言的自动抢占检测（Auto-Reduction Injection）：
+   • 生产环境中最怕单个 Agent 陷入死循环或执行长达数秒的本地重度文本计算，导致整个工作线程被彻底卡死。
+   • 编译器自动化注入：在编译 -nest 模式时，cpc 在所有的 while、for 循环回边以及函数入口处自动织入极轻量的指令计数递减代码（如 if (__ctx.dec_reductions() <= 0) return
+   yield();）。无论代码逻辑多深，达到 2000 reductions 强制出让执行权，物理级杜绝集群单点饥饿。
+2. 跨越 await 的严格借用与线程安全检查（Send / Sync 约束）：
+   • 跨越 await 时，协程可能会被不同的物理工作线程唤醒。
+   • 编译器必须在静态分析阶段拦截：严禁跨越 await 持有非线程安全的裸指针、不可重入的互斥锁或短生命周期的局部栈借用，防止并发数据竞态。
+3. 结构化并发作用域（Structured Concurrency Scope / Nursery）：
+   • 生产级避免“协程孤儿”泄露。提供语言级的作用域并发原语，确保外层函数退出前，其派生的子任务要么全部正常完成，要么在捕获错误时被统一广播取消（Cancellation）。
+
+──────
+
+### 四、 模块化增量编译与工程扩展性（支撑 10 万行+ 大型工程）
+
+1. 基于内容哈希的模块化增量转译（Incremental Compilation & Cache）：
+   • 目前 cpc 处理依赖时主要依赖全量解析。当工程规模扩大到数十万行、上百个依赖包时，单文件改动必须做到毫秒级转译。
+   • 引入模块级编译缓存（Content-Addressable Cache）：通过计算 AST 内容的哈希值，未变更的模块直接复用已生成的 .o 或转译缓存，无需重复分析。
+2. 跨模块循环引用解耦（Two-pass Declaration Resolution）：
+   • 业务系统中难以避免模块间相互引用类型（A 模块包含 B 类型，B 模块包含 A 类型）。cpc 前端需完善符号收集与类型推导的两阶段解耦，全面支持循环类型引用。
+3. 标准动态库加载与 C-ABI 稳定导出（Plugin Hot-Reload）：
+   • 原生支持 @export("c") 和动态库（.so / .dylib / .dll）安全加载接口，为智能体容器的热更新、C 语言宿主嵌入提供稳定 ABI。
+
+──────
+
+### 五、 类型系统与借用检查器深度升级（消除误报与死角）
+
+1. 泛型 Trait 静态契约拦截（Generic Bounds）：
+   • 目前泛型在遇到类型错误时，容易穿透到底层 Zig 模板展开阶段报错。
+   • 生产级要求：在 cpc 的语义分析阶段（sema.rs）就对泛型类型约束（如 fn process<T: Serializable>(item: T)）进行严格契约校验，直接在 CP 语法层指出“类型 Foo 未实现
+   Serializable 的某个方法”，提供 Rust/TS 级别的友好诊断。
+2. 多字段分离借用（Disjoint Field Borrowing）：
+   • 在复杂系统结构体中，同时借用结构体的不同独立字段（如 &mut state.queue 与 &state.
+   config）是极为常见的操作。借用检查器需细化到字段级路径追踪，避免将对象级锁定扩大化导致误报。
+3. 常量泛型（Const Generics）：
+   • 支持定长张量与缓冲区标注：Tensor<f32, [1, 4096]> 或 Buffer<4096>，使 AI 向量计算和网络定长包在编译期确定内存尺寸，零堆分配。
+
+──────
+
+### 六、 工业级标准库基础设施（打造零拷贝生态底座）
+
+1. 统一的高性能 I/O 流体系（Reader / Writer / Closer）：
+   • 文件、TCP 连接、TLS 加密流、内存缓冲区全部实现统一的流式 Trait，网络数据到解密、解析全链路零内存拷贝传递。
+2. 零拷贝高性能序列化框架（Zero-Copy Serde）：
+   • 内置编译期生成的 JSON / 结构化二进制序列化支持，性能对标 simdjson，直接在源 Buffer 上切片生成强类型对象，消灭动态构建中间字典的巨大损耗。
+3. 无锁并发原语库（Lock-Free Primitives）：
+   • 标准库内置工业级 MPMC 无锁环形队列、并发哈希表、原子引用计数切片，为跨线程高吞吐数据流提供坚固基础设施。
+
+──────
+
+### 七、 开发者体验与工具链全家桶（DevEx）
+
+1. 完备且工业级的 LSP（Language Server Protocol）服务端：
+   • 完善 cpc lsp：
+   • 精确定义跳转与全项目引用查找（Go to Definition / Find References）；
+   • 实时语义诊断与波浪线；
+   • 全局安全重构（Rename Symbol）；
+   • 悬停类型提取（Hover）与参数提示（Signature Help）。
+
+2. 官方权威代码格式化工具（cpc fmt / cap fmt）：
+   • 类似 rustfmt、gofmt，提供官方统一步伐的代码美化器，消除团队风格分歧与 Git 格式冲突。
+3. 原生单元测试与基准测试套件（Native Test & Benchmark）：
+   • 语言内置 test "description" { ... } 与 benchmark "name" { ... }，集成在 cap test / cap bench 中，一键输出耗时、每秒操作数（ops/sec）以及内存分配次数（allocs/op）。
+4. C 头文件自动化绑定工具（cap bindgen）：
+   • 类似 zig translate-c，能够自动将庞大复杂的第三方 C/C++ 库头文件一键扫描转换为强类型的 .cp 接口文件，生态吸纳速度提升百倍。
+
+──────
+
+### 八、 AI-First 机器可读自愈全闭环（让 Agent 自主演进）
+
+1. 100% 错误码的 Machine-Readable Edits 诊断闭环：
+   • 将 --json 的结构化修正建议从当前的“语法微调”全面扩展到类型错误、借用冲突与所有权纠正：
+   • 遇到不可变借用修改时：输出 edits 自动在参数前插入 * 或转换为独占 own；
+   • 遇到缺少模块导入时：自动计算正确的 import { Foo } from "..." 插入位置；
+   • 遇到模式匹配未穷尽时：自动追加缺失的分支骨架。
+
+2. 确定性构建（Deterministic & Reproducible Builds）：
+   • 杜绝由于内部哈希表迭代顺序不确定导致的生成代码波动，确保相同的输入源码在任何环境下输出 100% 一致的 Zig 代码和二进制哈希。
+
+──────
+
+### 推荐推进路线图（优先级建议）
+
+阶段 │ 重点领域 │ 核心任务 │ 交付价值
+──────────────────┼──────────────────┼────────────────────────────────────────────────────────────────────────────┼───────────────────────────────────────────────────────
+P0（近期待攻坚） │ 调试与工程稳定性 │ 1. 源码行号映射（DWARF / Source Map）2. 泛型 Trait │ 极大降低大型项目与 Bun 迁移调试门槛，消灭内存碎片
+│ │ 前端契约校验（消除底层晦涩报错）3. Scoped Arena 区域内存池语法 │
+P1（中期生产化） │ 并发与调度落地 │ 1. 循环回边 Auto-Reduction 抢占计数注入2. 跨 await 线程安全静态检查3. │ 真正实现百万 Agent 不卡死、抗死循环，大型项目秒级构建
+│ │ 模块级增量编译与缓存 │
+P2（生态成熟期） │ 工具链与生态底座 │ 1. 完整生产级 LSP（跳转/引用/重构）2. 官方格式化器 cpc fmt3. 零拷贝 I/O │ 开发者与 AI 体验媲美
+│ │ 流与无锁并发容器标准库 │ TypeScript/Rust，具备企业级承载力
+
 topt99755@gmail.com 138h 30m
-walteryu99@gmail.com 3h 49m v
+walteryu99@gmail.com 130h 13m x
 walteryu66@gmail.com 2h 31m x
 walteryu33@gmail.com 3h 9m
+
+agyr --json | jq -r '.[].id'
+640a7490-6bcb-4d2f-a6af-60d7b8d6c522 最早
+8bef6f4a-c26e-465d-92a9-5acea965ca44 v 主用
+1cbf7ce8-4f03-449e-9336-1386a194b3cb c 沟通
+root@beam-01:/data/dev/bun# agy --conversation=
+
+root@beam-01:/data/dev/cp# agyr --json | jq -r '.[].id'
+de9839a1-1501-421e-94ad-6d4216f98b34 v
+ebe8932a-593c-40d2-a931-f9ce1d4de5b9
+
+1. 合并到 cpc 正式版, 合并时注意， bun agy 可能更新了 cpc，需仔细审核 bun的修改是否合理、必要、完备、无缺陷、无隐患。相关内容更新到 cp_ref.md 规范文档。
+
+2. git 提交版本
+3. arena { ... }

@@ -170,7 +170,11 @@ pub struct Interface {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum GenericParam {
-    Type(Ident),
+    Type {
+        ident: Ident,
+        #[serde(default)]
+        bounds: Vec<Ident>,
+    },
     Const { ident: Ident, ty: Type },
 }
 
@@ -203,6 +207,8 @@ pub struct Class {
 pub struct Function {
     pub span: Span,
     pub ident: Ident,
+    #[serde(default)]
+    pub generic_params: Vec<GenericParam>,
     pub params: Vec<Param>,
     pub return_type: Option<Type>,
     pub body: BlockStmt,
@@ -736,6 +742,8 @@ pub struct Field {
 pub struct MethodSig {
     pub span: Span,
     pub ident: Ident,
+    #[serde(default)]
+    pub generic_params: Vec<GenericParam>,
     pub params: Vec<Param>,
     pub return_type: Option<Type>,
     #[serde(default)]
