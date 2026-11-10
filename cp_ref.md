@@ -8002,6 +8002,25 @@ cpc check --json src/main.cp
    }
    ```
 
+#### 18.1.1 编译器语句级与顶层项 Panic-Mode 语法容错恢复与多错误批量收集 (Multi-Error Recovery)
+
+在传统单错误中断模式下，编译器在遇到第一个语法歧义或符号不匹配时即提前终止退出，导致在大型模块开发或迁移时，开发者或 AI 必须经历痛苦的“修改单处 -> 重新编译 -> 暴露下一处”的反复单轮往返。
+
+`cpc` 编译器内置了**双层 Panic-Mode 语法容错同步状态机**，单次编译即可尽最大努力收集并呈现所有独立语法错误：
+
+1. **语句级容错同步 (`recover_stmt`)**：
+   - 当在代码块内解析单条语句发生语法异常时，记录当前 `Diagnostic` 错误并压入诊断集合；
+   - 维持嵌套大括号深度（Brace Depth）平衡，向前跳过无效 Token，直到遇到分号 `;`、块结束大括号 `}` 或新的语句起始关键字（`let`、`if`、`while`、`for`、`return`、`switch`、`break`、`continue`、`defer`、`errdefer`）；
+   - 保证 Token 指针严格单向递增，彻底消除语法自愈死循环风险，平滑继续解析后续语句。
+
+2. **顶层项容错同步 (`recover_module_item`)**：
+   - 当模块顶级声明（函数、结构体、类、枚举等）出现解析错误时，解析器自动跳至下一个顶层关键词（`pub`、`export`、`fn`、`class`、`struct`、`let`、`const`、`import`、`@`）或平衡的块末尾；
+   - 确保单个顶层定义的语法缺陷不会污染后续函数的编译解析。
+
+3. **双模式批量聚合输出**：
+   - **CLI 终端模式 (`cpc check`)**：一次性按源码行号顺序渲染所有语法错误，完整附带三段式源码切片、`cause`、`help` 与 `suggestion`；
+   - **机器可读模式 (`cpc check --json`)**：统一输出 `{"status":"error","diagnostics":[...]}`，单次往返返回所有错误的精确定位与机器可采纳 `edits` 补丁，AI Agent 单轮交互即可完成批量修正。
+
 #### 18.2 极简 `own` 关键字与无别名单写者保护 (Alias-Free Single Ownership)
 
 在百万级并发 Agent/Actor 通信场景下，共享堆大对象（如 `SharedTensor`、大缓存、Socket 连接）的传递必须从物理上杜绝并发别名读写冲突。CP 语言正式确立极简的 3 字母关键字 **`own`**，替代并超越了业界繁琐的 `move unique`。

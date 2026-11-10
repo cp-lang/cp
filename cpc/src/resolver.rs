@@ -75,7 +75,7 @@ pub fn resolve_dependencies(
     let mut parser = CPParser::new(&code);
     let module = parser
         .parse_module()
-        .map_err(|e| anyhow::anyhow!("{}", e.to_diagnostic().render(Some(&code), Some(path))))?;
+        .map_err(|e| anyhow::anyhow!("{}", e.render_all(Some(&code), Some(path))))?;
 
     for item in module.body {
         match item {
@@ -176,7 +176,7 @@ pub fn resolve_imports(
     let mut parser = CPParser::new(&code);
     let module = parser
         .parse_module()
-        .map_err(|e| anyhow::anyhow!("{}", e.to_diagnostic().render(Some(&code), Some(path))))?;
+        .map_err(|e| anyhow::anyhow!("{}", e.render_all(Some(&code), Some(path))))?;
 
     for item in module.body {
         match item {

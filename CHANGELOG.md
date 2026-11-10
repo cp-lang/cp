@@ -2,6 +2,22 @@
 
 > 历史变更日志已完整归档至 [CHANGELOG_H.md](file:///data/dev/cp/CHANGELOG_H.md)。本项目采用冷热分离架构，本文件仅保留当日活跃记录。
 
+## [2026-11-11] - 编译器语句级与顶层项 Panic-Mode 语法容错与多错误批量诊断
+
+### 新特性 (Added)
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs) / [`cpc_dev/src/parser.rs`](file:///data/dev/cp/cpc_dev/src/parser.rs):
+  - 新增 `ParseError::Multiple(Vec<Diagnostic>)` 复合诊断类型；
+  - 实现语句级容错同步器 `recover_stmt`：感知大括号嵌套深度，在遇到语句语法错误时跳过无效 Token 至 `;`、`}` 或控制流关键词（`let`/`if`/`while`/`for`/`return`/`switch`/`break`/`continue`/`defer`/`errdefer`），继续解析后续语句；
+  - 实现顶层项容错同步器 `recover_module_item`：跳过出错的函数或类型定义至下一个顶层关键词（`pub`/`export`/`fn`/`class`/`struct`/`let`/`const`/`import`/`@`）；
+  - `parse_block_stmt` 与 `parse_module` 升级为非短路式多错误累积模式，严格防止死循环并设有单模块最多 50 个错误上限与重复去重。
+- [`cpc/src/main.rs`](file:///data/dev/cp/cpc/src/main.rs) / [`cpc_dev/src/main.rs`](file:///data/dev/cp/cpc_dev/src/main.rs):
+  - `cpc check` 支持一次性输出全部语法的格式化代码切片与自愈建议；
+  - `cpc check --json` 输出聚合包含全部诊断的结构化 `DiagnosticReport` 与无损 `edits` 补丁。
+- [`cap/test/test_error_recovery_fail.cp`](file:///data/dev/cp/cap/test/test_error_recovery_fail.cp):
+  - 新增多错误批量捕获与容错同步端到端负向测试用例。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 新增第 18.1.1 节《编译器语句级与顶层项 Panic-Mode 语法容错恢复与多错误批量收集 (Multi-Error Recovery)》。
+
 ## [2026-11-11] - 编译器 Prelude 作用域防遮蔽 (Anti-Shadowing) 与 GEMINI 规范升级
 
 ### 优化与修复 (Fixed)
