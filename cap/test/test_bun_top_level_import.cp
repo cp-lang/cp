@@ -26,7 +26,7 @@ pub type PathString = string;
 
 // 顶层全局变量与常量
 pub const APP_TAG: string = "BUN_COMPAT";
-var global_counter: i32 = 100;
+pub let global_counter: i32 = 100;
 
 // --- 2. 上下文软关键字测试：验证 and/or 作为方法名时不被误伤 ---
 pub struct LogicCalculator {
@@ -91,7 +91,7 @@ fn main(): void {
     }
 
     // 验证带哨兵的切片（Sentinel Slice: buf[0..3 :0]）
-    let buf: [8]u8 = [65, 66, 67, 0, 0, 0, 0, 0];
+    let buf: [u8; 8] = [65, 66, 67, 0, 0, 0, 0, 0];
     let slice_sentinel = buf[0..3 :0];
     if (slice_sentinel.len != 3 || slice_sentinel[0] != 65) {
         print("FAIL: sentinel slice failed\n");

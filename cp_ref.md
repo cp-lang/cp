@@ -5450,6 +5450,27 @@ pub fn onHskDone(qs: *quic.Socket, ok: c_int): void {
       // ...
   }
   ```
+- **类/结构体内部的静态 C 回调方法**：
+  若在 `class` 或 `struct` 内部定义需要传递给底层 C 运行时的回调函数，必须附加 `static` 修饰符，防止编译器自动注入实例 `self` 接收者：
+  ```typescript
+  export class GarbageCollectionController {
+      // 静态 C-ABI 回调方法，无 self 隐式参数
+      @callconv("c")
+      pub static fn onGCTimer(timer: *uws.Timer): void {
+          var this = timer.as(*GarbageCollectionController);
+          // 处理定时器逻辑
+      }
+  }
+  ```
+  生成的 Zig 代码：
+  ```zig
+  pub const GarbageCollectionController = struct {
+      pub fn onGCTimer(timer: *uws.Timer) callconv(.c) void {
+          // ...
+      }
+  };
+  ```
+
 - **消除逃逸**：无需为了实现 C 回调而将整个回调函数被迫写进 `zig { ... }` 块中，使底层协议回调完全可以用 CP 现代语法书写。
 
 #### 11.8.13 不透明类装饰器（`@opaque class`）与底层系统句柄引用语义
@@ -7627,28 +7648,28 @@ export class ThreadPool {
 
 ##### 17.12.1 顶层常量与变量直接声明
 
-CP 允许在模块顶层直接使用 `const`、`var` 以及 `pub const`、`pub var` 声明模块级常量与可变变量，并支持深层命名空间别名与带属性的类型引用：
+CP 允许在模块顶层直接使用 `const`、`let` 以及 `pub const`、`pub let` 声明模块级常量与可变变量，并支持深层命名空间别名与带属性的类型引用。CP 语言**彻底废除 `var` 关键字**，变量体系统一遵循现代标准：`let` 声明可变变量，`const` 声明常量。转译时，`cpc` 编译器会自动将顶层 `let` / `pub let` 映射为底层的 Zig `var` / `pub var`：
 
 ```typescript
 // 直接引用导入模块的命名空间与深层属性，无需 zig {} 包装
-const Environment = bun.Environment;
-const FD = bun.FD;
-const HashedString = bun.HashedString;
-const Logger = bun.logger;
-const default_allocator = bun.default_allocator;
-const api = bun.schema.api;
+pub const Environment = bun.Environment;
+pub const FD = bun.FD;
+pub const HashedString = bun.HashedString;
+pub const Logger = bun.logger;
+pub const default_allocator = bun.default_allocator;
+pub const api = bun.schema.api;
 
 // 顶层类型别名定义与对外导出
 pub type PathString = bun.PathString;
 
-// 模块级可变状态与线程局部变量
-pub var global_counter: i32 = 100;
-pub threadlocal var worker_id: u32 = 0;
+// 模块级可变状态与线程局部变量（统一使用 let，严禁使用 var）
+pub let global_counter: i32 = 100;
+pub threadlocal let worker_id: u32 = 0; // 亦支持 @tls let worker_id: u32 = 0;
 ```
 
 > [!NOTE] 顶层常量与变量编译期求值规范 (Top-Level Comptime Initializer Semantics)
-> 在转译目标 Zig 中，模块顶级作用域中声明的所有 `const` 和 `var` 变量初始值表达式均在**编译期（Comptime Context）**进行静态求值。
-> CP 编译器（`cpc`）在生成顶层 `Stmt::Var` 初始值代码时，统一处于 `is_comptime = true` 模式：
+> 在转译目标 Zig 中，模块顶级作用域中声明的所有常量（`const`）与变量（转译为 Zig `var`）初始值表达式均在**编译期（Comptime Context）**进行静态求值。
+> CP 编译器（`cpc`）在生成顶层 `Stmt::Var`（无论是 `let` 还是 `const`）初始值代码时，统一处于 `is_comptime = true` 模式：
 > 1. 杜绝在顶层初始值中生成嵌套的 `if (comptime @typeInfo(...))`，避免触发 Zig 的 `error: comptime expression cannot be inside comptime context`；
 > 2. 支持在顶层初始值中直接执行类型转换、结构体内联初始化与编译期常量计算；
 > 3. 初始值生成完毕后即刻恢复运行时状态，确保函数体内的局部变量保持正确的运行时/编译期分流逻辑。

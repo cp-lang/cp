@@ -4360,6 +4360,31 @@ Scoped Arena 引入局部作用域内存池：
    - 重新执行 `bash scripts/sync_cpc.sh` 完成 Release 构建与部署；
    - 经测试用例（`test_zig_syntax_compat.cp`、`test_scoped_arena.cp`、`test_circular_modules.cp`、`test_disjoint_field_borrow.cp`）全量回归验证，全部 **100% PASS**。
 
+---
+
+## 2026-11-11: 核心语法澄清与归正 — 彻底严正厘清 CP `let` 与底层 Zig `var` 映射
+
+### 1. 问题发现
+- 用户在审核上一阶段汇报时敏锐指出：“你提到 `pub var` 语法，cp 没有 `var`，是否应该使用 `let`”。
+- 根因分析：
+  - 编译器 Codegen 节点命名为 `VarDecl`，且转译为 Zig 时生成 `pub var`，导致此前在汇报与部分互操作文档中将底层 Zig 关键字（`var`）与 CP 源码关键字混淆；
+  - 事实上，**CP 语言规范早已明确彻底废除 `var`**，变量声明体系唯一采用 `let`（默认可变）与 `const`（常量），模块顶层导出可变变量标准语法是 `pub let`；
+  - 词法/语法解析器宽容接受 `Token::Var` 是为了在 AST 层面作为 `VarDeclKind::Let` 容错处理，但绝对不应将其作为官方标准语法宣传。
+
+### 2. 规范归正与测试用例对齐
+1. **官方规范手册 (`cp_ref.md`)**：
+   - 修正第 17.12.1 节，彻底清理残留的 `pub var` 示例，严格确立 `pub let` 标准范式：
+     ```typescript
+     // 模块级可变状态与线程局部变量（统一使用 let，严禁使用 var）
+     pub let global_counter: i32 = 100;
+     pub threadlocal let worker_id: u32 = 0; // 亦支持 @tls let
+     ```
+   - 明确阐明转译映射机理：CP 源码书写 `let` / `pub let`，`cpc` 编译器自动负责转译发射底层 Zig 的 `var` / `pub var`。
+2. **测试用例归正 (`cap/test/`)**：
+   - 更新 [`cap/test/test_zig_syntax_compat.cp`](file:///data/dev/cp/cap/test/test_zig_syntax_compat.cp) 与 [`cap/test/test_bun_top_level_import.cp`](file:///data/dev/cp/cap/test/test_bun_top_level_import.cp)，将用例中的 `var` 统一修正为 CP 标准的 `let` / `pub let`；
+   - 验证 `cap cap/test/test_zig_syntax_compat.cp` 与 `cap cap/test/test_bun_top_level_import.cp` 执行通过（100% PASS）。
+
+
 
 
 

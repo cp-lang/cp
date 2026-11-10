@@ -7,8 +7,8 @@ fn check_even(x: u8): bool {
 }
 
 pub fn testWhileStep(): i32 {
-    var i: usize = 0;
-    var count: i32 = 0;
+    let i: usize = 0;
+    let count: i32 = 0;
     while (i < 10) : (i += 1) {
         if (i == 5) {
             break;

@@ -2544,7 +2544,12 @@
   - 增强 `infer_cp_type_with_mock` 的 `Expr::Call` 分支，支持通过函数类型别名解析被调用的函数指针返回类型，消灭状态机降级为 `*anyopaque` 的类型不匹配报错。
 - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
   - 新增第 8.12 节《循环步进表达式 (`while (cond) : (step)`) 与函数类型别名 (`const F = fn(...) Ret`)》。
-  - 更新第 17.12.1 节，明确模块顶层常量与变量编译期求值规范 (`Top-Level Comptime Initializer Semantics`)。
+  - 更新第 17.12.1 节，明确模块顶层常量与变量编译期求值规范 (`Top-Level Comptime Initializer Semantics`)，并纠正顶层变量语法为标准 `pub let`，彻底清理误导性的 `var` 写法。
+- [`cap/test/test_zig_syntax_compat.cp`](file:///data/dev/cp/cap/test/test_zig_syntax_compat.cp):
+  - 局部变量声明归正为标准 `let`。
+- [`cap/test/test_bun_top_level_import.cp`](file:///data/dev/cp/cap/test/test_bun_top_level_import.cp):
+  - 顶层全局变量声明归正为标准 `pub let`，切片缓冲区定义归正为标准数组 `[u8; 8]`。
+
 - [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs) / [`cpc_dev/src/codegen.rs`](file:///data/dev/cp/cpc_dev/src/codegen.rs):
   - 审核并同步 Bun AGY 对顶层 `var` 初始值求值置位 `is_comptime = true` 的改动，消除 Zig 顶层 Comptime 作用域内嵌 `comptime` 表达式错误。
 
