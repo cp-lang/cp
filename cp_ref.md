@@ -5757,6 +5757,30 @@ pub fn test(): void {
 1. **`let` / `let mut` 自动降级**：在 struct 内函数体中书写的 `let` 与 `let mut` 自动转译为 Zig 的 `var`，防止 Zig 编译器因不识别 `let` 关键字而报错；
 2. **函数签名冒号消除**：自动将 CP 风格函数声明中的返回值类型冒号（如 `pub fn f(): void`）消除为 Zig 标准函数签名（`pub fn f() void`），避免 `error: expected return type expression, found ':'`。
 
+#### 11.9.5.2 运行时 Prelude 辅助函数命名空间隔离与防遮蔽机制（Anti-Shadowing）
+
+在底层目标语言（Zig）的作用域规则中，顶层或模块级声明（如 `pub const T = enum { ... }`）会被其作用域内包含同名局部变量或常量的辅助函数判定为命名遮蔽（`local constant shadows declaration of 'T'`）。
+
+为保障用户在 CP 业务代码中自由使用 `T`（如通用类型形参名、枚举名或结构体名）而不受转译期环境干扰，CP 编译器规范：
+1. **内建辅助函数形参与局部变量私有化**：所有由代码生成器（Codegen Prelude）注入的通用类型提取辅助函数（如 `cp_iter_slice`、`is_string_like`、`CpValType`、`cp_string_from`、`cp_opt_is_null`、`cp_opt_unwrap`、`LockGuard`、`CpMutex` 等）统一采用前缀型标识符 `__T` 替代裸 `T`；
+2. **自动析构（Auto-Drop）防冲突隔离**：在作用域末尾自动注入的资源释放与所有权回收代码块（`defer if (!__x_moved) { const __T = @TypeOf(x); ... }`）同样全面采用 `__T` 局部类型名，实现 100% 的作用域安全隔离与抵抗遮蔽。
+
+```typescript
+// ✅ 用户可在顶层或模块内定义任意标识符为 T，完全零冲突：
+pub const T = enum {
+    Alpha,
+    Beta,
+};
+
+pub fn process_data(items: []const u8): usize {
+    let mut total: usize = 0;
+    for (items) |c| { // 底层调用 cp_iter_slice，内部使用 __T，不遮蔽顶层 T
+        total = total + c as usize;
+    }
+    return total;
+}
+```
+
 #### 11.9.6 字段级物理内存对齐注解 (`@align(N)`)
 
 在对接硬件网卡 DMA、SIMD 矢量寄存器或特定的操作系统事件循环（如 epoll/kqueue 事件缓冲区）时，结构体字段必须满足物理内存字节对齐要求。

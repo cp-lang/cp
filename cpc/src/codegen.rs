@@ -1951,9 +1951,9 @@ impl Codegen {
 
         // --- Tri-State Result, Built-in Error, String Concat & Pattern Helpers ---
         if !self.is_lib_mode && features.needs_result_error {
-            self.writeln("pub fn CpResult(comptime T: type, comptime E: type) type {");
+            self.writeln("pub fn CpResult(comptime __T: type, comptime __E: type) type {");
             self.writeln(
-                "    return union(enum) { ok: T, err: E, pub const __IS_CP_RESULT = true; };",
+                "    return union(enum) { ok: __T, err: __E, pub const __IS_CP_RESULT = true; };",
             );
             self.writeln("}");
             self.writeln("pub const Err = struct {");
@@ -1977,17 +1977,17 @@ impl Codegen {
             self.writeln("    }");
             self.writeln("};");
             self.writeln("pub const Error = Err;");
-            self.writeln("fn is_cp_result(comptime T: type) bool {");
+            self.writeln("fn is_cp_result(comptime __T: type) bool {");
             self.writeln(
-                "    return @typeInfo(T) == .@\"union\" and @hasDecl(T, \"__IS_CP_RESULT\");",
+                "    return @typeInfo(__T) == .@\"union\" and @hasDecl(__T, \"__IS_CP_RESULT\");",
             );
             self.writeln("}");
         }
         if features.needs_opt_chaining {
-            self.writeln("fn CpOptType(comptime T: type) type { if (@typeInfo(T) == .optional) return T; return ?T; }");
-            self.writeln("fn CpUnwrapOpt(comptime T: type) type { if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child; return T; }");
-            self.writeln("fn cp_opt_is_null(v: anytype) bool { const T = @TypeOf(v); if (comptime @typeInfo(T) == .optional) return v == null; return false; }");
-            self.writeln("fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) { const T = @TypeOf(v); if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; } }");
+            self.writeln("fn CpOptType(comptime __T: type) type { if (@typeInfo(__T) == .optional) return __T; return ?__T; }");
+            self.writeln("fn CpUnwrapOpt(comptime __T: type) type { if (@typeInfo(__T) == .optional) return @typeInfo(__T).optional.child; return __T; }");
+            self.writeln("fn cp_opt_is_null(v: anytype) bool { const __T = @TypeOf(v); if (comptime @typeInfo(__T) == .optional) return v == null; return false; }");
+            self.writeln("fn cp_opt_unwrap(v: anytype) CpUnwrapOpt(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime @typeInfo(__T) == .optional) { return v.?; } else { return v; } }");
         }
         if features.needs_cast_int {
             self.writeln("fn cp_cast_int(comptime Dest: type, val: anytype) Dest { const Src = @TypeOf(val); if (comptime Src == Dest) return val; if (comptime Src == comptime_int) { if (comptime @typeInfo(Dest).int.signedness == .unsigned and val < 0) return @as(Dest, @truncate(@as(u128, @bitCast(@as(i128, val))))) else return @as(Dest, @truncate(val)); } const src_bits = @typeInfo(Src).int.bits; const dest_bits = @typeInfo(Dest).int.bits; if (comptime @typeInfo(Src).int.signedness == @typeInfo(Dest).int.signedness) { if (comptime dest_bits >= src_bits) return @as(Dest, val) else return @truncate(val); } if (comptime @typeInfo(Src).int.signedness == .signed) { const s: i128 = if (comptime 128 >= src_bits) @as(i128, val) else @truncate(val); const u: u128 = @bitCast(s); if (comptime dest_bits >= 128) return @as(Dest, u) else return @truncate(u); } else { const u: u128 = if (comptime 128 >= src_bits) @as(u128, val) else @truncate(val); const s: i128 = @bitCast(u); if (comptime dest_bits >= 128) return @as(Dest, s) else return @truncate(s); } }");
@@ -2791,21 +2791,21 @@ impl Codegen {
             self.writeln("    pub fn isWriteLocked(self: *CpBareRwLock) bool { return self.raw.isWriteLocked(); }");
             self.writeln("};");
             self.writeln("");
-            self.writeln("fn LockGuard(comptime T: type) type {");
+            self.writeln("fn LockGuard(comptime __T: type) type {");
             self.writeln("    return struct {");
             self.writeln("        const Self = @This();");
-            self.writeln("        mutex: *CpMutex(T),");
-            self.writeln("        data: *T,");
+            self.writeln("        mutex: *CpMutex(__T),");
+            self.writeln("        data: *__T,");
             self.writeln("        pub fn release(self: Self) void { self.mutex.raw.unlock(); }");
             self.writeln("        pub fn unlock(self: Self) void { self.release(); }");
             self.writeln("    };");
             self.writeln("}");
             self.writeln("");
-            self.writeln("fn ReadGuard(comptime T: type) type {");
+            self.writeln("fn ReadGuard(comptime __T: type) type {");
             self.writeln("    return struct {");
             self.writeln("        const Self = @This();");
-            self.writeln("        rwlock: *CpRwLock(T),");
-            self.writeln("        data: *const T,");
+            self.writeln("        rwlock: *CpRwLock(__T),");
+            self.writeln("        data: *const __T,");
             self.writeln(
                 "        pub fn release(self: Self) void { self.rwlock.raw.unlockShared(); }",
             );
@@ -2813,11 +2813,11 @@ impl Codegen {
             self.writeln("    };");
             self.writeln("}");
             self.writeln("");
-            self.writeln("fn WriteGuard(comptime T: type) type {");
+            self.writeln("fn WriteGuard(comptime __T: type) type {");
             self.writeln("    return struct {");
             self.writeln("        const Self = @This();");
-            self.writeln("        rwlock: *CpRwLock(T),");
-            self.writeln("        data: *T,");
+            self.writeln("        rwlock: *CpRwLock(__T),");
+            self.writeln("        data: *__T,");
             self.writeln(
                 "        pub fn release(self: Self) void { self.rwlock.raw.unlockExclusive(); }",
             );
@@ -2825,30 +2825,30 @@ impl Codegen {
             self.writeln("    };");
             self.writeln("}");
             self.writeln("");
-            self.writeln("fn CpMutex(comptime T: type) type {");
+            self.writeln("fn CpMutex(comptime __T: type) type {");
             self.writeln("    return struct {");
             self.writeln("        const Self = @This();");
             self.writeln("        raw: NativeMutex = .{},");
-            self.writeln("        data: T,");
-            self.writeln("        pub fn init(val: T) Self { return .{ .data = val }; }");
-            self.writeln("        pub fn lock(self: *Self) LockGuard(T) { self.raw.lock(); return .{ .mutex = self, .data = &self.data }; }");
-            self.writeln("        pub fn tryLock(self: *Self) ?LockGuard(T) { if (self.raw.tryLock()) { return LockGuard(T){ .mutex = self, .data = &self.data }; } return null; }");
+            self.writeln("        data: __T,");
+            self.writeln("        pub fn init(val: __T) Self { return .{ .data = val }; }");
+            self.writeln("        pub fn lock(self: *Self) LockGuard(__T) { self.raw.lock(); return .{ .mutex = self, .data = &self.data }; }");
+            self.writeln("        pub fn tryLock(self: *Self) ?LockGuard(__T) { if (self.raw.tryLock()) { return LockGuard(__T){ .mutex = self, .data = &self.data }; } return null; }");
             self.writeln(
                 "        pub fn isLocked(self: *Self) bool { return self.raw.isLocked(); }",
             );
             self.writeln("    };");
             self.writeln("}");
             self.writeln("");
-            self.writeln("fn CpRwLock(comptime T: type) type {");
+            self.writeln("fn CpRwLock(comptime __T: type) type {");
             self.writeln("    return struct {");
             self.writeln("        const Self = @This();");
             self.writeln("        raw: NativeRwLock = .{},");
-            self.writeln("        data: T,");
-            self.writeln("        pub fn init(val: T) Self { return .{ .data = val }; }");
-            self.writeln("        pub fn read(self: *Self) ReadGuard(T) { self.raw.lockShared(); return .{ .rwlock = self, .data = &self.data }; }");
-            self.writeln("        pub fn tryRead(self: *Self) ?ReadGuard(T) { if (self.raw.tryLockShared()) { return ReadGuard(T){ .rwlock = self, .data = &self.data }; } return null; }");
-            self.writeln("        pub fn write(self: *Self) WriteGuard(T) { self.raw.lockExclusive(); return .{ .rwlock = self, .data = &self.data }; }");
-            self.writeln("        pub fn tryWrite(self: *Self) ?WriteGuard(T) { if (self.raw.tryLockExclusive()) { return WriteGuard(T){ .rwlock = self, .data = &self.data }; } return null; }");
+            self.writeln("        data: __T,");
+            self.writeln("        pub fn init(val: __T) Self { return .{ .data = val }; }");
+            self.writeln("        pub fn read(self: *Self) ReadGuard(__T) { self.raw.lockShared(); return .{ .rwlock = self, .data = &self.data }; }");
+            self.writeln("        pub fn tryRead(self: *Self) ?ReadGuard(__T) { if (self.raw.tryLockShared()) { return ReadGuard(__T){ .rwlock = self, .data = &self.data }; } return null; }");
+            self.writeln("        pub fn write(self: *Self) WriteGuard(__T) { self.raw.lockExclusive(); return .{ .rwlock = self, .data = &self.data }; }");
+            self.writeln("        pub fn tryWrite(self: *Self) ?WriteGuard(__T) { if (self.raw.tryLockExclusive()) { return WriteGuard(__T){ .rwlock = self, .data = &self.data }; } return null; }");
             self.writeln(
                 "        pub fn isReadLocked(self: *Self) bool { return self.raw.isReadLocked(); }",
             );
@@ -2856,43 +2856,43 @@ impl Codegen {
             self.writeln("    };");
             self.writeln("}");
             self.writeln("");
-            self.writeln("fn CpAtomic(comptime T: type) type {");
+            self.writeln("fn CpAtomic(comptime __T: type) type {");
             self.writeln("    return struct {");
             self.writeln("        const Self = @This();");
-            self.writeln("        raw: std.atomic.Value(T),");
-            self.writeln("        pub fn init(val: T) Self { return .{ .raw = std.atomic.Value(T).init(val) }; }");
+            self.writeln("        raw: std.atomic.Value(__T),");
+            self.writeln("        pub fn init(val: __T) Self { return .{ .raw = std.atomic.Value(__T).init(val) }; }");
             self.writeln(
-                "        pub fn load(self: *const Self) T { return self.raw.load(.seq_cst); }",
+                "        pub fn load(self: *const Self) __T { return self.raw.load(.seq_cst); }",
             );
             self.writeln(
-                "        pub fn store(self: *Self, val: T) void { self.raw.store(val, .seq_cst); }",
+                "        pub fn store(self: *Self, val: __T) void { self.raw.store(val, .seq_cst); }",
             );
-            self.writeln("        pub fn swap(self: *Self, val: T) T { return self.raw.swap(val, .seq_cst); }");
-            self.writeln("        pub fn cas(self: *Self, expected: T, desired: T) bool { return self.raw.cmpxchgStrong(expected, desired, .seq_cst, .seq_cst) == null; }");
-            self.writeln("        pub fn compareAndSwap(self: *Self, expected: T, desired: T) bool { return self.cas(expected, desired); }");
-            self.writeln("        pub fn add(self: *Self, delta: T) T { return self.raw.fetchAdd(delta, .seq_cst); }");
-            self.writeln("        pub fn sub(self: *Self, delta: T) T { return self.raw.fetchSub(delta, .seq_cst); }");
-            self.writeln("        pub fn inc(self: *Self) T { return self.add(1); }");
-            self.writeln("        pub fn dec(self: *Self) T { return self.sub(1); }");
-            self.writeln("        pub fn @\"and\"(self: *Self, mask: T) T { return self.raw.fetchAnd(mask, .seq_cst); }");
-            self.writeln("        pub fn @\"or\"(self: *Self, mask: T) T { return self.raw.fetchOr(mask, .seq_cst); }");
-            self.writeln("        pub fn @\"xor\"(self: *Self, mask: T) T { return self.raw.fetchXor(mask, .seq_cst); }");
-            self.writeln("        pub fn testAndSet(self: *Self) bool { if (comptime T == bool) { return self.raw.swap(true, .seq_cst); } else { return self.raw.swap(1, .seq_cst) != 0; } }");
-            self.writeln("        pub fn clear(self: *Self) void { if (comptime T == bool) { self.raw.store(false, .seq_cst); } else { self.raw.store(0, .seq_cst); } }");
+            self.writeln("        pub fn swap(self: *Self, val: __T) __T { return self.raw.swap(val, .seq_cst); }");
+            self.writeln("        pub fn cas(self: *Self, expected: __T, desired: __T) bool { return self.raw.cmpxchgStrong(expected, desired, .seq_cst, .seq_cst) == null; }");
+            self.writeln("        pub fn compareAndSwap(self: *Self, expected: __T, desired: __T) bool { return self.cas(expected, desired); }");
+            self.writeln("        pub fn add(self: *Self, delta: __T) __T { return self.raw.fetchAdd(delta, .seq_cst); }");
+            self.writeln("        pub fn sub(self: *Self, delta: __T) __T { return self.raw.fetchSub(delta, .seq_cst); }");
+            self.writeln("        pub fn inc(self: *Self) __T { return self.add(1); }");
+            self.writeln("        pub fn dec(self: *Self) __T { return self.sub(1); }");
+            self.writeln("        pub fn @\"and\"(self: *Self, mask: __T) __T { return self.raw.fetchAnd(mask, .seq_cst); }");
+            self.writeln("        pub fn @\"or\"(self: *Self, mask: __T) __T { return self.raw.fetchOr(mask, .seq_cst); }");
+            self.writeln("        pub fn @\"xor\"(self: *Self, mask: __T) __T { return self.raw.fetchXor(mask, .seq_cst); }");
+            self.writeln("        pub fn testAndSet(self: *Self) bool { if (comptime __T == bool) { return self.raw.swap(true, .seq_cst); } else { return self.raw.swap(1, .seq_cst) != 0; } }");
+            self.writeln("        pub fn clear(self: *Self) void { if (comptime __T == bool) { self.raw.store(false, .seq_cst); } else { self.raw.store(0, .seq_cst); } }");
             self.writeln("    };");
             self.writeln("}");
             self.writeln("");
             self.writeln("fn cp_make_mutex(val: anytype) CpMutex(@TypeOf(val)) { return CpMutex(@TypeOf(val)).init(val); }");
             self.writeln("fn cp_make_rwlock(val: anytype) CpRwLock(@TypeOf(val)) { return CpRwLock(@TypeOf(val)).init(val); }");
-            self.writeln("fn CpAtomicConcreteType(comptime T: type) type { if (T == comptime_int) return i32; if (T == comptime_float) return f32; return T; }");
-            self.writeln("fn cp_make_atomic(val: anytype) CpAtomic(CpAtomicConcreteType(@TypeOf(val))) { const T = CpAtomicConcreteType(@TypeOf(val)); return CpAtomic(T).init(@as(T, val)); }");
+            self.writeln("fn CpAtomicConcreteType(comptime __T: type) type { if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }");
+            self.writeln("fn cp_make_atomic(val: anytype) CpAtomic(CpAtomicConcreteType(@TypeOf(val))) { const __T = CpAtomicConcreteType(@TypeOf(val)); return CpAtomic(__T).init(@as(__T, val)); }");
             self.writeln("");
         }
 
         if features.needs_collections || features.needs_actors {
-            self.writeln("fn CpIndexReturnType(comptime T: type) type {");
-            self.writeln("    if (@typeInfo(T) == .pointer) {");
-            self.writeln("        const Child = @typeInfo(T).pointer.child;");
+            self.writeln("fn CpIndexReturnType(comptime __T: type) type {");
+            self.writeln("    if (@typeInfo(__T) == .pointer) {");
+            self.writeln("        const Child = @typeInfo(__T).pointer.child;");
             self.writeln("        if (@typeInfo(Child) == .@\"struct\" and @hasDecl(Child, \"get\")) return ?Message;");
             self.writeln(
                 "        if (@typeInfo(Child) == .array) return @typeInfo(Child).array.child;",
@@ -2901,15 +2901,15 @@ impl Codegen {
                 "        if (@typeInfo(Child) == .pointer and @typeInfo(Child).pointer.size == .slice) return @typeInfo(Child).pointer.child;",
             );
             self.writeln("    }");
-            self.writeln("    if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child;");
-            self.writeln("    if (@typeInfo(T) == .array) return @typeInfo(T).array.child;");
+            self.writeln("    if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return @typeInfo(__T).pointer.child;");
+            self.writeln("    if (@typeInfo(__T) == .array) return @typeInfo(__T).array.child;");
             self.writeln("    return ?Message;");
             self.writeln("}");
             self.writeln("fn cp_index_get(container: anytype, key: anytype) CpIndexReturnType(@TypeOf(container)) {");
-            self.writeln("    const T = @TypeOf(container);");
-            self.writeln("    if (comptime (T == Message or T == ?Message)) {");
+            self.writeln("    const __T = @TypeOf(container);");
+            self.writeln("    if (comptime (__T == Message or __T == ?Message)) {");
             self.writeln(
-                "        const val: ?Message = if (T == ?Message) container else container;",
+                "        const val: ?Message = if (__T == ?Message) container else container;",
             );
             self.writeln("        if (val) |m| {");
             self.writeln("            switch (m) {");
@@ -2930,9 +2930,9 @@ impl Codegen {
             self.writeln("            return null;");
             self.writeln("        }");
             self.writeln("    }");
-            self.writeln("    if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@\"struct\" and @hasDecl(@typeInfo(T).pointer.child, \"get\"))) {");
+            self.writeln("    if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@\"struct\" and @hasDecl(@typeInfo(__T).pointer.child, \"get\"))) {");
             self.writeln("        return container.get(key);");
-            self.writeln("    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) {");
+            self.writeln("    } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) {");
             self.writeln("        return container.*[@as(usize, @intCast(key))];");
             self.writeln("    } else {");
             self.writeln("        return container[@as(usize, @intCast(key))];");
@@ -2941,34 +2941,34 @@ impl Codegen {
             self.writeln(
                 "fn cp_index_assign(container: anytype, key: anytype, value: anytype) void {",
             );
-            self.writeln("    const T = @TypeOf(container);");
-            self.writeln("    if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@\"struct\" and @hasDecl(@typeInfo(T).pointer.child, \"set\"))) {");
+            self.writeln("    const __T = @TypeOf(container);");
+            self.writeln("    if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@\"struct\" and @hasDecl(@typeInfo(__T).pointer.child, \"set\"))) {");
             self.writeln("        _ = container.set(key, value);");
-            self.writeln("    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) {");
+            self.writeln("    } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) {");
             self.writeln("        @constCast(container.*)[@as(usize, @intCast(key))] = value;");
-            self.writeln("    } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) {");
+            self.writeln("    } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) {");
             self.writeln("        @constCast(container)[@as(usize, @intCast(key))] = value;");
             self.writeln("    } else {");
             self.writeln("        container[@as(usize, @intCast(key))] = value;");
             self.writeln("    }");
             self.writeln("}");
             self.writeln("fn cp_message_from(v: anytype) Message {");
-            self.writeln("    const T = @TypeOf(v);");
-            self.writeln("    if (T == Message) return v;");
+            self.writeln("    const __T = @TypeOf(v);");
+            self.writeln("    if (__T == Message) return v;");
             self.writeln(
-                "    if (T == []Message or T == []const Message) return .{ .array = @constCast(v) };",
+                "    if (__T == []Message or __T == []const Message) return .{ .array = @constCast(v) };",
             );
             self.writeln(
-                "    if (T == i32 or T == comptime_int) return .{ .int = @intCast(v) };
-    if (T == bool) return .{ .boolean = v };",
+                "    if (__T == i32 or __T == comptime_int) return .{ .int = @intCast(v) };
+    if (__T == bool) return .{ .boolean = v };",
             );
             self.writeln(
-                "    if (T == f32 or T == comptime_float) return .{ .float = @floatCast(v) };",
+                "    if (__T == f32 or __T == comptime_float) return .{ .float = @floatCast(v) };",
             );
             self.writeln(
-                "    if (T == []const u8 or T == []u8) return .{ .string = v };
-    if (@typeInfo(T) == .pointer) {
-        const Child = @typeInfo(T).pointer.child;
+                "    if (__T == []const u8 or __T == []u8) return .{ .string = v };
+    if (@typeInfo(__T) == .pointer) {
+        const Child = @typeInfo(__T).pointer.child;
         if (Child == u8) return .{ .string = v };
         if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) {
             const cp_str_slice: []const u8 = v;
@@ -2982,10 +2982,10 @@ impl Codegen {
         }
 
         if features.needs_string_helpers || features.needs_unpack {
-            self.writeln("fn is_string_like(comptime T: type) bool { if (T == []const u8 or T == []u8) return true; if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }");
-            self.writeln("fn to_string_slice(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime (T == []const u8 or T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }");
-            self.writeln("fn CpValType(comptime T: type) type { if (is_string_like(T)) return []const u8; if (T == comptime_int) return i32; if (T == comptime_float) return f32; return T; }");
-            self.writeln("fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == comptime_int) { return @as(i32, v); } else if (comptime T == comptime_float) { return @as(f32, v); } else { return v; } }");
+            self.writeln("fn is_string_like(comptime __T: type) bool { if (__T == []const u8 or __T == []u8) return true; if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (Child == u8) return true; if (@typeInfo(Child) == .array and @typeInfo(Child).array.child == u8) return true; } return false; }");
+            self.writeln("fn to_string_slice(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime (__T == []const u8 or __T == []u8)) { return v; } else { const cp_str_slice: []const u8 = v; return cp_str_slice; } }");
+            self.writeln("fn CpValType(comptime __T: type) type { if (is_string_like(__T)) return []const u8; if (__T == comptime_int) return i32; if (__T == comptime_float) return f32; return __T; }");
+            self.writeln("fn cp_val(v: anytype) CpValType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == comptime_int) { return @as(i32, v); } else if (comptime __T == comptime_float) { return @as(f32, v); } else { return v; } }");
         }
 
         if features.needs_add {
@@ -2999,21 +2999,21 @@ impl Codegen {
         }
 
         if !self.is_lib_mode && features.needs_result_error {
-            self.writeln("fn CpUnwrapOkType(comptime T: type) type { if (is_cp_result(T)) { const OkT = @FieldType(T, \"ok\"); if (@typeInfo(OkT) == .optional) return @typeInfo(OkT).optional.child; return OkT; } if (@typeInfo(T) == .error_union) return @typeInfo(T).error_union.payload; if (@typeInfo(T) == .optional) return @typeInfo(T).optional.child; return T; }");
-            self.writeln("fn CpUnwrapErrType(comptime T: type) type { if (is_cp_result(T)) return @FieldType(T, \"err\"); if (@typeInfo(T) == .error_union) return @typeInfo(T).error_union.error_set; return anyerror; }");
-            self.writeln("fn cp_has_ok_val(v: anytype) bool { const T = @TypeOf(v); if (comptime is_cp_result(T)) { if (v != .ok) return false; const OkT = @FieldType(T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok != null; } else { return true; } } else if (comptime @typeInfo(T) == .error_union) { if (v) |_| return true else |_| return false; } else if (comptime @typeInfo(T) == .optional) { return v != null; } else { return true; } }");
-            self.writeln("fn cp_unwrap_ok_val(v: anytype) CpUnwrapOkType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_cp_result(T)) { const OkT = @FieldType(T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok.?; } else { return v.ok; } } else if (comptime @typeInfo(T) == .error_union) { return v catch unreachable; } else if (comptime @typeInfo(T) == .optional) { return v.?; } else { return v; } }");
-            self.writeln("fn cp_unwrap_err_val(v: anytype) CpUnwrapErrType(@TypeOf(v)) { const T = @TypeOf(v); if (comptime is_cp_result(T)) return v.err; if (comptime @typeInfo(T) == .error_union) { if (v) |_| unreachable else |e| return e; } return v; }");
-            self.writeln("fn cp_is_null_val(v: anytype) bool { const T = @TypeOf(v); if (comptime is_cp_result(T)) { if (v != .ok) return false; const OkT = @FieldType(T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok == null; } else { return false; } } else if (comptime @typeInfo(T) == .optional) { return v == null; } else { return false; } }");
+            self.writeln("fn CpUnwrapOkType(comptime __T: type) type { if (is_cp_result(__T)) { const OkT = @FieldType(__T, \"ok\"); if (@typeInfo(OkT) == .optional) return @typeInfo(OkT).optional.child; return OkT; } if (@typeInfo(__T) == .error_union) return @typeInfo(__T).error_union.payload; if (@typeInfo(__T) == .optional) return @typeInfo(__T).optional.child; return __T; }");
+            self.writeln("fn CpUnwrapErrType(comptime __T: type) type { if (is_cp_result(__T)) return @FieldType(__T, \"err\"); if (@typeInfo(__T) == .error_union) return @typeInfo(__T).error_union.error_set; return anyerror; }");
+            self.writeln("fn cp_has_ok_val(v: anytype) bool { const __T = @TypeOf(v); if (comptime is_cp_result(__T)) { if (v != .ok) return false; const OkT = @FieldType(__T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok != null; } else { return true; } } else if (comptime @typeInfo(__T) == .error_union) { if (v) |_| return true else |_| return false; } else if (comptime @typeInfo(__T) == .optional) { return v != null; } else { return true; } }");
+            self.writeln("fn cp_unwrap_ok_val(v: anytype) CpUnwrapOkType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_cp_result(__T)) { const OkT = @FieldType(__T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok.?; } else { return v.ok; } } else if (comptime @typeInfo(__T) == .error_union) { return v catch unreachable; } else if (comptime @typeInfo(__T) == .optional) { return v.?; } else { return v; } }");
+            self.writeln("fn cp_unwrap_err_val(v: anytype) CpUnwrapErrType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_cp_result(__T)) return v.err; if (comptime @typeInfo(__T) == .error_union) { if (v) |_| unreachable else |e| return e; } return v; }");
+            self.writeln("fn cp_is_null_val(v: anytype) bool { const __T = @TypeOf(v); if (comptime is_cp_result(__T)) { if (v != .ok) return false; const OkT = @FieldType(__T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok == null; } else { return false; } } else if (comptime @typeInfo(__T) == .optional) { return v == null; } else { return false; } }");
             self.writeln("fn cp_convert_err(comptime TargetErr: type, err_val: anytype) TargetErr { const SrcType = @TypeOf(err_val); if (comptime SrcType == TargetErr) { return err_val; } else if (comptime TargetErr == Err or TargetErr == Error) { if (comptime @typeInfo(SrcType) == .@\"union\") { return Err{ .code = @intCast(@intFromEnum(std.meta.activeTag(err_val))), .msg = @tagName(err_val) }; } else if (comptime @typeInfo(SrcType) == .@\"enum\") { return Err{ .code = @intCast(@intFromEnum(err_val)), .msg = @tagName(err_val) }; } else if (comptime @typeInfo(SrcType) == .error_set) { return Err{ .code = 0, .msg = @errorName(err_val) }; } else if (comptime @typeInfo(SrcType) == .@\"struct\") { var c: i32 = 0; var m: []const u8 = \"\"; if (comptime @hasField(SrcType, \"code\")) { c = @as(i32, @intCast(err_val.code)); } if (comptime @hasField(SrcType, \"msg\")) { m = to_string_slice(err_val.msg); } else if (comptime @hasField(SrcType, \"message\")) { m = to_string_slice(err_val.message); } else if (comptime @hasDecl(SrcType, \"message\")) { m = to_string_slice(err_val.message()); } else { m = @typeName(SrcType); } return Err.init(c, m); } else if (comptime @typeInfo(SrcType) == .pointer and @typeInfo(@typeInfo(SrcType).pointer.child) == .@\"struct\") { const Child = @typeInfo(SrcType).pointer.child; var c: i32 = 0; var m: []const u8 = \"\"; if (comptime @hasField(Child, \"code\")) { c = @as(i32, @intCast(err_val.code)); } if (comptime @hasField(Child, \"msg\")) { m = to_string_slice(err_val.msg); } else if (comptime @hasField(Child, \"message\")) { m = to_string_slice(err_val.message); } else if (comptime @hasDecl(Child, \"message\")) { m = to_string_slice(err_val.message()); } else { m = @typeName(Child); } return Err.init(c, m).with_cause(err_val); } else { return Err{ .code = -1, .msg = \"error\" }; } } else if (comptime @typeInfo(TargetErr) == .pointer and @typeInfo(SrcType) != .pointer) { return @ptrCast(@constCast(&err_val)); } else if (comptime @typeInfo(SrcType) == .pointer and @typeInfo(TargetErr) != .pointer and @typeInfo(SrcType).pointer.child == TargetErr) { return err_val.*; } else if (comptime @typeInfo(TargetErr) == .@\"union\" and @hasDecl(TargetErr, \"__from\")) { return TargetErr.__from(err_val); } else if (comptime @hasDecl(TargetErr, \"from\")) { return TargetErr.from(err_val); } else { return err_val; } }");
         }
 
         if features.needs_result_error {
-            self.writeln("fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const T = @TypeOf(val); if (comptime @typeInfo(T) == .@\"enum\") { return val == tag; } else if (comptime @typeInfo(T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), \"Err\") and T == @field(@This(), \"Err\")) or (@hasDecl(@This(), \"Error\") and T == @field(@This(), \"Error\")) or (@typeInfo(T) == .@\"struct\" and @hasField(T, \"msg\")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(T) == .@\"union\") { return std.meta.activeTag(val) == tag; } else { return false; } }");
+            self.writeln("fn cp_match_tag(val: anytype, comptime tag: anytype) bool { const __T = @TypeOf(val); if (comptime @typeInfo(__T) == .@\"enum\") { return val == tag; } else if (comptime @typeInfo(__T) == .error_set) { return val == @field(anyerror, @tagName(tag)); } else if (comptime ((@hasDecl(@This(), \"Err\") and __T == @field(@This(), \"Err\")) or (@hasDecl(@This(), \"Error\") and __T == @field(@This(), \"Error\")) or (@typeInfo(__T) == .@\"struct\" and @hasField(__T, \"msg\")))) { return std.mem.eql(u8, val.msg, @tagName(tag)); } else if (comptime @typeInfo(__T) == .@\"union\") { return std.meta.activeTag(val) == tag; } else { return false; } }");
         }
 
         if features.needs_not {
-            self.writeln("fn cp_not(v: anytype) bool { const T = @TypeOf(v); if (comptime T == bool) { return !v; } else if (comptime @typeInfo(T) == .optional) { return v == null; } else if (comptime is_string_like(T)) { return to_string_slice(v).len == 0; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return v == 0; } else { return false; } }");
+            self.writeln("fn cp_not(v: anytype) bool { const __T = @TypeOf(v); if (comptime __T == bool) { return !v; } else if (comptime @typeInfo(__T) == .optional) { return v == null; } else if (comptime is_string_like(__T)) { return to_string_slice(v).len == 0; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return v == 0; } else { return false; } }");
         }
 
         if features.needs_null_coalesce {
@@ -3028,9 +3028,9 @@ impl Codegen {
 
         if features.needs_fmt {
             if features.needs_collections || features.needs_actors {
-                self.writeln("fn cp_fmt(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == bool) { return if (v) \"true\" else \"false\"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{d}\", .{v}) catch unreachable; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{d}\", .{v}) catch unreachable; } else if (comptime @typeInfo(T) == .@\"enum\") { return @tagName(v); } else if (comptime T == Message) { return switch (v) { .string => |s| s, .int => |i| std.fmt.allocPrint(std.heap.page_allocator, \"{d}\", .{i}) catch unreachable, .float => |f| std.fmt.allocPrint(std.heap.page_allocator, \"{d}\", .{f}) catch unreachable, .boolean => |b| if (b) \"true\" else \"false\", else => std.fmt.allocPrint(std.heap.page_allocator, \"{any}\", .{v}) catch unreachable, }; } else if (comptime @typeInfo(T) == .optional) { if (v) |unwrapped| { return cp_fmt(unwrapped); } else { return \"null\"; } } else { return std.fmt.allocPrint(std.heap.page_allocator, \"{any}\", .{v}) catch unreachable; } }");
+                self.writeln("fn cp_fmt(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == bool) { return if (v) \"true\" else \"false\"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{d}\", .{v}) catch unreachable; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{d}\", .{v}) catch unreachable; } else if (comptime @typeInfo(__T) == .@\"enum\") { return @tagName(v); } else if (comptime __T == Message) { return switch (v) { .string => |s| s, .int => |i| std.fmt.allocPrint(std.heap.page_allocator, \"{d}\", .{i}) catch unreachable, .float => |f| std.fmt.allocPrint(std.heap.page_allocator, \"{d}\", .{f}) catch unreachable, .boolean => |b| if (b) \"true\" else \"false\", else => std.fmt.allocPrint(std.heap.page_allocator, \"{any}\", .{v}) catch unreachable, }; } else if (comptime @typeInfo(__T) == .optional) { if (v) |unwrapped| { return cp_fmt(unwrapped); } else { return \"null\"; } } else { return std.fmt.allocPrint(std.heap.page_allocator, \"{any}\", .{v}) catch unreachable; } }");
             } else {
-                self.writeln("fn cp_fmt(v: anytype) []const u8 { const T = @TypeOf(v); if (comptime is_string_like(T)) { return to_string_slice(v); } else if (comptime T == bool) { return if (v) \"true\" else \"false\"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{d}\", .{v}) catch unreachable; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{d}\", .{v}) catch unreachable; } else if (comptime @typeInfo(T) == .@\"enum\") { return @tagName(v); } else if (comptime @typeInfo(T) == .optional) { if (v) |unwrapped| { return cp_fmt(unwrapped); } else { return \"null\"; } } else { return std.fmt.allocPrint(std.heap.page_allocator, \"{any}\", .{v}) catch unreachable; } }");
+                self.writeln("fn cp_fmt(v: anytype) []const u8 { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { return to_string_slice(v); } else if (comptime __T == bool) { return if (v) \"true\" else \"false\"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{d}\", .{v}) catch unreachable; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{d}\", .{v}) catch unreachable; } else if (comptime @typeInfo(__T) == .@\"enum\") { return @tagName(v); } else if (comptime @typeInfo(__T) == .optional) { if (v) |unwrapped| { return cp_fmt(unwrapped); } else { return \"null\"; } } else { return std.fmt.allocPrint(std.heap.page_allocator, \"{any}\", .{v}) catch unreachable; } }");
             }
         }
 
@@ -3081,7 +3081,7 @@ impl Codegen {
         }
 
         if features.needs_hash {
-            self.writeln("fn cp_hash_val(val: anytype) usize { const T = @TypeOf(val); if (comptime is_string_like(T)) { const s = to_string_slice(val); var h: usize = 2166136261; for (s) |byte| { h = (h ^ byte) *% 16777619; } return h; } if (comptime @typeInfo(T) == .int or @typeInfo(T) == .float or @typeInfo(T) == .bool) { var h: usize = 2166136261; const bytes = std.mem.asBytes(&val); for (bytes) |byte| { h = (h ^ byte) *% 16777619; } return h; } if (comptime @typeInfo(T) == .pointer) { if (@hasDecl(@typeInfo(T).pointer.child, \"hash\")) { return val.hash(); } } return 0; }");
+            self.writeln("fn cp_hash_val(val: anytype) usize { const __T = @TypeOf(val); if (comptime is_string_like(__T)) { const s = to_string_slice(val); var h: usize = 2166136261; for (s) |byte| { h = (h ^ byte) *% 16777619; } return h; } if (comptime @typeInfo(__T) == .int or @typeInfo(__T) == .float or @typeInfo(__T) == .bool) { var h: usize = 2166136261; const bytes = std.mem.asBytes(&val); for (bytes) |byte| { h = (h ^ byte) *% 16777619; } return h; } if (comptime @typeInfo(__T) == .pointer) { if (@hasDecl(@typeInfo(__T).pointer.child, \"hash\")) { return val.hash(); } } return 0; }");
         }
 
         if features.needs_array_helpers {
@@ -3093,7 +3093,7 @@ impl Codegen {
         }
 
         if features.needs_iter_helpers {
-            self.writeln("fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const T = @TypeOf(val); switch (@typeInfo(T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }");
+            self.writeln("fn cp_iter_slice(val: anytype) switch (@typeInfo(@TypeOf(val))) { .pointer => |p| switch (p.size) { .slice => @TypeOf(val), .one => switch (@typeInfo(p.child)) { .array => []const @typeInfo(p.child).array.child, .pointer => |sub_p| if (sub_p.size == .slice) p.child else @TypeOf(val), else => @TypeOf(val), }, else => @TypeOf(val), }, .array => []const @typeInfo(@TypeOf(val)).array.child, else => @TypeOf(val), } { const __T = @TypeOf(val); switch (@typeInfo(__T)) { .pointer => |p| switch (p.size) { .slice => return val, .one => switch (@typeInfo(p.child)) { .array => return val[0..], .pointer => |sub_p| if (sub_p.size == .slice) return val.* else return val, else => return val, }, else => return val, }, .array => return val[0..], else => return val, } }");
             self.writeln("fn cp_mut_slice(ptr: anytype) switch (@typeInfo(@TypeOf(ptr.*))) { .array => []@typeInfo(@TypeOf(ptr.*)).array.child, .pointer => |p| switch (p.size) { .slice => []if (@typeInfo(p.child) == .pointer) @typeInfo(p.child).pointer.child else p.child, .one => switch (@typeInfo(p.child)) { .pointer => |sub_p| if (sub_p.size == .slice) []sub_p.child else @compileError(\"Cannot mutably iterate over non-collection\"), else => @compileError(\"Cannot mutably iterate over non-collection\"), }, else => @compileError(\"Cannot mutably iterate over non-collection\"), }, else => @compileError(\"Cannot mutably iterate over non-collection\"), } { const ValT = @TypeOf(ptr.*); switch (@typeInfo(ValT)) { .array => return ptr[0..], .pointer => |p| switch (p.size) { .slice => return @constCast(ptr.*), .one => return @constCast(ptr.*.*), else => unreachable, }, else => unreachable, } }");
         }
         if features.needs_index_helpers {
@@ -3151,20 +3151,20 @@ impl Codegen {
         }
         if features.needs_shift {
             self.writeln("fn cp_shl(val: anytype, shift: anytype) @TypeOf(val) {");
-            self.writeln("    const T = @TypeOf(val);");
-            self.writeln("    if (comptime @typeInfo(T) == .comptime_int) return val << shift;");
-            self.writeln("    if (comptime @typeInfo(T) == .int) {");
-            self.writeln("        const ShiftType = std.math.Log2Int(T);");
+            self.writeln("    const __T = @TypeOf(val);");
+            self.writeln("    if (comptime @typeInfo(__T) == .comptime_int) return val << shift;");
+            self.writeln("    if (comptime @typeInfo(__T) == .int) {");
+            self.writeln("        const ShiftType = std.math.Log2Int(__T);");
             self.writeln("        const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);");
             self.writeln("        return val << @as(ShiftType, @truncate(u_shift));");
             self.writeln("    }");
             self.writeln("    return val << shift;");
             self.writeln("}");
             self.writeln("fn cp_shr(val: anytype, shift: anytype) @TypeOf(val) {");
-            self.writeln("    const T = @TypeOf(val);");
-            self.writeln("    if (comptime @typeInfo(T) == .comptime_int) return val >> shift;");
-            self.writeln("    if (comptime @typeInfo(T) == .int) {");
-            self.writeln("        const ShiftType = std.math.Log2Int(T);");
+            self.writeln("    const __T = @TypeOf(val);");
+            self.writeln("    if (comptime @typeInfo(__T) == .comptime_int) return val >> shift;");
+            self.writeln("    if (comptime @typeInfo(__T) == .int) {");
+            self.writeln("        const ShiftType = std.math.Log2Int(__T);");
             self.writeln("        const u_shift: usize = if (@typeInfo(@TypeOf(shift)) == .int and @typeInfo(@TypeOf(shift)).int.signedness == .signed) @intCast(@max(0, shift)) else @intCast(shift);");
             self.writeln("        return val >> @as(ShiftType, @truncate(u_shift));");
             self.writeln("    }");
@@ -3211,7 +3211,7 @@ impl Codegen {
             self.writeln("fn drain_cross_thread_mailbox() void { const slot = current_node_id % 128; while (global_worker_mailboxes[slot].pop()) |item| { deliver_local(item.target.local_id, item.sender, item.msg); } }");
             self.writeln("fn cp_send(sender_pid: PID, target: PID, msg: Message) bool { if (target.node_id == current_node_id) { deliver_local(target.local_id, sender_pid, msg); return true; } else { const slot = target.node_id % 128; return global_worker_mailboxes[slot].push(.{ .target = target, .sender = sender_pid, .msg = msg }); } }");
             self.writeln("");
-            self.writeln("pub fn print(v: anytype) void { const T = @TypeOf(v); if (comptime is_string_like(T)) { std.debug.print(\"{s}\\n\", .{ to_string_slice(v) }); } else if (comptime T == Message) { std.debug.print(\"{s}\\n\", .{ cp_fmt(v) }); } else if (comptime T == ?Message) { if (v) |m| { std.debug.print(\"{s}\\n\", .{ cp_fmt(m) }); } else { std.debug.print(\"null\\n\", .{}); } } else { std.debug.print(\"{any}\\n\", .{ v }); } }");
+            self.writeln("pub fn print(v: anytype) void { const __T = @TypeOf(v); if (comptime is_string_like(__T)) { std.debug.print(\"{s}\\n\", .{ to_string_slice(v) }); } else if (comptime __T == Message) { std.debug.print(\"{s}\\n\", .{ cp_fmt(v) }); } else if (comptime __T == ?Message) { if (v) |m| { std.debug.print(\"{s}\\n\", .{ cp_fmt(m) }); } else { std.debug.print(\"null\\n\", .{}); } } else { std.debug.print(\"{any}\\n\", .{ v }); } }");
             self.writeln("pub const CpTask = struct { base: BaseContext = .{}, lock: Spinlock = .{}, state: u8 = 0, waiter_ctx: ?*anyopaque = null, waiter_fn: ?*const fn(*anyopaque) anyerror!void = null, join_barrier: ?*JoinBarrier = null, join_idx: usize = 0, arena: ?*std.heap.ArenaAllocator = null, };");
             if !self.enum_defs.contains_key("Task") {
                 self.writeln("pub const Task = CpTask;");
@@ -3225,15 +3225,15 @@ impl Codegen {
                 self.writeln("const Message = anyopaque;");
                 self.writeln("fn cp_msg_to_val(_: anytype) []const u8 { return \"\"; }");
             }
-            self.writeln("pub fn CpUnpackElemType(comptime T: type, comptime idx: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; return @FieldType(T, std.fmt.comptimePrint(\"{d}\", .{idx})); }");
-            self.writeln("pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return \"\"; } else if (comptime T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return \"\"; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(T) == .array)) { return v[idx]; } else { return @field(v, std.fmt.comptimePrint(\"{d}\", .{idx})); } }");
-            self.writeln("pub fn CpUnpackTailType(comptime T: type, comptime offset_from_end: usize) type { if (T == ?Message or T == Message) return []const u8; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(T).pointer.child).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return @typeInfo(T).array.child; const n = @typeInfo(T).@\"struct\".fields.len; return @FieldType(T, std.fmt.comptimePrint(\"{d}\", .{n - offset_from_end})); }");
-            self.writeln("pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return \"\"; } else if (comptime T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return \"\"; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(T) == .array)) { return v[v.len - offset_from_end]; } else { const n = @typeInfo(T).@\"struct\".fields.len; return @field(v, std.fmt.comptimePrint(\"{d}\", .{n - offset_from_end})); } }");
-            self.writeln("pub fn CpUnpackSliceType(comptime T: type, comptime start_idx: usize) type { if (T == ?Message or T == Message) return []const Message; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice) return T; if (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice) return @typeInfo(T).pointer.child; if (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array) return []const @typeInfo(@typeInfo(T).pointer.child).array.child; if (@typeInfo(T) == .array) return []const @typeInfo(T).array.child; const fields = @typeInfo(T).@\"struct\".fields; if (fields.len == 0) return []const i32; const Elem = if (start_idx < fields.len) fields[start_idx].type else fields[0].type; return []const CpValType(Elem); }");
-            self.writeln("pub fn cp_unpack_slice(v: anytype, comptime start_idx: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start_idx) { const T = @TypeOf(v); if (comptime T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start_idx + suffix_len) { return m.array[start_idx .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime T == Message) { if (v == .array and v.array.len >= start_idx + suffix_len) { return v.array[start_idx .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .one and @typeInfo(@typeInfo(T).pointer.child) == .pointer and @typeInfo(@typeInfo(T).pointer.child).pointer.size == .slice)) { return v.*[start_idx .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .array)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(T) == .array)) { return v[start_idx .. v.len - suffix_len]; } else { const fields = @typeInfo(T).@\"struct\".fields; const end = fields.len - suffix_len; const count = if (end > start_idx) end - start_idx else 0; const Elem = if (start_idx < fields.len) CpValType(fields[start_idx].type) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start_idx..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, std.fmt.comptimePrint(\"{d}\", .{f_idx}))); } return buf; } }");
+            self.writeln("pub fn CpUnpackElemType(comptime __T: type, comptime idx: usize) type { if (__T == ?Message or __T == Message) return []const u8; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(__T).pointer.child).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return @typeInfo(__T).array.child; return @FieldType(__T, std.fmt.comptimePrint(\"{d}\", .{idx})); }");
+            self.writeln("pub fn cp_unpack_elem(v: anytype, comptime idx: usize) CpUnpackElemType(@TypeOf(v), idx) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and idx < m.array.len) { return cp_msg_to_val(m.array[idx]); } } return \"\"; } else if (comptime __T == Message) { if (v == .array and idx < v.array.len) { return cp_msg_to_val(v.array[idx]); } return \"\"; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[idx]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[idx]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[idx]; } else if (comptime (@typeInfo(__T) == .array)) { return v[idx]; } else { return @field(v, std.fmt.comptimePrint(\"{d}\", .{idx})); } }");
+            self.writeln("pub fn CpUnpackTailType(comptime __T: type, comptime offset_from_end: usize) type { if (__T == ?Message or __T == Message) return []const u8; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(@typeInfo(__T).pointer.child).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return @typeInfo(__T).array.child; const n = @typeInfo(__T).@\"struct\".fields.len; return @FieldType(__T, std.fmt.comptimePrint(\"{d}\", .{n - offset_from_end})); }");
+            self.writeln("pub fn cp_unpack_tail(v: anytype, comptime offset_from_end: usize) CpUnpackTailType(@TypeOf(v), offset_from_end) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= offset_from_end) { return cp_msg_to_val(m.array[m.array.len - offset_from_end]); } } return \"\"; } else if (comptime __T == Message) { if (v == .array and v.array.len >= offset_from_end) { return cp_msg_to_val(v.array[v.array.len - offset_from_end]); } return \"\"; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[v.*.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[v.len - offset_from_end]; } else if (comptime (@typeInfo(__T) == .array)) { return v[v.len - offset_from_end]; } else { const n = @typeInfo(__T).@\"struct\".fields.len; return @field(v, std.fmt.comptimePrint(\"{d}\", .{n - offset_from_end})); } }");
+            self.writeln("pub fn CpUnpackSliceType(comptime __T: type, comptime start_idx: usize) type { if (__T == ?Message or __T == Message) return []const Message; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice) return __T; if (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice) return @typeInfo(__T).pointer.child; if (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array) return []const @typeInfo(@typeInfo(__T).pointer.child).array.child; if (@typeInfo(__T) == .array) return []const @typeInfo(__T).array.child; const fields = @typeInfo(__T).@\"struct\".fields; if (fields.len == 0) return []const i32; const Elem = if (start_idx < fields.len) fields[start_idx].type else fields[0].type; return []const CpValType(Elem); }");
+            self.writeln("pub fn cp_unpack_slice(v: anytype, comptime start_idx: usize, comptime suffix_len: usize) CpUnpackSliceType(@TypeOf(v), start_idx) { const __T = @TypeOf(v); if (comptime __T == ?Message) { if (v) |m| { if (m == .array and m.array.len >= start_idx + suffix_len) { return m.array[start_idx .. m.array.len - suffix_len]; } } return &[_]Message{}; } else if (comptime __T == Message) { if (v == .array and v.array.len >= start_idx + suffix_len) { return v.array[start_idx .. v.array.len - suffix_len]; } return &[_]Message{}; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .one and @typeInfo(@typeInfo(__T).pointer.child) == .pointer and @typeInfo(@typeInfo(__T).pointer.child).pointer.size == .slice)) { return v.*[start_idx .. v.*.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .array)) { return v[start_idx .. v.len - suffix_len]; } else if (comptime (@typeInfo(__T) == .array)) { return v[start_idx .. v.len - suffix_len]; } else { const fields = @typeInfo(__T).@\"struct\".fields; const end = fields.len - suffix_len; const count = if (end > start_idx) end - start_idx else 0; const Elem = if (start_idx < fields.len) CpValType(fields[start_idx].type) else i32; const buf = std.heap.page_allocator.alloc(Elem, count) catch unreachable; inline for (start_idx..end, 0..) |f_idx, out_idx| { buf[out_idx] = cp_val(@field(v, std.fmt.comptimePrint(\"{d}\", .{f_idx}))); } return buf; } }");
         }
         if features.needs_string_helpers || features.needs_fmt {
-            self.writeln("pub fn cp_string_from(val: anytype) []const u8 { const T = @TypeOf(val); if (comptime T == []const u8) { return val; } else if (comptime (T == [*:0]const u8 or T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(T).pointer.size == .slice and @typeInfo(T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(T) == .@\"enum\")) { return @tagName(val); } else if (comptime T == bool) { return if (val) \"true\" else \"false\"; } else if (comptime (@typeInfo(T) == .int or T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{}\", .{val}) catch \"0\"; } else if (comptime (@typeInfo(T) == .float or T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{d}\", .{val}) catch \"0.0\"; } else if (comptime (@typeInfo(T) == .@\"struct\" and @hasDecl(T, \"toString\"))) { return val.toString(); } else if (comptime (@typeInfo(T) == .pointer and @typeInfo(@typeInfo(T).pointer.child) == .@\"struct\" and @hasDecl(@typeInfo(T).pointer.child, \"toString\"))) { return val.toString(); } else { return @typeName(T); } }");
+            self.writeln("pub fn cp_string_from(val: anytype) []const u8 { const __T = @TypeOf(val); if (comptime __T == []const u8) { return val; } else if (comptime (__T == [*:0]const u8 or __T == [*:0]u8)) { return std.mem.span(val); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(__T).pointer.size == .slice and @typeInfo(__T).pointer.child == u8)) { return val; } else if (comptime (@typeInfo(__T) == .@\"enum\")) { return @tagName(val); } else if (comptime __T == bool) { return if (val) \"true\" else \"false\"; } else if (comptime (@typeInfo(__T) == .int or __T == comptime_int)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{}\", .{val}) catch \"0\"; } else if (comptime (@typeInfo(__T) == .float or __T == comptime_float)) { return std.fmt.allocPrint(std.heap.page_allocator, \"{d}\", .{val}) catch \"0.0\"; } else if (comptime (@typeInfo(__T) == .@\"struct\" and @hasDecl(__T, \"toString\"))) { return val.toString(); } else if (comptime (@typeInfo(__T) == .pointer and @typeInfo(@typeInfo(__T).pointer.child) == .@\"struct\" and @hasDecl(@typeInfo(__T).pointer.child, \"toString\"))) { return val.toString(); } else { return @typeName(__T); } }");
             self.writeln("");
         }
 
@@ -8602,7 +8602,7 @@ impl Codegen {
                 }
                 if self.current_receiver_mode == ReceiverMode::Move && func.ident.sym != "release" {
                     self.writeln("var __self_moved = false; _ = &__self_moved;");
-                    self.writeln("defer if (!__self_moved) { const T = @TypeOf(self); if (@typeInfo(T) == .pointer) { const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@\"struct\" and @hasDecl(Child, \"release\")) { const RType = @typeInfo(@TypeOf(Child.release)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) { _ = self.release() catch {}; } else { self.release(); } } } };");
+                    self.writeln("defer if (!__self_moved) { const __T = @TypeOf(self); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@\"struct\" and @hasDecl(Child, \"release\")) { const RType = @typeInfo(@TypeOf(Child.release)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) { _ = self.release() catch {}; } else { self.release(); } } } };");
                 }
             }
             for p in &func.params {
@@ -8618,7 +8618,7 @@ impl Codegen {
                             "var __{}_moved = false; _ = &__{}_moved;",
                             p.ident.sym, p.ident.sym
                         ));
-                        self.writeln(&format!("defer if (!__{0}_moved) {{ const T = @TypeOf({0}); if (@typeInfo(T) == .pointer) {{ const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@\"struct\" and @hasDecl(Child, \"release\")) {{ const RType = @typeInfo(@TypeOf(Child.release)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _ = {0}.release() catch {{}}; }} else {{ {0}.release(); }} }} }} else if (@typeInfo(T) == .@\"struct\" and @hasDecl(T, \"release\")) {{ var _drop_val = {0}; _drop_val.release(); }} }};", p.ident.sym));
+                        self.writeln(&format!("defer if (!__{0}_moved) {{ const __T = @TypeOf({0}); if (@typeInfo(__T) == .pointer) {{ const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@\"struct\" and @hasDecl(Child, \"release\")) {{ const RType = @typeInfo(@TypeOf(Child.release)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _ = {0}.release() catch {{}}; }} else {{ {0}.release(); }} }} }} else if (@typeInfo(__T) == .@\"struct\" and @hasDecl(__T, \"release\")) {{ var _drop_val = {0}; _drop_val.release(); }} }};", p.ident.sym));
                     }
                 }
             }
@@ -9171,7 +9171,7 @@ impl Codegen {
                                     "var __{}_moved = false; _ = &__{}_moved;",
                                     ident.sym, ident.sym
                                 ));
-                                self.write_to_case(&format!("defer if (!__{0}_moved) {{ const T = @TypeOf({0}); if (@typeInfo(T) == .pointer) {{ const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@\"struct\" and @hasDecl(Child, \"release\")) {{ const RType = @typeInfo(@TypeOf(Child.release)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _ = {0}.release() catch {{}}; }} else {{ {0}.release(); }} }} }} else if (@typeInfo(T) == .@\"struct\" and @hasDecl(T, \"release\")) {{ var _drop_val = {0}; _drop_val.release(); }} }};", ident.sym));
+                                self.write_to_case(&format!("defer if (!__{0}_moved) {{ const __T = @TypeOf({0}); if (@typeInfo(__T) == .pointer) {{ const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@\"struct\" and @hasDecl(Child, \"release\")) {{ const RType = @typeInfo(@TypeOf(Child.release)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _ = {0}.release() catch {{}}; }} else {{ {0}.release(); }} }} }} else if (@typeInfo(__T) == .@\"struct\" and @hasDecl(__T, \"release\")) {{ var _drop_val = {0}; _drop_val.release(); }} }};", ident.sym));
                             } else if !self.is_state_machine {
                                 if !is_const {
                                     self.write_to_case(&format!("_ = &{};", ident.sym));
@@ -10367,7 +10367,7 @@ impl Codegen {
                             "var __{0}_moved = false; _ = &__{0}_moved;",
                             id.sym
                         ));
-                        self.write_to_case(&format!("defer if (!__{0}_moved) {{ const T = @TypeOf({0}); if (@typeInfo(T) == .pointer) {{ const Child = @typeInfo(T).pointer.child; if (@typeInfo(Child) == .@\"struct\" and @hasDecl(Child, \"release\")) {{ const RType = @typeInfo(@TypeOf(Child.release)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _ = {0}.release() catch {{}}; }} else {{ {0}.release(); }} }} }} else if (@typeInfo(T) == .@\"struct\" and @hasDecl(T, \"release\")) {{ var _drop_val = {0}; _drop_val.release(); }} }};", id.sym));
+                        self.write_to_case(&format!("defer if (!__{0}_moved) {{ const __T = @TypeOf({0}); if (@typeInfo(__T) == .pointer) {{ const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@\"struct\" and @hasDecl(Child, \"release\")) {{ const RType = @typeInfo(@TypeOf(Child.release)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _ = {0}.release() catch {{}}; }} else {{ {0}.release(); }} }} }} else if (@typeInfo(__T) == .@\"struct\" and @hasDecl(__T, \"release\")) {{ var _drop_val = {0}; _drop_val.release(); }} }};", id.sym));
                     }
                 } else {
                     let item_var = format!("__item_{}", tmp_id);
