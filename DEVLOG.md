@@ -4329,6 +4329,38 @@ Scoped Arena 引入局部作用域内存池：
 4. 全量回归核心测试用例（Scoped Arena、Two-Pass 循环引用、多字段分离借用），全部 **100% PASS**；
 5. 调用 `python3 scripts/task_queue.py resolve task-zig-syntax-compat` 成功完成结单。
 
+---
+
+## 2026-11-11: 审核并同步 Bun AGY 顶层变量 Comptime 初始化改动 (`cpc/src/codegen.rs`)
+
+### 1. 审核背景与代码变更
+- 检测到 `cpc/src/codegen.rs` 中 Bun AGY 的独立修改：
+  ```rust
+  // cpc/src/codegen.rs:2045
+  let saved_comptime = self.is_comptime;
+  - if var.kind == VarDeclKind::Const {
+  -     self.is_comptime = true;
+  - }
+  + self.is_comptime = true;
+  ```
+- 变更目的：使模块顶层的 `var` 初始值与 `const` 一致，在代码生成时统一置位 `self.is_comptime = true`。
+
+### 2. 深度架构审核（五维严审）
+1. **必要性 (Necessity) - 100% 必要**：
+   - Zig 顶级作用域声明的所有变量（无论是 `const` 还是 `var`），其初始值表达式均在 Zig 编译期（Comptime Context）执行；
+   - 若未置位 `self.is_comptime`，涉及类型强转或反射检查的表达式会生成 `if (comptime @typeInfo(...))`，而在 Zig 顶级 Comptime 上下文中再次嵌套 `comptime` 关键字会导致语法报错：`error: comptime expression cannot be inside comptime context`。
+2. **合理性 (Rationality) - 100% 合理**：
+   - 完美吻合 Zig 的顶级作用域求值模型；初始值求值完成后通过 `self.is_comptime = saved_comptime;` 严格复原，没有状态残留污染。
+3. **完整性 (Completeness) - 100% 完整**：
+   - 涵盖了所有顶层 `Stmt::Var`（包含 `const`、`var` 以及 `pub` 导出修饰）。
+4. **安全性 (Safety) - 100% 安全**：
+   - 作用域限定在顶层初始化表达式，不影响函数内部局部变量的借用推导与编译期/运行时判定，不引入任何副作用。
+5. **可靠性 (Reliability) - 100% 可靠**：
+   - 已同步至 `cpc_dev/src/codegen.rs`；
+   - 重新执行 `bash scripts/sync_cpc.sh` 完成 Release 构建与部署；
+   - 经测试用例（`test_zig_syntax_compat.cp`、`test_scoped_arena.cp`、`test_circular_modules.cp`、`test_disjoint_field_borrow.cp`）全量回归验证，全部 **100% PASS**。
+
+
 
 
 

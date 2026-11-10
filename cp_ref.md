@@ -7646,6 +7646,14 @@ pub var global_counter: i32 = 100;
 pub threadlocal var worker_id: u32 = 0;
 ```
 
+> [!NOTE] 顶层常量与变量编译期求值规范 (Top-Level Comptime Initializer Semantics)
+> 在转译目标 Zig 中，模块顶级作用域中声明的所有 `const` 和 `var` 变量初始值表达式均在**编译期（Comptime Context）**进行静态求值。
+> CP 编译器（`cpc`）在生成顶层 `Stmt::Var` 初始值代码时，统一处于 `is_comptime = true` 模式：
+> 1. 杜绝在顶层初始值中生成嵌套的 `if (comptime @typeInfo(...))`，避免触发 Zig 的 `error: comptime expression cannot be inside comptime context`；
+> 2. 支持在顶层初始值中直接执行类型转换、结构体内联初始化与编译期常量计算；
+> 3. 初始值生成完毕后即刻恢复运行时状态，确保函数体内的局部变量保持正确的运行时/编译期分流逻辑。
+
+
 ##### 17.12.2 透明 Zig 模块导入与默认导出绑定 (Default Specifier Import)
 
 CP 支持通过现代 ES 模块风格直接透明引入 `.zig` 源代码模块，并映射为命名空间对象：

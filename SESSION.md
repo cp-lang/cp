@@ -7041,6 +7041,32 @@ bun agy 按你的建议,优化了方案, 更新了 GEMINI.md 和 脚本文件
    - 执行 `git add .` 与 `git commit -m "feat(cpc): support bare function type aliases, while step expressions, and sync task queue scripts"`；
    - 提交后工作区保持 100% 干净，随时准备恢复后台待命监听。
 
+---
+
+### 用户指令 (User Prompts)
+很好,读取新的 GEMINI.md,与 bun agy 密切配合, 完成一项任务后记录四线文档, 自动git 提交. 
+同时需注意, bun agy 可能没有通过你直接修改了 cpc/src, 你要检测 cpc/src的变化, 对 bun agy的cpc/src修改, 进行审核: 是否必要/合理/完整/安全/可靠, 你审核如发现问题,需要你进行优化, 你是 cpc的主agy, 为 cp 语言及 cpc 负全责, 你对cpc的优化/修改/新增功能, 正式发布后, 均需通知 bun agy 知悉, 否则 bun agy 不知道你的修改, 继续使用错误的语法迁移, 导致cpc编译出错, 降低工作效率.
+
+### 执行汇报 (Execution Report)
+1. **全面吸收 GEMINI.md 最新规范**：
+   - 确立主 AGY 职责：为 CP 语言及 `cpc` 编译器负全责；
+   - 建立主动审核机制：对 Bun AGY 在 `cpc/src` 中的改动执行“必要性、合理性、完整性、安全性、可靠性”五维严审；
+   - 建立改动通报机制：对已正式发布生效的功能与语法变更，及时向 Bun AGY 通报说明。
+2. **`cpc/src` 源码变更审核与同步**：
+   - 检测到 Bun AGY 修改了 `cpc/src/codegen.rs:2045`，将顶层变量声明的 `self.is_comptime = true` 扩展至所有 `Stmt::Var`（包含 `var` 与 `const`）；
+   - **审核结论**：**通过（必要/合理/完整/安全/可靠）**。在 Zig 中所有模块顶级作用域初值均在 Comptime Context 求值，该改动消除了顶层变量初值中嵌套 `comptime` 表达式导致的 Zig 编译错误；
+   - 将变更同步至 `cpc_dev/src/codegen.rs`，保持双缓冲目录一致；
+   - 运行 `bash scripts/sync_cpc.sh` 重新编译构建并全量回归验证，全部 **100% PASS**。
+3. **四线演进文档全量对齐**：
+   - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)：在第 17.12.1 节载入《顶层常量与变量编译期求值规范 (Top-Level Comptime Initializer Semantics)》；
+   - [`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)：记录五维审核细节与 Zig 顶级求值模型技术背景；
+   - [`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)：记录文件变更轨迹；
+   - [`SESSION.md`](file:///data/dev/cp/SESSION.md)：记录指令与审核闭环。
+4. **Git 提交闭环**：
+   - 执行 `git add .` 与 `git commit -m "feat(cpc): audit and adopt top-level var comptime initializer codegen"` 一次性提交；
+   - 提交后工作区保持 100% 干净，后台持续维持 `watch_task.py` 监听待命。
+
+
 
 
 

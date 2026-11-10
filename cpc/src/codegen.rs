@@ -2043,9 +2043,7 @@ impl Codegen {
                             continue;
                         }
                         let saved_comptime = self.is_comptime;
-                        if var.kind == VarDeclKind::Const {
-                            self.is_comptime = true;
-                        }
+                        self.is_comptime = true;
                         let init_code = if let Some(init) = &var.init {
                             self.generate_expr(init)
                         } else {
