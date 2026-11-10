@@ -14,7 +14,7 @@ BASE_DIR = "/data/dev/cp/.tasks"
 PENDING_DIR = os.path.join(BASE_DIR, "pending")
 RESOLVED_DIR = os.path.join(BASE_DIR, "resolved")
 
-def check_pending_directory(task_id_filter=None):
+def check_pending_directory(task_id_filter=None, creator_filter=None):
     if not os.path.exists(PENDING_DIR):
         return None
     try:
@@ -28,6 +28,8 @@ def check_pending_directory(task_id_filter=None):
                 with open(fpath, "r", encoding="utf-8") as f:
                     task = json.load(f)
                 if task.get("status") == "pending":
+                    if creator_filter and task.get("created_by") != creator_filter:
+                        continue
                     return task
             except (json.JSONDecodeError, OSError):
                 # 捕获半写入或锁占用异常，跳过并等待下一次循环
@@ -54,17 +56,18 @@ def main():
     parser = argparse.ArgumentParser(description="Watch task queue for pending or resolved tasks")
     parser.add_argument("--status", default="pending", choices=["pending", "resolved"], help="Task status to wait for (default: pending)")
     parser.add_argument("--id", default=None, help="Specific task ID to wait for")
+    parser.add_argument("--creator", default="bun_agy", help="Filter by creator ID (default: bun_agy)")
     parser.add_argument("--interval", type=float, default=1.0, help="Poll interval in seconds (default: 1.0)")
     parser.add_argument("--timeout", type=int, default=0, help="Timeout in seconds (0 = infinite)")
     args = parser.parse_args()
 
-    print(f"[WATCHER] Listening for tasks (status={args.status}, id={args.id or 'ANY'})...", flush=True)
+    print(f"[WATCHER] Listening for tasks (status={args.status}, id={args.id or 'ANY'}, creator={args.creator or 'ANY'})...", flush=True)
 
     start_time = time.time()
     while True:
         # 首轮零延迟即时检测：启动时若已有任务，立即退出唤醒，绝不空等
         if args.status == "pending":
-            task = check_pending_directory(args.id)
+            task = check_pending_directory(args.id, args.creator)
         else:
             task = check_resolved_directory(args.id)
 

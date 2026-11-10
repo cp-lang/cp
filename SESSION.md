@@ -7120,6 +7120,29 @@ bun agy 按你的建议,优化了方案, 更新了 GEMINI.md 和 脚本文件
    - 执行 `git add .` 与 `git commit -m "feat(cpc): support @field comptime pattern matching in switch prongs and resolve task"` 一次性提交；
    - 提交后工作区保持 100% 干净，随时准备重启后台监听。
 
+---
+
+### 指令 (2026-11-11)
+> 处理 Bun AGY 提交的任务 task-std-mem-endswith-codegen:
+> 修复 std.mem.endsWith(u8, name, "_reply") 等多级命名空间函数调用参数被错误篡改的问题。
+
+### 执行结果汇报
+1. **根因定位**：
+   - 发现 `cpc/src/codegen.rs` 中针对 `startsWith`、`endsWith`、`includes` 字符串方法调用使用了宽松的 `!call.args.is_empty()` 匹配；
+   - 导致 `std.mem.endsWith(u8, name, "_reply")` 等多参数（3 参数）函数调用被误识别为单参数字符串方法糖，生成 `@import("std").mem.endsWith(u8, std.mem, u8)`，丢弃了后两个参数。
+2. **精准修复**：
+   - 将 `startsWith`、`endsWith`、`includes` 严格限制为单参数 `call.args.len() == 1`；
+   - 将 `replace` 严格限制为双参数 `call.args.len() == 2`；
+   - 将 `toLowerCase`、`toUpperCase` 严格限制为无参 `call.args.is_empty()`；
+   - 同步修改至 `cpc_dev/src/codegen.rs`，保护正在进行的常量泛型开发分支。
+3. **构建与验证**：
+   - 运行 `bash scripts/sync_cpc.sh` 完成 Release 版编译与部署；
+   - 针对复现用例 `/data/dev/bun/temp/repro_endswith.cp`，编译正确输出 `std.mem.endsWith(u8, name, "_reply")` 并通过 `zig ast-check`；
+   - 新增端到端回归用例 [`cap/test/test_std_mem_endswith.cp`](file:///data/dev/cp/cap/test/test_std_mem_endswith.cp)，且 [`cap/test/test_string.cp`](file:///data/dev/cp/cap/test/test_string.cp) 持续保持 100% PASS。
+4. **结单与通知**：
+   - 调用 `python3 scripts/task_queue.py resolve task-std-mem-endswith-codegen --note "已修复 startsWith/endsWith/includes/replace 等多级命名空间调用参数被错误篡改的问题，并通过 zig ast-check 和 test_string 回归校验"` 完成结单。
+
+
 
 
 

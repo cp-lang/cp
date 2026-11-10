@@ -2564,6 +2564,17 @@
 - [`cap/test/test_switch_field_pat.cp`](file:///data/dev/cp/cap/test/test_switch_field_pat.cp):
   - 新增 switch `@field` 模式匹配端到端回归用例。
 
+## [2026-11-11] - 修复 std.mem.endsWith/startsWith 等多级命名空间函数调用参数篡改问题 (task-std-mem-endswith-codegen)
+
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs):
+  - 修复 `includes`、`startsWith`、`endsWith`、`toLowerCase`、`toUpperCase`、`replace` 等字符串方法糖的调用匹配条件；
+  - 将 `startsWith`、`endsWith`、`includes` 严格限制为单参数 `call.args.len() == 1`，将 `replace` 严格限制为双参数 `call.args.len() == 2`，消除多参数原生命名空间函数调用（如 `std.mem.endsWith(u8, name, "_reply")`）被错误劫持为字符串实例方法并将参数篡改的严重缺陷。
+- [`cpc_dev/src/codegen.rs`](file:///data/dev/cp/cpc_dev/src/codegen.rs):
+  - 同步合入上述 codegen 参数匹配严审机制，保护现有常量泛型开发分支。
+- [`cap/test/test_std_mem_endswith.cp`](file:///data/dev/cp/cap/test/test_std_mem_endswith.cp):
+  - 新增 `std.mem.endsWith` 与 `std.mem.startsWith` 多级命名空间原生函数调用的端到端回归用例。
+
+
 
 
 

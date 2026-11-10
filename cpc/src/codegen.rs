@@ -11806,17 +11806,17 @@ impl Codegen {
                         let obj = self.generate_expr(&mem.obj);
                         let arg = self.generate_expr(&call.args[0]);
                         return format!("cp_last_index_of({}, {})", obj, arg);
-                    } else if prop == "includes" && !call.args.is_empty() {
+                    } else if prop == "includes" && call.args.len() == 1 {
                         self.check_read_allowed(&mem.obj);
                         let obj = self.generate_expr(&mem.obj);
                         let arg = self.generate_expr(&call.args[0]);
                         return format!("cp_includes({}, {})", obj, arg);
-                    } else if prop == "startsWith" && !call.args.is_empty() {
+                    } else if prop == "startsWith" && call.args.len() == 1 {
                         self.check_read_allowed(&mem.obj);
                         let obj = self.generate_expr(&mem.obj);
                         let arg = self.generate_expr(&call.args[0]);
                         return format!("@import(\"std\").mem.startsWith(u8, {}, {})", obj, arg);
-                    } else if prop == "endsWith" && !call.args.is_empty() {
+                    } else if prop == "endsWith" && call.args.len() == 1 {
                         self.check_read_allowed(&mem.obj);
                         let obj = self.generate_expr(&mem.obj);
                         let arg = self.generate_expr(&call.args[0]);
@@ -11831,13 +11831,13 @@ impl Codegen {
                         } else {
                             return format!("cp_iter_slice({})[@intCast({})..]", obj, start);
                         }
-                    } else if prop == "toLowerCase" {
+                    } else if prop == "toLowerCase" && call.args.is_empty() {
                         let obj = self.generate_expr(&mem.obj);
                         return format!("(blk: {{ var out = {}.alloc(u8, {}.len) catch unreachable; for ({}, 0..) |c, i| out[i] = @import(\"std\").ascii.toLower(c); break :blk out; }})", self.current_allocator(), obj, obj);
-                    } else if prop == "toUpperCase" {
+                    } else if prop == "toUpperCase" && call.args.is_empty() {
                         let obj = self.generate_expr(&mem.obj);
                         return format!("(blk: {{ var out = {}.alloc(u8, {}.len) catch unreachable; for ({}, 0..) |c, i| out[i] = @import(\"std\").ascii.toUpper(c); break :blk out; }})", self.current_allocator(), obj, obj);
-                    } else if prop == "replace" && call.args.len() >= 2 {
+                    } else if prop == "replace" && call.args.len() == 2 {
                         let obj = self.generate_expr(&mem.obj);
                         let arg = self.generate_expr(&call.args[0]);
                         let replacement = self.generate_expr(&call.args[1]);
@@ -14192,11 +14192,13 @@ impl Codegen {
                 "@field" => {
                     let obj = self.generate_expr(&call.args[0]);
                     let f = self.generate_expr(&call.args[1]);
+                    let f = strip_redundant_comptime(&f);
                     format!("@field({}, {})", obj, f)
                 }
                 "@hasField" => {
                     let t = self.generate_expr(&call.args[0]);
                     let f = self.generate_expr(&call.args[1]);
+                    let f = strip_redundant_comptime(&f);
                     format!("@hasField({}, {})", t, f)
                 }
                 "@sizeOf" => {
@@ -16659,6 +16661,59 @@ impl Codegen {
         self.current_case_content
             .push_str(&format!("{}{}\n", indent, s));
     }
+}
+
+fn strip_redundant_comptime(s: &str) -> String {
+    let mut res = String::with_capacity(s.len());
+    let chars: Vec<char> = s.chars().collect();
+    let n = chars.len();
+    let mut i = 0;
+    let mut in_str = false;
+    let mut str_char = ' ';
+
+    while i < n {
+        let c = chars[i];
+        if in_str {
+            res.push(c);
+            if c == '\\' && i + 1 < n {
+                i += 1;
+                res.push(chars[i]);
+            } else if c == str_char {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if c == '"' || c == '\'' {
+            in_str = true;
+            str_char = c;
+            res.push(c);
+            i += 1;
+            continue;
+        }
+
+        // Check if keyword "comptime"
+        if i + 8 <= n && &chars[i..i + 8] == ['c', 'o', 'm', 'p', 't', 'i', 'm', 'e'] {
+            let prev_ok = i == 0
+                || (!chars[i - 1].is_alphanumeric()
+                    && chars[i - 1] != '_'
+                    && chars[i - 1] != '@'
+                    && chars[i - 1] != '.');
+            let next_ok = i + 8 == n || (!chars[i + 8].is_alphanumeric() && chars[i + 8] != '_');
+            if prev_ok && next_ok {
+                i += 8;
+                if i < n && (chars[i] == ' ' || chars[i] == '\t') {
+                    i += 1;
+                }
+                continue;
+            }
+        }
+
+        res.push(c);
+        i += 1;
+    }
+    res
 }
 
 fn type_to_display_string(ty: &Type) -> String {

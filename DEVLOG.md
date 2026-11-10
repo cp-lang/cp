@@ -4412,6 +4412,27 @@ Scoped Arena 引入局部作用域内存池：
   - 新增正式回归用例 [`cap/test/test_switch_field_pat.cp`](file:///data/dev/cp/cap/test/test_switch_field_pat.cp)，经生产 `cpc` 编译运行 **100% PASS**；
   - 成功调用 `python3 scripts/task_queue.py resolve task-switch-field-pat` 结单并追加全局审计流与预警通知。
 
+## 2026-11-11: 修复 std.mem.endsWith/startsWith 等多级命名空间函数调用参数篡改问题 (task-std-mem-endswith-codegen)
+
+- **问题现象**：
+  - Bun AGY 在转译调用 `std.mem.endsWith(u8, name, "_reply")` 时，`cpc` 错误输出了 `return @import("std").mem.endsWith(u8, std.mem, u8);`，导致原本传入的切片参数 `name` 和后缀 `"_reply"` 被吞噬，参数列表被污染。
+- **根因分析**：
+  - 在 `cpc/src/codegen.rs` 的方法调用分支中，`startsWith`、`endsWith`、`includes` 判断使用了 `!call.args.is_empty()`，`toLowerCase`、`toUpperCase` 未对参数个数设防，`replace` 使用了 `>= 2`；
+  - 当代码直接调用原生命名空间多级函数（如 `std.mem.endsWith(u8, name, "_reply")`，共 3 个参数）时，条件意外匹配，编译器将其误判为 TypeScript 风格的单参数字符串对象方法（`str.endsWith(suffix)`），从而错误地将 `std.mem` 当成接收者、将第 1 个类型实参 `u8` 当成后缀，并吞弃了其余参数。
+- **攻坚修复**：
+  - **Codegen 严审参数个数**：
+    - `startsWith`、`endsWith`、`includes` 严格限制为单参数 `call.args.len() == 1`；
+    - `replace` 严格限制为双参数 `call.args.len() == 2`；
+    - `toLowerCase`、`toUpperCase` 严格限制为无参 `call.args.is_empty()`；
+  - **同步与编译**：
+    - 同步修改至 `cpc_dev/src/codegen.rs`；
+    - 执行 `bash scripts/sync_cpc.sh` 完成 Release 版编译与部署。
+- **验证与结单**：
+  - 运行 `cpc --lib /data/dev/bun/temp/repro_endswith.cp` 正确生成 `return std.mem.endsWith(u8, name, "_reply");`，并通过 `zig ast-check`；
+  - 新增端到端测试用例 [`cap/test/test_std_mem_endswith.cp`](file:///data/dev/cp/cap/test/test_std_mem_endswith.cp) 与现有 [`cap/test/test_string.cp`](file:///data/dev/cp/cap/test/test_string.cp)，经 `cap` 执行全部验证通过；
+  - 调用 `python3 scripts/task_queue.py resolve task-std-mem-endswith-codegen` 正式结单。
+
+
 
 
 
