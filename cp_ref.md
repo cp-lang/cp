@@ -2764,6 +2764,13 @@ err NetErr {
     ConnectionReset
 }
 
+// 模块级导出错误集（直接对应 Zig 的 pub const Error = error{ ... };）
+pub err Error {
+    OutOfMemory,
+    SyntaxError,
+    UnexpectedToken,
+}
+
 // 2. 具名 + 匿名错误联合声明
 fn test_anon_union(flag: i32): string ! FileErr || err{Timeout, Canceled} {
     if (flag == 1) {
