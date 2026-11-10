@@ -266,6 +266,7 @@ impl<'a> Parser<'a> {
             Token::Class => "class".to_string(),
             Token::Struct => "struct".to_string(),
             Token::Fn => "fn".to_string(),
+            Token::Auto => "auto".to_string(),
             Token::Ref => "ref".to_string(),
             Token::Let => "let".to_string(),
             Token::Const => "const".to_string(),
@@ -453,12 +454,28 @@ impl<'a> Parser<'a> {
             self.bump()?;
             if self.is_error_type_rhs_start() {
                 let err = self.parse_error_type_rhs()?;
+                let ok_ty = if self.peek().map(Self::is_type_start).unwrap_or(false)
+                    && self.peek() != Some(&Token::LBrace)
+                    && self.peek() != Some(&Token::Semicolon)
+                {
+                    self.parse_type()?
+                } else {
+                    Type::Void
+                };
                 return_type = Some(Type::ResultType {
-                    ok: Box::new(Type::Void),
+                    ok: Box::new(ok_ty),
                     err,
                 });
             } else {
-                return_type = Some(Type::ErrorUnion(Box::new(Type::Void)));
+                let ok_ty = if self.peek().map(Self::is_type_start).unwrap_or(false)
+                    && self.peek() != Some(&Token::LBrace)
+                    && self.peek() != Some(&Token::Semicolon)
+                {
+                    self.parse_type()?
+                } else {
+                    Type::Void
+                };
+                return_type = Some(Type::ErrorUnion(Box::new(ok_ty)));
             }
         } else if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Arrow) {
             self.bump()?;
@@ -490,12 +507,28 @@ impl<'a> Parser<'a> {
             self.bump()?;
             if self.is_error_type_rhs_start() {
                 let err = self.parse_error_type_rhs()?;
+                let ok_ty = if self.peek().map(Self::is_type_start).unwrap_or(false)
+                    && self.peek() != Some(&Token::LBrace)
+                    && self.peek() != Some(&Token::Semicolon)
+                {
+                    self.parse_type()?
+                } else {
+                    Type::Void
+                };
                 return_type = Some(Type::ResultType {
-                    ok: Box::new(Type::Void),
+                    ok: Box::new(ok_ty),
                     err,
                 });
             } else {
-                return_type = Some(Type::ErrorUnion(Box::new(Type::Void)));
+                let ok_ty = if self.peek().map(Self::is_type_start).unwrap_or(false)
+                    && self.peek() != Some(&Token::LBrace)
+                    && self.peek() != Some(&Token::Semicolon)
+                {
+                    self.parse_type()?
+                } else {
+                    Type::Void
+                };
+                return_type = Some(Type::ErrorUnion(Box::new(ok_ty)));
             }
         } else if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Arrow) {
             self.bump()?;
@@ -596,7 +629,9 @@ impl<'a> Parser<'a> {
                                 span,
                                 header,
                             })));
-                            if self.peek() == Some(&Token::Comma) || self.peek() == Some(&Token::Semicolon) {
+                            if self.peek() == Some(&Token::Comma)
+                                || self.peek() == Some(&Token::Semicolon)
+                            {
                                 self.bump()?;
                             }
                         }
@@ -666,9 +701,14 @@ impl<'a> Parser<'a> {
                 }
             }
             if let Some(tok) = clone.peek() {
-                if matches!(tok, Token::Let | Token::Const | Token::Var | Token::ThreadLocal) {
+                if matches!(
+                    tok,
+                    Token::Let | Token::Const | Token::Var | Token::ThreadLocal
+                ) {
                     let meta_list = self.parse_meta_list()?;
-                    let is_tl = meta_list.iter().any(|m| m.name.sym == "tls" || m.name.sym == "threadlocal");
+                    let is_tl = meta_list
+                        .iter()
+                        .any(|m| m.name.sym == "tls" || m.name.sym == "threadlocal");
                     let mut v = self.parse_var_decl()?;
                     if has_pub_or_priv {
                         v.is_pub = is_pub;
@@ -701,6 +741,29 @@ impl<'a> Parser<'a> {
                 let mut v = self.parse_var_decl()?;
                 if has_pub_or_priv {
                     v.is_pub = is_pub;
+                }
+                if v.kind == VarDeclKind::Const && v.ty.is_none() {
+                    if let Pattern::Ident(ident) = &v.pat {
+                        if let Some(Expr::Zig(z)) = &v.init {
+                            let trimmed = z.code.trim();
+                            if trimmed.starts_with("fn ") || trimmed.starts_with("fn(") {
+                                let mut sub_parser = Parser::new(trimmed);
+                                if let Ok(target_ty) = sub_parser.parse_fn_type_sig(false) {
+                                    return Ok(vec![ModuleItem::Decl(Decl::TypeAlias(
+                                        TypeAliasDecl {
+                                            span: Span {
+                                                start: v.span.start,
+                                                end: v.span.end,
+                                            },
+                                            ident: ident.clone(),
+                                            target_ty,
+                                            is_pub: v.is_pub,
+                                        },
+                                    ))]);
+                                }
+                            }
+                        }
+                    }
                 }
                 Ok(vec![ModuleItem::Stmt(Stmt::Var(v))])
             }
@@ -883,8 +946,10 @@ impl<'a> Parser<'a> {
                 | Some(Token::Unsafe)
                 | Some(Token::Export)
                 | Some(Token::Private)
-        ) || matches!(self.peek(), Some(Token::Ident(id)) if id == "inline" || id == "extern" || id == "noinline") {
-            if matches!(self.peek(), Some(Token::Ident(id)) if id == "inline" || id == "extern" || id == "noinline") {
+        ) || matches!(self.peek(), Some(Token::Ident(id)) if id == "inline" || id == "extern" || id == "noinline")
+        {
+            if matches!(self.peek(), Some(Token::Ident(id)) if id == "inline" || id == "extern" || id == "noinline")
+            {
                 let (tok, span) = self.bump()?;
                 let sym = match tok {
                     Token::Ident(s) => s,
@@ -892,10 +957,7 @@ impl<'a> Parser<'a> {
                 };
                 meta.push(MetaItem {
                     span,
-                    name: Ident {
-                        span,
-                        sym,
-                    },
+                    name: Ident { span, sym },
                     args: vec![],
                 });
             } else if self.peek() == Some(&Token::Export) {
@@ -932,12 +994,28 @@ impl<'a> Parser<'a> {
             self.bump()?;
             if self.is_error_type_rhs_start() {
                 let err = self.parse_error_type_rhs()?;
+                let ok_ty = if self.peek().map(Self::is_type_start).unwrap_or(false)
+                    && self.peek() != Some(&Token::LBrace)
+                    && self.peek() != Some(&Token::Semicolon)
+                {
+                    self.parse_type()?
+                } else {
+                    Type::Void
+                };
                 return_type = Some(Type::ResultType {
-                    ok: Box::new(Type::Void),
+                    ok: Box::new(ok_ty),
                     err,
                 });
             } else {
-                return_type = Some(Type::ErrorUnion(Box::new(Type::Void)));
+                let ok_ty = if self.peek().map(Self::is_type_start).unwrap_or(false)
+                    && self.peek() != Some(&Token::LBrace)
+                    && self.peek() != Some(&Token::Semicolon)
+                {
+                    self.parse_type()?
+                } else {
+                    Type::Void
+                };
+                return_type = Some(Type::ErrorUnion(Box::new(ok_ty)));
             }
         } else if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Arrow) {
             self.bump()?;
@@ -1394,13 +1472,25 @@ impl<'a> Parser<'a> {
         self.expect(Token::LParen)?;
         let mut param_types = Vec::new();
         while self.peek() != Some(&Token::RParen) && self.peek().is_some() {
+            let mut is_comptime = false;
+            if matches!(self.peek(), Some(Token::Ident(id)) if id == "comptime") {
+                self.bump()?;
+                is_comptime = true;
+            }
             if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw))
                 && self.peek_next() == Some(&Token::Colon)
             {
                 self.bump()?; // name
                 self.bump()?; // colon
             }
-            param_types.push(self.parse_type()?);
+            let mut ty = self.parse_type()?;
+            if is_comptime {
+                ty = Type::Ref(Ident {
+                    span: self.peek_span(),
+                    sym: format!("comptime {}", Self::type_to_str(&ty)),
+                });
+            }
+            param_types.push(ty);
             if self.peek() == Some(&Token::Comma) {
                 self.bump()?;
             }
@@ -1966,9 +2056,7 @@ impl<'a> Parser<'a> {
                 };
                 let elem_ty = self.parse_base_type()?;
                 let mut is_optional = false;
-                if self.peek() == Some(&Token::Question)
-                    && self.peek_next() == Some(&Token::Bang)
-                {
+                if self.peek() == Some(&Token::Question) && self.peek_next() == Some(&Token::Bang) {
                     self.bump()?;
                     self.bump()?;
                     is_optional = true;
@@ -2172,7 +2260,7 @@ impl<'a> Parser<'a> {
                     }
                 }
                 Type::Ref(Ident { span, sym })
-            },
+            }
             Token::Ident(sym) => {
                 if sym == "cstr" {
                     Type::CStr
@@ -2425,14 +2513,27 @@ impl<'a> Parser<'a> {
 
     fn parse_stmt(&mut self) -> ParseResult<Stmt> {
         if matches!(self.peek(), Some(Token::Ident(id)) if id == "comptime" || id == "inline") {
+            let is_inline = matches!(self.peek(), Some(Token::Ident(id)) if id == "inline");
             let mut clone = self.clone_lookahead();
             let _ = clone.bump();
             if clone.peek() == Some(&Token::LBrace) {
                 self.bump()?; // consume 'comptime'
                 return Ok(Stmt::ComptimeBlock(self.parse_block_stmt()?));
-            } else if clone.peek() == Some(&Token::For) || matches!(clone.peek(), Some(Token::Ident(id)) if id == "for") {
+            } else if clone.peek() == Some(&Token::For)
+                || matches!(clone.peek(), Some(Token::Ident(id)) if id == "for")
+            {
                 self.bump()?; // consume 'comptime' or 'inline'
                 return Ok(Stmt::For(self.parse_for_stmt_with_comptime(true)?));
+            } else if clone.peek() == Some(&Token::While) {
+                self.bump()?; // consume 'comptime' or 'inline'
+                let mut w = self.parse_while_stmt()?;
+                w.is_inline = is_inline;
+                return Ok(Stmt::While(w));
+            } else if matches!(
+                clone.peek(),
+                Some(Token::Var) | Some(Token::Let) | Some(Token::Const)
+            ) {
+                return Ok(Stmt::Var(self.parse_var_decl()?));
             }
         }
         if matches!(self.peek(), Some(Token::Ident(_))) && self.peek_next() == Some(&Token::Colon) {
@@ -2446,7 +2547,9 @@ impl<'a> Parser<'a> {
                         let mut w = self.parse_while_stmt()?;
                         w.label = Some(label);
                         return Ok(Stmt::While(w));
-                    } else if clone.peek() == Some(&Token::For) || matches!(clone.peek(), Some(Token::Ident(id)) if id == "for") {
+                    } else if clone.peek() == Some(&Token::For)
+                        || matches!(clone.peek(), Some(Token::Ident(id)) if id == "for")
+                    {
                         self.bump()?; // consume ident
                         self.bump()?; // consume ':'
                         let mut f = self.parse_for_stmt()?;
@@ -2469,7 +2572,9 @@ impl<'a> Parser<'a> {
                 let func = self.parse_function()?;
                 Ok(Stmt::Func(Box::new(func)))
             }
-            Some(Token::Let) | Some(Token::Const) | Some(Token::Var) | Some(Token::ThreadLocal) => Ok(Stmt::Var(self.parse_var_decl()?)),
+            Some(Token::Let) | Some(Token::Const) | Some(Token::Var) | Some(Token::ThreadLocal) => {
+                Ok(Stmt::Var(self.parse_var_decl()?))
+            }
             Some(Token::While) => Ok(Stmt::While(self.parse_while_stmt()?)),
             Some(Token::For) => Ok(Stmt::For(self.parse_for_stmt()?)),
             Some(Token::If) => Ok(Stmt::If(self.parse_if_stmt()?)),
@@ -2527,7 +2632,10 @@ impl<'a> Parser<'a> {
                         self.bump()?;
                     }
                     let end = self.peek_span().start;
-                    return Ok(Stmt::Expr(Expr::LabeledContinue(Span { start, end }, label)));
+                    return Ok(Stmt::Expr(Expr::LabeledContinue(
+                        Span { start, end },
+                        label,
+                    )));
                 }
                 if self.peek() == Some(&Token::Semicolon) {
                     self.bump()?;
@@ -2535,6 +2643,13 @@ impl<'a> Parser<'a> {
                 Ok(Stmt::Continue)
             }
             Some(Token::Try) => {
+                if self.peek_next() != Some(&Token::LBrace) {
+                    let expr = self.parse_expr()?;
+                    if self.peek() == Some(&Token::Semicolon) {
+                        self.bump()?;
+                    }
+                    return Ok(Stmt::Expr(expr));
+                }
                 let start = self.expect(Token::Try)?.start;
                 let try_block = self.parse_block_stmt()?;
                 let mut err_ident = None;
@@ -2568,7 +2683,10 @@ impl<'a> Parser<'a> {
                             is_err_mut = true;
                             is_binding = true;
                         }
-                        if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw)) {
+                        if matches!(
+                            self.peek(),
+                            Some(Token::Ident(_)) | Some(Token::ErrorKw) | Some(Token::Auto)
+                        ) {
                             let id = self.parse_ident()?;
                             if self.peek() == Some(&Token::FatArrow) {
                                 self.bump()?;
@@ -2620,7 +2738,8 @@ impl<'a> Parser<'a> {
                 }
             }
             Some(Token::At) => {
-                if matches!(self.peek_next(), Some(Token::Ident(id)) if id == "tls" || id == "threadlocal") {
+                if matches!(self.peek_next(), Some(Token::Ident(id)) if id == "tls" || id == "threadlocal")
+                {
                     return Ok(Stmt::Var(self.parse_var_decl()?));
                 }
                 if matches!(self.peek_next(), Some(Token::Ident(id)) if id == "comptime") {
@@ -2733,6 +2852,18 @@ impl<'a> Parser<'a> {
 
     fn parse_var_decl(&mut self) -> ParseResult<VarDecl> {
         let start = self.peek_span().start;
+        let mut is_comptime = false;
+        if matches!(self.peek(), Some(Token::Ident(id)) if id == "comptime") {
+            let mut clone = self.clone_lookahead();
+            let _ = clone.bump();
+            if matches!(
+                clone.peek(),
+                Some(Token::Let) | Some(Token::Var) | Some(Token::Const)
+            ) {
+                self.bump()?; // consume 'comptime'
+                is_comptime = true;
+            }
+        }
         let mut is_threadlocal = false;
         if self.peek() == Some(&Token::ThreadLocal) {
             self.bump()?;
@@ -2740,7 +2871,8 @@ impl<'a> Parser<'a> {
         } else if self.peek() == Some(&Token::At) {
             let mut clone = self.clone_lookahead();
             let _ = clone.bump();
-            if matches!(clone.peek(), Some(Token::Ident(id)) if id == "tls" || id == "threadlocal") {
+            if matches!(clone.peek(), Some(Token::Ident(id)) if id == "tls" || id == "threadlocal")
+            {
                 self.bump()?; // consume @
                 self.bump()?; // consume tls / threadlocal
                 is_threadlocal = true;
@@ -2780,6 +2912,7 @@ impl<'a> Parser<'a> {
             init,
             is_threadlocal,
             is_pub: false,
+            is_comptime,
         })
     }
 
@@ -3343,6 +3476,12 @@ impl<'a> Parser<'a> {
         self.expect(Token::LBrace)?;
         let mut arms = Vec::new();
         while self.peek() != Some(&Token::RBrace) && self.peek().is_some() {
+            let is_inline = if matches!(self.peek(), Some(Token::Ident(id)) if id == "inline") {
+                self.bump()?;
+                true
+            } else {
+                false
+            };
             self.in_switch_arm += 1;
             let pat = self.parse_pattern()?;
             self.in_switch_arm -= 1;
@@ -3357,13 +3496,21 @@ impl<'a> Parser<'a> {
                 None
             };
             self.expect(Token::FatArrow)?;
-            if self.peek() == Some(&Token::Pipe) {
-                let pipe_span = self.peek_span();
-                return Err(ParseError::Generic(
-                    "CP Syntax Error: Zig-style pipe capture syntax '|...|' is not supported in CP.\n  = cause: CP does not support Zig pipe capture '|val|' in switch arms.\n  = help: in CP, pattern binding is declared directly in pattern: '.Variant val => ...' or '.Variant [x, y] => ...' or '.Variant { x, y } => ...'.\n  = suggestion: bind payload directly: .Variant val => { ... }".to_string(),
-                    pipe_span,
-                ));
-            }
+            let (capture, is_capture_ptr) = if self.peek() == Some(&Token::Pipe) {
+                self.bump()?; // consume '|'
+                let is_ptr =
+                    if self.peek() == Some(&Token::Star) || self.peek() == Some(&Token::Mut) {
+                        self.bump()?;
+                        true
+                    } else {
+                        false
+                    };
+                let cap_id = self.parse_ident()?;
+                self.expect(Token::Pipe)?;
+                (Some(cap_id), is_ptr)
+            } else {
+                (None, false)
+            };
             let body = if self.peek() == Some(&Token::LBrace) {
                 Stmt::Block(self.parse_block_stmt()?)
             } else if self.peek() == Some(&Token::Return) {
@@ -3380,6 +3527,9 @@ impl<'a> Parser<'a> {
                 pat,
                 guard,
                 body: Box::new(body),
+                is_inline,
+                capture,
+                is_capture_ptr,
             });
         }
         let end = self.expect(Token::RBrace)?.end;
@@ -3402,7 +3552,10 @@ impl<'a> Parser<'a> {
         let mut capture = None;
         let mut is_ptr_capture = false;
         if (self.peek() == Some(&Token::Star) || self.peek() == Some(&Token::Mut))
-            && matches!(self.peek_next(), Some(Token::Ident(_)) | Some(Token::ErrorKw))
+            && matches!(
+                self.peek_next(),
+                Some(Token::Ident(_)) | Some(Token::ErrorKw)
+            )
         {
             self.bump()?;
             is_ptr_capture = true;
@@ -3416,12 +3569,35 @@ impl<'a> Parser<'a> {
         }
         let test = self.parse_expr()?;
         self.expect(Token::RParen)?;
+        let mut continue_expr = None;
+        if self.peek() == Some(&Token::Colon) {
+            self.bump()?; // consume ':'
+            if self.peek() == Some(&Token::LParen) {
+                self.bump()?; // consume '('
+                continue_expr = Some(self.parse_expr()?);
+                self.expect(Token::RParen)?;
+            } else {
+                continue_expr = Some(self.parse_expr()?);
+            }
+        }
         if self.peek() == Some(&Token::Pipe) {
-            let pipe_span = self.peek_span();
-            return Err(ParseError::Generic(
-                "CP Syntax Error: Zig-style pipe capture syntax '|...|' is not supported in CP.\n  = cause: CP does not support Zig pipe capture '|val|' or '|*val|'.\n  = help: in CP, loop unwrap is performed using walrus syntax inside parentheses: 'while (item := iter.next())' or 'while (*item := iter.next())'.\n  = suggestion: rewrite with walrus capture: while (val := cond) { ... }".to_string(),
-                pipe_span,
-            ));
+            self.bump()?; // consume '|'
+            if self.peek() == Some(&Token::Star) {
+                self.bump()?;
+                is_ptr_capture = true;
+            }
+            capture = Some(self.parse_ident()?);
+            self.expect(Token::Pipe)?;
+        }
+        if continue_expr.is_none() && self.peek() == Some(&Token::Colon) {
+            self.bump()?; // consume ':'
+            if self.peek() == Some(&Token::LParen) {
+                self.bump()?; // consume '('
+                continue_expr = Some(self.parse_expr()?);
+                self.expect(Token::RParen)?;
+            } else {
+                continue_expr = Some(self.parse_expr()?);
+            }
         }
         let body = self.parse_stmt()?;
         Ok(WhileStmt {
@@ -3431,6 +3607,8 @@ impl<'a> Parser<'a> {
             capture,
             is_ptr_capture,
             label: None,
+            continue_expr,
+            is_inline: false,
         })
     }
 
@@ -3453,6 +3631,91 @@ impl<'a> Parser<'a> {
             ));
         }
         self.expect(Token::LParen)?;
+
+        // Check if this is Zig-style for loop: for (collection) |capture|
+        let is_zig_style = {
+            let mut clone = self.clone_lookahead();
+            let mut depth = 0;
+            let mut found_of_or_in = false;
+            let mut has_pipe_after_rparen = false;
+            while let Some(tok) = clone.peek() {
+                match tok {
+                    Token::LParen => depth += 1,
+                    Token::RParen => {
+                        if depth == 0 {
+                            clone.bump().ok();
+                            if clone.peek() == Some(&Token::Pipe) {
+                                has_pipe_after_rparen = true;
+                            }
+                            break;
+                        }
+                        depth -= 1;
+                    }
+                    Token::Of | Token::In if depth == 0 => {
+                        found_of_or_in = true;
+                        break;
+                    }
+                    _ => {}
+                }
+                clone.bump().ok();
+            }
+            !found_of_or_in && has_pipe_after_rparen
+        };
+
+        if is_zig_style {
+            let header_start = self.peek_span().start;
+            let mut depth = 0;
+            while let Some(tok) = self.peek() {
+                if tok == &Token::LParen {
+                    depth += 1;
+                } else if tok == &Token::RParen {
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                }
+                self.bump()?;
+            }
+            let header_end = self.peek_span().start;
+            let raw_header = self.input[header_start..header_end].trim().to_string();
+            self.expect(Token::RParen)?;
+            self.expect(Token::Pipe)?;
+            let pat_start = self.peek_span().start;
+            let mut pipe_depth = 0;
+            while let Some(tok) = self.peek() {
+                if tok == &Token::Pipe && pipe_depth == 0 {
+                    break;
+                }
+                self.bump()?;
+            }
+            let pat_end = self.peek_span().start;
+            let raw_pat = self.input[pat_start..pat_end].trim().to_string();
+            self.expect(Token::Pipe)?;
+            let body = self.parse_stmt()?;
+            return Ok(ForStmt {
+                span: Span { start, end: 0 },
+                mode: IterMode::Borrow,
+                pat: Pattern::Ident(Ident {
+                    span: Span {
+                        start: pat_start,
+                        end: pat_end,
+                    },
+                    sym: raw_pat,
+                }),
+                expr: Expr::Ident(Ident {
+                    span: Span {
+                        start: header_start,
+                        end: header_end,
+                    },
+                    sym: raw_header.clone(),
+                }),
+                body: Box::new(body),
+                is_comptime,
+                label: None,
+                raw_header: Some(raw_header),
+            });
+        }
+
         if self.peek() == Some(&Token::Let) || self.peek() == Some(&Token::Const) {
             self.bump()?;
         }
@@ -3507,6 +3770,7 @@ impl<'a> Parser<'a> {
             body: Box::new(body),
             is_comptime,
             label: None,
+            raw_header: None,
         })
     }
 
@@ -3531,7 +3795,10 @@ impl<'a> Parser<'a> {
                 is_comptime = true;
             }
             if (self.peek() == Some(&Token::Star) || self.peek() == Some(&Token::Mut))
-                && matches!(self.peek_next(), Some(Token::Ident(_)) | Some(Token::ErrorKw))
+                && matches!(
+                    self.peek_next(),
+                    Some(Token::Ident(_)) | Some(Token::ErrorKw)
+                )
             {
                 self.bump()?;
                 is_ptr_capture = true;
@@ -3553,11 +3820,13 @@ impl<'a> Parser<'a> {
             ));
         };
         if self.peek() == Some(&Token::Pipe) {
-            let pipe_span = self.peek_span();
-            return Err(ParseError::Generic(
-                "CP Syntax Error: Zig-style pipe capture syntax '|...|' is not supported in CP.\n  = cause: CP does not support Zig pipe capture '|val|' or '|*val|'.\n  = help: in CP, optional and error unwrap is performed using walrus syntax inside parentheses: 'if (val := opt)' or 'if (*val := opt)'.\n  = suggestion: rewrite with walrus capture: if (*val := opt) { ... }".to_string(),
-                pipe_span,
-            ));
+            self.bump()?; // consume '|'
+            if self.peek() == Some(&Token::Star) {
+                self.bump()?;
+                is_ptr_capture = true;
+            }
+            capture = Some(self.parse_ident()?);
+            self.expect(Token::Pipe)?;
         }
         let cons = self.parse_stmt()?;
         let mut alt = None;
@@ -3696,8 +3965,10 @@ impl<'a> Parser<'a> {
             }
             let mut is_field_static = is_static;
             if self.peek() == Some(&Token::Static) {
-                if !matches!(self.peek_next(), Some(Token::Fn) | Some(Token::Async) | Some(Token::Colon))
-                    && !matches!(self.peek_next(), Some(Token::Ident(id)) if id == "inline" || id == "extern" || id == "noinline")
+                if !matches!(
+                    self.peek_next(),
+                    Some(Token::Fn) | Some(Token::Async) | Some(Token::Colon)
+                ) && !matches!(self.peek_next(), Some(Token::Ident(id)) if id == "inline" || id == "extern" || id == "noinline")
                 {
                     self.bump()?;
                     is_field_static = true;
@@ -3731,7 +4002,11 @@ impl<'a> Parser<'a> {
                                 break;
                             }
                             brace_depth -= 1;
-                            if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 && had_brace {
+                            if brace_depth == 0
+                                && paren_depth == 0
+                                && bracket_depth == 0
+                                && had_brace
+                            {
                                 let span = self.bump()?.1;
                                 end_idx = span.end;
                                 while let Some(tok) = self.peek() {
@@ -3774,7 +4049,11 @@ impl<'a> Parser<'a> {
                     end_idx = span.end;
                 }
                 let raw_code = &self.input[start_idx..end_idx];
-                let pub_prefix = if member_is_pub && has_pub_or_priv { "pub " } else { "" };
+                let pub_prefix = if member_is_pub && has_pub_or_priv {
+                    "pub "
+                } else {
+                    ""
+                };
                 extra_zig.push(format!("{}{}", pub_prefix, raw_code.trim()));
                 continue;
             }
@@ -3783,9 +4062,13 @@ impl<'a> Parser<'a> {
             }
             let is_method = match self.peek() {
                 Some(Token::Fn) | Some(Token::Async) => true,
-                Some(Token::Static) => matches!(self.peek_next(), Some(Token::Fn) | Some(Token::Async))
-                    || matches!(self.peek_next(), Some(Token::Ident(id)) if id == "inline" || id == "extern" || id == "noinline"),
-                Some(Token::Ident(id)) if id == "inline" || id == "extern" || id == "noinline" => matches!(self.peek_next(), Some(Token::Fn) | Some(Token::Async)),
+                Some(Token::Static) => {
+                    matches!(self.peek_next(), Some(Token::Fn) | Some(Token::Async))
+                        || matches!(self.peek_next(), Some(Token::Ident(id)) if id == "inline" || id == "extern" || id == "noinline")
+                }
+                Some(Token::Ident(id)) if id == "inline" || id == "extern" || id == "noinline" => {
+                    matches!(self.peek_next(), Some(Token::Fn) | Some(Token::Async))
+                }
                 _ => false,
             };
             if is_method {
@@ -4022,7 +4305,11 @@ impl<'a> Parser<'a> {
                                 break;
                             }
                             brace_depth -= 1;
-                            if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 && had_brace {
+                            if brace_depth == 0
+                                && paren_depth == 0
+                                && bracket_depth == 0
+                                && had_brace
+                            {
                                 let span = self.bump()?.1;
                                 end_idx = span.end;
                                 while let Some(tok) = self.peek() {
@@ -4383,7 +4670,8 @@ impl<'a> Parser<'a> {
                         };
                         continue;
                     }
-                    let is_prop_type_like = prop.sym.chars().next().map_or(false, |c| c.is_uppercase());
+                    let is_prop_type_like =
+                        prop.sym.chars().next().map_or(false, |c| c.is_uppercase());
                     let is_enum_variant_init = if let Expr::Ident(ref obj_id) = left {
                         obj_id
                             .sym
@@ -4395,7 +4683,9 @@ impl<'a> Parser<'a> {
                         false
                     };
 
-                    if (is_enum_variant_init || is_prop_type_like) && self.peek() == Some(&Token::LBrace) {
+                    if (is_enum_variant_init || is_prop_type_like)
+                        && self.peek() == Some(&Token::LBrace)
+                    {
                         self.bump()?;
                         let mut fields = Vec::new();
                         while self.peek() != Some(&Token::RBrace) && self.peek().is_some() {
@@ -4403,7 +4693,9 @@ impl<'a> Parser<'a> {
                                 self.bump()?;
                             }
                             let key = self.parse_ident()?;
-                            if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Assign) {
+                            if self.peek() == Some(&Token::Colon)
+                                || self.peek() == Some(&Token::Assign)
+                            {
                                 self.bump()?;
                             } else {
                                 self.expect(Token::Colon)?;
@@ -4425,7 +4717,8 @@ impl<'a> Parser<'a> {
                             };
                             (enum_name, prop)
                         } else {
-                            let left_str = expr_to_member_str(&left).unwrap_or_else(|| "Unknown".to_string());
+                            let left_str =
+                                expr_to_member_str(&left).unwrap_or_else(|| "Unknown".to_string());
                             let full_ty_sym = format!("{}.{}", left_str, prop.sym);
                             let full_ty_ident = Ident {
                                 span: Span {
@@ -4653,7 +4946,10 @@ impl<'a> Parser<'a> {
                             is_err_mut = true;
                             is_binding = true;
                         }
-                        if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw)) {
+                        if matches!(
+                            self.peek(),
+                            Some(Token::Ident(_)) | Some(Token::ErrorKw) | Some(Token::Auto)
+                        ) {
                             let id = self.parse_ident()?;
                             if self.peek() == Some(&Token::FatArrow) {
                                 self.bump()?;
@@ -4693,7 +4989,9 @@ impl<'a> Parser<'a> {
                     if self.peek() == Some(&Token::DotDot) {
                         self.bump()?;
                         is_slice = true;
-                        if self.peek() != Some(&Token::RBracket) && self.peek() != Some(&Token::Colon) {
+                        if self.peek() != Some(&Token::RBracket)
+                            && self.peek() != Some(&Token::Colon)
+                        {
                             end_idx = Some(Box::new(self.parse_expr()?));
                         }
                     } else {
@@ -4702,7 +5000,9 @@ impl<'a> Parser<'a> {
                             self.bump()?;
                             is_slice = true;
                             start_idx = Some(Box::new(idx));
-                            if self.peek() != Some(&Token::RBracket) && self.peek() != Some(&Token::Colon) {
+                            if self.peek() != Some(&Token::RBracket)
+                                && self.peek() != Some(&Token::Colon)
+                            {
                                 end_idx = Some(Box::new(self.parse_expr()?));
                             }
                         } else {
@@ -5117,7 +5417,8 @@ impl<'a> Parser<'a> {
                         };
                         continue;
                     }
-                    let is_prop_type_like = prop.sym.chars().next().map_or(false, |c| c.is_uppercase());
+                    let is_prop_type_like =
+                        prop.sym.chars().next().map_or(false, |c| c.is_uppercase());
                     let is_enum_variant_init = if let Expr::Ident(ref obj_id) = left {
                         obj_id
                             .sym
@@ -5129,7 +5430,9 @@ impl<'a> Parser<'a> {
                         false
                     };
 
-                    if (is_enum_variant_init || is_prop_type_like) && self.peek() == Some(&Token::LBrace) {
+                    if (is_enum_variant_init || is_prop_type_like)
+                        && self.peek() == Some(&Token::LBrace)
+                    {
                         self.bump()?;
                         let mut fields = Vec::new();
                         while self.peek() != Some(&Token::RBrace) && self.peek().is_some() {
@@ -5137,7 +5440,9 @@ impl<'a> Parser<'a> {
                                 self.bump()?;
                             }
                             let key = self.parse_ident()?;
-                            if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Assign) {
+                            if self.peek() == Some(&Token::Colon)
+                                || self.peek() == Some(&Token::Assign)
+                            {
                                 self.bump()?;
                             } else {
                                 self.expect(Token::Colon)?;
@@ -5159,7 +5464,8 @@ impl<'a> Parser<'a> {
                             };
                             (enum_name, prop)
                         } else {
-                            let left_str = expr_to_member_str(&left).unwrap_or_else(|| "Unknown".to_string());
+                            let left_str =
+                                expr_to_member_str(&left).unwrap_or_else(|| "Unknown".to_string());
                             let full_ty_sym = format!("{}.{}", left_str, prop.sym);
                             let full_ty_ident = Ident {
                                 span: Span {
@@ -5261,7 +5567,9 @@ impl<'a> Parser<'a> {
                     if self.peek() == Some(&Token::DotDot) {
                         self.bump()?;
                         is_slice = true;
-                        if self.peek() != Some(&Token::RBracket) && self.peek() != Some(&Token::Colon) {
+                        if self.peek() != Some(&Token::RBracket)
+                            && self.peek() != Some(&Token::Colon)
+                        {
                             end_idx = Some(Box::new(self.parse_expr()?));
                         }
                     } else {
@@ -5270,7 +5578,9 @@ impl<'a> Parser<'a> {
                             self.bump()?;
                             is_slice = true;
                             start_idx = Some(Box::new(idx));
-                            if self.peek() != Some(&Token::RBracket) && self.peek() != Some(&Token::Colon) {
+                            if self.peek() != Some(&Token::RBracket)
+                                && self.peek() != Some(&Token::Colon)
+                            {
                                 end_idx = Some(Box::new(self.parse_expr()?));
                             }
                         } else {
@@ -5372,6 +5682,10 @@ impl<'a> Parser<'a> {
     fn parse_primary_expr(&mut self) -> ParseResult<Expr> {
         let (token, span) = self.bump()?;
         match token {
+            Token::Try => {
+                let inner = self.parse_postfix_expr()?;
+                Ok(Expr::Question(Box::new(inner)))
+            }
             Token::Undefined => Ok(Expr::Lit(Lit::Undefined)),
             Token::Null => Ok(Expr::Lit(Lit::Null)),
             Token::Minus => {
@@ -5400,7 +5714,10 @@ impl<'a> Parser<'a> {
                     return Ok(Expr::Object(fields));
                 }
                 if self.in_pipeline_rhs > 0 {
-                    if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw)) {
+                    if matches!(
+                        self.peek(),
+                        Some(Token::Ident(_)) | Some(Token::ErrorKw) | Some(Token::Auto)
+                    ) {
                         let prop = self.parse_ident()?;
                         if prop.sym.chars().next().map_or(false, |c| c.is_uppercase())
                             && self.peek() == Some(&Token::LBrace)
@@ -5444,7 +5761,10 @@ impl<'a> Parser<'a> {
                         Ok(Expr::PipePlaceholder(span))
                     }
                 } else {
-                    if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw)) {
+                    if matches!(
+                        self.peek(),
+                        Some(Token::Ident(_)) | Some(Token::ErrorKw) | Some(Token::Auto)
+                    ) {
                         let variant_name = self.parse_ident()?;
                         let mut fields = None;
                         let mut tuple_args = None;
@@ -5457,7 +5777,9 @@ impl<'a> Parser<'a> {
                                     self.bump()?;
                                 }
                                 let key = self.parse_ident()?;
-                                if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Assign) {
+                                if self.peek() == Some(&Token::Colon)
+                                    || self.peek() == Some(&Token::Assign)
+                                {
                                     self.bump()?;
                                 } else {
                                     self.expect(Token::Colon)?;
@@ -5580,7 +5902,11 @@ impl<'a> Parser<'a> {
                                     break;
                                 }
                                 brace_depth -= 1;
-                                if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 && had_brace {
+                                if brace_depth == 0
+                                    && paren_depth == 0
+                                    && bracket_depth == 0
+                                    && had_brace
+                                {
                                     let s = self.bump()?.1;
                                     end_idx = s.end;
                                     break;
@@ -5632,7 +5958,9 @@ impl<'a> Parser<'a> {
                                 self.bump()?;
                             }
                             let key = self.parse_ident()?;
-                            if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Assign) {
+                            if self.peek() == Some(&Token::Colon)
+                                || self.peek() == Some(&Token::Assign)
+                            {
                                 self.bump()?;
                             } else {
                                 self.expect(Token::Colon)?;
@@ -5649,10 +5977,7 @@ impl<'a> Parser<'a> {
                                 start: span.start,
                                 end,
                             },
-                            enum_name: Ident {
-                                span,
-                                sym,
-                            },
+                            enum_name: Ident { span, sym },
                             variant_name: Ident {
                                 span: Span { start: 0, end: 0 },
                                 sym: String::new(),
@@ -5661,10 +5986,7 @@ impl<'a> Parser<'a> {
                             tuple_args: None,
                         }));
                     }
-                    Ok(Expr::Ident(Ident {
-                        span,
-                        sym,
-                    }))
+                    Ok(Expr::Ident(Ident { span, sym }))
                 }
             }
             Token::Unsafe => {
@@ -5739,7 +6061,11 @@ impl<'a> Parser<'a> {
                                 break;
                             }
                             brace_depth -= 1;
-                            if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 && had_brace {
+                            if brace_depth == 0
+                                && paren_depth == 0
+                                && bracket_depth == 0
+                                && had_brace
+                            {
                                 let s = self.bump()?.1;
                                 end_idx = s.end;
                                 break;
@@ -6000,7 +6326,11 @@ impl<'a> Parser<'a> {
                                     break;
                                 }
                                 brace_depth -= 1;
-                                if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 && had_brace {
+                                if brace_depth == 0
+                                    && paren_depth == 0
+                                    && bracket_depth == 0
+                                    && had_brace
+                                {
                                     let s = self.bump()?.1;
                                     end_idx = s.end;
                                     break;
@@ -6056,7 +6386,8 @@ impl<'a> Parser<'a> {
                             self.bump()?;
                         }
                         let key = self.parse_ident()?;
-                        if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Assign) {
+                        if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Assign)
+                        {
                             self.bump()?;
                         } else {
                             self.expect(Token::Colon)?;
@@ -6325,6 +6656,24 @@ impl<'a> Parser<'a> {
                 } else if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Arrow) {
                     self.bump()?;
                     _return_type = Some(self.parse_type()?);
+                } else if self.peek().map(Self::is_type_start).unwrap_or(false)
+                    && self.peek() != Some(&Token::LBrace)
+                    && self.peek() != Some(&Token::Semicolon)
+                {
+                    _return_type = Some(self.parse_type()?);
+                }
+
+                if self.peek() != Some(&Token::LBrace) {
+                    let end_idx = self.peek_span().start;
+                    let raw_code = self.input[span.start..end_idx].trim().to_string();
+                    let clean_code = raw_code.replace("): ", ") ").replace(") : ", ") ");
+                    return Ok(Expr::Zig(ZigEscapeExpr {
+                        span: Span {
+                            start: span.start,
+                            end: end_idx,
+                        },
+                        code: clean_code,
+                    }));
                 }
                 let body = ArrowBody::Block(self.parse_block_stmt()?);
                 let pat_params = params
@@ -6724,7 +7073,8 @@ impl<'a> Parser<'a> {
                     let label = self.parse_ident()?;
                     let val = if !matches!(
                         self.peek(),
-                        Some(Token::Semicolon | Token::RBrace | Token::RParen | Token::Comma) | None
+                        Some(Token::Semicolon | Token::RBrace | Token::RParen | Token::Comma)
+                            | None
                     ) {
                         Some(Box::new(self.parse_expr()?))
                     } else {
@@ -6734,7 +7084,8 @@ impl<'a> Parser<'a> {
                 } else {
                     let has_val = !matches!(
                         self.peek(),
-                        Some(Token::Semicolon | Token::RBrace | Token::RParen | Token::Comma) | None
+                        Some(Token::Semicolon | Token::RBrace | Token::RParen | Token::Comma)
+                            | None
                     );
                     let val = if has_val {
                         Some(Box::new(self.parse_expr()?))
@@ -6796,7 +7147,9 @@ impl<'a> Parser<'a> {
                     is_spread: true,
                 });
             } else if is_dot_brace {
-                let is_keyed = if self.peek() == Some(&Token::Dot) && self.peek_next() != Some(&Token::LBrace) {
+                let is_keyed = if self.peek() == Some(&Token::Dot)
+                    && self.peek_next() != Some(&Token::LBrace)
+                {
                     let checkpoint = self.lexer.clone();
                     let peeked_checkpoint = self.peeked.clone();
                     let peeked2_checkpoint = self.peeked2.clone();
@@ -6963,6 +7316,7 @@ impl<'a> Parser<'a> {
             Token::Move => "move".to_string(),
             Token::Own => "own".to_string(),
             Token::Fn => "fn".to_string(),
+            Token::Auto => "auto".to_string(),
             _ => {
                 return Err(ParseError::ExpectedToken(
                     Token::Ident("Ident".to_string()),
@@ -7019,7 +7373,12 @@ impl<'a> Parser<'a> {
             BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq => 8,
             BinaryOp::Pipe => 9,
             BinaryOp::Shl | BinaryOp::Shr => 10,
-            BinaryOp::Add | BinaryOp::Sub | BinaryOp::WrappingAdd | BinaryOp::WrappingSub | BinaryOp::SaturatingAdd | BinaryOp::SaturatingSub => 11,
+            BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::WrappingAdd
+            | BinaryOp::WrappingSub
+            | BinaryOp::SaturatingAdd
+            | BinaryOp::SaturatingSub => 11,
             BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod | BinaryOp::WrappingMul => 12,
         }
     }

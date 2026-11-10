@@ -175,7 +175,10 @@ pub enum GenericParam {
         #[serde(default)]
         bounds: Vec<Ident>,
     },
-    Const { ident: Ident, ty: Type },
+    Const {
+        ident: Ident,
+        ty: Type,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -268,6 +271,8 @@ pub struct VarDecl {
     pub is_threadlocal: bool,
     #[serde(default)]
     pub is_pub: bool,
+    #[serde(default)]
+    pub is_comptime: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -360,6 +365,10 @@ pub struct WhileStmt {
     pub is_ptr_capture: bool,
     #[serde(default)]
     pub label: Option<Ident>,
+    #[serde(default)]
+    pub continue_expr: Option<Expr>,
+    #[serde(default)]
+    pub is_inline: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -380,6 +389,8 @@ pub struct ForStmt {
     pub is_comptime: bool,
     #[serde(default)]
     pub label: Option<Ident>,
+    #[serde(default)]
+    pub raw_header: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -632,6 +643,12 @@ pub struct MatchArm {
     #[serde(default)]
     pub guard: Option<Expr>,
     pub body: Box<Stmt>,
+    #[serde(default)]
+    pub is_inline: bool,
+    #[serde(default)]
+    pub capture: Option<Ident>,
+    #[serde(default)]
+    pub is_capture_ptr: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -981,7 +998,10 @@ impl Expr {
             Expr::ErrWrap(e) => e.span(),
             Expr::BoxNew(b) => b.span(),
             Expr::Downcast { obj, .. } => obj.span(),
-            Expr::Array(items) => items.first().map(|i| i.span()).unwrap_or(Span { start: 0, end: 0 }),
+            Expr::Array(items) => items
+                .first()
+                .map(|i| i.span())
+                .unwrap_or(Span { start: 0, end: 0 }),
             Expr::ArrayRepeat(val, _) => val.span(),
             Expr::Object(_) => Span { start: 0, end: 0 },
             Expr::Dict(_) => Span { start: 0, end: 0 },

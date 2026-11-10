@@ -74,27 +74,26 @@ pub enum SemaError {
     CannotInstantiateStatic(String, Span),
     #[error("Compile Error: {0} at {1:?}")]
     InvalidPointerArithmetic(String, Span),
-    #[error("Compile Error: Index {index} is out of bounds for buffer of length {len} at {span:?}")]
-    CompileTimeIndexOutOfBounds {
-        index: i64,
-        len: usize,
-        span: Span,
-    },
+    #[error(
+        "Compile Error: Index {index} is out of bounds for buffer of length {len} at {span:?}"
+    )]
+    CompileTimeIndexOutOfBounds { index: i64, len: usize, span: Span },
     #[error("Compile Error: Negative index {index} at {span:?}")]
-    NegativeIndex {
-        index: i64,
-        span: Span,
-    },
+    NegativeIndex { index: i64, span: Span },
     #[error("Compile Error: Mutation via unbounded raw pointer or cstr '{0}' requires 'unsafe' block at {1:?}")]
     UnboundedRawPointerMutation(String, Span),
-    #[error("Compile Error: Type '{type_name}' does not satisfy trait bound '{trait_name}' at {span:?}")]
+    #[error(
+        "Compile Error: Type '{type_name}' does not satisfy trait bound '{trait_name}' at {span:?}"
+    )]
     TraitBoundNotSatisfied {
         type_name: String,
         trait_name: String,
         missing_method: Option<String>,
         span: Span,
     },
-    #[error("Compile Error: Class '{class_name}' does not satisfy trait '{trait_name}' at {span:?}")]
+    #[error(
+        "Compile Error: Class '{class_name}' does not satisfy trait '{trait_name}' at {span:?}"
+    )]
     TraitMissingMethod {
         class_name: String,
         trait_name: String,
@@ -1860,6 +1859,9 @@ impl Analyzer {
             }
             Stmt::While(w) => {
                 Self::substitute_expr(&mut w.test, subst);
+                if let Some(c) = &mut w.continue_expr {
+                    Self::substitute_expr(c, subst);
+                }
                 Self::substitute_stmt(&mut w.body, subst);
             }
             Stmt::For(f) => {
@@ -2864,6 +2866,10 @@ impl Analyzer {
                         },
                         cap.span,
                     )?;
+                    if let Some(c) = &w.continue_expr {
+                        self.infer_type(c)?;
+                        self.analyze_expr(c)?;
+                    }
                     self.analyze_stmt(&w.body)?;
                     self.exit_scope();
                 } else if !not_null_vars.is_empty() {
@@ -2881,13 +2887,54 @@ impl Analyzer {
                             )?;
                         }
                     }
+                    if let Some(c) = &w.continue_expr {
+                        self.infer_type(c)?;
+                        self.analyze_expr(c)?;
+                    }
                     self.analyze_stmt(&w.body)?;
                     self.exit_scope();
                 } else {
+                    if let Some(c) = &w.continue_expr {
+                        self.infer_type(c)?;
+                        self.analyze_expr(c)?;
+                    }
                     self.analyze_stmt(&w.body)?;
                 }
             }
             Stmt::For(f) => {
+                if f.raw_header.is_some() {
+                    self.enter_scope();
+                    if let Pattern::Ident(id) = &f.pat {
+                        for part in id.sym.split(',') {
+                            let clean_name = part.trim().trim_start_matches('*').trim();
+                            if !clean_name.is_empty() {
+                                let _ = self.define(
+                                    clean_name.to_string(),
+                                    SymbolKind::Var {
+                                        ty: Type::Any,
+                                        kind: VarDeclKind::Let,
+                                    },
+                                    id.span,
+                                );
+                            }
+                        }
+                    }
+                    let res = match &*f.body {
+                        Stmt::Block(b) => {
+                            let mut r = Ok(());
+                            for s in &b.body {
+                                if let Err(e) = self.analyze_stmt(s) {
+                                    r = Err(e);
+                                    break;
+                                }
+                            }
+                            r
+                        }
+                        other => self.analyze_stmt(other),
+                    };
+                    self.exit_scope();
+                    return res;
+                }
                 let coll_ty = self.infer_type(&f.expr)?;
                 self.analyze_expr(&f.expr)?;
 
@@ -2954,6 +3001,16 @@ impl Analyzer {
                 for arm in &m.arms {
                     self.enter_scope();
                     self.bind_match_pattern(&arm.pat)?;
+                    if let Some(cap) = &arm.capture {
+                        let _ = self.define(
+                            cap.sym.clone(),
+                            SymbolKind::Var {
+                                ty: Type::Any,
+                                kind: VarDeclKind::Let,
+                            },
+                            cap.span,
+                        );
+                    }
                     if let Some(g) = &arm.guard {
                         self.infer_type(g)?;
                         self.analyze_expr(g)?;
@@ -3190,7 +3247,11 @@ impl Analyzer {
                     if let Some(func) = self.functions.get(&id.sym).cloned() {
                         if !func.generic_params.is_empty() {
                             for gp in &func.generic_params {
-                                if let GenericParam::Type { ident: gp_id, bounds } = gp {
+                                if let GenericParam::Type {
+                                    ident: gp_id,
+                                    bounds,
+                                } = gp
+                                {
                                     if !bounds.is_empty() {
                                         for (idx, p) in func.params.iter().enumerate() {
                                             let mut p_ty = &p.ty;
@@ -3199,9 +3260,15 @@ impl Analyzer {
                                             }
                                             if let Type::Ref(pid) = p_ty {
                                                 if pid.sym == gp_id.sym && idx < call.args.len() {
-                                                    if let Ok(arg_ty) = self.infer_type(&call.args[idx]) {
+                                                    if let Ok(arg_ty) =
+                                                        self.infer_type(&call.args[idx])
+                                                    {
                                                         for bound in bounds {
-                                                            self.check_trait_bound(&arg_ty, &bound.sym, call.args[idx].span())?;
+                                                            self.check_trait_bound(
+                                                                &arg_ty,
+                                                                &bound.sym,
+                                                                call.args[idx].span(),
+                                                            )?;
                                                         }
                                                     }
                                                 }
@@ -3220,22 +3287,48 @@ impl Analyzer {
                         }
                         if let Type::Ref(cid) = base_ty {
                             if let Some(cls) = self.classes.get(&cid.sym).cloned() {
-                                if let Some(m) = cls.methods.iter().find(|m| m.ident.sym == mem.prop.sym) {
+                                if let Some(m) =
+                                    cls.methods.iter().find(|m| m.ident.sym == mem.prop.sym)
+                                {
                                     if !m.generic_params.is_empty() {
                                         for gp in &m.generic_params {
-                                            if let GenericParam::Type { ident: gp_id, bounds } = gp {
+                                            if let GenericParam::Type {
+                                                ident: gp_id,
+                                                bounds,
+                                            } = gp
+                                            {
                                                 if !bounds.is_empty() {
-                                                    let method_params: Vec<&Param> = m.params.iter().filter(|p| p.ident.sym != "this" && p.ident.sym != "_" && p.ident.sym != "self").collect();
-                                                    for (idx, p) in method_params.iter().enumerate() {
+                                                    let method_params: Vec<&Param> = m
+                                                        .params
+                                                        .iter()
+                                                        .filter(|p| {
+                                                            p.ident.sym != "this"
+                                                                && p.ident.sym != "_"
+                                                                && p.ident.sym != "self"
+                                                        })
+                                                        .collect();
+                                                    for (idx, p) in method_params.iter().enumerate()
+                                                    {
                                                         let mut p_ty = &p.ty;
-                                                        while let Type::BorrowType { inner, .. } = p_ty {
+                                                        while let Type::BorrowType {
+                                                            inner, ..
+                                                        } = p_ty
+                                                        {
                                                             p_ty = inner;
                                                         }
                                                         if let Type::Ref(pid) = p_ty {
-                                                            if pid.sym == gp_id.sym && idx < call.args.len() {
-                                                                if let Ok(arg_ty) = self.infer_type(&call.args[idx]) {
+                                                            if pid.sym == gp_id.sym
+                                                                && idx < call.args.len()
+                                                            {
+                                                                if let Ok(arg_ty) =
+                                                                    self.infer_type(&call.args[idx])
+                                                                {
                                                                     for bound in bounds {
-                                                                        self.check_trait_bound(&arg_ty, &bound.sym, call.args[idx].span())?;
+                                                                        self.check_trait_bound(
+                                                                            &arg_ty,
+                                                                            &bound.sym,
+                                                                            call.args[idx].span(),
+                                                                        )?;
                                                                     }
                                                                 }
                                                             }
@@ -3266,20 +3359,41 @@ impl Analyzer {
                         }
                         if !cls.generic_params.is_empty() {
                             for gp in &cls.generic_params {
-                                if let GenericParam::Type { ident: gp_id, bounds } = gp {
+                                if let GenericParam::Type {
+                                    ident: gp_id,
+                                    bounds,
+                                } = gp
+                                {
                                     if !bounds.is_empty() {
-                                        if let Some(init_m) = cls.methods.iter().find(|m| m.ident.sym == "init") {
-                                            let init_params: Vec<&Param> = init_m.params.iter().filter(|p| p.ident.sym != "this" && p.ident.sym != "_" && p.ident.sym != "self").collect();
+                                        if let Some(init_m) =
+                                            cls.methods.iter().find(|m| m.ident.sym == "init")
+                                        {
+                                            let init_params: Vec<&Param> = init_m
+                                                .params
+                                                .iter()
+                                                .filter(|p| {
+                                                    p.ident.sym != "this"
+                                                        && p.ident.sym != "_"
+                                                        && p.ident.sym != "self"
+                                                })
+                                                .collect();
                                             for (idx, p) in init_params.iter().enumerate() {
                                                 let mut p_ty = &p.ty;
                                                 while let Type::BorrowType { inner, .. } = p_ty {
                                                     p_ty = inner;
                                                 }
                                                 if let Type::Ref(pid) = p_ty {
-                                                    if pid.sym == gp_id.sym && idx < call.args.len() {
-                                                        if let Ok(arg_ty) = self.infer_type(&call.args[idx]) {
+                                                    if pid.sym == gp_id.sym && idx < call.args.len()
+                                                    {
+                                                        if let Ok(arg_ty) =
+                                                            self.infer_type(&call.args[idx])
+                                                        {
                                                             for bound in bounds {
-                                                                self.check_trait_bound(&arg_ty, &bound.sym, call.args[idx].span())?;
+                                                                self.check_trait_bound(
+                                                                    &arg_ty,
+                                                                    &bound.sym,
+                                                                    call.args[idx].span(),
+                                                                )?;
                                                             }
                                                         }
                                                     }
@@ -3340,6 +3454,16 @@ impl Analyzer {
                 for arm in &m.arms {
                     self.enter_scope();
                     self.bind_match_pattern(&arm.pat)?;
+                    if let Some(cap) = &arm.capture {
+                        let _ = self.define(
+                            cap.sym.clone(),
+                            SymbolKind::Var {
+                                ty: Type::Any,
+                                kind: VarDeclKind::Let,
+                            },
+                            cap.span,
+                        );
+                    }
                     if let Some(g) = &arm.guard {
                         self.analyze_expr(g)?;
                     }
@@ -4627,7 +4751,9 @@ impl Analyzer {
                 return true;
             }
         }
-        if let (Type::SentinelSlice(t_inner, t_s), Type::SentinelSlice(s_inner, s_s)) = (target, src) {
+        if let (Type::SentinelSlice(t_inner, t_s), Type::SentinelSlice(s_inner, s_s)) =
+            (target, src)
+        {
             let t_clean = t_s.split(':').next().unwrap_or(t_s);
             let s_clean = s_s.split(':').next().unwrap_or(s_s);
             if t_clean == s_clean && self.can_coerce(t_inner, s_inner, None) {
@@ -4877,7 +5003,9 @@ impl Analyzer {
         match pat {
             Pattern::Ident(ident) => {
                 if self.scopes.len() > 1 {
-                    if let Some(SymbolKind::Var { .. }) = self.scopes.last().unwrap().get(&ident.sym) {
+                    if let Some(SymbolKind::Var { .. }) =
+                        self.scopes.last().unwrap().get(&ident.sym)
+                    {
                         return Err(SemaError::DuplicateVarDecl(ident.sym.clone(), ident.span));
                     }
                 }
@@ -5144,7 +5272,9 @@ impl Analyzer {
                     || ident.sym == "reflect"
                     || ident.sym == "unreachable"
                     || ident.sym.starts_with("c_")
-                    || ((ident.sym.starts_with('u') || ident.sym.starts_with('i')) && ident.sym.len() > 1 && ident.sym[1..].chars().all(|c| c.is_ascii_digit()))
+                    || ((ident.sym.starts_with('u') || ident.sym.starts_with('i'))
+                        && ident.sym.len() > 1
+                        && ident.sym[1..].chars().all(|c| c.is_ascii_digit()))
                     || matches!(
                         ident.sym.as_str(),
                         "u8" | "i8"
@@ -5372,10 +5502,14 @@ impl Analyzer {
                             }
                         }
                         if let Some(SymbolKind::Enum(e)) = self.resolve(&oid.sym) {
-                            if let Some(m) = e.methods.iter().find(|m| m.ident.sym == mem.prop.sym) {
+                            if let Some(m) = e.methods.iter().find(|m| m.ident.sym == mem.prop.sym)
+                            {
                                 return Ok(m.return_type.clone().unwrap_or(Type::Void));
                             }
-                            if mem.prop.sym == "fromName" || mem.prop.sym == "fromString" || mem.prop.sym == "get" {
+                            if mem.prop.sym == "fromName"
+                                || mem.prop.sym == "fromString"
+                                || mem.prop.sym == "get"
+                            {
                                 return Ok(Type::Optional(Box::new(Type::Ref(oid.clone()))));
                             }
                             if mem.prop.sym == "has" {
@@ -5454,9 +5588,7 @@ impl Analyzer {
                     | Type::Array(elem)
                     | Type::FixedArray(elem, _) => elem,
                     Type::CStr => Box::new(Type::U8),
-                    Type::Ref(id) if id.sym == "cstring" || id.sym == "cstr" => {
-                        Box::new(Type::U8)
-                    }
+                    Type::Ref(id) if id.sym == "cstring" || id.sym == "cstr" => Box::new(Type::U8),
                     Type::String => Box::new(Type::U8),
                     Type::Ref(id) if id.sym.ends_with("WPathBuffer") || id.sym.contains("u16") => {
                         Box::new(Type::U16)
@@ -5791,7 +5923,13 @@ impl Analyzer {
                         }
                     } else if (*base_ty == Type::String
                         || *base_ty == Type::CStr
-                        || matches!(base_ty, Type::Array(_) | Type::FixedArray(_, _) | Type::SentinelSlice(_, _) | Type::SentinelPtr(_, _)))
+                        || matches!(
+                            base_ty,
+                            Type::Array(_)
+                                | Type::FixedArray(_, _)
+                                | Type::SentinelSlice(_, _)
+                                | Type::SentinelPtr(_, _)
+                        ))
                         && (mem.prop.sym == "len" || mem.prop.sym == "length")
                     {
                         return Ok(Type::USize);

@@ -4299,6 +4299,37 @@ Scoped Arena 引入局部作用域内存池：
 6. **C-FFI 复合布局支持**：未新增任何关键字或宏；在 C/Zig 布局表达式解析中放宽了对 `packed union`、`extern union`、`packed enum`、`extern enum` 的前置合法性检查，消除系统结构体报文的解析报错；
 7. **函数显式返回类型省略冒号**：CP 原生规范早已支持省略 `: void`（如 `fn foo() { ... }`）；Bun agy 本次新增的是允许在显式指定任何返回类型时省略冒号（Zig 签名风格兼容：`fn foo() i32`）。
 
+---
+
+## 2026-11-10: 跨智能体异步闭环首次激活 — 解决 task-zig-syntax-compat (函数类型别名与 While 步进表达式)
+
+### 1. 任务背景与自动唤醒
+- 终端 2 挂起 `python3 scripts/watch_task.py` 进入 0 Token 休眠；
+- 终端 1 (Bun AGY) 投递任务 `task-zig-syntax-compat`，复现文件为 `/data/dev/bun/temp/repro_zig_compat.cp`：
+  - 报错 1：`const MyFunc = fn (x: u8) bool;` 触发 `error[E0111]: expected token 'LBrace', found 'Bool'`；
+  - 报错 2：`while (i < 10) : (i += 1) {}` 触发 `error[E0100]: unexpected token 'Colon'`；
+- `watch_task.py` 退出代码 0，系统瞬间触发 **Reactive Wakeup** 自动唤醒 CP AGY。
+
+### 2. 根因剖析与编译器攻坚修复
+1. **函数类型声明识别 (`cpc/src/parser.rs`)**：
+   - 原 parser 在 `Token::Fn` 表达式分支中强制要求大括号块 `parse_block_stmt`，未能区分匿名函数块与纯函数签名类型；
+   - 优化：支持函数返回类型省略冒号（如 `bool` 而非必须 `: bool`）；若参数与返回类型后无 `{`（例如直接遇到分号 `;` 或逗号），将其识别为裸函数类型；
+   - 在模块顶层将 `const MyFunc = fn (x: u8) bool;` 自动提升为强类型 `Decl::TypeAlias`，打通 Sema 类型别名表与 Codegen 的 `const MyFunc = *const fn (u8) bool;` 映射。
+2. **`while` 步进表达式 (`while (cond) : (step)`) 完整支持**：
+   - 在 `cpc/src/ast.rs` 中为 `WhileStmt` 扩充 `continue_expr: Option<Expr>`；
+   - 在 `parser.rs` 的 `parse_while_stmt` 中解析条件闭括号后的 `: (step_expr)`（或 `: step_expr`）；
+   - 在 `ast_visitor.rs`、`sema.rs` 与 `codegen.rs` 中适配该字段，Codegen 阶段生成对齐的 Zig `while (cond) : (step) { ... }`。
+3. **函数指针调用返回类型推导 (`cpc/src/codegen.rs`)**：
+   - 增强 `infer_cp_type_with_mock` 的 `Expr::Call` 分支，当被调用者为具有函数类型或函数类型别名（如 `MyFunc`）的局部变量/字段时，自动解包并提取其返回类型，修复 CPS 状态机误将返回值降级为 `*anyopaque` 的类型不匹配报错。
+
+### 3. 测试与验证
+1. 编写端到端正式回归用例 [`cap/test/test_zig_syntax_compat.cp`](file:///data/dev/cp/cap/test/test_zig_syntax_compat.cp)，覆盖函数类型别名定义、函数指针赋值、间接调用传参及 `while` 步进表达式计数跳出；
+2. 运行 `./cap/bin/cap cap/test/test_zig_syntax_compat.cp`，编译转译与执行 **100% PASS**（输出 `zig syntax compat test passed!`）；
+3. 验证原用例 `/data/dev/bun/temp/repro_zig_compat.cp`，`cpc` 转译 Exit Code 0，无任何报错；
+4. 全量回归核心测试用例（Scoped Arena、Two-Pass 循环引用、多字段分离借用），全部 **100% PASS**；
+5. 调用 `python3 scripts/task_queue.py resolve task-zig-syntax-compat` 成功完成结单。
+
+
 
 
 

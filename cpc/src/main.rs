@@ -218,7 +218,10 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                             println!("{}", diag.to_json(Some(&code), Some(&input)));
                             std::process::exit(1);
                         } else {
-                            return Err(anyhow::anyhow!("{}", diag.render(Some(&code), Some(&input))));
+                            return Err(anyhow::anyhow!(
+                                "{}",
+                                diag.render(Some(&code), Some(&input))
+                            ));
                         }
                     }
                 };
@@ -230,7 +233,10 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                         println!("{}", diag.to_json(Some(&code), Some(&input)));
                         std::process::exit(1);
                     } else {
-                        return Err(anyhow::anyhow!("{}", diag.render(Some(&code), Some(&input))));
+                        return Err(anyhow::anyhow!(
+                            "{}",
+                            diag.render(Some(&code), Some(&input))
+                        ));
                     }
                 }
                 if json {

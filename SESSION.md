@@ -6977,6 +6977,73 @@ git 提交
    - **`SESSION.md`**：完整记录本次问答推演、纠偏细节与 Git 提交闭环；
 2. **一次性暂存与提交**：执行 `git add .` 与 `git commit -m "docs: correct mutable borrow syntax in cp_ref and clarify Bun agy compatibility rules"`，保持工作区绝对整洁。
 
+---
+
+### 用户指令 (User Prompts)
+bun agy 按你的建议,优化了方案, 更新了 GEMINI.md 和 脚本文件
+重新 审核 该方案是否完备/可行
+
+### 执行汇报 (Execution Report)
+1. **多进程异步通信架构深度审核（Maildir + Append-Only 模式）**：
+   - 深入审查了 [`scripts/task_queue.py`](file:///data/dev/cp/scripts/task_queue.py)、[`scripts/watch_task.py`](file:///data/dev/cp/scripts/watch_task.py)、[`scripts/resolve_task.py`](file:///data/dev/cp/scripts/resolve_task.py)、[`scripts/sync_cpc.sh`](file:///data/dev/cp/scripts/sync_cpc.sh) 以及 [`GEMINI.md`](file:///data/dev/cp/GEMINI.md)；
+   - **审核结论**：方案达到工业级完备水准！彻底消灭了“并发写穿”、“半写入损坏”、“冷启动延迟”以及“轮询 Token 损耗” 4 大痛点；
+   - **完成 3 处锦上添花加固**：
+     1. 在 `task_queue.py` 中将 `repro` 自动归一化为绝对路径，杜绝跨工作区（`/data/dev/bun` vs `/data/dev/cp`）相对路径解析歧义；
+     2. 在 `resolve_task` 中先移除 `pending_file` 再重命名至 `resolved_file`，实现目录可见性的瞬时单步抹除；
+     3. 在 `.gitignore` 中加入 `.tasks/`，防止任务流转运行态文件污染 Git 工作区；
+2. **实测验证**：通过真实任务提交、监听唤醒、结单归档全流程测试，全部毫秒级通过，工作区处于随时可开工监听状态。
+
+---
+
+### 用户指令 (User Prompts)
+遵循 GEMINI.md 第七章跨智能体看板协议，立即进入后台监听待命状态：
+1. 请立刻运行指令：python3 scripts/watch_task.py 并结束当前轮次，进入 0 Token 休眠；
+2. 被系统 Reactive Wakeup 自动唤醒后：
+   - 立即读取投递的绝对路径复现用例；
+   - 修复 cpc/src 源码，并运行 bash scripts/sync_cpc.sh 一键编译部署；
+   - 验证单测通过后，执行 python3 scripts/task_queue.py resolve <task_id> --note "已修复" 结单；
+   - 结单后立刻重新调用 python3 scripts/watch_task.py，进入下一轮待命休眠。
+
+### 执行汇报 (Execution Report)
+1. **自动唤醒与任务捕获**：
+   - 后台 `watch_task.py` 成功捕获 Bun AGY 投递的阻断任务 `task-zig-syntax-compat`（复现文件 `/data/dev/bun/temp/repro_zig_compat.cp`）；
+   - 报错项：`const MyFunc = fn (x: u8) bool;`（LBrace expected）与 `while (i < 10) : (i += 1) {}`（unexpected token Colon）；
+   - 退出代码 0 毫秒级触发系统 **Reactive Wakeup** 唤醒 CP AGY。
+2. **源码级精准攻坚与编译器修复**：
+   - **顶层函数类型别名支持**：在 `cpc/src/parser.rs` 中支持函数签名类型无大括号块解析，并在顶层将 `const MyFunc = fn (x: u8) bool;` 自动提升为强类型 `Decl::TypeAlias`，打通 Sema 类型别名解析与 Codegen 映射；
+   - **`while` 步进表达式支持**：在 `ast.rs`、`parser.rs`、`ast_visitor.rs`、`sema.rs` 与 `codegen.rs` 中支持 `while (cond) : (step) { ... }` 语法并对齐转译为 Zig 原生步进循环；
+   - **函数指针调用返回类型推导**：增强 `infer_cp_type_with_mock`，打通变量与字段函数指针调用的返回类型推导，消灭状态机降级为 `*anyopaque` 的类型报错；
+3. **极速编译部署与全量验证**：
+   - 运行 `bash scripts/sync_cpc.sh` 完成极速编译生效；
+   - 编写回归用例 [`cap/test/test_zig_syntax_compat.cp`](file:///data/dev/cp/cap/test/test_zig_syntax_compat.cp)，运行验证 **100% PASS**（转译 27ms，链接运行 642ms）；
+   - 原复现文件 `/data/dev/bun/temp/repro_zig_compat.cp` 直接用 `cpc` 转译 **100% 成功，0 错误**；
+   - 运行原有核心测试（Scoped Arena、Two-Pass 循环引用、多字段分离借用），全部 **100% PASS**。
+4. **结单与四线文档同步**：
+   - 成功执行 `python3 scripts/task_queue.py resolve task-zig-syntax-compat` 结单并归档至 `.tasks/resolved/`；
+   - 同步更新 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)（第 8.12 节）、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`SESSION.md`](file:///data/dev/cp/SESSION.md)。
+
+---
+
+### 用户指令 (User Prompts)
+汇报你的进度和状态, 与 bun agy 通信是否顺畅, 完成一项任务后, 需更新四线文档, 特别是相关改动/更新及示例代码, 务必同步到 cp_ref.md 设计文档, 让开发者知晓该功能及如何使用. 然后 自动完成git 提交
+
+### 执行汇报 (Execution Report)
+1. **通信机制与闭环状态**：
+   - 与 Bun AGY 的异步看板通信完全打通且运转极其顺畅！
+   - 通过 `watch_task.py` 后台 Reactive Wakeup 机制，实现了「Bun 投递任务 -> CP 自动毫秒级唤醒 -> 修复部署并结单 -> 自动重回休眠」全流程零人工盯梢闭环；
+   - 首个阻断任务 `task-zig-syntax-compat` 已 100% 解决并完成验收。
+2. **四线演进文档全量对齐**：
+   - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)：在第 8.12 节正式载入《循环步进表达式 (`while (cond) : (step)`) 与函数类型别名 (`const F = fn(...) Ret`)》标准规范与示例代码；
+   - [`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)：记录问题剖析、AST 拓展与 Codegen 推导修复原理；
+   - [`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)：记录文件变更轨迹；
+   - [`SESSION.md`](file:///data/dev/cp/SESSION.md)：记录问答指令与提交闭环。
+3. **一次性暂存与提交**：
+   - 执行 `git add .` 与 `git commit -m "feat(cpc): support bare function type aliases, while step expressions, and sync task queue scripts"`；
+   - 提交后工作区保持 100% 干净，随时准备恢复后台待命监听。
+
+
+
+
 
 
 

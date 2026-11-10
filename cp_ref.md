@@ -2327,11 +2327,15 @@ CP 语言将普通函数的“默认/`&` 只读借用、`*` 可变借用、`move
 switch 分支捕获的值：
 
 - 如果是值捕获：拿到副本/所有权；
-- 如果需要借用，在分支内部显式写 `&v` / `*v`；
+- 如果需要指针/引用借用，支持显式前缀 `*` 捕获：`variant => |*ptr| { ... }` 获得载荷的独占可变借用；
+- 亦可在分支内部显式写 `&v` / `*v`；
 - switch通配符为 `*`，不影响借用规则。
 
 ```cp
-switch(some_user) {
+switch (some_user) {
+    .active => |*user| {
+        user.score += 10; // 原地可变借用与修改
+    }
     u => {
         let r = *u; // 创建u的可变借用
     }
@@ -3040,6 +3044,13 @@ fn process_transaction(): void! {
 process_transaction() catch err => {
     print("Failed transaction:", err);
 };
+
+// 4. 前缀 try 表达式兼容语法（Zig/Rust 迁移兼容与极速适配）
+// 支持直接书写前缀 try expr，前端自动映射为标准错误传播（Expr::Question）：
+fn send_data(*socket: Socket, data: []const u8): void! {
+    try socket.write(data);
+    const amount = try socket.flush();
+}
 ```
 
 ---
@@ -3252,6 +3263,31 @@ CP 采用符合现代前端（TypeScript/ES6）与系统语言（Go/Swift）直�
 3. **换行安全防御规则**：
    - 换行后的首字符若为左圆括号 `(`（如独立表达式 `(a < b) || break`），**严禁**被贪婪解析为上一行末尾表达式的后缀函数调用（`CallExpr`）；
    - 无参数的 `return` 语句若遇到换行，自动断句，不会将下一行的独立语句误吞为返回值。
+
+---
+
+### 8.12 循环步进表达式 (`while (cond) : (step)`) 与函数类型别名 (`const F = fn(...) Ret`)
+
+为大幅降低从 Zig / Bun.js 底层系统库直译到 CP 的摩擦力，CP 编译器在语法与类型系统层面原生打通了以下能力：
+
+1. **`while` 循环步进表达式 (`: (step_expr)`)**：
+   - 支持在条件括号闭合后直接书写 `: (step_expr)`，定义在每次迭代回边（Continue）时必定执行的步进表达式：
+     ```typescript
+     var i: usize = 0;
+     while (i < 10) : (i += 1) {
+         if (i == 5) break;
+     }
+     ```
+   - 零额外控制开销，直接对齐发射为 Zig 寄存器级 `while (...) : (...)` 原生循环。
+
+2. **顶层函数签名类型别名 (`const F = fn (...) Ret;`)**：
+   - 除标准的 `type F = fn (x: u8): bool;` 之外，完全允许使用 Zig 风格的 `const` 定义裸函数签名类型（支持省略返回类型前的冒号 `:`）：
+     ```typescript
+     const MyCallback = fn (x: u8) bool;
+     let cb: MyCallback = my_handler;
+     let ok = cb(42);
+     ```
+   - 编译器在前端自动将其单态化提升为强类型函数指针类型，打通完整的参数类型检查与调用推导。
 
 ---
 

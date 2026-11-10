@@ -511,7 +511,14 @@ pub fn from_compiler_error_msg(raw_msg: &str, source_code: Option<&str>) -> Diag
         .with_help("methods that modify instance fields must declare a mutable receiver parameter '*_' or '*this'.")
         .with_suggestion("add '*_' or '*this' as the first parameter of the method: fn method(*_) { ... }")
     } else if msg.contains("read-only borrow") {
-        let var_name = msg.split('\'').nth(1).unwrap_or("variable");
+        let parts: Vec<&str> = msg.split('\'').collect();
+        let var_name = if parts.len() >= 4 {
+            parts[3]
+        } else if parts.len() >= 2 {
+            parts[1]
+        } else {
+            "variable"
+        };
         Diagnostic::new(
             "E0201",
             format!(

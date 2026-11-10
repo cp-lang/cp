@@ -56,3 +56,8 @@ bun.lockb          # 如果使用 bun
 # evn
 .env
 .env.local
+
+# AGY Async Tasks Mailbox
+.tasks/
+TASK_QUEUE.jsonl
+

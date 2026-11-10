@@ -136,7 +136,9 @@ pub fn find_referenced_vars_in_expr(expr: &Expr, vars: &mut HashSet<String>) {
         }
         Expr::Cast { expr, .. } => find_referenced_vars_in_expr(expr, vars),
         Expr::Deref(d) | Expr::Unwrap(d) | Expr::BitNot(d) => find_referenced_vars_in_expr(d, vars),
-        Expr::Unsafe(b) | Expr::Comptime(b) | Expr::Arena(b) => find_referenced_vars_in_block(b, vars),
+        Expr::Unsafe(b) | Expr::Comptime(b) | Expr::Arena(b) => {
+            find_referenced_vars_in_block(b, vars)
+        }
         Expr::If {
             test, cons, alt, ..
         } => {
@@ -180,6 +182,9 @@ pub fn find_referenced_vars_in_stmt(stmt: &Stmt, vars: &mut HashSet<String>) {
         }
         Stmt::While(w) => {
             find_referenced_vars_in_expr(&w.test, vars);
+            if let Some(c) = &w.continue_expr {
+                find_referenced_vars_in_expr(c, vars);
+            }
             find_referenced_vars_in_stmt(&w.body, vars);
         }
         Stmt::For(f) => {
@@ -210,7 +215,9 @@ pub fn find_referenced_vars_in_stmt(stmt: &Stmt, vars: &mut HashSet<String>) {
         Stmt::Defer(d) => find_referenced_vars_in_stmt(d, vars),
         Stmt::ErrDefer(d) => find_referenced_vars_in_stmt(d, vars),
         Stmt::ComptimeBlock(b) => find_referenced_vars_in_block(b, vars),
-        Stmt::Block(b) | Stmt::UnsafeBlock(b) | Stmt::ArenaBlock(b) => find_referenced_vars_in_block(b, vars),
+        Stmt::Block(b) | Stmt::UnsafeBlock(b) | Stmt::ArenaBlock(b) => {
+            find_referenced_vars_in_block(b, vars)
+        }
         Stmt::TryCatch {
             try_block,
             catch_body,

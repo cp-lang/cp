@@ -86,6 +86,7 @@ impl ModuleFeatures {
             || f.needs_comparison
             || f.needs_add
             || f.needs_not
+            || f.needs_result_error
         {
             f.needs_string_helpers = true;
         }
@@ -462,6 +463,13 @@ impl ModuleFeatures {
                         self.needs_fmt = true;
                         self.needs_string_helpers = true;
                     }
+                    match id.sym.as_str() {
+                        "u8" | "i8" | "u16" | "i16" | "u32" | "i32" | "u64" | "i64" | "u128"
+                        | "i128" | "usize" | "isize" => {
+                            self.needs_cast_int = true;
+                        }
+                        _ => {}
+                    }
                 }
                 if let Expr::Member(m) = &*c.callee {
                     if m.prop.sym == "toString" && c.args.is_empty() {
@@ -480,7 +488,9 @@ impl ModuleFeatures {
                     match m.prop.sym.as_str() {
                         "push" | "pop" => self.needs_array_helpers = true,
                         "includes" => self.needs_index_helpers = true,
-                        "indexOf" | "lastIndexOf" if c.args.len() == 1 => self.needs_index_helpers = true,
+                        "indexOf" | "lastIndexOf" if c.args.len() == 1 => {
+                            self.needs_index_helpers = true
+                        }
                         "slice" | "substring" if !c.args.is_empty() => {
                             self.needs_iter_helpers = true
                         }
@@ -795,7 +805,11 @@ impl Codegen {
 
     pub fn current_generated_line(&self) -> u32 {
         let out_newlines = self.output.bytes().filter(|&b| b == b'\n').count();
-        let case_newlines = self.current_case_content.bytes().filter(|&b| b == b'\n').count();
+        let case_newlines = self
+            .current_case_content
+            .bytes()
+            .filter(|&b| b == b'\n')
+            .count();
         (out_newlines + case_newlines + 1) as u32
     }
 
@@ -826,19 +840,24 @@ impl Codegen {
                         return;
                     }
                 }
-                self.source_map_entries.push(crate::source_map::SourceMapEntry {
-                    zig_line,
-                    zig_col: 1,
-                    cp_file: file.clone(),
-                    cp_line,
-                    cp_col,
-                    symbol: self.current_func_name.clone(),
-                });
+                self.source_map_entries
+                    .push(crate::source_map::SourceMapEntry {
+                        zig_line,
+                        zig_col: 1,
+                        cp_file: file.clone(),
+                        cp_line,
+                        cp_col,
+                        symbol: self.current_func_name.clone(),
+                    });
             }
         }
     }
 
-    pub fn build_source_map(&self, cp_source: String, zig_target: String) -> crate::source_map::SourceMap {
+    pub fn build_source_map(
+        &self,
+        cp_source: String,
+        zig_target: String,
+    ) -> crate::source_map::SourceMap {
         let mut sm = crate::source_map::SourceMap::new(cp_source, zig_target);
         sm.mappings = self.source_map_entries.clone();
         sm
@@ -1648,7 +1667,11 @@ impl Codegen {
                         self.var_cp_types.insert(id.sym.clone(), t.clone());
                     }
                     if v.kind == VarDeclKind::Const
-                        && id.sym.chars().next().map_or(false, |c| c.is_ascii_uppercase())
+                        && id
+                            .sym
+                            .chars()
+                            .next()
+                            .map_or(false, |c| c.is_ascii_uppercase())
                     {
                         self.value_classes.insert(id.sym.clone());
                     }
@@ -1886,7 +1909,8 @@ impl Codegen {
                     let mut inferred = v.ty.clone();
                     if inferred.is_none() {
                         if let Some(init) = &v.init {
-                            inferred = self.infer_cp_type_with_mock(init, &std::collections::HashMap::new());
+                            inferred = self
+                                .infer_cp_type_with_mock(init, &std::collections::HashMap::new());
                         }
                     }
                     if let Some(ty) = inferred {
@@ -1913,7 +1937,9 @@ impl Codegen {
             self.writeln("    pub extern \"c\" fn exit(status: c_int) noreturn;");
             self.writeln("    pub extern \"c\" fn getenv(name: [*c]const u8) ?[*c]u8;");
             self.writeln("    pub extern \"c\" fn strlen(s: [*c]const u8) usize;");
-            self.writeln("    pub extern \"c\" fn strcmp(s1: [*c]const u8, s2: [*c]const u8) c_int;");
+            self.writeln(
+                "    pub extern \"c\" fn strcmp(s1: [*c]const u8, s2: [*c]const u8) c_int;",
+            );
             self.writeln("    pub extern \"c\" fn strncmp(s1: [*c]const u8, s2: [*c]const u8, n: usize) c_int;");
             self.writeln("    pub extern \"c\" fn memcpy(dest: ?*anyopaque, src: ?*const anyopaque, n: usize) ?*anyopaque;");
             self.writeln("    pub extern \"c\" fn memset(s: ?*anyopaque, c_val: c_int, n: usize) ?*anyopaque;");
@@ -2016,11 +2042,16 @@ impl Codegen {
                         if ident.sym == "std" {
                             continue;
                         }
+                        let saved_comptime = self.is_comptime;
+                        if var.kind == VarDeclKind::Const {
+                            self.is_comptime = true;
+                        }
                         let init_code = if let Some(init) = &var.init {
                             self.generate_expr(init)
                         } else {
                             "undefined".to_string()
                         };
+                        self.is_comptime = saved_comptime;
                         self.writeln(&format!("{} {}{} = {};", kw, ident.sym, ty_str, init_code));
                     }
                     _ => {}
@@ -3667,10 +3698,14 @@ impl Codegen {
                 line.push(',');
                 self.writeln(&line);
             }
-            let has_get = e.methods.iter().any(|m| m.ident.sym == "get") || e.extra_zig.iter().any(|z| z.contains("fn get("));
-            let has_has = e.methods.iter().any(|m| m.ident.sym == "has") || e.extra_zig.iter().any(|z| z.contains("fn has("));
-            let has_from_name = e.methods.iter().any(|m| m.ident.sym == "fromName") || e.extra_zig.iter().any(|z| z.contains("fn fromName("));
-            let has_name = e.methods.iter().any(|m| m.ident.sym == "name") || e.extra_zig.iter().any(|z| z.contains("fn name("));
+            let has_get = e.methods.iter().any(|m| m.ident.sym == "get")
+                || e.extra_zig.iter().any(|z| z.contains("fn get("));
+            let has_has = e.methods.iter().any(|m| m.ident.sym == "has")
+                || e.extra_zig.iter().any(|z| z.contains("fn has("));
+            let has_from_name = e.methods.iter().any(|m| m.ident.sym == "fromName")
+                || e.extra_zig.iter().any(|z| z.contains("fn fromName("));
+            let has_name = e.methods.iter().any(|m| m.ident.sym == "name")
+                || e.extra_zig.iter().any(|z| z.contains("fn name("));
             if !has_get {
                 self.writeln("pub fn get(s: []const u8) ?@This() { return std.meta.stringToEnum(@This(), s); }");
             }
@@ -3750,10 +3785,14 @@ impl Codegen {
             self.dedent();
             self.writeln("}");
         }
-        if !e.methods.iter().any(|m| m.ident.sym == "has") && !e.extra_zig.iter().any(|z| z.contains("fn has(")) {
+        if !e.methods.iter().any(|m| m.ident.sym == "has")
+            && !e.extra_zig.iter().any(|z| z.contains("fn has("))
+        {
             self.writeln("pub fn has(s: []const u8) bool { if (comptime @typeInfo(@This()).@\"union\".tag_type) |TagType| { return std.meta.stringToEnum(TagType, s) != null; } return false; }");
         }
-        if !e.methods.iter().any(|m| m.ident.sym == "name") && !e.extra_zig.iter().any(|z| z.contains("fn name(")) {
+        if !e.methods.iter().any(|m| m.ident.sym == "name")
+            && !e.extra_zig.iter().any(|z| z.contains("fn name("))
+        {
             self.writeln("pub fn name(self: @This()) []const u8 { return @tagName(self); }");
         }
         if !e.methods.is_empty() {
@@ -3852,7 +3891,11 @@ impl Codegen {
                     self.writeln(line);
                 }
             }
-            if let Some(rc_meta) = class.meta.iter().find(|m| m.name.sym == "refCount" || m.name.sym == "refcount") {
+            if let Some(rc_meta) = class
+                .meta
+                .iter()
+                .find(|m| m.name.sym == "refCount" || m.name.sym == "refcount")
+            {
                 let deinit_fn = if let Some(arg) = rc_meta.args.first() {
                     match arg {
                         crate::ast::MetaArg::Positional(Expr::Ident(id)) => id.sym.clone(),
@@ -4045,7 +4088,11 @@ impl Codegen {
                 self.writeln(line);
             }
         }
-        if let Some(rc_meta) = class.meta.iter().find(|m| m.name.sym == "refCount" || m.name.sym == "refcount") {
+        if let Some(rc_meta) = class
+            .meta
+            .iter()
+            .find(|m| m.name.sym == "refCount" || m.name.sym == "refcount")
+        {
             let deinit_fn = if let Some(arg) = rc_meta.args.first() {
                 match arg {
                     crate::ast::MetaArg::Positional(Expr::Ident(id)) => id.sym.clone(),
@@ -4420,7 +4467,9 @@ impl Codegen {
                 }
             }
             Stmt::Break | Stmt::Continue => {}
-            Stmt::Block(b) | Stmt::UnsafeBlock(b) | Stmt::ArenaBlock(b) => self.compute_last_uses_block(b, counter),
+            Stmt::Block(b) | Stmt::UnsafeBlock(b) | Stmt::ArenaBlock(b) => {
+                self.compute_last_uses_block(b, counter)
+            }
             Stmt::If(i) => {
                 crate::ast_visitor::find_referenced_vars_in_expr(&i.test, &mut refs);
                 for r in refs {
@@ -4441,6 +4490,9 @@ impl Codegen {
             }
             Stmt::While(w) => {
                 crate::ast_visitor::find_referenced_vars_in_expr(&w.test, &mut refs);
+                if let Some(c) = &w.continue_expr {
+                    crate::ast_visitor::find_referenced_vars_in_expr(c, &mut refs);
+                }
                 for r in refs {
                     self.last_use_map.insert(r, idx);
                 }
@@ -4503,7 +4555,10 @@ impl Codegen {
 
     fn check_active_borrows_before_move(&self, var_name: &str) {
         for (borrower, (sources, _)) in &self.var_borrow_sources {
-            if sources.iter().any(|(s, _)| s == var_name || ((s == "this" || s == "_") && (var_name == "this" || var_name == "_"))) {
+            if sources.iter().any(|(s, _)| {
+                s == var_name
+                    || ((s == "this" || s == "_") && (var_name == "this" || var_name == "_"))
+            }) {
                 let last_use = self.last_use_map.get(borrower).copied().unwrap_or(0);
                 if last_use > self.current_stmt_idx {
                     panic!(
@@ -4519,7 +4574,12 @@ impl Codegen {
         self.check_borrow_conflict_field_excluding(target_var, None, "", req_mut);
     }
 
-    fn check_borrow_conflict_field(&self, target_var: &str, target_field: Option<&str>, req_mut: bool) {
+    fn check_borrow_conflict_field(
+        &self,
+        target_var: &str,
+        target_field: Option<&str>,
+        req_mut: bool,
+    ) {
         self.check_borrow_conflict_field_excluding(target_var, target_field, "", req_mut);
     }
 
@@ -4705,7 +4765,9 @@ impl Codegen {
                                     ) {
                                         return;
                                     }
-                                    if matches!(f.ty, Type::BorrowType { is_mut: false, .. }) && !op_desc.starts_with("field assignment") {
+                                    if matches!(f.ty, Type::BorrowType { is_mut: false, .. })
+                                        && !op_desc.starts_with("field assignment")
+                                    {
                                         panic!(
                                             "CP Compile Error: Cannot perform mutable operation ({}) through read-only borrow field '{}'",
                                             op_desc, id.sym
@@ -4755,12 +4817,27 @@ impl Codegen {
                                 op_desc, id.sym, src
                             );
                         }
-                        self.check_borrow_conflict_field_excluding(src, src_f.as_deref(), &id.sym, true);
+                        self.check_borrow_conflict_field_excluding(
+                            src,
+                            src_f.as_deref(),
+                            &id.sym,
+                            true,
+                        );
                     }
                 } else {
                     if self.current_fn_params.contains(&id.sym)
                         && !self.mutable_fn_params.contains(&id.sym)
                     {
+                        if op_desc == "index assignment '[] ='" {
+                            if self.is_lib_mode {
+                                return;
+                            }
+                            if let Some(param_ty) = self.var_cp_types.get(&id.sym) {
+                                if matches!(param_ty, Type::Array(_) | Type::FixedArray(_, _)) {
+                                    return;
+                                }
+                            }
+                        }
                         let is_ptr_or_mut_borrow =
                             if let Some(param_ty) = self.var_cp_types.get(&id.sym) {
                                 matches!(
@@ -4788,7 +4865,9 @@ impl Codegen {
                     ) {
                         return;
                     }
-                    if matches!(m_ty, Type::BorrowType { is_mut: false, .. }) && !op_desc.starts_with("field assignment") {
+                    if matches!(m_ty, Type::BorrowType { is_mut: false, .. })
+                        && !op_desc.starts_with("field assignment")
+                    {
                         panic!(
                             "CP Compile Error: Cannot perform mutable operation ({}) through read-only borrow field '{}'",
                             op_desc, mem.prop.sym
@@ -4818,12 +4897,27 @@ impl Codegen {
                                 (None, Some(f)) => Some(f.clone()),
                                 (None, None) => None,
                             };
-                            self.check_borrow_conflict_field_excluding(src, combined_field.as_deref(), &root, true);
+                            self.check_borrow_conflict_field_excluding(
+                                src,
+                                combined_field.as_deref(),
+                                &root,
+                                true,
+                            );
                         }
                     } else {
                         if self.current_fn_params.contains(&root)
                             && !self.mutable_fn_params.contains(&root)
                         {
+                            if op_desc == "index assignment '[] ='" {
+                                if self.is_lib_mode {
+                                    return;
+                                }
+                                if let Some(param_ty) = self.var_cp_types.get(&root) {
+                                    if matches!(param_ty, Type::Array(_) | Type::FixedArray(_, _)) {
+                                        return;
+                                    }
+                                }
+                            }
                             let is_ptr_or_mut_borrow =
                                 if let Some(param_ty) = self.var_cp_types.get(&root) {
                                     matches!(
@@ -4948,7 +5042,11 @@ impl Codegen {
                                         root, field_opt.as_deref().unwrap_or("")
                                     );
                                 }
-                                self.check_borrow_conflict_field("this", field_opt.as_deref(), *is_mut);
+                                self.check_borrow_conflict_field(
+                                    "this",
+                                    field_opt.as_deref(),
+                                    *is_mut,
+                                );
                                 return (
                                     vec![
                                         ("this".to_string(), field_opt.clone()),
@@ -4958,13 +5056,25 @@ impl Codegen {
                                     false,
                                 );
                             }
-                            let is_obj_ptr = self.locals.get(&root).map_or(false, |t| {
-                                t.starts_with('*') || t.starts_with("?*") || t.contains("=> *") || t.contains("=> ?*")
-                            })
-                            || self.var_cp_types.get(&root).map_or(false, |t| matches!(t, Type::RawPtr { .. } | Type::BorrowType { .. } | Type::CPtr(_) | Type::ManyRawPtr(_)));
+                            let is_obj_ptr =
+                                self.locals.get(&root).map_or(false, |t| {
+                                    t.starts_with('*')
+                                        || t.starts_with("?*")
+                                        || t.contains("=> *")
+                                        || t.contains("=> ?*")
+                                }) || self.var_cp_types.get(&root).map_or(false, |t| {
+                                    matches!(
+                                        t,
+                                        Type::RawPtr { .. }
+                                            | Type::BorrowType { .. }
+                                            | Type::CPtr(_)
+                                            | Type::ManyRawPtr(_)
+                                    )
+                                });
 
                             self.check_borrow_conflict_field(&root, field_opt.as_deref(), *is_mut);
-                            let resolved = self.resolve_borrow_source_field(&root, field_opt.as_deref());
+                            let resolved =
+                                self.resolve_borrow_source_field(&root, field_opt.as_deref());
                             if is_obj_ptr {
                                 if let Some((orig, _)) = self.var_borrow_sources.get(&root) {
                                     if !orig.is_empty() {
@@ -5003,8 +5113,15 @@ impl Codegen {
                                 Expr::Borrow(inner, is_m) => {
                                     let (root_opt, field_opt) = self.extract_member_path(inner);
                                     if let Some(root) = root_opt {
-                                        self.check_borrow_conflict_field(&root, field_opt.as_deref(), *is_m);
-                                        let resolved = self.resolve_borrow_source_field(&root, field_opt.as_deref());
+                                        self.check_borrow_conflict_field(
+                                            &root,
+                                            field_opt.as_deref(),
+                                            *is_m,
+                                        );
+                                        let resolved = self.resolve_borrow_source_field(
+                                            &root,
+                                            field_opt.as_deref(),
+                                        );
                                         sources.extend(resolved);
                                     }
                                     if *is_m {
@@ -5075,7 +5192,8 @@ impl Codegen {
                                                         {
                                                             sources.extend(orig.clone());
                                                         } else {
-                                                            sources.push((arg_id.sym.clone(), None));
+                                                            sources
+                                                                .push((arg_id.sym.clone(), None));
                                                         }
                                                     }
                                                 }
@@ -5103,7 +5221,10 @@ impl Codegen {
                         }
                     }
                 } else if let Expr::Ident(fid) = &*call.callee {
-                    if fid.sym == "@fieldParentPtr" || fid.sym == "@alignCast" || fid.sym == "@ptrCast" {
+                    if fid.sym == "@fieldParentPtr"
+                        || fid.sym == "@alignCast"
+                        || fid.sym == "@ptrCast"
+                    {
                         if let Some(last_arg) = call.args.last() {
                             return self.extract_expr_borrow_info(last_arg);
                         }
@@ -5121,14 +5242,20 @@ impl Codegen {
                                 match ret_ty {
                                     Type::BorrowType { is_mut, .. } => {
                                         return (
-                                            vec![("this".to_string(), None), ("_".to_string(), None)],
+                                            vec![
+                                                ("this".to_string(), None),
+                                                ("_".to_string(), None),
+                                            ],
                                             is_mut,
                                             false,
                                         );
                                     }
                                     Type::Ref(cid) if self.ref_classes.contains(&cid.sym) => {
                                         return (
-                                            vec![("this".to_string(), None), ("_".to_string(), None)],
+                                            vec![
+                                                ("this".to_string(), None),
+                                                ("_".to_string(), None),
+                                            ],
                                             recv_mode == ReceiverMode::Mut,
                                             true,
                                         );
@@ -5172,7 +5299,8 @@ impl Codegen {
                                                         {
                                                             sources.extend(orig.clone());
                                                         } else {
-                                                            sources.push((arg_id.sym.clone(), None));
+                                                            sources
+                                                                .push((arg_id.sym.clone(), None));
                                                         }
                                                     }
                                                 }
@@ -5261,7 +5389,11 @@ impl Codegen {
                         })
                     });
                 }
-                if let Some(t) = self.var_cp_types.get(&id.sym).or_else(|| self.global_var_types.get(&id.sym)) {
+                if let Some(t) = self
+                    .var_cp_types
+                    .get(&id.sym)
+                    .or_else(|| self.global_var_types.get(&id.sym))
+                {
                     if self.narrowed_null_vars.contains(&id.sym) {
                         return Some(Self::unwrap_optional_type(t));
                     }
@@ -5480,8 +5612,8 @@ impl Codegen {
                                     }
                                     if let Type::Ref(pid) = p_ty {
                                         if pid.sym == rid.sym && idx < c.args.len() {
-                                            if let Some(arg_ty) =
-                                                self.infer_cp_type_with_mock(&c.args[idx], mock_types)
+                                            if let Some(arg_ty) = self
+                                                .infer_cp_type_with_mock(&c.args[idx], mock_types)
                                             {
                                                 return Some(arg_ty);
                                             }
@@ -5699,10 +5831,17 @@ impl Codegen {
                             || (!self.locals.contains_key(&oid.sym)
                                 && !mock_types.contains_key(&oid.sym)
                                 && !self.global_var_types.contains_key(&oid.sym)
-                                && oid.sym.chars().next().map_or(false, |c| c.is_ascii_uppercase())
+                                && oid
+                                    .sym
+                                    .chars()
+                                    .next()
+                                    .map_or(false, |c| c.is_ascii_uppercase())
                                 && !self.class_defs.contains_key(&oid.sym));
                         if is_enum {
-                            if mem.prop.sym == "fromName" || mem.prop.sym == "fromString" || mem.prop.sym == "get" {
+                            if mem.prop.sym == "fromName"
+                                || mem.prop.sym == "fromString"
+                                || mem.prop.sym == "get"
+                            {
                                 return Some(Type::Optional(Box::new(Type::Ref(oid.clone()))));
                             }
                             if mem.prop.sym == "has" {
@@ -5711,7 +5850,9 @@ impl Codegen {
                             return Some(Type::Ref(oid.clone()));
                         }
                         if mem.prop.sym == "get" {
-                            if let Some(mut oty) = self.infer_cp_type_with_mock(&mem.obj, mock_types) {
+                            if let Some(mut oty) =
+                                self.infer_cp_type_with_mock(&mem.obj, mock_types)
+                            {
                                 while let Type::BorrowType { inner, .. } = oty {
                                     oty = *inner;
                                 }
@@ -5793,6 +5934,19 @@ impl Codegen {
                                 return Some(rt);
                             }
                         }
+                    }
+                }
+                if let Some(mut callee_ty) = self.infer_cp_type_with_mock(&c.callee, mock_types) {
+                    while let Type::BorrowType { inner, .. } = callee_ty {
+                        callee_ty = *inner;
+                    }
+                    if let Type::Ref(rid) = &callee_ty {
+                        if let Some(target) = self.type_aliases.get(&rid.sym) {
+                            callee_ty = target.target_ty.clone();
+                        }
+                    }
+                    if let Type::Fn(_, ret) | Type::CFn(_, ret) = callee_ty {
+                        return Some(*ret);
                     }
                 }
                 None
@@ -6301,11 +6455,14 @@ impl Codegen {
                 span: Span { start: 0, end: 0 },
                 sym: "Dict".to_string(),
             })),
-            Expr::ComptimeMap { target_ty, entries, .. } => {
+            Expr::ComptimeMap {
+                target_ty, entries, ..
+            } => {
                 let val_ty = if let Some(ty) = target_ty {
                     ty.clone()
                 } else if let Some(first) = entries.first() {
-                    self.infer_cp_type_with_mock(&first.val, mock_types).unwrap_or(Type::Any)
+                    self.infer_cp_type_with_mock(&first.val, mock_types)
+                        .unwrap_or(Type::Any)
                 } else {
                     Type::Any
                 };
@@ -6324,7 +6481,9 @@ impl Codegen {
                     Some(Type::String) => Some(Type::U8),
                     Some(Type::CStr) => Some(Type::U8),
                     Some(Type::ManyRawPtr(inner)) | Some(Type::CPtr(inner)) => Some(*inner),
-                    Some(Type::Ref(id)) if id.sym == "cstring" || id.sym == "cstr" => Some(Type::U8),
+                    Some(Type::Ref(id)) if id.sym == "cstring" || id.sym == "cstr" => {
+                        Some(Type::U8)
+                    }
                     Some(Type::Ref(id)) if id.sym == "Dict" || id.sym == "Map" => {
                         Some(Type::Optional(Box::new(Type::Ref(Ident {
                             span: Span { start: 0, end: 0 },
@@ -7375,19 +7534,24 @@ impl Codegen {
                         } else {
                             format!("{}.{}", ep.enum_name.sym, ep.variant_name.sym)
                         };
+                        let inline_prefix = if arm.is_inline { "inline " } else { "" };
                         if let Some(tup) = &ep.tuple_pats {
                             if tup.len() == 1 {
                                 if let Pattern::Ident(id) = &tup[0] {
                                     bound_ident = Some(id.sym.clone());
-                                    format!("{} => |{}|", base, id.sym)
+                                    format!("{}{} => |{}|", inline_prefix, base, id.sym)
                                 } else {
-                                    format!("{} =>", base)
+                                    format!("{}{} =>", inline_prefix, base)
                                 }
                             } else {
-                                format!("{} =>", base)
+                                format!("{}{} =>", inline_prefix, base)
                             }
+                        } else if let Some(cap) = &arm.capture {
+                            bound_ident = Some(cap.sym.clone());
+                            let ptr_prefix = if arm.is_capture_ptr { "*" } else { "" };
+                            format!("{}{} => |{}{}|", inline_prefix, base, ptr_prefix, cap.sym)
                         } else {
-                            format!("{} =>", base)
+                            format!("{}{} =>", inline_prefix, base)
                         }
                     }
                     Pattern::Ident(id) if id.sym != "_" && id.sym != "else" => {
@@ -7397,7 +7561,15 @@ impl Codegen {
                     }
                     other => {
                         let s = Self::format_simple_pat(other, &mut has_else);
-                        format!("{} =>", s)
+                        let inline_prefix = if arm.is_inline { "inline " } else { "" };
+                        let cap_suffix = if let Some(cap) = &arm.capture {
+                            bound_ident = Some(cap.sym.clone());
+                            let ptr_prefix = if arm.is_capture_ptr { "*" } else { "" };
+                            format!(" |{}{}|", ptr_prefix, cap.sym)
+                        } else {
+                            "".to_string()
+                        };
+                        format!("{}{} =>{}", inline_prefix, s, cap_suffix)
                     }
                 };
 
@@ -7954,6 +8126,7 @@ impl Codegen {
                     kind: VarDeclKind::Let,
                     is_threadlocal: false,
                     is_pub: false,
+                    is_comptime: false,
                 }));
             }
         }
@@ -8062,7 +8235,10 @@ impl Codegen {
                         return true;
                     }
                 }
-                Stmt::Block(b) | Stmt::UnsafeBlock(b) | Stmt::ComptimeBlock(b) | Stmt::ArenaBlock(b) => {
+                Stmt::Block(b)
+                | Stmt::UnsafeBlock(b)
+                | Stmt::ComptimeBlock(b)
+                | Stmt::ArenaBlock(b) => {
                     if Self::block_contains_ident(b, id) {
                         return true;
                     }
@@ -8231,10 +8407,17 @@ impl Codegen {
                     } else {
                         c.clone()
                     };
-                    let ptr_type = if let Some(first) = func.params.first().filter(|p| p.ident.sym == "this" || p.ident.sym == "_") {
+                    let ptr_type = if let Some(first) = func
+                        .params
+                        .first()
+                        .filter(|p| p.ident.sym == "this" || p.ident.sym == "_")
+                    {
                         if matches!(&first.ty, Type::BorrowType { is_mut: false, .. }) {
                             format!("*const {}", type_name)
-                        } else if matches!(&first.ty, Type::BorrowType { is_mut: true, .. } | Type::RawPtr { .. }) {
+                        } else if matches!(
+                            &first.ty,
+                            Type::BorrowType { is_mut: true, .. } | Type::RawPtr { .. }
+                        ) {
                             format!("*{}", type_name)
                         } else if is_val && self.current_receiver_mode == ReceiverMode::ReadOnly {
                             type_name
@@ -8255,15 +8438,21 @@ impl Codegen {
                 }
             }
             for p in &func.params {
-                if self.is_class_method && (p.ident.sym == "this" || p.ident.sym == "_" || p.ident.sym == "self") {
+                if self.is_class_method
+                    && (p.ident.sym == "this" || p.ident.sym == "_" || p.ident.sym == "self")
+                {
                     continue;
                 }
                 let mapped_ty = match &p.ty {
                     Type::Ref(id) if self.trait_defs.contains_key(&id.sym) => "anytype".to_string(),
-                    Type::Ref(id) if func.generic_params.iter().any(|gp| match gp {
-                        GenericParam::Type { ident, .. } => ident.sym == id.sym,
-                        _ => false,
-                    }) => "anytype".to_string(),
+                    Type::Ref(id)
+                        if func.generic_params.iter().any(|gp| match gp {
+                            GenericParam::Type { ident, .. } => ident.sym == id.sym,
+                            _ => false,
+                        }) =>
+                    {
+                        "anytype".to_string()
+                    }
                     Type::CStr => {
                         if p.is_mut {
                             "[*:0]u8".to_string()
@@ -8299,33 +8488,34 @@ impl Codegen {
                 Some(MetaArg::Positional(Expr::Lit(Lit::Str(s)))) => Some(s.clone()),
                 _ => None,
             });
-            let callconv_clause = if let Some(m) = func.meta.iter().find(|m| m.name.sym == "callconv") {
-                let conv = match m.args.first() {
-                    Some(MetaArg::Positional(Expr::Lit(Lit::Str(s)))) => {
-                        if s.starts_with('.') || s.contains('.') {
-                            s.clone()
-                        } else {
-                            format!(".{}", s)
+            let callconv_clause =
+                if let Some(m) = func.meta.iter().find(|m| m.name.sym == "callconv") {
+                    let conv = match m.args.first() {
+                        Some(MetaArg::Positional(Expr::Lit(Lit::Str(s)))) => {
+                            if s.starts_with('.') || s.contains('.') {
+                                s.clone()
+                            } else {
+                                format!(".{}", s)
+                            }
                         }
-                    }
-                    Some(MetaArg::Positional(Expr::Ident(id))) => {
-                        if id.sym.starts_with('.') || id.sym.contains('.') {
-                            id.sym.clone()
-                        } else {
-                            format!(".{}", id.sym)
+                        Some(MetaArg::Positional(Expr::Ident(id))) => {
+                            if id.sym.starts_with('.') || id.sym.contains('.') {
+                                id.sym.clone()
+                            } else {
+                                format!(".{}", id.sym)
+                            }
                         }
-                    }
-                    Some(MetaArg::Positional(Expr::Member(mem))) => {
-                        format!("{}.{}", self.generate_expr(&mem.obj), mem.prop.sym)
-                    }
-                    _ => ".c".to_string(),
+                        Some(MetaArg::Positional(Expr::Member(mem))) => {
+                            format!("{}.{}", self.generate_expr(&mem.obj), mem.prop.sym)
+                        }
+                        _ => ".c".to_string(),
+                    };
+                    format!("callconv({}) ", conv)
+                } else if is_c {
+                    "callconv(.c) ".to_string()
+                } else {
+                    String::new()
                 };
-                format!("callconv({}) ", conv)
-            } else if is_c {
-                "callconv(.c) ".to_string()
-            } else {
-                String::new()
-            };
             let pub_prefix = if class_name.is_some() {
                 if func.is_pub
                     || func.ident.sym == "init"
@@ -8361,11 +8551,7 @@ impl Codegen {
             }
             let is_export = func.meta.iter().any(|m| m.name.sym == "export")
                 || (is_c && !func.body.body.is_empty());
-            let export_kw = if is_export {
-                "export "
-            } else {
-                ""
-            };
+            let export_kw = if is_export { "export " } else { "" };
             self.current_func_name = Some(func.ident.sym.clone());
             self.record_source_location(func.span);
             writeln!(
@@ -8643,6 +8829,9 @@ impl Codegen {
             }
             Stmt::While(w) => {
                 self.collect_expr_error_types(&w.test, out);
+                if let Some(c) = &w.continue_expr {
+                    self.collect_expr_error_types(c, out);
+                }
                 self.collect_stmt_error_types(&w.body, out);
             }
             Stmt::For(f) => {
@@ -8827,9 +9016,17 @@ impl Codegen {
                                 let keyword = if var.is_threadlocal {
                                     "threadlocal var"
                                 } else if is_const {
-                                    "const"
+                                    if var.is_comptime {
+                                        "comptime const"
+                                    } else {
+                                        "const"
+                                    }
                                 } else {
-                                    "var"
+                                    if var.is_comptime {
+                                        "comptime var"
+                                    } else {
+                                        "var"
+                                    }
                                 };
                                 let ty_annot = if expr_code == "undefined" {
                                     if let Some(t) = &var.ty {
@@ -8896,8 +9093,10 @@ impl Codegen {
                                     || matches!(init, Expr::Lit(Lit::Str(_))))
                             {
                                 format!("@constCast({})", final_expr)
-                            } else if matches!(var.ty, Some(Type::ManyRawPtr(_)) | Some(Type::CPtr(_)))
-                                && matches!(init, Expr::Borrow(_, _))
+                            } else if matches!(
+                                var.ty,
+                                Some(Type::ManyRawPtr(_)) | Some(Type::CPtr(_))
+                            ) && matches!(init, Expr::Borrow(_, _))
                             {
                                 format!("@ptrCast({})", final_expr)
                             } else {
@@ -9589,45 +9788,51 @@ impl Codegen {
                         self.narrowed_null_vars = old_narrowed;
                     }
                 } else {
-                    let (saved_cap_local, saved_cap_cp, was_mut_loop) = if let Some(cap) = &i.capture {
-                        self.var_scope_depth
-                            .insert(cap.sym.clone(), self.current_scope_depth + 1);
-                        self.block_locals.insert(cap.sym.clone());
-                        let was_mut = if i.is_ptr_capture {
-                            !self.mut_borrow_loop_vars.insert(cap.sym.clone())
+                    let (saved_cap_local, saved_cap_cp, was_mut_loop) =
+                        if let Some(cap) = &i.capture {
+                            self.var_scope_depth
+                                .insert(cap.sym.clone(), self.current_scope_depth + 1);
+                            self.block_locals.insert(cap.sym.clone());
+                            let was_mut = if i.is_ptr_capture {
+                                !self.mut_borrow_loop_vars.insert(cap.sym.clone())
+                            } else {
+                                false
+                            };
+                            let ptr_prefix = if i.is_ptr_capture { "*" } else { "" };
+                            self.write_to_case(&format!(
+                                "if ({}) |{}{}| {{",
+                                test, ptr_prefix, cap.sym
+                            ));
+                            let test_cp_ty = self.infer_cp_type(&i.test);
+                            let unwrapped_ty = match &test_cp_ty {
+                                Some(Type::Optional(inner)) => (**inner).clone(),
+                                Some(Type::ErrorUnion(inner)) => (**inner).clone(),
+                                Some(Type::ResultType { ok, .. }) => (**ok).clone(),
+                                Some(other) => other.clone(),
+                                None => Type::Any,
+                            };
+                            let final_ty = if i.is_ptr_capture {
+                                Type::BorrowType {
+                                    is_mut: true,
+                                    inner: Box::new(unwrapped_ty.clone()),
+                                    lifetimes: vec![],
+                                }
+                            } else {
+                                unwrapped_ty.clone()
+                            };
+                            let zig_ty = self.map_type(&final_ty);
+                            let prev_cp = self.var_cp_types.insert(cap.sym.clone(), final_ty);
+                            let prev_l = self.locals.insert(cap.sym.clone(), zig_ty);
+                            (prev_l, prev_cp, was_mut)
                         } else {
-                            false
+                            self.write_to_case(&format!("if ({}) {{", test));
+                            (None, None, false)
                         };
-                        let ptr_prefix = if i.is_ptr_capture { "*" } else { "" };
-                        self.write_to_case(&format!("if ({}) |{}{}| {{", test, ptr_prefix, cap.sym));
-                        let test_cp_ty = self.infer_cp_type(&i.test);
-                        let unwrapped_ty = match &test_cp_ty {
-                            Some(Type::Optional(inner)) => (**inner).clone(),
-                            Some(Type::ErrorUnion(inner)) => (**inner).clone(),
-                            Some(Type::ResultType { ok, .. }) => (**ok).clone(),
-                            Some(other) => other.clone(),
-                            None => Type::Any,
-                        };
-                        let final_ty = if i.is_ptr_capture {
-                            Type::BorrowType {
-                                is_mut: true,
-                                inner: Box::new(unwrapped_ty.clone()),
-                                lifetimes: vec![],
-                            }
-                        } else {
-                            unwrapped_ty.clone()
-                        };
-                        let zig_ty = self.map_type(&final_ty);
-                        let prev_cp = self.var_cp_types.insert(cap.sym.clone(), final_ty);
-                        let prev_l = self.locals.insert(cap.sym.clone(), zig_ty);
-                        (prev_l, prev_cp, was_mut)
-                    } else {
-                        self.write_to_case(&format!("if ({}) {{", test));
-                        (None, None, false)
-                    };
                     self.indent();
                     if let Some(cap) = &i.capture {
-                        self.write_to_case(&format!("_ = &{};", cap.sym));
+                        if cap.sym != "_" {
+                            self.write_to_case(&format!("_ = &{};", cap.sym));
+                        }
                     }
                     self.current_scope_depth += 1;
                     self.narrowed_null_vars.extend(not_null_vars);
@@ -9692,6 +9897,11 @@ impl Codegen {
             Stmt::While(w) => {
                 let not_null_vars = Self::extract_not_null_vars(&w.test);
                 let test = self.generate_expr(&w.test);
+                let cont_suffix = if let Some(c) = &w.continue_expr {
+                    format!(" : ({})", self.generate_expr(c))
+                } else {
+                    String::new()
+                };
                 let old_uninit = self.uninitialized_vars.clone();
                 let old_narrowed = self.narrowed_null_vars.clone();
                 let lbl_prefix = if let Some(lbl) = &w.label {
@@ -9708,8 +9918,12 @@ impl Codegen {
                     } else {
                         false
                     };
+                    let inline_prefix = if w.is_inline { "inline " } else { "" };
                     let ptr_prefix = if w.is_ptr_capture { "*" } else { "" };
-                    self.write_to_case(&format!("{}while ({}) |{}{}| {{", lbl_prefix, test, ptr_prefix, cap.sym));
+                    self.write_to_case(&format!(
+                        "{}{}while ({}) |{}{}|{} {{",
+                        lbl_prefix, inline_prefix, test, ptr_prefix, cap.sym, cont_suffix
+                    ));
                     let test_cp_ty = self.infer_cp_type(&w.test);
                     let unwrapped_ty = match &test_cp_ty {
                         Some(Type::Optional(inner)) => (**inner).clone(),
@@ -9732,7 +9946,11 @@ impl Codegen {
                     let prev_l = self.locals.insert(cap.sym.clone(), zig_ty);
                     (prev_l, prev_cp, was_mut)
                 } else {
-                    self.write_to_case(&format!("{}while ({}) {{", lbl_prefix, test));
+                    let inline_prefix = if w.is_inline { "inline " } else { "" };
+                    self.write_to_case(&format!(
+                        "{}{}while ({}){} {{",
+                        lbl_prefix, inline_prefix, test, cont_suffix
+                    ));
                     (None, None, false)
                 };
                 self.indent();
@@ -9776,6 +9994,33 @@ impl Codegen {
                 self.uninitialized_vars.extend(uninit_body);
             }
             Stmt::For(f) => {
+                let lbl_prefix = if let Some(lbl) = &f.label {
+                    format!("{}: ", lbl.sym)
+                } else {
+                    String::new()
+                };
+                if let Some(raw) = &f.raw_header {
+                    let pat_str = match &f.pat {
+                        Pattern::Ident(id) => id.sym.clone(),
+                        _ => "item".to_string(),
+                    };
+                    let inline_prefix = if f.is_comptime { "inline " } else { "" };
+                    self.write_to_case(&format!(
+                        "{}{}for ({}) |{}| {{",
+                        lbl_prefix, inline_prefix, raw, pat_str
+                    ));
+                    self.indent();
+                    if let Stmt::Block(b) = &*f.body {
+                        for s in &b.body {
+                            self.generate_stmt(s);
+                        }
+                    } else {
+                        self.generate_stmt(&f.body);
+                    }
+                    self.dedent();
+                    self.write_to_case("}");
+                    return;
+                }
                 if f.is_comptime {
                     if let Expr::Range {
                         start,
@@ -10030,8 +10275,9 @@ impl Codegen {
                     }
                 }
 
-                let is_native_slice =
-                    f.is_comptime || expr_code.ends_with(".items") || expr_code.ends_with(".values()");
+                let is_native_slice = f.is_comptime
+                    || expr_code.ends_with(".items")
+                    || expr_code.ends_with(".values()");
                 let (for_target, ptr_star) = match f.mode {
                     IterMode::MutBorrow => {
                         if is_native_slice {
@@ -10258,7 +10504,11 @@ impl Codegen {
                             Some(Type::Optional(_)) => true,
                             Some(Type::ResultType { ok, .. }) => matches!(&**ok, Type::Optional(_)),
                             Some(Type::ErrorUnion(inner)) => matches!(&**inner, Type::Optional(_)),
-                            Some(Type::Ref(id)) if id.sym.contains('?') || id.sym.starts_with("switch") => true,
+                            Some(Type::Ref(id))
+                                if id.sym.contains('?') || id.sym.starts_with("switch") =>
+                            {
+                                true
+                            }
                             None => true,
                             _ => false,
                         };
@@ -10273,7 +10523,10 @@ impl Codegen {
                     // Check for dangling local reference return or ref struct escape!
                     let (borrow_sources, _, is_ref_st) = self.extract_expr_borrow_info(arg);
                     for (src, _) in &borrow_sources {
-                        if self.local_trampolines.contains(src) {
+                        if self.local_trampolines.contains(src)
+                            || self.globals.contains(src)
+                            || self.global_var_types.contains_key(src)
+                        {
                             continue;
                         }
                         if !self.current_fn_params.contains(src) {
@@ -14367,8 +14620,21 @@ impl Codegen {
                                     "cp_cast_int({}, @intFromEnum({}))",
                                     target_zig_ty, inner_code
                                 )
-                            } else if inner_code.starts_with("@intCast(") || inner_code.starts_with("@truncate(") {
+                            } else if inner_code.starts_with("@intCast(")
+                                || inner_code.starts_with("@truncate(")
+                                || inner_code.starts_with("@bitCast(")
+                                || inner_code.starts_with("@enumFromInt(")
+                                || inner_code.starts_with("@ptrFromInt(")
+                                || inner_code.starts_with("@ptrCast(")
+                                || inner_code.starts_with("@floatCast(")
+                                || inner_code.starts_with("@intFromFloat(")
+                            {
                                 format!("@as({}, {})", target_zig_ty, inner_code)
+                            } else if self.is_comptime {
+                                format!(
+                                    "(if (@typeInfo(@TypeOf({0})) == .@\"enum\") cp_cast_int({1}, @intFromEnum({0})) else cp_cast_int({1}, {0}))",
+                                    inner_code, target_zig_ty
+                                )
                             } else {
                                 format!(
                                     "(if (comptime @typeInfo(@TypeOf({0})) == .@\"enum\") cp_cast_int({1}, @intFromEnum({0})) else cp_cast_int({1}, {0}))",
@@ -14400,7 +14666,11 @@ impl Codegen {
                                 )
                             }
                         } else if is_target_enum {
-                            format!("@as({}, @enumFromInt({}))", target_zig_ty, inner_code)
+                            if inner_code.starts_with("@enumFromInt(") {
+                                format!("@as({}, {})", target_zig_ty, inner_code)
+                            } else {
+                                format!("@as({}, @enumFromInt({}))", target_zig_ty, inner_code)
+                            }
                         } else if is_target_fn {
                             format!("@as({}, @ptrCast({}))", target_zig_ty, inner_code)
                         } else if matches!(resolved_ty, Type::Any) {
@@ -14409,12 +14679,31 @@ impl Codegen {
                                 target_zig_ty, inner_code
                             )
                         } else if matches!(resolved_ty, Type::Ref(_)) && !matches!(resolved_ty, Type::Ref(ref id) if self.class_defs.contains_key(&id.sym) || self.trait_defs.contains_key(&id.sym)) {
-                            format!(
-                                "(if (comptime @typeInfo({0}) == .@\"enum\") @as({0}, @enumFromInt({1})) else @as({0}, {1}))",
-                                target_zig_ty, inner_code
-                            )
+                            if inner_code.starts_with("@enumFromInt(")
+                                || inner_code.starts_with("@truncate(")
+                                || inner_code.starts_with("@intCast(")
+                                || inner_code.starts_with("@bitCast(")
+                                || inner_code.starts_with("@ptrCast(")
+                                || inner_code.starts_with("@ptrFromInt(")
+                            {
+                                format!("@as({}, {})", target_zig_ty, inner_code)
+                            } else if self.is_comptime {
+                                format!(
+                                    "(if (@typeInfo({0}) == .@\"enum\") @as({0}, @enumFromInt({1})) else @as({0}, {1}))",
+                                    target_zig_ty, inner_code
+                                )
+                            } else {
+                                format!(
+                                    "(if (comptime @typeInfo({0}) == .@\"enum\") @as({0}, @enumFromInt({1})) else @as({0}, {1}))",
+                                    target_zig_ty, inner_code
+                                )
+                            }
                         } else if resolved_ty == Type::Bool {
-                            format!("(if (comptime @typeInfo(@TypeOf({0})) == .bool) {0} else ({0} != 0))", inner_code)
+                            if self.is_comptime {
+                                format!("(if (@typeInfo(@TypeOf({0})) == .bool) {0} else ({0} != 0))", inner_code)
+                            } else {
+                                format!("(if (comptime @typeInfo(@TypeOf({0})) == .bool) {0} else ({0} != 0))", inner_code)
+                            }
                         } else {
                             format!("@as({}, {})", target_zig_ty, inner_code)
                         }
@@ -15027,7 +15316,9 @@ impl Codegen {
                             }
                         }
                         let prop = mem.prop.sym.as_str();
-                        if (prop == "indexOf" || prop == "lastIndexOf" || prop == "charCodeAt") && call.args.len() == 1 {
+                        if (prop == "indexOf" || prop == "lastIndexOf" || prop == "charCodeAt")
+                            && call.args.len() == 1
+                        {
                             return "i32".to_string();
                         } else if prop == "includes"
                             || prop == "startsWith"
@@ -15447,8 +15738,10 @@ impl Codegen {
                             if let Pattern::Err(inner_p) = &arm.pat {
                                 if let Pattern::Ident(id) = &**inner_p {
                                     if let Some(Type::ResultType { err, .. }) = &disc_ty {
-                                        self.var_cp_types
-                                            .insert(id.sym.clone(), self.error_type_to_cp_type(err));
+                                        self.var_cp_types.insert(
+                                            id.sym.clone(),
+                                            self.error_type_to_cp_type(err),
+                                        );
                                     }
                                 }
                             } else if let Pattern::Ident(id) = &arm.pat {
@@ -15469,7 +15762,9 @@ impl Codegen {
                         self.extract_locals_from_expr_simple(e);
                     }
                 }
-                Stmt::Block(b) | Stmt::UnsafeBlock(b) | Stmt::ArenaBlock(b) => self.extract_locals_simple(b),
+                Stmt::Block(b) | Stmt::UnsafeBlock(b) | Stmt::ArenaBlock(b) => {
+                    self.extract_locals_simple(b)
+                }
                 Stmt::If(i) => {
                     let old_v = self.var_cp_types.clone();
                     let old_l = self.locals.clone();
@@ -15811,7 +16106,9 @@ impl Codegen {
                 Stmt::Expr(e) => {
                     self.extract_local_vars_from_expr_to_str(e, output);
                 }
-                Stmt::Block(b) | Stmt::UnsafeBlock(b) | Stmt::ArenaBlock(b) => self.extract_local_vars_to_str(b, output),
+                Stmt::Block(b) | Stmt::UnsafeBlock(b) | Stmt::ArenaBlock(b) => {
+                    self.extract_local_vars_to_str(b, output)
+                }
                 Stmt::If(i) => {
                     match &*i.cons {
                         Stmt::Block(b) | Stmt::UnsafeBlock(b) | Stmt::ArenaBlock(b) => {
@@ -16000,14 +16297,20 @@ impl Codegen {
                     let inner = &ident.sym[6..ident.sym.len() - 1];
                     return format!("CpMutex({})", self.map_type_name(inner));
                 }
-                if ident.sym == "Mutex" && !self.type_aliases.contains_key("Mutex") && !self.class_defs.contains_key("Mutex") {
+                if ident.sym == "Mutex"
+                    && !self.type_aliases.contains_key("Mutex")
+                    && !self.class_defs.contains_key("Mutex")
+                {
                     return "CpBareMutex".to_string();
                 }
                 if ident.sym.starts_with("RwLock<") {
                     let inner = &ident.sym[7..ident.sym.len() - 1];
                     return format!("CpRwLock({})", self.map_type_name(inner));
                 }
-                if ident.sym == "RwLock" && !self.type_aliases.contains_key("RwLock") && !self.class_defs.contains_key("RwLock") {
+                if ident.sym == "RwLock"
+                    && !self.type_aliases.contains_key("RwLock")
+                    && !self.class_defs.contains_key("RwLock")
+                {
                     return "CpBareRwLock".to_string();
                 }
                 if ident.sym.starts_with("Atomic<") {

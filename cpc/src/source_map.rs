@@ -121,7 +121,8 @@ pub fn demangle_stack_trace(trace: &str, explicit_map: Option<&SourceMap>) -> St
                             if entry.cp_line > 0 && (entry.cp_line as usize) <= cp_lines.len() {
                                 let code_line = cp_lines[(entry.cp_line - 1) as usize];
                                 result_lines.push(format!("    {}", code_line));
-                                let col_indent = " ".repeat(entry.cp_col.saturating_sub(1) as usize + 4);
+                                let col_indent =
+                                    " ".repeat(entry.cp_col.saturating_sub(1) as usize + 4);
                                 result_lines.push(format!("{}^", col_indent));
                                 handled_preview = true;
                                 i += 1;
@@ -148,9 +149,7 @@ pub fn demangle_stack_trace(trace: &str, explicit_map: Option<&SourceMap>) -> St
     result_lines.join("\n")
 }
 
-fn parse_trace_line(
-    line: &str,
-) -> Option<(String, String, u32, u32, String)> {
+fn parse_trace_line(line: &str) -> Option<(String, String, u32, u32, String)> {
     let colon_indices: Vec<usize> = line.match_indices(':').map(|(idx, _)| idx).collect();
     if colon_indices.len() < 3 {
         return None;

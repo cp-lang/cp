@@ -2521,6 +2521,30 @@
   - 纠正开发日志中 `&mut` 语法表述为标准 `*` 借用；
   - 深度复核并记录 7 项语法机制裁定分析（可变借用语法、Two-pass 历史架构、具名循环标签增强、顶层 comptime 上下文兼容、inline for 上下文修饰词、C-FFI 复合布局放行、显式返回类型省略冒号）。
 
+---
+
+## 2026-11-10 (支持裸函数类型声明与 While 步进表达式，解决 task-zig-syntax-compat)
+
+### 新增文件 (Added)
+- [`cap/test/test_zig_syntax_compat.cp`](file:///data/dev/cp/cap/test/test_zig_syntax_compat.cp): 函数类型声明赋值调用与 `while (cond) : (step)` 步进循环综合回归测试用例。
+
+### 修改文件 (Modified)
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs) / [`cpc_dev/src/ast.rs`](file:///data/dev/cp/cpc_dev/src/ast.rs):
+  - `WhileStmt` 新增 `continue_expr: Option<Expr>` 字段。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs) / [`cpc_dev/src/parser.rs`](file:///data/dev/cp/cpc_dev/src/parser.rs):
+  - `parse_while_stmt` 支持解析条件圆括号后的 `: (step_expr)` 步进表达式；
+  - `Token::Fn` 表达式分支支持无冒号返回类型；若参数与返回类型后无 `{` 块，识别为纯函数签名类型；
+  - 顶层 `const MyFunc = fn (x: u8) bool;` 自动提升为强类型 `Decl::TypeAlias`。
+- [`cpc/src/ast_visitor.rs`](file:///data/dev/cp/cpc/src/ast_visitor.rs) / [`cpc_dev/src/ast_visitor.rs`](file:///data/dev/cp/cpc_dev/src/ast_visitor.rs):
+  - 递归遍历 `WhileStmt.continue_expr` 中的变量引用。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs) / [`cpc_dev/src/sema.rs`](file:///data/dev/cp/cpc_dev/src/sema.rs):
+  - 适配 `WhileStmt.continue_expr` 的语义分析与泛型变量替换。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs) / [`cpc_dev/src/codegen.rs`](file:///data/dev/cp/cpc_dev/src/codegen.rs):
+  - 生成 Zig 对齐的 `while (cond) : (step) { ... }` 原生循环代码；
+  - 增强 `infer_cp_type_with_mock` 的 `Expr::Call` 分支，支持通过函数类型别名解析被调用的函数指针返回类型，消灭状态机降级为 `*anyopaque` 的类型不匹配报错。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 新增第 8.12 节《循环步进表达式 (`while (cond) : (step)`) 与函数类型别名 (`const F = fn(...) Ret`)》。
+
 
 
 
