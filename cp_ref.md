@@ -665,18 +665,58 @@ visited.add(42);
 
 ### 3.3 变量可变性与不可变哲学
 
-CP 彻底废除 `let mut`，全面拥抱 TypeScript 直觉：
+CP 彻底废除 `let mut` 与 `var`，全面拥抱 TypeScript 直觉与编译期所有权安全：
 
-- **`let`**：局部变量声明，**默认可变**。
+- **`let`**：变量声明，**默认可变**。局部可变变量写 `let x = ...;`，模块顶层可变变量写 `pub let g_state = ...;`。
 - **`const`**：常量与深度不可变声明。编译期阻止一切重分配与内部修改。
+- 🚨 **严禁使用 `var`**：CP 语法中不存在 `var` 关键字（`var` 是 Zig 遗留语法）。在 CP 源代码中，可变变量必须 100% 写作 `let`。
 
 ```typescript
 let count = 1;
 count = count + 1; // 合法
 
+pub let global_counter: usize = 0; // 顶层可变变量声明
+
 const MAX_LIMIT = 1024;
 // MAX_LIMIT = 2048; // 编译报错：Cannot assign to constant 'MAX_LIMIT'
 ```
+
+#### 3.3.0 C-ABI 调用约定与修饰器规范（首选 `@c`）
+
+在声明导出函数、静态回调或 C-ABI 兼容函数指针时，**强烈推荐使用 `@c` 代替冗长的 `@callconv("c")`**：
+
+```typescript
+// 类内静态回调方法
+class TimerController {
+    @c pub static fn onTimeout(timer: *uws.Timer): void {
+        // C-ABI 导出，无 implicit this receiver
+    }
+}
+
+// 顶层 C 兼容函数
+@c pub fn native_callback(status: i32, ctx: ?*anyopaque): void {
+    // ...
+}
+```
+
+#### 3.3.0.1 嵌套结构体定义与命名空间规范
+
+在类或结构体内部定义内嵌结构体时，必须采用赋值表达式形式并以分号结尾：
+
+```typescript
+pub const LibInfo = struct {
+    pub const HandleReply = struct {
+        pub fn get(): ?*anyopaque { return null; }
+    };
+};
+```
+
+#### 3.3.0.2 错误联合类型（Result）声明顺序
+
+CP 语法遵从 TypeScript / Rust 成功优先直觉，Result 类型统一采用 `OkType!ErrType`：
+- `void!bun.JSError`（成功返回 void，失败携带 JSError）；
+- `jsc.JSValue!bun.JSTerminated`（成功返回 JSValue，失败携带 JSTerminated）。
+转译器（`cpc`）在生成 Zig 代码时会自动转为 Zig 的 `ErrType!OkType`。
 
 ---
 
