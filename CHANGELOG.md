@@ -2,6 +2,16 @@
 
 > 历史变更日志已完整归档至 [CHANGELOG_H.md](file:///data/dev/cp/CHANGELOG_H.md)。本项目采用冷热分离架构，本文件仅保留当日活跃记录。
 
+## [2026-11-11] - 并发 Guard 代理访问、定长数组字面量与 C-FFI 负数生成修复
+
+### 优化与修复 (Fixed)
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs) / [`cpc_dev/src/codegen.rs`](file:///data/dev/cp/cpc_dev/src/codegen.rs):
+  - **同步 Guard 代理字段**：将 `ReadGuard`、`WriteGuard`、`LockGuard` 的 `.data` 代理访问判定优先级提升至 enum 字段属性匹配之前，使 `rg.value` 正确解引用至 `rg.data.value`，并允许对其直接赋值；
+  - **结构体 `value` / `name` 属性冲突消除**：针对明确为 struct/class 的实例，禁用 `(if (@typeInfo(...) == .@"enum") ...)` 伪属性分支，消除赋值语句 LHS 非法表达式错误；
+  - **`[N]T` 定长数组类型推导**：修复语句与全局变量推导中对 `Type::Ref("[N]T")` 的识别，使定长数组初始化自动匹配元素类型并生成原生 Zig 数组字面量 `.{ ... }`，消除错误回退为 `cp_array_lit(i32, ...)` 的类型不匹配；
+  - **负整数字面量发射**：修复表达式生成中将负整数错误强制格式化为 64 位十六进制（如 `c_abs(0xffffffffffffff85)`）的严重缺陷，恢复为正确十进制形式；
+  - **定长数组到多项指针强转**：修复 `arr as [*]T!` 在转译时未对值数组取地址导致 Zig 拒绝 `@ptrCast` 的问题，自动生成 `&arr`。
+
 ## [2026-11-11] - 编译器语句级与顶层项 Panic-Mode 语法容错与多错误批量诊断
 
 ### 新特性 (Added)

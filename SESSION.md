@@ -52,3 +52,24 @@
   4. `cap/test/test_error_recovery_fail.cp`：新增多错误批量语法容错负向测试用例；
   5. `cp_ref.md`：新增第 18.1.1 节《编译器语句级与顶层项 Panic-Mode 语法容错恢复与多错误批量收集》；
   6. `SESSION.md` / `CHANGELOG.md` / `DEVLOG.md`：当日热日志记录。
+
+## 指令 3：修复并发同步 Guard 字段代理访问与系统级 C-FFI / 数组字面量转译缺陷
+
+- **用户需求**：
+  - 推进标准库 `cap:sync` 并发原语，排查并修复并发与底层系统交互中的转译异常；
+  - 保证多线程与 C-FFI 回归套件 100% 通过。
+
+- **执行结果**：
+  1. **同步 Guard 字段解引用修复**：在 `cpc/src/codegen.rs` 中将 `ReadGuard`、`WriteGuard`、`LockGuard` 的 `.data` 字段代理检查前置，避免其 `.value` / `.name` 等字段访问被通用 enum 分支截获为非法的 `(if (...) ...) = val`；
+  2. **结构体真实字段保护**：当对象已知为 struct/class 时，直接发射普通成员访问，禁止注入 enum 伪属性匹配；
+  3. **定长数组 `[N]T` 字面量推导修复**：在语句与模块级推导中识别 `Type::Ref(id)` 为 `"[N]T"` 形式时的定长数组类型，消除 `cp_array_lit(i32, ...)` 错误回退，使其正确生成 Zig 原生数组字面量 `.{ ... }`；
+  4. **负整数转译修正**：移除针对负整数的 64 位无符号十六进制强制转译（消除 `c_abs(0xffffffffffffff85)` 导致的 `i32` 溢出编译错误），恢复为纯净的负整数十进制表示；
+  5. **数组向多项指针转换修正**：`arr as [*]T!` 针对值类型定长数组自动提取地址 `&arr` 进行指针安全转换；
+  6. **回归测试全量通过**：`test_mutex_atomic.cp` (7/7 PASS) 与 `test_c_ffi_pointers.cp` (11/11 PASS) 均 100% 通过。
+
+## 阶段里程碑 Git 提交 3
+
+- **提交说明**：`fix(codegen): resolve sync guard member access, fixed array literal inference, and negative integer ffi codegen`
+- **变更范围**：
+  1. `cpc/src/codegen.rs` / `cpc_dev/src/codegen.rs`：修复 Guard 代理访问、结构体字段、`[N]T` 字面量推导、负整数字面量与数组裸指针强转；
+  2. `SESSION.md` / `CHANGELOG.md` / `DEVLOG.md`：当日热日志记录。

@@ -2,6 +2,24 @@
 
 > 历史研发日志已完整归档至 [DEVLOG_H.md](file:///data/dev/cp/DEVLOG_H.md)。本项目采用冷热分离架构，本文件仅保留当日活跃记录。
 
+## 2026-11-11: 攻坚并发 Guard 代理与底层 C-FFI / 数组转译多重边界缺陷
+
+- **问题分析与根因排查**：
+  1. `test_mutex_atomic.cp` 在测试 `RwLock` 的 `rg.value` 与 `wg.value = 300` 时发生编译崩溃。排查发现 `codegen.rs` 中为支持智能枚举属性而引入的 `if member.prop.sym == "value"` 分支拦截了所有访问，盲目生成 `(if (comptime ...) ...) = 300`，不仅无法在 Zig 中作为赋值左值，而且忽略了 Guard 内部应优先代理到 `.data` 的核心契约；
+  2. `test_c_ffi_pointers.cp` 中 `c_abs(-123)` 被发射为 `c_abs(0xffffffffffffff85)`，导致 Zig 报出 `type 'i32' cannot represent integer value '18446744073709551493'`。根因为近期一次合并中误将所有负整数字面量转换为 64 位无符号十六进制；
+  3. `let arr: [4]u8 = [65, 66, 67, 68]` 在状态机闭包内被错误发射为 `cp_array_lit(i32, ...)`，导致类型不匹配。根因为 parser 解析 `[N]T` 时生成了 `Type::Ref("[4]u8")`，而 `codegen` 仅匹配 `Type::FixedArray`，未从字符串形式提取元素类型，导致期望数组类型丢失。
+
+- **实施方案**：
+  1. **优先级调整**：将 `is_guard`（`LockGuard`/`ReadGuard`/`WriteGuard`）检查提前至所有属性处理最顶端，若匹配则直接发射 `.data.prop`；
+  2. **作用域过滤**：当识别到接收者为结构体或类时，绕过 enum 模式判断，直接作为结构体字段处理；
+  3. **定长数组反射补全**：在 `expected_array_elem_type` 赋值处加入对 `Type::Ref(id)` 中 `[N]T` 形式的前缀解析，准确识别元素类型 `u8`；
+  4. **负整数规范化**：恢复 `Expr::Lit(Lit::Int(v)) => v.to_string()`；
+  5. **裸指针安全强转**：在 `as [*]T!` 转换中，若源对象为数组形式，自动补充 `&` 取址。
+
+- **效果验证**：
+  - `cap cap/test/test_mutex_atomic.cp`：7/7 全部通过（100% PASS）；
+  - `cap cap/test/test_c_ffi_pointers.cp`：11/11 全部通过（100% PASS）。
+
 ## 2026-11-11: 落地 cpc Panic-Mode 语法容错同步与多错误批量诊断系统
 
 - **背景与痛点**：

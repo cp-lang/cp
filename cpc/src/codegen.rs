@@ -2037,8 +2037,19 @@ impl Codegen {
                     }
                 };
                 let old_array_elem = self.expected_array_elem_type.clone();
-                if let Some(Type::FixedArray(elem, _) | Type::Array(elem)) = &var.ty {
-                    self.expected_array_elem_type = Some((**elem).clone());
+                if let Some(ty) = &var.ty {
+                    match ty {
+                        Type::FixedArray(elem, _) | Type::Array(elem) => {
+                            self.expected_array_elem_type = Some((**elem).clone());
+                        }
+                        Type::Ref(id) if id.sym.starts_with('[') => {
+                            if let Some(idx) = id.sym.find(']') {
+                                let elem_name = id.sym[idx + 1..].trim_start_matches("const ").trim();
+                                self.expected_array_elem_type = Some(Self::type_from_name_static(elem_name));
+                            }
+                        }
+                        _ => {}
+                    }
                 }
                 match &var.pat {
                     Pattern::Ident(ident) => {
@@ -8952,8 +8963,19 @@ impl Codegen {
                         self.extract_expr_borrow_info(init);
                     let old_box_trait = self.expected_box_trait.clone();
                     let old_array_elem = self.expected_array_elem_type.clone();
-                    if let Some(Type::FixedArray(elem, _) | Type::Array(elem)) = &var.ty {
-                        self.expected_array_elem_type = Some((**elem).clone());
+                    if let Some(ty) = &var.ty {
+                        match ty {
+                            Type::FixedArray(elem, _) | Type::Array(elem) => {
+                                self.expected_array_elem_type = Some((**elem).clone());
+                            }
+                            Type::Ref(id) if id.sym.starts_with('[') => {
+                                if let Some(idx) = id.sym.find(']') {
+                                    let elem_name = id.sym[idx + 1..].trim_start_matches("const ").trim();
+                                    self.expected_array_elem_type = Some(Self::type_from_name_static(elem_name));
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                     match &var.ty {
                         Some(Type::BoxDyn(tr_id)) => {
@@ -11035,13 +11057,7 @@ impl Codegen {
 
     fn generate_expr(&mut self, expr: &Expr) -> String {
         match expr {
-            Expr::Lit(Lit::Int(v)) => {
-                if *v < 0 {
-                    format!("0x{:x}", *v as u64)
-                } else {
-                    v.to_string()
-                }
-            }
+            Expr::Lit(Lit::Int(v)) => v.to_string(),
             Expr::Lit(Lit::Float(f)) => {
                 let s = f.to_string();
                 if s.contains('.') {
@@ -13789,28 +13805,6 @@ impl Codegen {
                 let cp_ty = self.infer_cp_type(&member.obj);
                 let obj_ty = self.infer_zig_type(None, Some(&member.obj));
 
-                let is_enum = match &cp_ty {
-                    Some(Type::Ref(id)) => self.enum_defs.contains_key(&id.sym),
-                    _ => false,
-                };
-                if is_enum && member.prop.sym == "name" {
-                    return format!("@tagName({})", obj);
-                }
-                if is_enum && member.prop.sym == "value" {
-                    return format!("@intFromEnum({})", obj);
-                }
-                if member.prop.sym == "name" {
-                    return format!("(if (comptime @typeInfo(@TypeOf({0})) == .@\"enum\" or @typeInfo(@TypeOf({0})) == .@\"union\") @tagName({0}) else {0}.name)", obj);
-                }
-                if member.prop.sym == "value" {
-                    return format!("(if (comptime @typeInfo(@TypeOf({0})) == .@\"enum\") @intFromEnum({0}) else {0}.value)", obj);
-                }
-
-                let is_cstr = matches!(cp_ty, Some(Type::CStr)) || obj_ty.contains("[*:0]");
-                if is_cstr && (member.prop.sym == "len" || member.prop.sym == "length") {
-                    return format!("std.mem.span({}).len", obj);
-                }
-
                 let is_array_or_string = match &cp_ty {
                     Some(Type::String) | Some(Type::Array(_)) | Some(Type::FixedArray(_, _)) => true,
                     _ => false,
@@ -13830,12 +13824,47 @@ impl Codegen {
                     prop.to_string()
                 };
                 if is_guard && prop != "release" && prop != "unlock" {
-                    if obj_ty.starts_with('?') {
+                    return if obj_ty.starts_with('?') {
                         format!("({}).?.data.{}", obj, safe_prop)
                     } else {
                         format!("{}.data.{}", obj, safe_prop)
+                    };
+                }
+
+                let is_struct_or_class = match &cp_ty {
+                    Some(Type::Ref(id)) => self.class_defs.contains_key(&id.sym),
+                    Some(Type::BorrowType { inner, .. }) => match &**inner {
+                        Type::Ref(id) => self.class_defs.contains_key(&id.sym),
+                        _ => false,
+                    },
+                    _ => false,
+                };
+
+                let is_enum = match &cp_ty {
+                    Some(Type::Ref(id)) => self.enum_defs.contains_key(&id.sym),
+                    _ => false,
+                };
+                if !is_struct_or_class {
+                    if is_enum && member.prop.sym == "name" {
+                        return format!("@tagName({})", obj);
                     }
-                } else if obj_ty.starts_with('?') {
+                    if is_enum && member.prop.sym == "value" {
+                        return format!("@intFromEnum({})", obj);
+                    }
+                    if member.prop.sym == "name" {
+                        return format!("(if (comptime @typeInfo(@TypeOf({0})) == .@\"enum\" or @typeInfo(@TypeOf({0})) == .@\"union\") @tagName({0}) else {0}.name)", obj);
+                    }
+                    if member.prop.sym == "value" {
+                        return format!("(if (comptime @typeInfo(@TypeOf({0})) == .@\"enum\") @intFromEnum({0}) else {0}.value)", obj);
+                    }
+                }
+
+                let is_cstr = matches!(cp_ty, Some(Type::CStr)) || obj_ty.contains("[*:0]");
+                if is_cstr && (member.prop.sym == "len" || member.prop.sym == "length") {
+                    return format!("std.mem.span({}).len", obj);
+                }
+
+                if obj_ty.starts_with('?') {
                     format!("({}).?.{}", obj, safe_prop)
                 } else if obj_ty.starts_with("*[]") {
                     format!("{}.*.{}", obj, safe_prop)
@@ -14722,6 +14751,8 @@ impl Codegen {
                                     target_zig_ty, inner_code
                                 )
                             } else if matches!(src_ty, Some(Type::Array(_)) | Some(Type::FixedArray(_, _)))
+                                || matches!(src_ty, Some(Type::Ref(ref id)) if id.sym.starts_with('['))
+                                || self.infer_zig_type(None, Some(expr)).starts_with('[')
                                 || self.locals.get(&inner_code).map_or(false, |l| l.starts_with('['))
                             {
                                 format!("@as({}, @ptrCast(&({})))", target_zig_ty, inner_code)
