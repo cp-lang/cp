@@ -1452,10 +1452,14 @@ impl<'a> Parser<'a> {
                     self.bump()?;
                     ty = Type::Array(Box::new(ty));
                 } else if let Some(Token::IntLiteral(n)) = self.peek() {
-                    let size = *n as usize;
+                    let size = ArraySize::Literal(*n as usize);
                     self.bump()?;
                     self.expect(Token::RBracket)?;
                     ty = Type::FixedArray(Box::new(ty), size);
+                } else if let Some(Token::Ident(_)) = self.peek() {
+                    let id = self.parse_ident()?;
+                    self.expect(Token::RBracket)?;
+                    ty = Type::FixedArray(Box::new(ty), ArraySize::Ident(id));
                 } else {
                     self.expect(Token::RBracket)?;
                     ty = Type::Array(Box::new(ty));
@@ -2129,16 +2133,101 @@ impl<'a> Parser<'a> {
                 let ty = Type::Tuple(Vec::new());
                 return self.parse_postfix_type_modifiers(ty);
             }
+            if let Some(Token::IntLiteral(n)) = self.peek() {
+                let sz = ArraySize::Literal(*n as usize);
+                self.bump()?;
+                if self.peek() == Some(&Token::RBracket) {
+                    self.bump()?;
+                    let elem_ty = self.parse_base_type()?;
+                    let ty = Type::FixedArray(Box::new(elem_ty), sz);
+                    return self.parse_postfix_type_modifiers(ty);
+                }
+            }
+            if let Some(Token::Ident(_)) = self.peek() {
+                let mut probe = self.clone_lookahead();
+                if probe.bump().is_ok() && probe.peek() == Some(&Token::RBracket) {
+                    let _ = probe.bump();
+                    if matches!(
+                        probe.peek(),
+                        Some(
+                            Token::U8
+                                | Token::U16
+                                | Token::U32
+                                | Token::U64
+                                | Token::I8
+                                | Token::I16
+                                | Token::I32
+                                | Token::I64
+                                | Token::USize
+                                | Token::ISize
+                                | Token::F32
+                                | Token::F64
+                                | Token::Bool
+                                | Token::String
+                                | Token::CStr
+                                | Token::Star
+                                | Token::Ampersand
+                                | Token::LBracket
+                        )
+                    ) || matches!(probe.peek(), Some(Token::Ident(tid)) if tid.chars().next().map_or(false, |c| c.is_uppercase()))
+                    {
+                        let id = self.parse_ident()?;
+                        self.expect(Token::RBracket)?;
+                        let elem_ty = self.parse_base_type()?;
+                        let ty = Type::FixedArray(Box::new(elem_ty), ArraySize::Ident(id));
+                        return self.parse_postfix_type_modifiers(ty);
+                    }
+                }
+            }
             let first = self.parse_type()?;
             if self.peek() == Some(&Token::Semicolon) {
                 self.bump()?;
-                if let Some(Token::IntLiteral(n)) = self.peek() {
-                    let size = *n as usize;
+                let size = if let Some(Token::IntLiteral(n)) = self.peek() {
+                    let sz = ArraySize::Literal(*n as usize);
                     self.bump()?;
-                    self.expect(Token::RBracket)?;
-                    let ty = Type::FixedArray(Box::new(first), size);
-                    return self.parse_postfix_type_modifiers(ty);
-                }
+                    sz
+                } else if let Some(Token::Ident(_)) = self.peek() {
+                    let id = self.parse_ident()?;
+                    if self.peek() == Some(&Token::RBracket) {
+                        ArraySize::Ident(id)
+                    } else {
+                        let mut expr_str = id.sym.clone();
+                        let mut bracket_depth = 0;
+                        while self.peek().is_some() {
+                            if self.peek() == Some(&Token::RBracket) && bracket_depth == 0 {
+                                break;
+                            }
+                            let (tok, t_span) = self.bump()?;
+                            match tok {
+                                Token::LBracket => bracket_depth += 1,
+                                Token::RBracket => bracket_depth -= 1,
+                                _ => {}
+                            }
+                            expr_str.push(' ');
+                            expr_str.push_str(&self.input[t_span.start..t_span.end]);
+                        }
+                        ArraySize::Expr(expr_str)
+                    }
+                } else {
+                    let mut expr_str = String::new();
+                    let mut bracket_depth = 0;
+                    while self.peek().is_some() {
+                        if self.peek() == Some(&Token::RBracket) && bracket_depth == 0 {
+                            break;
+                        }
+                        let (tok, t_span) = self.bump()?;
+                        match tok {
+                            Token::LBracket => bracket_depth += 1,
+                            Token::RBracket => bracket_depth -= 1,
+                            _ => {}
+                        }
+                        expr_str.push_str(&self.input[t_span.start..t_span.end]);
+                    }
+                    ArraySize::Expr(expr_str)
+                };
+                self.expect(Token::RBracket)?;
+                let ty = Type::FixedArray(Box::new(first), size);
+                return self.parse_postfix_type_modifiers(ty);
             }
             let mut elements = vec![first];
             if self.peek() == Some(&Token::Comma) {
@@ -2261,7 +2350,7 @@ impl<'a> Parser<'a> {
                 }
                 Type::Ref(Ident { span, sym })
             }
-            Token::Ident(sym) => {
+            Token::Ident(mut sym) => {
                 if sym == "cstr" {
                     Type::CStr
                 } else if sym == "pid" {
@@ -6265,7 +6354,7 @@ impl<'a> Parser<'a> {
                 .to_string();
                 Ok(Expr::Ident(Ident { span, sym }))
             }
-            Token::Ident(sym) => {
+            Token::Ident(mut sym) => {
                 if sym == "asm" {
                     let mut is_volatile = true;
                     if matches!(self.peek(), Some(Token::Ident(id)) if id == "volatile") {
@@ -6380,42 +6469,84 @@ impl<'a> Parser<'a> {
                     self.expect(Token::RParen)?;
                     return Ok(Expr::ErrWrap(Box::new(inner)));
                 }
-                if sym.chars().next().map_or(false, |c| c.is_uppercase())
-                    && self.peek() == Some(&Token::LBrace)
-                {
-                    self.bump()?;
-                    let mut fields = Vec::new();
-                    while self.peek() != Some(&Token::RBrace) && self.peek().is_some() {
-                        if self.peek() == Some(&Token::Dot) {
-                            self.bump()?;
-                        }
-                        let key = self.parse_ident()?;
-                        if self.peek() == Some(&Token::Colon) || self.peek() == Some(&Token::Assign)
-                        {
-                            self.bump()?;
-                        } else {
-                            self.expect(Token::Colon)?;
-                        }
-                        let val = self.parse_expr()?;
-                        fields.push(EnumInitField { key, val });
-                        if self.peek() == Some(&Token::Comma) {
-                            self.bump()?;
+                if sym.chars().next().map_or(false, |c| c.is_uppercase()) {
+                    if self.peek() == Some(&Token::Less) {
+                        let mut probe = self.clone_lookahead();
+                        if probe.bump().is_ok() {
+                            let mut depth = 1;
+                            let mut found_greater = false;
+                            while let Ok((tok, _)) = probe.bump() {
+                                if tok == Token::Less {
+                                    depth += 1;
+                                } else if tok == Token::Greater {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        found_greater = true;
+                                        break;
+                                    }
+                                } else if tok == Token::Semicolon || tok == Token::RBrace {
+                                    break;
+                                }
+                            }
+                            if found_greater
+                                && (probe.peek() == Some(&Token::LBrace)
+                                    || probe.peek() == Some(&Token::Dot))
+                            {
+                                self.bump()?;
+                                sym.push('<');
+                                let mut angle_depth = 1;
+                                while angle_depth > 0 && self.peek().is_some() {
+                                    let (tok, t_span) = self.bump()?;
+                                    match tok {
+                                        Token::Less => angle_depth += 1,
+                                        Token::Greater => angle_depth -= 1,
+                                        _ => {}
+                                    }
+                                    if angle_depth == 0 {
+                                        sym.push('>');
+                                        break;
+                                    }
+                                    sym.push_str(&self.input[t_span.start..t_span.end]);
+                                }
+                            }
                         }
                     }
-                    let end = self.expect(Token::RBrace)?.end;
-                    return Ok(Expr::EnumInit(EnumInitExpr {
-                        span: Span {
-                            start: span.start,
-                            end,
-                        },
-                        enum_name: Ident { span, sym },
-                        variant_name: Ident {
-                            span,
-                            sym: String::new(),
-                        },
-                        fields: Some(fields),
-                        tuple_args: None,
-                    }));
+                    if self.peek() == Some(&Token::LBrace) {
+                        self.bump()?;
+                        let mut fields = Vec::new();
+                        while self.peek() != Some(&Token::RBrace) && self.peek().is_some() {
+                            if self.peek() == Some(&Token::Dot) {
+                                self.bump()?;
+                            }
+                            let key = self.parse_ident()?;
+                            if self.peek() == Some(&Token::Colon)
+                                || self.peek() == Some(&Token::Assign)
+                            {
+                                self.bump()?;
+                            } else {
+                                self.expect(Token::Colon)?;
+                            }
+                            let val = self.parse_expr()?;
+                            fields.push(EnumInitField { key, val });
+                            if self.peek() == Some(&Token::Comma) {
+                                self.bump()?;
+                            }
+                        }
+                        let end = self.expect(Token::RBrace)?.end;
+                        return Ok(Expr::EnumInit(EnumInitExpr {
+                            span: Span {
+                                start: span.start,
+                                end,
+                            },
+                            enum_name: Ident { span, sym },
+                            variant_name: Ident {
+                                span,
+                                sym: String::new(),
+                            },
+                            fields: Some(fields),
+                            tuple_args: None,
+                        }));
+                    }
                 }
                 if sym.starts_with('@') {
                     if sym == "@is_beam" {
@@ -6964,16 +7095,24 @@ impl<'a> Parser<'a> {
             }
             Token::New => {
                 let callee_expr = self.parse_primary_expr()?;
-                if let Expr::Ident(ident) = callee_expr {
+                if let Expr::Ident(mut ident) = callee_expr {
                     if self.peek() == Some(&Token::Less) {
                         self.bump()?;
-                        while self.peek() != Some(&Token::Greater) && self.peek().is_some() {
-                            self.parse_type()?;
-                            if self.peek() == Some(&Token::Comma) {
-                                self.bump()?;
+                        ident.sym.push('<');
+                        let mut depth = 1;
+                        while depth > 0 && self.peek().is_some() {
+                            let (tok, t_span) = self.bump()?;
+                            match tok {
+                                Token::Less => depth += 1,
+                                Token::Greater => depth -= 1,
+                                _ => {}
                             }
+                            if depth == 0 {
+                                ident.sym.push('>');
+                                break;
+                            }
+                            ident.sym.push_str(&self.input[t_span.start..t_span.end]);
                         }
-                        self.expect(Token::Greater)?;
                     }
                     self.expect(Token::LParen)?;
                     let mut args = Vec::new();

@@ -7142,6 +7142,55 @@ bun agy 按你的建议,优化了方案, 更新了 GEMINI.md 和 脚本文件
 4. **结单与通知**：
    - 调用 `python3 scripts/task_queue.py resolve task-std-mem-endswith-codegen --note "已修复 startsWith/endsWith/includes/replace 等多级命名空间调用参数被错误篡改的问题，并通过 zig ast-check 和 test_string 回归校验"` 完成结单。
 
+---
+
+### 指令 (2026-11-11)
+> 1. 常量泛型（Const Generics）：支持定长张量与缓冲区标注：Tensor<f32, [1, 4096]> 或 Buffer<4096>，使 AI 向量计算和网络定长包在编译期确定内存尺寸，零堆分配。
+> 2. 工业级标准库基础设施：统一高性能 I/O 流体系、零拷贝 Serde 框架、无锁并发原语库。从 bun 迁移已有成果中继承，避免重新造轮子。
+> 3. 按计划执行第一步，完成第一步，记录四线文档，git 提交后执行第二步。
+> 4. 双线并行铁律：
+>    - 用户或自主完善 CP 发起的修改，在 `cpc_dev` 中完成；
+>    - 后台侦听任务（`watch_task.py`）常驻后台绝不停歇；
+>    - 收到 Bun AGY 的 cpc 修改指令，派生子智能体直接在 `cpc/src` 正式版本上修改与热更发布，并通知 Bun AGY；
+>    - 永远保持与 Bun AGY 通信，双线并行推进。
+
+### 执行结果汇报 (Milestone Report)
+
+1. **子智能体并行攻坚与热更发布 (`task-struct-let-to-var`)**：
+   - 收到 Bun AGY 提交的任务 `task-struct-let-to-var`（struct 表达式函数体中 `let` 未转译为 `var` 且保留 CP 风格冒号）；
+   - 派生子智能体在 `cpc/src/codegen.rs` 与 `cpc_dev/src/codegen.rs` 中实现了 token 感知降级解析器 `lower_struct_body`；
+   - 自动跳过注释与字符串，将独立的 `let`/`let mut` 降级为 `var`，将函数签名返回冒号 `):` 消除为 `)`；
+   - 执行 `bash scripts/sync_cpc.sh` 完成 Release 版编译与部署生效；
+   - 针对复现用例 `/data/dev/bun/temp/repro_struct_let.cp` 验证通过，新增回归用例 [`cap/test/test_struct_let.cp`](file:///data/dev/cp/cap/test/test_struct_let.cp) 测试 **100% PASS**；
+   - 调用 `python3 scripts/task_queue.py resolve task-struct-let-to-var` 成功结单。
+
+2. **跨智能体协作重要进展 (`task-migrate-interchange-json`)**：
+   - Bun AGY 已成功完成我们前置派发的任务 `task-migrate-interchange-json`；
+   - 产出纯 CP 语言重构版 [`/data/dev/bun/src/interchange/json.cp`](file:///data/dev/bun/src/interchange/json.cp)（817 行 vs 原版 1044 行，0 处 `zig {}` 逃逸，代码精简 21.7%），100% 通过 `zig ast-check`；
+   - 为后续标准库零拷贝 Serde 奠定了坚实基础。
+
+3. **常量泛型（Const Generics）工业级底座落地 (Phase 1 达成)**：
+   - **AST**：引入 `ArraySize`（`Literal`, `Ident`, `Expr`），`Type::FixedArray` 支持常量标识符尺寸；
+   - **Parser**：支持 `Buffer<const N: usize>`、`Tensor<T, const shape: [usize; 2]>`、`[u8; N]`、`[N]T` 与多维表达式维度解析，支持泛型结构体字面量与静态维度访问（如 `Embedding.rows`）；
+   - **Sema & Codegen**：实现常量泛型单态化（Monomorphization）与类型别名特化展开；
+   - **回归验证**：新增正式回归用例 [`cap/test/test_const_generics.cp`](file:///data/dev/cp/cap/test/test_const_generics.cp)，经生产 `cpc` 编译运行 **100% PASS**。
+
+4. **生产编译器 Release 构建与部署**：
+   - 乐观锁校验通过，`cpc_dev` 与 `cpc` 差异 100% 同步合流；
+   - 编译 Release 生产版二进制部署至 `/data/dev/cp/cap/bin/cpc`。
+
+5. **后台侦听守护守护常驻**：
+   - 重新启动常驻后台侦听任务 `python3 scripts/watch_task.py --creator bun_agy`，毫秒级响应 Bun AGY 的后续协作请求。
+
+6. **四线演进文档全量对齐与阶段性成果提交**：
+   - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)、[`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)、[`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)、[`SESSION.md`](file:///data/dev/cp/SESSION.md) 全部同步完毕。
+
+### Git 提交范围与哈希归档
+- **提交范围**：
+  - `cpc/src/ast.rs`, `cpc/src/parser.rs`, `cpc/src/sema.rs`, `cpc/src/codegen.rs`（常量泛型与 struct let 自动降级）；
+  - `cap/test/test_const_generics.cp`, `cap/test/test_struct_let.cp`（回归测试套件）；
+  - `cp_ref.md`, `DEVLOG.md`, `CHANGELOG.md`, `SESSION.md`（四线演进文档）。
+
 
 
 

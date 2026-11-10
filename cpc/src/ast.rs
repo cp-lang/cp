@@ -676,6 +676,38 @@ pub enum ErrorType {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ArraySize {
+    Literal(usize),
+    Ident(Ident),
+    Expr(String),
+}
+
+impl ArraySize {
+    pub fn as_usize(&self) -> Option<usize> {
+        match self {
+            ArraySize::Literal(n) => Some(*n),
+            _ => None,
+        }
+    }
+}
+
+impl From<usize> for ArraySize {
+    fn from(n: usize) -> Self {
+        ArraySize::Literal(n)
+    }
+}
+
+impl std::fmt::Display for ArraySize {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ArraySize::Literal(n) => write!(f, "{}", n),
+            ArraySize::Ident(id) => write!(f, "{}", id.sym),
+            ArraySize::Expr(s) => write!(f, "{}", s),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Type {
     U8,
     I8,
@@ -696,7 +728,7 @@ pub enum Type {
     Void,
     Any,
     Array(Box<Type>),
-    FixedArray(Box<Type>, usize),
+    FixedArray(Box<Type>, ArraySize),
     Map(Box<Type>, Box<Type>),
     Dict(Box<Type>, Box<Type>),
     Set(Box<Type>),

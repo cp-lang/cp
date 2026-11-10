@@ -3831,7 +3831,7 @@ impl Analyzer {
             curr_ty = inner;
         }
         if let Type::FixedArray(_, len) = curr_ty {
-            return Some(*len);
+            return len.as_usize();
         }
 
         if let Some(init) = init_opt {
@@ -3916,7 +3916,7 @@ impl Analyzer {
                     curr_ty = inner;
                 }
                 if let Type::FixedArray(_, len) = curr_ty {
-                    known_len = Some(*len);
+                    known_len = len.as_usize();
                 }
             }
         }
@@ -4855,7 +4855,7 @@ impl Analyzer {
                 }
             }
             (Type::FixedArray(t_elem, t_len), Type::Tuple(s_elems)) => {
-                if *t_len != s_elems.len() {
+                if t_len.as_usize() != Some(s_elems.len()) {
                     return false;
                 }
                 if let Some(Expr::Array(elements)) = init_expr {
@@ -4957,7 +4957,7 @@ impl Analyzer {
             }
             (Type::FixedArray(elem, len), Type::Tuple(tys))
             | (Type::Tuple(tys), Type::FixedArray(elem, len)) => {
-                *len == tys.len() && tys.iter().all(|t| self.types_eq(elem, t))
+                len.as_usize() == Some(tys.len()) && tys.iter().all(|t| self.types_eq(elem, t))
             }
             (Type::Tuple(t1), Type::Tuple(t2)) => {
                 if t1.len() != t2.len() {
@@ -5724,7 +5724,15 @@ impl Analyzer {
             Expr::ArrayRepeat(val, count) => {
                 let val_ty = self.infer_type(val)?;
                 if let Expr::Lit(Lit::Int(n)) = &**count {
-                    Ok(Type::FixedArray(Box::new(val_ty), *n as usize))
+                    Ok(Type::FixedArray(
+                        Box::new(val_ty),
+                        ArraySize::Literal(*n as usize),
+                    ))
+                } else if let Expr::Ident(id) = &**count {
+                    Ok(Type::FixedArray(
+                        Box::new(val_ty),
+                        ArraySize::Ident(id.clone()),
+                    ))
                 } else {
                     Ok(Type::Array(Box::new(val_ty)))
                 }

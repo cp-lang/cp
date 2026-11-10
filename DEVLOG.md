@@ -4432,6 +4432,50 @@ Scoped Arena 引入局部作用域内存池：
   - 新增端到端测试用例 [`cap/test/test_std_mem_endswith.cp`](file:///data/dev/cp/cap/test/test_std_mem_endswith.cp) 与现有 [`cap/test/test_string.cp`](file:///data/dev/cp/cap/test/test_string.cp)，经 `cap` 执行全部验证通过；
   - 调用 `python3 scripts/task_queue.py resolve task-std-mem-endswith-codegen` 正式结单。
 
+## 2026-11-11: 修复 struct/匿名结构体表达式函数体内 let 转译为 var 及返回值冒号消除 (task-struct-let-to-var)
+
+- **问题现象**：
+  - Bun AGY 在转译包含结构体内部函数的方法时（如 `const S = struct { pub fn testFn(): void { let x: i32 = 1; } };`），`cpc` 在转译 `Expr::Zig` 时直接输出了原始代码，导致结构体内部函数体中的 `let` 没有被转译为 Zig 的 `var`，且 CP 风格的返回值冒号 `): <Type> {` 也被带入 Zig 源码，引发 Zig 编译语法错误。
+- **根因分析**：
+  - 在 CP 语法中，结构体声明与匿名结构体在某些上下文中被解析为 `Expr::Zig`；
+  - `codegen.rs` 对 `Expr::Zig` 缺乏语法降级处理，直接发射内部文本，导致 CP 的 `let` 关键字（在 Zig 中不存在）与函数返回值冒号未被替换。
+- **攻坚修复**：
+  - **实现 token 感知安全降级函数 `lower_struct_body`**：
+    - 严格识别并跳过单行注释（`//`）、块注释（`/* */`）、字符串字面量（`"..."`、`'...'`）；
+    - 将外部独立的 `let ` 及 `let mut ` 关键字转译为 Zig 的 `var `；
+    - 将 CP 风格函数签名的返回类型冒号消除，即 `):` 转换为 `)`，同时保留 Zig while-loop 循环步进语法 `) : (step)`；
+  - 在 `generate_expr`、`generate_stmt` 及模块顶层全面接入 `lower_struct_body`；
+  - 同步修改至 `cpc_dev/src/codegen.rs`。
+- **验证与结单**：
+  - 运行 `cpc --lib /data/dev/bun/temp/repro_struct_let.cp`，输出的 Zig 源码中 `let` 成功转译为 `var`，返回值冒号完全消除；
+  - 新增正式回归用例 [`cap/test/test_struct_let.cp`](file:///data/dev/cp/cap/test/test_struct_let.cp)，运行 `cap cap/test/test_struct_let.cp` 测试 **100% PASS**；
+  - 调用 `python3 scripts/task_queue.py resolve task-struct-let-to-var` 归档结单。
+
+## 2026-11-11: 工业级第一步 —— 常量泛型（Const Generics）与定长张量/网络缓冲区基础设施落地
+
+- **背景与目标**：
+  - 为 AI 向量计算、网络定长包与工业级高性能场景提供在编译期确定物理尺寸、零堆分配（Zero Heap Allocation）的常量泛型支持。
+- **核心实现**：
+  1. **AST 增强 (`cpc/src/ast.rs`)**：
+     - 新增 `pub enum ArraySize { Literal(usize), Ident(Ident), Expr(String) }`；
+     - `Type::FixedArray(Box<Type>, ArraySize)` 支持常量标识符与维度表达式作为定长数组尺寸。
+  2. **Parser 拓展 (`cpc/src/parser.rs`)**：
+     - 支持定长数组语法：`[u8; N]`、`[T; shape[0] * shape[1]]`、`[N]T`；
+     - 增强大写泛型结构体字面量与静态成员访问解析探测（如 `Buffer<1024>.capacity()` 与 `Embedding.rows`）。
+  3. **Sema 语义检查 (`cpc/src/sema.rs`)**：
+     - 支持常量泛型参数类型推导与替换（`subst_map`）；
+     - 适配常量数组大小比较与单态化类型展开。
+  4. **Codegen 单态化展开 (`cpc/src/codegen.rs`)**：
+     - 泛型类声明 `pub class Buffer<const N: usize>` 编译为 Zig 编译期函数 `pub fn Buffer(comptime N: usize) type`；
+     - 泛型类型别名展开：`type Embedding = Tensor<f32, [1, 4096]>` 自动单态化展开为静态常量与方法；
+     - 结构体实例化 `Tensor<T, shape>{ ... }` 映射为 `Tensor(T, shape){ ... }`。
+- **验证与交付**：
+  - 新增正式回归测试 [`cap/test/test_const_generics.cp`](file:///data/dev/cp/cap/test/test_const_generics.cp)，涵盖：
+    - `Buffer<const N: usize>`（定长网络缓冲区）；
+    - `Tensor<T, const shape: [usize; 2]>`（定长二维张量）；
+    - 静态维度访问 `Embedding.rows`、`Embedding.cols` 与别名；
+  - 经 `cap cap/test/test_const_generics.cp` 运行 **100% PASS**。
+
 
 
 

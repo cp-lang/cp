@@ -5682,28 +5682,73 @@ export class VTable {
 > 1. CP 坚决不引入 C 语言的 `[*c]` 宽松可空不确定指针。所有的可空性必须通过 `?` 显式显化，所有的数组遍历必须通过 `[*]` 显式显化，禁止任何隐式可空与隐式降级转换！
 > 2. `*T!` 仅代表单个对象的裸指针，不支持下标访问 `p[i]`；若需要进行连续内存数组访问，必须明确使用 `[*]T!` 或切片 `[]T`。
 
-#### 11.9.5 常量泛型类（Const Generic Classes）与零开销单态化
+#### 11.9.5 常量泛型类（Const Generic Classes）与定长张量/定长缓冲区
 
-在网络协议和底层系统设计中，诸如 SSL/TLS 开启与关闭、协议版本号、固定缓冲区大小等配置往往在编译期确定。传统 Zig 通常采用返回类型的泛型函数（如 `pub fn App(comptime ssl: bool) type`）。
+在 AI 向量计算、网络定长数据包与底层系统设计中，定长张量与定长缓冲区通常需要在编译期确定物理尺寸，以实现零堆内存分配（Zero Heap Allocation）与零开销单态化展开。
 
-CP 引入现代优雅的**常量泛型类（Const Generic Classes）**：
+CP 完整支持**常量泛型（Const Generics）**语法，支持标量常量与数组维度常量参数：
 
 ```typescript
-export class App<const ssl: bool> {
-    fn listen(*this, port: i32, cb: fn(ls: *any!): void): void {
-        if (ssl) {
-            // 编译期已知分支，零运行时条件分支开销
-        }
+// 1. 定长定容网络缓冲区
+pub class Buffer<const N: usize> {
+    pub data: [u8; N],
+    pub len: usize,
+
+    pub fn new(): Buffer<N> {
+        let b: Buffer<N> = undefined;
+        b.len = 0;
+        return b;
+    }
+
+    pub fn capacity(): usize {
+        return N;
     }
 }
 
-// 实例化特化
-let http_app = new App<false>();
-let https_app = new App<true>();
+// 2. 编译期多维张量定义（支持多常量参数与类型参数）
+pub class Tensor<T, const shape: [usize; 2]> {
+    pub rows: usize = shape[0],
+    pub cols: usize = shape[1],
+    pub data: [T; shape[0] * shape[1]],
+
+    pub fn init(): Tensor<T, shape> {
+        let t: Tensor<T, shape> = undefined;
+        t.rows = shape[0];
+        t.cols = shape[1];
+        return t;
+    }
+
+    pub fn total_elements(): usize {
+        return shape[0] * shape[1];
+    }
+}
+
+// 3. 类型别名与静态维度单态化
+type Embedding = Tensor<f32, [1, 4096]>;
+type PacketBuffer = Buffer<1024>;
+
+pub fn test(): void {
+    let emb = Embedding.init();
+    assert(emb.rows == 1);
+    assert(emb.cols == 4096);
+    assert(Embedding.rows == 1);
+    assert(Embedding.cols == 4096);
+
+    let buf = PacketBuffer.new();
+    assert(Buffer<1024>.capacity() == 1024);
+}
 ```
 
-- **语义**：`<const name: Type>` 声明编译期值泛型参数；
-- **单态化（Monomorphization）**：编译器针对每个具体的常量组合生成特化的静态结构体，分支在编译期完全内联优化，实现 100% 零运行时开销。
+- **语义与约束**：
+  - `<const name: Type>`：声明编译期值泛型参数（支持整数、布尔及定长数组如 `[usize; 2]`）；
+  - `[T; N]` 与 `[N]T`：定长数组语法在类型与字段声明中完全互通；
+  - 编译器针对具体的常量实参组合自动在编译期展开为单态化（Monomorphize）特化类型，生成确定的物理内存布局，零堆分配、零运行时抽象惩罚。
+
+#### 11.9.5.1 Struct 嵌套与匿名代码块语法自动降级机制
+
+针对在 CP 中书写 `@zig`、C-FFI 或匿名 `struct { ... }` 表达式的场景，CP 编译器内置 token 感知的语法自愈降级机制：
+1. **`let` / `let mut` 自动降级**：在 struct 内函数体中书写的 `let` 与 `let mut` 自动转译为 Zig 的 `var`，防止 Zig 编译器因不识别 `let` 关键字而报错；
+2. **函数签名冒号消除**：自动将 CP 风格函数声明中的返回值类型冒号（如 `pub fn f(): void`）消除为 Zig 标准函数签名（`pub fn f() void`），避免 `error: expected return type expression, found ':'`。
 
 #### 11.9.6 字段级物理内存对齐注解 (`@align(N)`)
 

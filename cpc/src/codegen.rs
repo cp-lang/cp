@@ -1996,7 +1996,8 @@ impl Codegen {
         // --- Top-Level C-FFI / Zig Escapes ---
         for item in &module.body {
             if let ModuleItem::Stmt(Stmt::Expr(Expr::Zig(zig))) = item {
-                for line in zig.code.lines() {
+                let lowered = lower_struct_body(&zig.code);
+                for line in lowered.lines() {
                     let trimmed = line.trim();
                     if trimmed == "const std = @import(\"std\");"
                         || trimmed == "pub const std = @import(\"std\");"
@@ -6434,7 +6435,15 @@ impl Codegen {
                     .infer_cp_type_with_mock(val, mock_types)
                     .unwrap_or(Type::U8);
                 if let Expr::Lit(Lit::Int(n)) = &**count {
-                    Some(Type::FixedArray(Box::new(val_ty), *n as usize))
+                    Some(Type::FixedArray(
+                        Box::new(val_ty),
+                        ArraySize::Literal(*n as usize),
+                    ))
+                } else if let Expr::Ident(id) = &**count {
+                    Some(Type::FixedArray(
+                        Box::new(val_ty),
+                        ArraySize::Ident(id.clone()),
+                    ))
                 } else {
                     Some(Type::Array(Box::new(val_ty)))
                 }
@@ -9628,7 +9637,7 @@ impl Codegen {
                     let sw_code = self.generate_switch(m, false);
                     self.write_to_case(&sw_code);
                 }
-                Expr::Zig(zig) => self.write_to_case(&format!("{}\n", zig.code)),
+                Expr::Zig(zig) => self.write_to_case(&format!("{}\n", lower_struct_body(&zig.code))),
                 Expr::Bin(bin)
                     if bin.op == BinaryOp::LogicalOr
                         && matches!(
@@ -13250,19 +13259,51 @@ impl Codegen {
                 let fields_slice = ei.fields.as_deref().unwrap_or(&[]);
                 let tuple_slice = ei.tuple_args.as_deref().unwrap_or(&[]);
                 if ei.variant_name.sym.is_empty() && !ei.enum_name.sym.is_empty() {
-                    let cls_opt = self.class_defs.get(&ei.enum_name.sym).cloned();
+                    let mut target_sym = ei.enum_name.sym.clone();
+                    while let Some(ta) = self.type_aliases.get(&target_sym) {
+                        if let Type::Ref(ref tid) = ta.target_ty {
+                            target_sym = tid.sym.clone();
+                        } else {
+                            break;
+                        }
+                    }
+                    let base_name = target_sym.split('<').next().unwrap_or(&target_sym);
+                    let cls_opt = self.class_defs.get(base_name).cloned();
                     if let Some(ref cls) = cls_opt {
                         if cls.is_static {
                             panic!("CP Compile Error: Cannot instantiate static class or struct '{}'", ei.enum_name.sym);
                         }
                     }
-                    let mut s = format!("{}{{ ", ei.enum_name.sym);
+                    let mut subst_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+                    if let Some(pos) = target_sym.find('<') {
+                        if target_sym.ends_with('>') {
+                            let args_str = &target_sym[pos + 1..target_sym.len() - 1];
+                            let parts = Self::split_generic_args_str(args_str);
+                            if let Some(ref cls) = cls_opt {
+                                for (gp, arg) in cls.generic_params.iter().zip(parts.iter()) {
+                                    let param_name = match gp {
+                                        GenericParam::Type { ident, .. } => &ident.sym,
+                                        GenericParam::Const { ident, .. } => &ident.sym,
+                                    };
+                                    subst_map.insert(param_name.clone(), arg.clone());
+                                }
+                            }
+                        }
+                    }
+                    let mapped_name = self.map_type_name(&ei.enum_name.sym);
+                    let mut s = format!("{}{{ ", mapped_name);
                     for (idx, f) in fields_slice.iter().enumerate() {
                         let old_array_elem = self.expected_array_elem_type.clone();
                         if let Some(ref cls) = cls_opt {
                             if let Some(cf) = cls.fields.iter().find(|fl| fl.ident.sym == f.key.sym) {
                                 if let Type::FixedArray(elem, _) | Type::Array(elem) = &cf.ty {
-                                    self.expected_array_elem_type = Some((**elem).clone());
+                                    let mut el = (**elem).clone();
+                                    if let Type::Ref(ref mut id) = el {
+                                        if let Some(sub) = subst_map.get(&id.sym) {
+                                            id.sym = sub.clone();
+                                        }
+                                    }
+                                    self.expected_array_elem_type = Some(el);
                                 }
                             }
                         }
@@ -13726,6 +13767,10 @@ impl Codegen {
                     }
                     if self.error_sets.contains_key(&id.sym) {
                         return format!("{}.{}", id.sym, member.prop.sym);
+                    }
+                    if id.sym.contains('<') && id.sym.ends_with('>') {
+                        let mapped = self.map_type_name(&id.sym);
+                        return format!("{}.{}", mapped, member.prop.sym);
                     }
                 }
                 if matches!(&*member.obj, Expr::OptMember(_) | Expr::OptCall(_)) {
@@ -15022,7 +15067,7 @@ impl Codegen {
                 }
                 format!("std.StaticStringMap({}).initComptime(.{{ {} }})", val_zig_ty, entries_str.join(", "))
             }
-            Expr::Zig(z) => z.code.clone(),
+            Expr::Zig(z) => lower_struct_body(&z.code),
             _ => "0".to_string(),
         }
     }
@@ -16278,6 +16323,15 @@ impl Codegen {
                 } else if name.starts_with("Atomic<") {
                     let inner = &name[7..name.len() - 1];
                     format!("CpAtomic({})", self.map_type_name(inner))
+                } else if let Some(pos) = name.find('<') {
+                    if name.ends_with('>') {
+                        let base = &name[..pos];
+                        let args = &name[pos + 1..name.len() - 1];
+                        let mapped_args = Self::map_generic_args_str(args);
+                        format!("{}({})", base, mapped_args)
+                    } else {
+                        name.to_string()
+                    }
                 } else {
                     name.to_string()
                 }
@@ -16362,7 +16416,8 @@ impl Codegen {
                     if ident.sym.ends_with('>') {
                         let base = &ident.sym[..pos];
                         let args = &ident.sym[pos + 1..ident.sym.len() - 1];
-                        return format!("{}({})", base, args);
+                        let mapped_args = Self::map_generic_args_str(args);
+                        return format!("{}({})", base, mapped_args);
                     }
                 }
                 if ident.sym == "cstring" {
@@ -16605,6 +16660,58 @@ impl Codegen {
         }
     }
 
+    fn split_generic_args_str(args: &str) -> Vec<String> {
+        let mut parts = Vec::new();
+        let mut cur = String::new();
+        let mut depth = 0;
+        for c in args.chars() {
+            match c {
+                '[' | '(' | '<' | '{' => {
+                    depth += 1;
+                    cur.push(c);
+                }
+                ']' | ')' | '>' | '}' => {
+                    depth -= 1;
+                    cur.push(c);
+                }
+                ',' if depth == 0 => {
+                    parts.push(cur.trim().to_string());
+                    cur.clear();
+                }
+                _ => cur.push(c),
+            }
+        }
+        if !cur.trim().is_empty() {
+            parts.push(cur.trim().to_string());
+        }
+        parts
+    }
+
+    fn map_generic_args_str(args: &str) -> String {
+        let parts = Self::split_generic_args_str(args);
+        let types = [
+            "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "usize", "isize", "f32", "f64",
+            "bool", "string",
+        ];
+        let mapped_parts: Vec<String> = parts
+            .into_iter()
+            .map(|p| {
+                if p.starts_with('[') && p.ends_with(']') {
+                    let inner = p[1..p.len() - 1].trim();
+                    if types.contains(&inner) {
+                        format!("[]{}", inner)
+                    } else {
+                        format!(".{{ {} }}", inner)
+                    }
+                } else {
+                    p
+                }
+            })
+            .collect();
+
+        mapped_parts.join(", ")
+    }
+
     fn map_raw_ptr_base(&self, ty: &Type) -> String {
         match ty {
             Type::U8 => "u8".to_string(),
@@ -16774,3 +16881,121 @@ fn type_to_display_string(ty: &Type) -> String {
         _ => "any".to_string(),
     }
 }
+
+pub fn lower_struct_body(code: &str) -> String {
+    let mut res = String::with_capacity(code.len());
+    let chars: Vec<char> = code.chars().collect();
+    let n = chars.len();
+    let mut i = 0;
+    let mut in_str = false;
+    let mut str_char = ' ';
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+
+    while i < n {
+        let c = chars[i];
+
+        // 1. Comments
+        if in_line_comment {
+            res.push(c);
+            if c == '\n' { in_line_comment = false; }
+            i += 1;
+            continue;
+        }
+        if in_block_comment {
+            res.push(c);
+            if c == '*' && i + 1 < n && chars[i + 1] == '/' {
+                res.push('/');
+                i += 2;
+                in_block_comment = false;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        // 2. Strings
+        if in_str {
+            res.push(c);
+            if c == '\\' && i + 1 < n {
+                i += 1;
+                res.push(chars[i]);
+            } else if c == str_char {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if c == '"' || c == '\'' {
+            in_str = true;
+            str_char = c;
+            res.push(c);
+            i += 1;
+            continue;
+        }
+
+        if c == '/' && i + 1 < n {
+            if chars[i + 1] == '/' {
+                in_line_comment = true;
+                res.push('/');
+                res.push('/');
+                i += 2;
+                continue;
+            } else if chars[i + 1] == '*' {
+                in_block_comment = true;
+                res.push('/');
+                res.push('*');
+                i += 2;
+                continue;
+            }
+        }
+
+        // 3. Keyword `let` / `let mut`
+        if i + 3 <= n && &chars[i..i + 3] == ['l', 'e', 't'] {
+            let prev_ok = i == 0 || (!chars[i - 1].is_alphanumeric() && chars[i - 1] != '_' && chars[i - 1] != '@' && chars[i - 1] != '.');
+            let next_ok = i + 3 == n || chars[i + 3].is_whitespace();
+            if prev_ok && next_ok {
+                i += 3;
+                let mut j = i;
+                while j < n && (chars[j] == ' ' || chars[j] == '\t') {
+                    j += 1;
+                }
+                if j + 3 <= n && &chars[j..j + 3] == ['m', 'u', 't'] && (j + 3 == n || chars[j + 3].is_whitespace()) {
+                    i = j + 3;
+                }
+                res.push_str("var");
+                continue;
+            }
+        }
+
+        // 4. Return type colon in function signature: `):` followed by return type
+        if c == ')' {
+            res.push(')');
+            i += 1;
+            let mut j = i;
+            while j < n && (chars[j] == ' ' || chars[j] == '\t') {
+                j += 1;
+            }
+            if j < n && chars[j] == ':' {
+                let mut k = j + 1;
+                while k < n && (chars[k] == ' ' || chars[k] == '\t') {
+                    k += 1;
+                }
+                if k < n && chars[k] != '(' && chars[k] != '{' && chars[k] != ';' {
+                    if k == j + 1 {
+                        res.push(' ');
+                    }
+                    i = j + 1;
+                    continue;
+                }
+            }
+            continue;
+        }
+
+        res.push(c);
+        i += 1;
+    }
+    res
+}
+

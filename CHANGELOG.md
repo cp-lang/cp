@@ -2574,6 +2574,33 @@
 - [`cap/test/test_std_mem_endswith.cp`](file:///data/dev/cp/cap/test/test_std_mem_endswith.cp):
   - 新增 `std.mem.endsWith` 与 `std.mem.startsWith` 多级命名空间原生函数调用的端到端回归用例。
 
+## [2026-11-11] - struct/匿名结构体内函数体 let 自动降级与冒号消除 (task-struct-let-to-var)
+
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs) / [`cpc_dev/src/codegen.rs`](file:///data/dev/cp/cpc_dev/src/codegen.rs):
+  - 实现 `lower_struct_body` token 感知安全降级解析器；
+  - 自动将 struct 内部函数声明中的 `let` 与 `let mut` 降级为 Zig 的 `var`；
+  - 消除 CP 风格函数签名的返回类型冒号（`):` -> `)`）。
+- [`cap/test/test_struct_let.cp`](file:///data/dev/cp/cap/test/test_struct_let.cp):
+  - 新增 struct 嵌套函数体内 `let` 降级与执行的端到端回归用例。
+
+## [2026-11-11] - 常量泛型（Const Generics）与定长张量/网络缓冲区支持
+
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs) / [`cpc_dev/src/ast.rs`](file:///data/dev/cp/cpc_dev/src/ast.rs):
+  - 新增 `ArraySize` 枚举（`Literal`, `Ident`, `Expr`）；
+  - `Type::FixedArray` 支持常量参数尺寸。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs) / [`cpc_dev/src/parser.rs`](file:///data/dev/cp/cpc_dev/src/parser.rs):
+  - 支持 `[T; N]`、`[N]T` 与表达式维度定长数组解析；
+  - 支持泛型结构体字面量与静态成员访问（如 `Embedding.rows`）。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs) / [`cpc_dev/src/sema.rs`](file:///data/dev/cp/cpc_dev/src/sema.rs):
+  - 常量泛型参数语义推导与单态化类型展开（`subst_map`）。
+- [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs) / [`cpc_dev/src/codegen.rs`](file:///data/dev/cp/cpc_dev/src/codegen.rs):
+  - 泛型类声明与实例化的 Zig 代码单态化生成；
+  - 支持常量泛型类型别名展开。
+- [`cap/test/test_const_generics.cp`](file:///data/dev/cp/cap/test/test_const_generics.cp):
+  - 新增 `Buffer<const N: usize>` 与 `Tensor<T, const shape: [usize; 2]>` 端到端回归用例。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 完善第 11.9.5 节《常量泛型类（Const Generic Classes）与定长张量/定长缓冲区》规范手册与代码示例。
+
 
 
 
