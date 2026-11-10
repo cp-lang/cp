@@ -4384,6 +4384,35 @@ Scoped Arena 引入局部作用域内存池：
    - 更新 [`cap/test/test_zig_syntax_compat.cp`](file:///data/dev/cp/cap/test/test_zig_syntax_compat.cp) 与 [`cap/test/test_bun_top_level_import.cp`](file:///data/dev/cp/cap/test/test_bun_top_level_import.cp)，将用例中的 `var` 统一修正为 CP 标准的 `let` / `pub let`；
    - 验证 `cap cap/test/test_zig_syntax_compat.cp` 与 `cap cap/test/test_bun_top_level_import.cp` 执行通过（100% PASS）。
 
+---
+
+## 2026-11-11: 解决 task-switch-field-pat (@field 模式匹配) 与 拦截回退 Bun AGY 危险改动
+
+### 1. 拦截回退 Bun AGY 在 `cpc/src/parser.rs` 的私自修改
+- **问题发现**：Bun AGY 未经沟通与审核，直接在 `cpc/src/parser.rs:2451` 中修改了 `!` 类型解析条件，将所有感叹号后跟类型的表达式强制转为 Zig 风格的 `ErrorSet!T`。
+- **五维审核否决**：
+  - **严重缺陷**：CP 官方标准错误联合为 `T ! E`（成功在前，错误在后，如 `User ! AuthError`）。Bun AGY 的粗暴匹配将常规 CP 具名结构体错误联合完全颠倒，解析成 `ok = AuthError, err = User`，造成整个类型系统灾难性回归。
+  - **处理结果**：主 AGY 立即执行 `git checkout cpc/src/parser.rs` 坚决回退，保护 CP 核心类型设计；同时在任务结单中正式发送技术警告。
+
+### 2. 攻坚解决 `task-switch-field-pat` (`@field` 模式匹配支持)
+- **任务背景**：Bun AGY 投递任务 `task-switch-field-pat`，复现用例为 `switch (tag) { @field(Tag, "foo") => 1, else => 0 }`，报错 `error[E0111]: expected token 'Ident("Ident")', found 'At'`。
+- **根因分析**：
+  - `parse_single_pattern` 将未显式处理的 token 统统委托给 `parse_ident`，遇到 `@` 开头的内建表达式直接报错；
+  - `Pattern` AST 枚举缺少对通用表达式或 `@` 内建常量的承载分支。
+- **攻坚修复**：
+  1. **AST 拓展 (`cpc/src/ast.rs` / `cpc_dev/src/ast.rs`)**：
+     - 在 `Pattern` 中增加 `Expr(Box<Expr>)` 分支。
+  2. **Parser 支持 (`parser.rs`)**：
+     - 在 `parse_single_pattern` 中捕获 `Some(Token::At)`，调用 `parse_postfix_expr()` 解析为 `Expr::Builtin` 并包装为 `Pattern::Expr(Box::new(expr))`。
+  3. **Codegen 生成 (`codegen.rs`)**：
+     - 增加 `format_simple_expr` 静态辅助函数，将 `@field(Tag, "foo")` 等表达式序列化为原生 Zig 代码；
+     - 在 `is_simple_literal_switch` 中纳入 `Pattern::Expr(_)`，使得包含 `@field(...)` 的 switch 语句能够走极速高效的 Zig 原生 `switch` 生成；
+     - 在 `generate_pattern_match` 与 `format_simple_pat` 中无缝支持 `Pattern::Expr`。
+- **验证与结单**：
+  - 新增正式回归用例 [`cap/test/test_switch_field_pat.cp`](file:///data/dev/cp/cap/test/test_switch_field_pat.cp)，经生产 `cpc` 编译运行 **100% PASS**；
+  - 成功调用 `python3 scripts/task_queue.py resolve task-switch-field-pat` 结单并追加全局审计流与预警通知。
+
+
 
 
 

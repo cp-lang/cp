@@ -2962,6 +2962,10 @@ impl<'a> Parser<'a> {
 
     fn parse_single_pattern(&mut self) -> ParseResult<Pattern> {
         match self.peek() {
+            Some(Token::At) => {
+                let expr = self.parse_postfix_expr()?;
+                Ok(Pattern::Expr(Box::new(expr)))
+            }
             Some(Token::Mut) => {
                 let (_, span) = self.bump()?;
                 return Err(ParseError::UnexpectedToken(Token::Mut, span));

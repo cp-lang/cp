@@ -1018,7 +1018,28 @@ switch (result) {
 }
 ```
 
+#### 4.3.2 编译期内建表达式匹配 (`@field` 动态字段与元编程模式)
+
+在系统级编程与元编程场景中（如枚举反射、网络协议状态机），分支目标可能是由编译期计算决定的。CP 支持在 `switch` 分支中直接书写 `@field(Container, "name")` 等编译期求值表达式：
+
+```typescript
+pub const Tag = enum {
+    foo,
+    bar,
+    baz,
+};
+
+pub fn checkTag(tag: Tag): i32 {
+    switch (tag) {
+        @field(Tag, "foo") => 100,
+        @field(Tag, "bar") => 200,
+        * => 300,
+    }
+}
+```
+
 ---
+
 
 ### 4.4 守卫条件表达式与穷尽性检查
 

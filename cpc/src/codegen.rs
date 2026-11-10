@@ -268,6 +268,7 @@ impl ModuleFeatures {
                 }
             }
             Pattern::Binding { subpat, .. } => self.scan_pat(subpat),
+            Pattern::Expr(expr) => self.scan_expr(expr),
             _ => {}
         }
     }
@@ -1131,7 +1132,7 @@ impl Codegen {
                 return false;
             }
             match &arm.pat {
-                Pattern::Lit(_) | Pattern::Wildcard | Pattern::Range { .. } => {}
+                Pattern::Lit(_) | Pattern::Wildcard | Pattern::Range { .. } | Pattern::Expr(_) => {}
                 Pattern::Ident(_) => {}
                 Pattern::Enum(ep)
                     if ep.fields.is_none()
@@ -1145,6 +1146,7 @@ impl Codegen {
                             p,
                             Pattern::Lit(_)
                                 | Pattern::Range { .. }
+                                | Pattern::Expr(_)
                                 | Pattern::Enum(crate::ast::EnumPattern {
                                     fields: None,
                                     tuple_pats: None,
@@ -7372,7 +7374,27 @@ impl Codegen {
                 }
                 (format!("({})", conds.join(" or ")), String::new())
             }
+            Pattern::Expr(expr) => {
+                let e_code = Self::format_simple_expr(expr);
+                (format!("cp_eq({}, {})", val_expr, e_code), String::new())
+            }
             _ => ("true".to_string(), String::new()),
+        }
+    }
+
+    fn format_simple_expr(expr: &Expr) -> String {
+        match expr {
+            Expr::Ident(id) => id.sym.clone(),
+            Expr::Lit(Lit::Str(s)) => format!("\"{}\"", Self::escape_zig_string(s)),
+            Expr::Lit(Lit::Int(v)) => v.to_string(),
+            Expr::Lit(Lit::Float(f)) => f.to_string(),
+            Expr::Lit(Lit::Bool(b)) => b.to_string(),
+            Expr::Member(m) => format!("{}.{}", Self::format_simple_expr(&m.obj), m.prop.sym),
+            Expr::Builtin(b) => {
+                let args: Vec<String> = b.args.iter().map(Self::format_simple_expr).collect();
+                format!("{}({})", b.name, args.join(", "))
+            }
+            _ => String::new(),
         }
     }
 
@@ -7397,6 +7419,7 @@ impl Codegen {
 
     fn format_simple_pat(pat: &Pattern, has_else: &mut bool) -> String {
         match pat {
+            Pattern::Expr(expr) => Self::format_simple_expr(expr),
             Pattern::Lit(Lit::Int(v)) => {
                 if *v >= 32 && *v <= 126 {
                     let ch = *v as u8;

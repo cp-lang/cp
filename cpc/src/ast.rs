@@ -314,6 +314,7 @@ pub enum Pattern {
         ident: Ident,
         ty: Type,
     },
+    Expr(Box<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -2551,7 +2551,19 @@
   - 顶层全局变量声明归正为标准 `pub let`，切片缓冲区定义归正为标准数组 `[u8; 8]`。
 
 - [`cpc/src/codegen.rs`](file:///data/dev/cp/cpc/src/codegen.rs) / [`cpc_dev/src/codegen.rs`](file:///data/dev/cp/cpc_dev/src/codegen.rs):
-  - 审核并同步 Bun AGY 对顶层 `var` 初始值求值置位 `is_comptime = true` 的改动，消除 Zig 顶层 Comptime 作用域内嵌 `comptime` 表达式错误。
+  - 审核并同步 Bun AGY 对顶层 `var` 初始值求值置位 `is_comptime = true` 的改动，消除 Zig 顶层 Comptime 作用域内嵌 `comptime` 表达式错误；
+  - 增加 `Pattern::Expr` 的 Zig 代码生成支持与 `format_simple_expr` 序列化；
+  - `is_simple_literal_switch` 纳入 `Pattern::Expr`，直接生成高效原生 Zig `switch`。
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs) / [`cpc_dev/src/ast.rs`](file:///data/dev/cp/cpc_dev/src/ast.rs):
+  - `Pattern` 枚举新增 `Expr(Box<Expr>)` 分支。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs) / [`cpc_dev/src/parser.rs`](file:///data/dev/cp/cpc_dev/src/parser.rs):
+  - 拦截回退 Bun AGY 颠倒错误联合类型的危险改动；
+  - `parse_single_pattern` 支持 `@` 开头的内建表达式作为模式分支（如 `@field(Tag, "foo")`）。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 新增第 4.3.2 节《编译期内建表达式匹配 (`@field` 动态字段与元编程模式)》。
+- [`cap/test/test_switch_field_pat.cp`](file:///data/dev/cp/cap/test/test_switch_field_pat.cp):
+  - 新增 switch `@field` 模式匹配端到端回归用例。
+
 
 
 

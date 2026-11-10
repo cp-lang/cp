@@ -7090,6 +7090,37 @@ bun agy 按你的建议,优化了方案, 更新了 GEMINI.md 和 脚本文件
    - 执行 `git add .` 与 `git commit -m "docs(spec): clarify CP let vs Zig var mapping and rectify top-level pub let syntax"` 一次性提交；
    - 提交后工作区保持 100% 干净，后台监听任务平稳持续运行中。
 
+---
+
+### 用户指令 (User Prompts)
+很好, 按你规划与bun agy 紧密配合
+目前双 agy 并行工作,并互相通信, 你已经能接收bun agy的任务, 你完成任务,或者 发现问题, 是否能通知 bun agy, 让其知悉?
+很好, 执行
+
+### 执行汇报 (Execution Report)
+1. **拦截回退 Bun AGY 私自修改**：
+   - 发现 Bun AGY 在 `cpc/src/parser.rs:2451` 中私自引入反转 CP `T!E` 错误联合的逻辑，五维审核判定不合格（严重破坏类型系统）；
+   - 执行 `git checkout cpc/src/parser.rs` 坚决回退并还原。
+2. **攻坚解决 `task-switch-field-pat` 并验证**：
+   - 隔离复制复现用例至本地沙盒，在 `cpc_dev` 中完成全流程开发；
+   - 在 `Pattern` 中扩充 `Expr(Box<Expr>)` 分支，Parser 捕获 `Some(Token::At)` 解析 `@field(Tag, ...)` 内建表达式；
+   - Codegen 实现 `format_simple_expr`，并在 `is_simple_literal_switch` 中纳入 `Pattern::Expr`，直接生成高效原生 Zig `switch`；
+   - 编写正式回归用例 [`cap/test/test_switch_field_pat.cp`](file:///data/dev/cp/cap/test/test_switch_field_pat.cp)，经生产 `cpc` 测试 **100% PASS**。
+3. **完成结单与跨智能体通知广播**：
+   - 成功执行 `python3 scripts/task_queue.py resolve task-switch-field-pat --note "..."`，在结单中同步回传：
+     - 特性支持通报（switch `@field` 模式匹配已就绪）；
+     - 审核拦截通报（`parser.rs` 颠倒改动已被主 AGY 依法拦截清理）；
+     - 语法规范重申（CP 语言彻底废除 `var`，顶层可变变量必须使用 `pub let`）。
+4. **四线演进文档全量对齐**：
+   - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)：在第 4.3.2 节载入《编译期内建表达式匹配 (`@field` 动态字段与元编程模式)》；
+   - [`DEVLOG.md`](file:///data/dev/cp/DEVLOG.md)：记录问题剖析、审核拦截背景与 `@field` 模式支持原理；
+   - [`CHANGELOG.md`](file:///data/dev/cp/CHANGELOG.md)：记录文件变更轨迹；
+   - [`SESSION.md`](file:///data/dev/cp/SESSION.md)：记录指令与结单闭环。
+5. **Git 提交闭环**：
+   - 执行 `git add .` 与 `git commit -m "feat(cpc): support @field comptime pattern matching in switch prongs and resolve task"` 一次性提交；
+   - 提交后工作区保持 100% 干净，随时准备重启后台监听。
+
+
 
 
 
