@@ -2,6 +2,31 @@
 
 > 历史变更日志已完整归档至 [CHANGELOG_H.md](file:///data/dev/cp/CHANGELOG_H.md)。本项目采用冷热分离架构，本文件仅保留当日活跃记录。
 
+## [2026-11-12] - 标准库第五阶段：可执行程序定位器、WebSocket 帧协议与文件系统原子增强
+
+### 新特性 (Added)
+- [`lib/which/`](file:///data/dev/cp/lib/which/) & [`lib/which.cp`](file:///data/dev/cp/lib/which.cp):
+  - `which.cp`：吸收自 Bun 的跨平台可执行程序快速定位器，支持绝对路径、相对路径以及 `PATH` 环境变量遍历；在 Windows 下自动推导 `.exe`、`.cmd`、`.bat`；基于 `std.c.access(path, 1)`（`X_OK`）检测执行权限；
+  - `index.cp` & `lib/which.cp`：官方标准库导出通道 `cap:which`。
+- [`lib/ws/`](file:///data/dev/cp/lib/ws/) & [`lib/ws.cp`](file:///data/dev/cp/lib/ws.cp):
+  - `opcode.cp`：标准 RFC 6455 `Opcode`（`Text`, `Binary`, `Close`, `Ping`, `Pong`, `Continue`）与 `CloseCode` 状态码；
+  - `mask.cp`：RFC 6455 规范 4 字节 XOR 掩码编解码；
+  - `frame.cp`：`FrameHeader` 支持 7 位基础、16 位中型与 64 位超大型载荷扩展与掩码解析，`FrameBuilder` 提供便捷帧构造方法；
+  - `index.cp` & `lib/ws.cp`：官方标准库导出通道 `cap:ws`。
+- [`lib/fs.cp`](file:///data/dev/cp/lib/fs.cp):
+  - 扩充 `tmpDir()` 跨平台系统临时目录探测；
+  - 扩充 `tmpPath()` 原子序列号与单调时钟纳秒时间戳保证唯一临时文件路径；
+  - 扩充 `writeAtomic()` 崩溃安全的原子覆盖写入。
+- 测试用例套件：
+  - [`cap/test/test_which.cp`](file:///data/dev/cp/cap/test/test_which.cp)：可执行二进制定位与 PATH 解析全部 100% PASS；
+  - [`cap/test/test_ws.cp`](file:///data/dev/cp/cap/test/test_ws.cp)：4 大 WebSocket 帧协议与掩码往返套件全部 100% PASS；
+  - [`cap/test/test_fs_extensions.cp`](file:///data/dev/cp/cap/test/test_fs_extensions.cp)：临时文件与原子写入套件全部 100% PASS。
+
+### 文档更新 (Docs)
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)：
+  - 第 12.1 节总表中更新 `cap:which` 与 `cap:ws` 状态为已全面实装；
+  - 新增第 12.15 节 `cap:which`、第 12.16 节 `cap:ws` 与第 12.17 节 `cap:fs` 增强能力的详细技术契约与完整代码示例。
+
 ## [2026-11-12] - 标准库第四阶段：Unix Glob 模式匹配、Semver 2.0 版本解析与范围匹配、DotEnv 与 INI 配置解析
 
 ### 新特性 (Added)

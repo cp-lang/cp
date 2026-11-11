@@ -232,3 +232,44 @@
   5. `cap/test/test_glob.cp`, `cap/test/test_semver.cp`, `cap/test/test_config.cp`；
   6. `cp_ref.md`：第 12.1 节标准库总表与第 12.4 ~ 12.14 节全量深度扩充详细技术说明与完整代码使用示例；
   7. `SESSION.md` / `CHANGELOG.md` / `DEVLOG.md`：当日热日志同步更新。
+
+## 指令 6：自主持续推进标准库第五阶段 5.1、5.2、5.3（跨平台可执行程序定位 cap:which、WebSocket 帧协议 cap:ws、文件系统原子操作与临时文件）
+
+- **自主规划与工程目标**：
+  - 依照指示“后续吸收 Bun 资产，直接将成果记录在四线文档中，自动 Git 提交，无需汇报与请示，继续下一阶段吸收，不要停止”；
+  - 排查 `/data/dev/bun/src` 中成熟资产，收编高频基础组件：
+    1. 阶段 5.1：跨平台可执行程序定位器（`cap:which`，移植自 `/data/dev/bun/src/which/which.cp`）；
+    2. 阶段 5.2：RFC 6455 现代 WebSocket 帧协议处理（`cap:ws`，移植自 `/data/dev/bun/src/http/websocket.cp`）；
+    3. 阶段 5.3：文件系统工业级高可用增强（`cap:fs` 中的 `tmpDir()`, `tmpPath()`, `writeAtomic()`，借鉴自 `/data/dev/bun/src/sys/tmp.cp`）。
+  - 全量回归测试通过，更新四线文档与权威手册 `cp_ref.md`，执行阶段里程碑单次 Git 提交。
+
+- **执行结果**：
+  1. **5.1 跨平台可执行程序定位器 (`cap:which`)**：
+     - `lib/which/which.cp`：支持绝对路径、相对路径以及 `PATH` 环境变量优先遍历；在 Windows 下自动推导 `.exe`、`.cmd`、`.bat` 扩展名；基于底层 `std.c.access(path, 1)`（`X_OK`）极速检测执行权限；
+     - `lib/which/index.cp` 与 `lib/which.cp`：官方导出入口 `cap:which`；
+     - 测试用例 `cap/test/test_which.cp`：标准系统二进制 `sh`、绝对路径与自定义 `PATH` 解析 100% PASS。
+  2. **5.2 RFC 6455 现代 WebSocket 帧协议 (`cap:ws`)**：
+     - `lib/ws/opcode.cp`：`Opcode` 枚举（`Text`, `Binary`, `Close`, `Ping`, `Pong`, `Continue`）与 `CloseCode` 状态码；
+     - `lib/ws/mask.cp`：4 字节 XOR 掩码编解码与解密；
+     - `lib/ws/frame.cp`：`FrameHeader` 二进制头部编码与解码（自动处理 7 位、16 位与 64 位载荷长度扩展与客户端掩码），`FrameBuilder` 构建文本/二进制/Ping/Pong/Close 帧；
+     - `lib/ws/index.cp` 与 `lib/ws.cp`：官方导出入口 `cap:ws`；
+     - 测试用例 `cap/test/test_ws.cp`：4 大用例套件全部 100% PASS。
+  3. **5.3 文件系统原子写入与临时文件生成 (`cap:fs` 扩充)**：
+     - `lib/fs.cp`：扩充 `tmpDir()`（跨平台嗅探 `TMPDIR`, `TEMP`, `TMP`, `/tmp`, `C:\Temp`）；扩充 `tmpPath()`（原子计数器 + 单调纳秒时钟组合保证唯一性）；扩充 `writeAtomic()`（隐秘临时文件就地写入后操作系统级原子重命名覆盖，杜绝半途损坏）；
+     - 测试用例 `cap/test/test_fs_extensions.cp`：临时文件生成与原子写入读回全部 100% PASS。
+  4. **权威手册 `cp_ref.md` 同步更新**：
+     - 第 12.1 节总表中更新 `cap:which` 与 `cap:ws` 状态为已全面实装；
+     - 新增第 12.15 节 `cap:which`、第 12.16 节 `cap:ws` 与第 12.17 节 `cap:fs` 增强能力的详细技术契约与完整代码示例。
+  5. **全量回归测试 100% PASS**：
+     - 包含 `test_which.cp`, `test_ws.cp`, `test_fs_extensions.cp`, `test_glob.cp`, `test_semver.cp`, `test_config.cp`, `test_router.cp`, `test_http_features.cp`, `test_path_url.cp`, `test_encoding.cp`, `test_sync_primitives.cp`, `test_io_streams.cp`, `test_zero_copy_json.cp` 全部 13 套端到端测试均保持 100% 绿灯，0 错误。
+
+## 阶段里程碑 Git 提交 6
+
+- **提交说明**：`feat(stdlib): port which locator, websocket framing, and atomic fs operations from bun`
+- **变更范围**：
+  1. `lib/which/` 及 `lib/which.cp`（`cap:which`）；
+  2. `lib/ws/` 及 `lib/ws.cp`（`cap:ws`）；
+  3. `lib/fs.cp`：新增 `tmpDir`, `tmpPath`, `writeAtomic`；
+  4. `cap/test/test_which.cp`, `cap/test/test_ws.cp`, `cap/test/test_fs_extensions.cp`；
+  5. `cp_ref.md`：第 12.1、12.15、12.16、12.17 节全面更新设计规范与示例；
+  6. `SESSION.md` / `CHANGELOG.md` / `DEVLOG.md`：当日热日志同步更新。

@@ -5864,6 +5864,8 @@ export class SocketContext<Handler> {
 | `cap:semver`      | Semver 2.0 版本解析、全语义比较排序与范围匹配（`^`, `~`, `>=`, `<=`, `-`, `||`, `*`） | **已全面实装** |
 | `cap:dotenv`      | 环境变量 `.env` 极速加载器（支持单/双引号、转义符、内联注释、`export` 语法） | **已全面实装** |
 | `cap:ini`         | 工业级 INI 配置文件解析器（多 Section 划分、全局/分段键值提取、默认值回退） | **已全面实装** |
+| `cap:which`       | 跨平台可执行二进制定位器（支持 `PATH` 环境变量遍历、相对/绝对路径解析与执行权限校验） | **已全面实装** |
+| `cap:ws`          | RFC 6455 现代 WebSocket 协议帧处理（Opcode、打包分片、4 字节极速异或掩码、控制帧） | **已全面实装** |
 | `cap:mem`         | `Arena`, `SharedTensor`, 全局共享堆, 原子引用计数                      | **已全面实装** |
 | `cap:task`        | `spawn`, `spawn_cpu`, `join`, `Task.all`, `Task.race`                  | **已全面实装** |
 | `cap:actor`       | `@spawn`, `@receive`, `@reply`, `PID`, 信箱通信                        | **已全面实装** |
@@ -6603,7 +6605,114 @@ const workers = conf.getOr("server", "workers", "4");// "4"
 
 ---
 
-### 12.15 生态演进与路线图（Roadmap）
+### 12.15 跨平台可执行程序定位器（`cap:which`） 【已实装】
+
+吸收自 Bun 的 `which` 高速寻径算法，`cap:which` 提供了工业级跨平台可执行二进制文件定位与可执行权限检测支持：
+
+#### 12.15.1 核心特性
+
+- **跨平台多模式解析**：
+  - 绝对路径检测：若为绝对路径，直接校验目标文件是否存在且具备可执行权限；
+  - 相对路径检测：若路径包含 `/` 或 `\`，根据指定的 `cwd` 目录就地拼接并校验；
+  - `PATH` 环境变量多段解析：按操作系统分隔符（POSIX 为 `:`，Windows 为 `;`）分词并按优先级遍历；
+- **Windows 扩展名智能推导**：未显式提供后缀时自动轮询 `.exe`、`.cmd`、`.bat`；
+- **零动态堆分配**：支持传入栈缓冲区 `out_buf: []u8`，就地完成路径拼接与切片返回。
+
+#### 12.15.2 完整使用示例
+
+```typescript
+import { which, isExecutable, WhichOptions } from "cap:which";
+
+// 1. 查找系统二进制程序（自动遍历 PATH）
+var buf: [512]u8 = undefined;
+const sh_path = which("sh", .{}, &buf);
+if (sh_path) |p| {
+    // 命中 "/bin/sh" 或 "/usr/bin/sh"
+    const can_run = isExecutable(p); // true
+}
+
+// 2. 自定义 PATH 与工作目录
+var custom_buf: [512]u8 = undefined;
+const node_path = which("node", .{
+    .path = "/opt/homebrew/bin:/usr/local/bin",
+    .cwd = "/app/server",
+}, &custom_buf);
+```
+
+---
+
+### 12.16 RFC 6455 现代 WebSocket 协议帧处理（`cap:ws`） 【已实装】
+
+吸收自 Bun 的底层网络帧模型，`cap:ws` 提供了纯 CP 编写的高性能 WebSocket 帧协议编解码、掩码变换与控制帧构建库：
+
+#### 12.16.1 核心组件
+
+- **`Opcode` 枚举**：完备支持 `Continue (0x0)`、`Text (0x1)`、`Binary (0x2)`、`Close (0x8)`、`Ping (0x9)`、`Pong (0xA)`，提供 `isControl()` 与 `isData()`；
+- **`CloseCode` 状态码**：标准 RFC 6455 关停状态码（`NormalClosure=1000`、`GoingAway=1001`、`ProtocolError=1002` 等）；
+- **`FrameHeader`**：支持 7 位基础载荷长度、16 位中型载荷扩展与 64 位超大型载荷扩展，完整支持客户端 4 字节掩码 `mask_key` 编解码；
+- **`Mask.apply(data, key)`**：RFC 6455 标准 4 字节 XOR 掩码编解码；
+- **`FrameBuilder`**：提供 `buildText()`、`buildBinary()`、`buildPing()`、`buildPong()` 与 `buildClose()`。
+
+#### 12.16.2 完整使用示例
+
+```typescript
+import { Opcode, CloseCode, FrameHeader, FrameBuilder, Mask } from "cap:ws";
+
+// 1. 构建带掩码的客户端文本帧
+var frame_buf: [256]u8 = undefined;
+const mask_key = [_]u8{ 0x12, 0x34, 0x56, 0x78 };
+const frame_len = try FrameBuilder.buildText(&frame_buf, "Hello WebSocket!", mask_key);
+
+// 2. 解码服务端收到的数据帧头部
+const header = try FrameHeader.decode(frame_buf[0..frame_len]);
+const is_text = header.opcode == Opcode.Text; // true
+const is_masked = header.masked;              // true
+const payload_len = header.payload_len;       // 16
+
+// 3. 解除掩码还原数据
+var payload: [64]u8 = [0 as u8; 64];
+@memcpy(payload[0..payload_len], frame_buf[header.header_len .. frame_len]);
+Mask.apply(payload[0..payload_len], header.mask_key);
+// payload 即为原始字符串 "Hello WebSocket!"
+
+// 4. 构建心跳 Ping 与优雅断开 Close 帧
+var ping_buf: [64]u8 = undefined;
+const ping_len = try FrameBuilder.buildPing(&ping_buf, "heartbeat_ping", null);
+
+var close_buf: [64]u8 = undefined;
+const close_len = try FrameBuilder.buildClose(&close_buf, .NormalClosure, "server shutting down", null);
+```
+
+---
+
+### 12.17 文件系统工业级增强能力（`cap:fs` 扩充） 【已实装】
+
+吸收自 Bun 的系统文件高可用与零拷贝设计，`cap:fs` 补充了工业级临时文件管理与原子写入能力：
+
+- **`tmpDir()`**：跨平台临时目录自动嗅探（按序解析 `TMPDIR`, `TEMP`, `TMP`，POSIX 回退 `/tmp`，Windows 回退 `C:\Temp`）；
+- **`tmpPath(prefix, suffix, dest_buf)`**：结合单调时钟纳秒时间戳与高并发原子递增计数器，生成绝对无冲突的临时文件路径；
+- **`writeAtomic(dest_path, content)`**：先向同目录下隐秘临时文件写入全部数据，完成后通过操作系统级原子重命名（Atomic Rename）覆盖目标文件，杜绝写入中断导致的文件数据损毁。
+
+#### 12.17.1 完整使用示例
+
+```typescript
+import { tmpDir, tmpPath, writeAtomic, readFileSync, remove } from "cap:fs";
+
+// 1. 嗅探系统临时目录并生成唯一临时文件路径
+const temp_dir = tmpDir(); // "/tmp"
+var path_buf: [512]u8 = undefined;
+const unique_file = tmpPath("agent_task", ".json", &path_buf);
+
+// 2. 崩溃安全的原子写入（避免写入半途断电破坏旧文件）
+writeAtomic("/data/app/config.json", "{\"status\": \"active\"}");
+
+// 3. 读取已就绪的配置并清理
+const data = readFileSync("/data/app/config.json");
+```
+
+---
+
+### 12.18 生态演进与路线图（Roadmap）
 
 ```mermaid
 timeline

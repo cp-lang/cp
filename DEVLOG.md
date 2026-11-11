@@ -2,6 +2,35 @@
 
 > 历史研发日志已完整归档至 [DEVLOG_H.md](file:///data/dev/cp/DEVLOG_H.md)。本项目采用冷热分离架构，本文件仅保留当日活跃记录。
 
+## 2026-11-12: 落地跨平台可执行程序定位 (cap:which)、WebSocket 协议帧 (cap:ws) 与文件系统原子写入 (5.1/5.2/5.3)
+
+- **任务背景与工程目标**：
+  - 依照指示持续主动吸收 Bun 资产，打通工业级系统应用与高频实时通信的核心标准库原语；
+  - 完整落地标准库第五阶段 3 大核心领域模块：
+    1. 阶段 5.1：跨平台可执行二进制定位器（`cap:which`，移植自 `/data/dev/bun/src/which/which.cp`）；
+    2. 阶段 5.2：RFC 6455 现代 WebSocket 帧协议处理（`cap:ws`，移植自 `/data/dev/bun/src/http/websocket.cp`）；
+    3. 阶段 5.3：文件系统工业级高可用增强（`cap:fs` 中的 `tmpDir()`, `tmpPath()`, `writeAtomic()`）。
+  - 对齐设计手册 `cp_ref.md`，保障全量回归测试保持 100% 绿灯并执行 Git 资产保存。
+
+- **核心技术挑战与根因剖析**：
+  1. **跨平台二进制执行权限检查 API 适配**：
+     - 在 Zig 0.17 中，原 `std.posix.access` 与 `std.posix.getenv` 均已被移除或重构至底层 C 库；
+     - **解决方案**：统一采用标准 C ABI 直通绑定 `std.c.access(path, 1)`（`X_OK` = 1），在 POSIX 平台精准检查文件的用户/组执行权限位；
+     - 在 Windows 平台，自动检测 `.exe`、`.cmd`、`.bat` 扩展名并验证文件物理存在性；环境变量直接调用 `std.c.getenv("PATH")`，零开销跨平台。
+  2. **WebSocket 掩码内存对齐崩溃防御**：
+     - 在初始设计中，为了利用 32 位整型单次异或 4 字节，对 `data.ptr` 尝试了 `@alignCast` 转为 `[*]u32`；
+     - 但由于 WebSocket 数据载荷紧随变长 Header（例如 2 字节或 6 字节），其指针地址可能仅按 2 字节对齐，强制转为 4 字节指针在 Debug 模式下直接触发 `panic: incorrect alignment`；
+     - **修复**：采用字节级跨度结合 `key[i % 4]` 轮询异或，避免一切未对齐指针强转，且现代 LLVM 后端可自动对连续内存循环进行 SIMD 向量化加速。
+  3. **未初始化变量（Undefined）静态分析与 `@memcpy` 冲突防范**：
+     - 在 `cpc` 编译器的数据流静态分析中，若变量以 `var payload: [64]u8 = undefined;` 声明，随后在切片表达式 `payload[...]` 中作为接收端传递给 `@memcpy`，会被判定为“读取未初始化变量”并拦截；
+     - **解决方案**：对需要传递给外部填充的定长栈内存，采用安全的零值初始化 `[0 as u8; 64]`，彻底避免触发未初始化告警。
+
+- **效果验证**：
+  - `cap/test/test_which.cp`：1/1 PASS（`which("sh")` 命中 `/bin/sh`，自定义 PATH 与权限检查通过）；
+  - `cap/test/test_ws.cp`：4/4 PASS（Opcode 分类、FrameHeader 编码解码、FrameBuilder 与掩码往返、Ping/Close 控制帧）；
+  - `cap/test/test_fs_extensions.cp`：1/1 PASS（`tmpDir`、`tmpPath` 唯一性、`writeAtomic` 崩溃安全原子写入读回）；
+  - 全套 13 大标准库回归测试全部 100% 绿色通过。
+
 ## 2026-11-12: 落地 Unix Glob 模式匹配、Semver 2.0 语义版本/范围匹配与 DotEnv/INI 解析器 (4.1/4.2/4.3)
 
 - **任务背景与工程目标**：

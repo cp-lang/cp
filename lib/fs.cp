@@ -2,6 +2,8 @@
  * CP File System SDK (cap:fs)
  * 使用 @is_beam 进行显式双模分支逻辑重构
  */
+const std = @import("std");
+const builtin = @import("builtin");
 
 import { SystemAction } from "cap:beam";
 
@@ -116,3 +118,42 @@ export fn statSize(path: string): i32 {
 export fn isDirectory(path: string): bool {
     return @fs_is_dir(path);
 }
+
+var tmp_counter: std.atomic.Value(u64) = std.atomic.Value(u64).init(1);
+
+pub const FileSystem = struct {
+    pub fn tmpDir(): []const u8 {
+        if (std.c.getenv("TMPDIR")) |p| return std.mem.span(p);
+        if (std.c.getenv("TEMP")) |p| return std.mem.span(p);
+        if (std.c.getenv("TMP")) |p| return std.mem.span(p);
+        if (builtin.os.tag == .windows) return "C:\\Temp";
+        return "/tmp";
+    }
+
+    pub fn tmpPath(prefix: []const u8, suffix: []const u8, dest: []u8): []const u8 {
+        const dir = FileSystem.tmpDir();
+        const id = tmp_counter.fetchAdd(1, .monotonic);
+        var seed: u64 = id;
+        if (builtin.os.tag == .linux) {
+            var ts: std.os.linux.timespec = undefined;
+            _ = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+            seed ^= @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+        }
+        return std.fmt.bufPrint(dest, "{s}/{s}_{x}{s}", .{ dir, prefix, seed, suffix }) catch "";
+    }
+
+    pub fn writeAtomic(dest: string, content: string): void {
+        var tmp_buf: [1024]u8 = undefined;
+        const dir = std.fs.path.dirname(dest) orelse FileSystem.tmpDir();
+        const base = std.fs.path.basename(dest);
+        const id = tmp_counter.fetchAdd(1, .monotonic);
+        const tmp_name = std.fmt.bufPrint(&tmp_buf, "{s}/.{s}.tmp_{x}", .{ dir, base, id }) catch return;
+
+        writeFileSync(tmp_name, content);
+        rename(tmp_name, dest);
+    }
+};
+
+pub const tmpDir = FileSystem.tmpDir;
+pub const tmpPath = FileSystem.tmpPath;
+pub const writeAtomic = FileSystem.writeAtomic;
