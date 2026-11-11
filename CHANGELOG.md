@@ -2,6 +2,25 @@
 
 > 历史变更日志已完整归档至 [CHANGELOG_H.md](file:///data/dev/cp/CHANGELOG_H.md)。本项目采用冷热分离架构，本文件仅保留当日活跃记录。
 
+## [2026-11-12] - 编译器核心 Codegen 模块化分拆与 Trait 作用域强化
+
+### 架构演进 (Changed)
+- [`cpc/src/codegen/`](file:///data/dev/cp/cpc/src/codegen/):
+  - 彻底废除 1.7 万行巨石单体文件 `codegen.rs`，重构分拆为 8 个高内聚子模块：
+    - `mod.rs`（3,398 行）：上下文派发中心、`Codegen` 结构体、代码缩进派发与模块级顶层项（Class/Trait/Enum/Impl/Interface/Reflection）；
+    - `prelude.rs`（614 行）：`ModuleFeatures` AST 特性扫描与运行时环境感知；
+    - `types.rs`（2,601 行）：类型推导、Zig 原生类型映射与常量泛型单态化；
+    - `borrow.rs`（960 行）：NLL 借用检查与跨作用域冲突拦截；
+    - `pattern.rs`（1,587 行）：模式匹配、穷尽性分析与 `switch` 展开；
+    - `actor.rs`（1,577 行）：CPS 状态机切分、异步闭包变量捕获与 Actor 协程逻辑；
+    - `stmt.rs`（2,114 行）：控制流语句生成（`let`、`if`、`while`、`for`、`return`、`defer`、`errdefer`）；
+    - `expr.rs`（4,332 行）：表达式求值、运算符重载、方法调用与内联闭包。
+  - 单文件规模降至 1,000 ~ 4,000 行，消除跨 800 行分段读取开销，全面赋能多子智能体并行开发。
+
+### 优化与修复 (Fixed)
+- [`cpc/src/codegen/mod.rs`](file:///data/dev/cp/cpc/src/codegen/mod.rs):
+  - **Trait 虚表局部作用域强化**：在 Trait 与 Interface 声明生成中，将虚表指针类型升级为 `vtable: *const @This().VTable`，彻底杜绝与业务代码中的顶层 `class VTable` 发生 Zig 符号歧义。
+
 ## [2026-11-12] - 方案 A 工业级统一 I/O 流体系与 C 变量外部绑定支持
 
 ### 新特性 (Added)

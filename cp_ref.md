@@ -8653,6 +8653,18 @@ flowchart TD
      ```
 3. **稳定 C-ABI 导出与动态插件热加载 (Dynamic Plugins)**：
    - 支持 `@export("c")` 规范与 `.so` / `.dylib` 运行时安全动态加载，为 Agent 容器的热插拔插件提供稳定接口。
+4. **编译器核心代码生成器模块化架构 (Modular Codegen Architecture) 【已全面实装】**：
+   - 彻底重构拆解 1.7 万行巨石单体文件，全面升级为 8 个高内聚职责子模块：
+     - `codegen/mod.rs`：上下文环境、`Codegen` 核心生命周期、缩进派发与模块级顶层项生成；
+     - `codegen/prelude.rs`：`ModuleFeatures` AST 特性扫描与运行时环境感知；
+     - `codegen/types.rs`：类型推导、Zig 原生类型映射与常量泛型单态化；
+     - `codegen/borrow.rs`：NLL 借用检查与跨作用域冲突拦截；
+     - `codegen/pattern.rs`：模式匹配、穷尽性分析与 `switch` 展开；
+     - `codegen/actor.rs`：CPS 状态机切分、异步闭包变量捕获与 Actor 协程逻辑；
+     - `codegen/stmt.rs`：控制流语句生成（`let`、`if`、`while`、`for`、`return`、`defer`、`errdefer`）；
+     - `codegen/expr.rs`：表达式求值、运算符重载、方法调用与内联闭包。
+   - **多子智能体并行维护**：单文件规模严格控制在 1,000 ~ 4,000 行以内，彻底消除了跨 800 行分段读取往返延迟，具备极高并发迭代能力；
+   - **作用域防护增强**：Trait 虚函数表严格限定为局部 `@This().VTable`，杜绝用户代码顶层同名 `VTable` 符号引起的作用域歧义冲突。
 
 ---
 

@@ -87,9 +87,9 @@ fn compile_file(
     if lib {
         let code = fs::read_to_string(input)?;
         let mut parser = CPParser::new(&code);
-        let parsed_module = parser.parse_module().map_err(|e| {
-            anyhow::anyhow!("{}", e.render_all(Some(&code), Some(input)))
-        })?;
+        let parsed_module = parser
+            .parse_module()
+            .map_err(|e| anyhow::anyhow!("{}", e.render_all(Some(&code), Some(input))))?;
         all_items = parsed_module.body;
     } else {
         resolve_imports(input, include, &mut all_items, &mut processed_sources)?;

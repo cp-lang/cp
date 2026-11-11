@@ -45,3 +45,38 @@
   5. `cpc_dev/src/*`：Write-Through 全量同步；
   6. `cp_ref.md`：第 12.3 节与第 20.6 节同步更新标准流体系契约；
   7. `SESSION.md` / `CHANGELOG.md` / `DEVLOG.md`：记录 2026-11-12 热日志。
+
+## 指令 2：合并 codegen/ 模块化至 cpc 正式版本，同步更新 cp_ref.md 等四线文档
+
+- **用户需求**：
+  1. 将沙盒 `cpc_dev` 中验证通过的 `codegen/` 模块化分拆合并至正式编译器目录 `cpc/src`；
+  2. 同步更新最高语言规范 `cp_ref.md`、`SESSION.md`、`CHANGELOG.md`、`DEVLOG.md` 等四线文档；
+  3. 保持与 Bun AGY 的后台常驻双向协同。
+
+- **执行结果**：
+  1. **无损合流与正式版本构建**：
+     - 将原 1.7 万行巨石 `cpc/src/codegen.rs` 彻底废除，替换为 8 个子模块构成的目录 `cpc/src/codegen/`（`mod.rs`, `prelude.rs`, `types.rs`, `borrow.rs`, `pattern.rs`, `actor.rs`, `stmt.rs`, `expr.rs`）；
+     - 经过 `cargo check` 零错误验证；
+     - 调用原子脚本 `bash scripts/sync_cpc.sh` 完成秒级正式构建与发布部署至 `/data/dev/cp/cap/bin/cpc`。
+  2. **Trait 局部作用域防护修复**：
+     - 在 `cpc/src/codegen/mod.rs` 中，将 Trait 与 Interface 的虚函数表指针类型从 `vtable: *const VTable` 升级为精确类型作用域 `vtable: *const @This().VTable`，彻底杜绝与用户顶层 `class VTable` 产生的 Zig 作用域符号歧义。
+  3. **正式回归测试全量通过**：
+     - `test_io_streams.cp`（6/6 PASS）；
+     - `test_extern_var.cp`（100% PASS）；
+     - `test_const_generics.cp`（2/2 PASS）；
+     - `test_mutex_atomic.cp`（7/7 PASS）；
+     - `test_c_ffi_pointers.cp`（11/11 PASS）；
+     - `test_struct_let.cp`（100% PASS）；
+     - `test_prelude_t_shadowing.cp`（100% PASS）。
+  4. **四线演进文档全量对齐**：
+     - `cp_ref.md`：第 20.4 节新增第 4 款《编译器核心代码生成器模块化架构》；
+     - `SESSION.md` / `CHANGELOG.md` / `DEVLOG.md`：完成当日热数据归档。
+
+## 阶段里程碑 Git 提交 2
+
+- **提交说明**：`refactor(cpc): modularize codegen into 8 domain submodules and scope trait vtable`
+- **变更范围**：
+  1. `cpc/src/codegen/`：拆分为 `mod.rs`, `prelude.rs`, `types.rs`, `borrow.rs`, `pattern.rs`, `actor.rs`, `stmt.rs`, `expr.rs`；
+  2. `cpc/src/codegen.rs`：删除旧单体文件；
+  3. `cp_ref.md`：第 20.4 节记录代码生成器模块化演进与作用域防护；
+  4. `SESSION.md` / `CHANGELOG.md` / `DEVLOG.md`：当日热日志同步更新。

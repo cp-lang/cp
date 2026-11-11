@@ -4753,10 +4753,13 @@ impl Analyzer {
                     let elem_name = id.sym[idx + 1..].trim_start_matches("const ").trim();
                     if let Ok(target_len) = len_str.parse::<usize>() {
                         if target_len == *n {
-                            let target_elem = crate::codegen::Codegen::type_from_name_static(elem_name);
+                            let target_elem =
+                                crate::codegen::Codegen::type_from_name_static(elem_name);
                             let elem_expr = match init_expr {
                                 Some(Expr::ArrayRepeat(val, _)) => Some(&**val),
-                                Some(Expr::Array(elements)) if !elements.is_empty() => Some(&elements[0]),
+                                Some(Expr::Array(elements)) if !elements.is_empty() => {
+                                    Some(&elements[0])
+                                }
                                 _ => None,
                             };
                             if **elem == target_elem
@@ -4776,10 +4779,9 @@ impl Analyzer {
                     let elem_name = id.sym[idx + 1..].trim_start_matches("const ").trim();
                     if let Ok(src_len) = len_str.parse::<usize>() {
                         if src_len == *n {
-                            let target_elem = crate::codegen::Codegen::type_from_name_static(elem_name);
-                            if **elem == target_elem
-                                || self.can_coerce(elem, &target_elem, None)
-                            {
+                            let target_elem =
+                                crate::codegen::Codegen::type_from_name_static(elem_name);
+                            if **elem == target_elem || self.can_coerce(elem, &target_elem, None) {
                                 return true;
                             }
                         }

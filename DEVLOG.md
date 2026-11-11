@@ -2,6 +2,49 @@
 
 > 历史研发日志已完整归档至 [DEVLOG_H.md](file:///data/dev/cp/DEVLOG_H.md)。本项目采用冷热分离架构，本文件仅保留当日活跃记录。
 
+## 2026-11-12: 落地编译器核心代码生成器 8 大领域子模块重构与 Trait 作用域强化
+
+- **任务背景与工程动因**：
+  - 编译器代码生成器 `codegen.rs` 代码量膨胀至 17,081 行，单体巨石文件导致工具往返读取 Token 消耗巨大，并阻碍多智能体并行开发与细粒度增量维护；
+  - 依据 GEMINI.md 架构规划，全面将 `codegen.rs` 按职责拆解为 8 个子模块，单文件控制在 1,000 ~ 4,000 行。
+
+- **模块拆解拓扑与方法映射设计**：
+  1. `cpc/src/codegen/mod.rs`（3,398 行）：
+     - 宿主 `Codegen` 结构体，将原私有字段开放为 `pub(crate)` 供子模块安全访问；
+     - `generate_module` 顶层总入口与顶级 AST 项生成（`generate_trait`, `generate_impl`, `generate_enum`, `generate_interface`, `generate_class`, `generate_reflection_tables`）；
+     - 文本发射底层辅助方法（`indent`, `dedent`, `writeln`, `write_to_case`）与独立字符处理函数（`strip_redundant_comptime`, `lower_struct_body`）。
+  2. `cpc/src/codegen/prelude.rs`（614 行）：
+     - `ModuleFeatures` 结构体及 `scan`、`scan_decl`、`scan_stmt`、`scan_expr` 等全套语法特性静态扫描器。
+  3. `cpc/src/codegen/types.rs`（2,601 行）：
+     - 类型转换与映射核心：`map_type`、`map_type_name`、`infer_zig_type`、`infer_cp_type`、`infer_cp_type_with_mock`；
+     - 泛型单态化参数提取：`split_generic_args_str`、`map_generic_args_str`；
+     - 错误类型映射与兼容校验：`map_error_type`、`verify_error_type_compatibility`；
+     - 方法与字段查找：`lookup_method`、`is_class_field`。
+  4. `cpc/src/codegen/borrow.rs`（960 行）：
+     - 生命周期与活跃度分析：`compute_last_uses_block`、`compute_last_uses_stmt`；
+     - 借用检查与冲突拦截：`check_active_borrows_before_move`、`check_borrow_conflict`、`check_mutation_allowed`、`check_read_allowed`、`extract_expr_borrow_info`。
+  5. `cpc/src/codegen/pattern.rs`（1,587 行）：
+     - 模式匹配状态机：`generate_switch`、`generate_pattern_match`、`format_simple_pat`；
+     - 分支穷尽性校验：`check_switch_exhaustiveness`；
+     - 转义与字符串辅助：`escape_zig_string`、`escape_zig_fmt_string`。
+  6. `cpc/src/codegen/actor.rs`（1,577 行）：
+     - 函数定义与逻辑生成：`generate_function`、`generate_function_logic`、`generate_function_decorated`；
+     - 异步与 Actor CPS 状态机切分：`emit_current_case`、`next_state`、`extract_locals_simple`、`extract_local_vars_to_str`。
+  7. `cpc/src/codegen/stmt.rs`（2,114 行）：
+     - 控制流与语句派发：`generate_stmt`（变量声明、赋值、`if`、`while`、`for`、`return`、`defer`、`errdefer`、`unsafe` 块）。
+  8. `cpc/src/codegen/expr.rs`（4,332 行）：
+     - 表达式生成：`generate_expr`（字面量、操作符、函数调用、构造、管道、HTTP 路由生成）。
+
+- **关键技术发现与边界缺陷修复**：
+  - **Trait 虚函数表与同名 Class 作用域冲突**：
+    - `test_c_ffi_pointers.cp` 定义了 `class VTable { on_data: ... }`；
+    - 当编译包含 Trait 时，Zig 代码生成为 `pub const Reader = struct { ptr: *anyopaque, vtable: *const VTable, pub const VTable = struct { ... } };`；
+    - Zig 编译器在解析 `vtable: *const VTable` 时因同名导致 `ambiguous reference` 编译崩溃；
+    - **修复**：将 Trait 和 Interface 生成中的虚表指针类型升级为 `vtable: *const @This().VTable`，利用 Zig `@This()` 精确限定为当前 Trait 内部的 `VTable`，彻底杜绝外层作用域符号遮蔽。
+
+- **效果验证**：
+  - 编译器代码库完成编译与秒级发布，全套回归套件（`test_io_streams`、`test_extern_var`、`test_const_generics`、`test_mutex_atomic`、`test_c_ffi_pointers`、`test_struct_let`、`test_prelude_t_shadowing`）全量 **100% PASS**。
+
 ## 2026-11-12: 攻坚标准库方案 A（工业级统一 I/O 流体系）与 extern const 编译器支持
 
 - **任务背景与工程目标**：

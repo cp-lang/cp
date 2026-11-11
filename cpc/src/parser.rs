@@ -817,7 +817,10 @@ impl<'a> Parser<'a> {
                                 self.bump()?;
                             }
                         }
-                    } else if matches!(self.peek(), Some(Token::Const) | Some(Token::Var) | Some(Token::Let)) {
+                    } else if matches!(
+                        self.peek(),
+                        Some(Token::Const) | Some(Token::Var) | Some(Token::Let)
+                    ) {
                         let mut v = self.parse_var_decl()?;
                         v.is_c = true;
                         v.is_extern = true;
@@ -828,7 +831,10 @@ impl<'a> Parser<'a> {
                     } else if matches!(self.peek(), Some(Token::Ident(s)) if s == "extern")
                         && matches!(
                             self.peek_next(),
-                            Some(Token::Const) | Some(Token::Var) | Some(Token::Let) | Some(Token::ThreadLocal)
+                            Some(Token::Const)
+                                | Some(Token::Var)
+                                | Some(Token::Let)
+                                | Some(Token::ThreadLocal)
                         )
                     {
                         self.bump()?; // consume 'extern'
@@ -1006,7 +1012,10 @@ impl<'a> Parser<'a> {
                 if id == "extern"
                     && matches!(
                         self.peek_next(),
-                        Some(Token::Const) | Some(Token::Var) | Some(Token::Let) | Some(Token::ThreadLocal)
+                        Some(Token::Const)
+                            | Some(Token::Var)
+                            | Some(Token::Let)
+                            | Some(Token::ThreadLocal)
                     )
                 {
                     self.bump()?; // consume 'extern'
@@ -3151,7 +3160,10 @@ impl<'a> Parser<'a> {
                     }
                     if matches!(
                         clone.peek(),
-                        Some(Token::Let) | Some(Token::Const) | Some(Token::Var) | Some(Token::ThreadLocal)
+                        Some(Token::Let)
+                            | Some(Token::Const)
+                            | Some(Token::Var)
+                            | Some(Token::ThreadLocal)
                     ) {
                         let meta_list = self.parse_meta_list()?;
                         if is_extern {
