@@ -5851,7 +5851,7 @@ export class SocketContext<Handler> {
 | 标准库协议通道    | 核心导出功能                                                           | 状态           |
 | :---------------- | :--------------------------------------------------------------------- | :------------- |
 | `cap:collections` | `VecDeque`, `BinaryHeap`, `BTreeMap`, `BTreeSet`, `HashMap`, `HashSet` | **已全面实装** |
-| `cap:io`          | `print`, `print_err`, `readLine`, 格式化输出流                         | **已全面实装** |
+| `cap:io`          | `Reader`, `Writer`, `Closer`, `Seeker`, `BufferReader`, `BufferWriter`, `BufferedReader`, `BufferedWriter`, `copyStream`, `print`, `console` | **已全面实装** |
 | `cap:mem`         | `Arena`, `SharedTensor`, 全局共享堆, 原子引用计数                      | **已全面实装** |
 | `cap:task`        | `spawn`, `spawn_cpu`, `join`, `Task.all`, `Task.race`                  | **已全面实装** |
 | `cap:actor`       | `@spawn`, `@receive`, `@reply`, `PID`, 信箱通信                        | **已全面实装** |
@@ -6017,7 +6017,92 @@ expect_eq(set.has(100), true);
 
 ---
 
-### 12.3 生态演进与路线图（Roadmap）
+### 12.3 统一高性能 I/O 流体系（`cap:io`）与 Trait 契约 【已实装】
+
+CP 语言在 `cap:io` 中构建了对标 Go `io` 与 Rust `std::io` 的工业级、零拷贝、类型安全的流式 I/O 基础设施。通过强类型 Trait 契约解耦底层数据源（操作系统文件、TCP/UDP 套接字、内存切片、终端）与数据处理管道。
+
+#### 12.3.1 核心 Trait 契约
+
+```typescript
+import { Reader, Writer, Closer, Seeker, SeekOrigin, IOError } from "cap:io";
+
+// 统一读取器契约：传入目标缓冲区可变切片，返回实际读取字节数，0 表示 EOF
+export trait Reader {
+    fn read(mut _, *buf: []u8): usize!;
+}
+
+// 统一写入器契约：传入只读数据切片，返回实际写入字节数
+export trait Writer {
+    fn write(mut _, buf: []const u8): usize!;
+}
+
+// 统一资源关闭契约
+export trait Closer {
+    fn close(mut _): void;
+}
+
+// 统一流寻址契约
+export trait Seeker {
+    fn seek(mut _, offset: i64, origin: SeekOrigin): u64!;
+}
+```
+
+#### 12.3.2 内存切片与缓冲流
+
+- **`BufferReader`**：基于只读字节切片 `[]const u8` 的零拷贝内存读取器，无需堆分配，原生实现 `Reader` 与 `Seeker`。
+  ```typescript
+  import { BufferReader, SeekOrigin } from "cap:io";
+
+  let reader = new BufferReader("Hello CP World");
+  let buf: [5]u8 = [0 as u8; 5];
+  let n = reader.read(buf[0..5])?; // n = 5, buf 为 "Hello"
+  let new_pos = reader.seek(0, SeekOrigin.Start)?; // 重新寻址至起始
+  ```
+
+- **`BufferWriter`**：4096 字节定长安全写入器，原生实现 `Writer`，支持 `.bytes()` 切片提取与 `.reset()` 重置。
+  ```typescript
+  import { BufferWriter } from "cap:io";
+
+  let writer = new BufferWriter();
+  writer.write("CP Native Data")?;
+  let data = writer.bytes(); // []const u8 切片
+  ```
+
+- **`BufferedReader<R: Reader>`**：带 256 字节内部缓存的高性能包装流，支持 `.readByte()` 单字节速读与批量块填充，消除高频细粒度系统调用。
+  ```typescript
+  import { BufferReader, BufferedReader } from "cap:io";
+
+  let base_reader = new BufferReader("Stream Payload");
+  let buffered = new BufferedReader<BufferReader>(base_reader);
+  let b = buffered.readByte()?; // 'S'
+  ```
+
+- **`BufferedWriter<W: Writer>`**：带 256 字节聚合缓存的高性能包装流，支持满缓冲自动 flush 与手动 `.flush()`。
+  ```typescript
+  import { BufferWriter, BufferedWriter } from "cap:io";
+
+  let base_writer = new BufferWriter();
+  let buffered = new BufferedWriter<BufferWriter>(base_writer);
+  buffered.write("Chunk 1")?;
+  buffered.flush()?;
+  ```
+
+#### 12.3.3 泛型流管道操作
+
+- **`copyStream<R: Reader, W: Writer>(mut r: R, mut w: W): usize!`**：在读取器与写入器之间执行分块流式全量搬运直至 EOF，返回总传输字节数。
+- **`copyN<R: Reader, W: Writer>(mut r: R, mut w: W, limit: usize): usize!`**：精确搬运 `limit` 字节。
+
+```typescript
+import { BufferReader, BufferWriter, copyStream } from "cap:io";
+
+let src = new BufferReader("Pipelined Data Across Streams");
+let dst = new BufferWriter();
+let copied = copyStream(src, dst)?; // 搬运 29 字节
+```
+
+---
+
+### 12.4 生态演进与路线图（Roadmap）
 
 ```mermaid
 timeline
@@ -8609,8 +8694,8 @@ flowchart TD
 
 #### 20.6 生产级零拷贝标准库基石 (Production Standard Library Ecosystem)
 
-##### 1. 统一零拷贝流抽象 (`Reader` / `Writer` / `Closer` / `Seeker`)
-- 文件系统、TCP/UDP 套接字、TLS 安全连接、内存 Buffer 统一实现标准流契约，数据流转零多余深拷贝。
+##### 1. 统一零拷贝流抽象 (`Reader` / `Writer` / `Closer` / `Seeker`) 【已全面实装】
+- 详见第 12.3 节《统一高性能 I/O 流体系（`cap:io`）与 Trait 契约》。在 `cap:io` 中已完备落地 `Reader`、`Writer`、`Closer`、`Seeker` 四大核心契约，并配套提供 `BufferReader`、`BufferWriter`、`BufferedReader`、`BufferedWriter` 与 `copyStream` 泛型管道。文件系统、TCP/UDP 套接字、TLS 安全连接与内存 Buffer 统一实现标准流契约，数据流转零多余深拷贝。
 
 ##### 2. 高性能编译期序列化框架 (Zero-Copy Serde)
 - 对标 `simdjson`，实现零拷贝编译期 JSON / 结构化二进制序列化与反序列化，从原始字节切片直接零成本映射至强类型数据容器。

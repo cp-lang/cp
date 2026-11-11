@@ -817,6 +817,28 @@ impl<'a> Parser<'a> {
                                 self.bump()?;
                             }
                         }
+                    } else if matches!(self.peek(), Some(Token::Const) | Some(Token::Var) | Some(Token::Let)) {
+                        let mut v = self.parse_var_decl()?;
+                        v.is_c = true;
+                        v.is_extern = true;
+                        if is_pub {
+                            v.is_pub = true;
+                        }
+                        items.push(ModuleItem::Stmt(Stmt::Var(v)));
+                    } else if matches!(self.peek(), Some(Token::Ident(s)) if s == "extern")
+                        && matches!(
+                            self.peek_next(),
+                            Some(Token::Const) | Some(Token::Var) | Some(Token::Let) | Some(Token::ThreadLocal)
+                        )
+                    {
+                        self.bump()?; // consume 'extern'
+                        let mut v = self.parse_var_decl()?;
+                        v.is_c = true;
+                        v.is_extern = true;
+                        if is_pub {
+                            v.is_pub = true;
+                        }
+                        items.push(ModuleItem::Stmt(Stmt::Var(v)));
                     } else {
                         let mut f = self.parse_function()?;
                         if is_pub {
@@ -882,15 +904,24 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
+            let mut is_extern = false;
+            if matches!(clone.peek(), Some(Token::Ident(id)) if id == "extern") {
+                let _ = clone.bump();
+                is_extern = true;
+            }
             if let Some(tok) = clone.peek() {
                 if matches!(
                     tok,
                     Token::Let | Token::Const | Token::Var | Token::ThreadLocal
                 ) {
                     let meta_list = self.parse_meta_list()?;
+                    if is_extern {
+                        self.bump()?; // consume 'extern'
+                    }
                     let is_tl = meta_list
                         .iter()
                         .any(|m| m.name.sym == "tls" || m.name.sym == "threadlocal");
+                    let is_c = meta_list.iter().any(|m| m.name.sym == "c");
                     let mut v = self.parse_var_decl()?;
                     if has_pub_or_priv {
                         v.is_pub = is_pub;
@@ -898,9 +929,15 @@ impl<'a> Parser<'a> {
                     if is_tl {
                         v.is_threadlocal = true;
                     }
+                    if is_extern {
+                        v.is_extern = true;
+                        v.is_c = is_c || true;
+                    } else if is_c {
+                        v.is_c = true;
+                    }
                     return Ok(vec![ModuleItem::Stmt(Stmt::Var(v))]);
                 }
-                if Self::is_decl_keyword(tok) {
+                if Self::is_decl_keyword(tok) || is_extern {
                     has_decl = true;
                 }
             }
@@ -966,6 +1003,21 @@ impl<'a> Parser<'a> {
             | Some(Token::Static)
             | Some(Token::TypeKw) => Ok(vec![ModuleItem::Decl(self.parse_decl(vec![], is_pub)?)]),
             Some(Token::Ident(ref id)) if id == "extern" || id == "inline" || id == "noinline" => {
+                if id == "extern"
+                    && matches!(
+                        self.peek_next(),
+                        Some(Token::Const) | Some(Token::Var) | Some(Token::Let) | Some(Token::ThreadLocal)
+                    )
+                {
+                    self.bump()?; // consume 'extern'
+                    let mut v = self.parse_var_decl()?;
+                    v.is_extern = true;
+                    v.is_c = true;
+                    if has_pub_or_priv {
+                        v.is_pub = is_pub;
+                    }
+                    return Ok(vec![ModuleItem::Stmt(Stmt::Var(v))]);
+                }
                 Ok(vec![ModuleItem::Decl(self.parse_decl(vec![], is_pub)?)])
             }
             Some(Token::Unsafe) => {
@@ -2807,6 +2859,18 @@ impl<'a> Parser<'a> {
                 return Ok(Stmt::Var(self.parse_var_decl()?));
             }
         }
+        if matches!(self.peek(), Some(Token::Ident(id)) if id == "extern")
+            && matches!(
+                self.peek_next(),
+                Some(Token::Var) | Some(Token::Let) | Some(Token::Const) | Some(Token::ThreadLocal)
+            )
+        {
+            self.bump()?; // consume 'extern'
+            let mut v = self.parse_var_decl()?;
+            v.is_extern = true;
+            v.is_c = true;
+            return Ok(Stmt::Var(v));
+        }
         if matches!(self.peek(), Some(Token::Ident(_))) && self.peek_next() == Some(&Token::Colon) {
             let mut clone = self.clone_lookahead();
             if let Ok(label) = clone.parse_ident() {
@@ -3080,6 +3144,35 @@ impl<'a> Parser<'a> {
                             }
                         }
                     }
+                    let mut is_extern = false;
+                    if matches!(clone.peek(), Some(Token::Ident(id)) if id == "extern") {
+                        let _ = clone.bump();
+                        is_extern = true;
+                    }
+                    if matches!(
+                        clone.peek(),
+                        Some(Token::Let) | Some(Token::Const) | Some(Token::Var) | Some(Token::ThreadLocal)
+                    ) {
+                        let meta_list = self.parse_meta_list()?;
+                        if is_extern {
+                            self.bump()?;
+                        }
+                        let is_tl = meta_list
+                            .iter()
+                            .any(|m| m.name.sym == "tls" || m.name.sym == "threadlocal");
+                        let is_c = meta_list.iter().any(|m| m.name.sym == "c");
+                        let mut v = self.parse_var_decl()?;
+                        if is_tl {
+                            v.is_threadlocal = true;
+                        }
+                        if is_extern {
+                            v.is_extern = true;
+                            v.is_c = is_c || true;
+                        } else if is_c {
+                            v.is_c = true;
+                        }
+                        return Ok(Stmt::Var(v));
+                    }
                     if matches!(clone.peek(), Some(Token::Fn) | Some(Token::Async)) {
                         is_local_fn = true;
                     }
@@ -3184,6 +3277,8 @@ impl<'a> Parser<'a> {
             is_threadlocal,
             is_pub: false,
             is_comptime,
+            is_extern: false,
+            is_c: false,
         })
     }
 

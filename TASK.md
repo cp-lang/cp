@@ -4041,7 +4041,7 @@ P1（中期生产化） │ 并发与调度落地 │ 1. 循环回边 Auto-Reduc
 P2（生态成熟期） │ 工具链与生态底座 │ 1. 完整生产级 LSP（跳转/引用/重构）2. 官方格式化器 cpc fmt3. 零拷贝 I/O │ 开发者与 AI 体验媲美
 │ │ 流与无锁并发容器标准库 │ TypeScript/Rust，具备企业级承载力
 
-topt99755@gmail.com 88h
+topt99755@gmail.com 59h
 walteryu99@gmail.com 111h
 walteryu66@gmail.com 108h
 walteryu33@gmail.com 118h

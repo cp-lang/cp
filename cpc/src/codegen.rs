@@ -1445,7 +1445,12 @@ impl Codegen {
         method_name: &str,
     ) -> Option<(Vec<Param>, Option<Type>, ReceiverMode)> {
         let clean = type_name.trim_start_matches('?').trim_start_matches('*');
-        if let Some(cls) = self.class_defs.get(clean) {
+        let base_name = if let Some(pos) = clean.find('<') {
+            &clean[..pos]
+        } else {
+            clean
+        };
+        if let Some(cls) = self.class_defs.get(base_name) {
             if let Some(m) = cls.methods.iter().find(|m| m.ident.sym == method_name) {
                 return Some((
                     m.params.clone(),
@@ -1454,7 +1459,7 @@ impl Codegen {
                 ));
             }
         }
-        if let Some(tr) = self.trait_defs.get(clean) {
+        if let Some(tr) = self.trait_defs.get(base_name) {
             if let Some(tm) = tr.methods.iter().find(|m| m.ident.sym == method_name) {
                 return Some((
                     tm.params.clone(),
@@ -1668,7 +1673,8 @@ impl Codegen {
                     if let Some(t) = &v.ty {
                         self.var_cp_types.insert(id.sym.clone(), t.clone());
                     }
-                    if v.kind == VarDeclKind::Const
+                    if !v.is_extern
+                        && v.kind == VarDeclKind::Const
                         && id
                             .sym
                             .chars()
@@ -2017,6 +2023,26 @@ impl Codegen {
                 } else {
                     String::new()
                 };
+                if var.is_extern {
+                    if let Pattern::Ident(ident) = &var.pat {
+                        let pub_str = if var.is_pub || var.is_extern || !self.is_lib_mode {
+                            "pub "
+                        } else {
+                            ""
+                        };
+                        let extern_str = if var.is_c { "extern \"c\"" } else { "extern" };
+                        let kind_str = if var.kind == VarDeclKind::Const {
+                            "const"
+                        } else {
+                            "var"
+                        };
+                        self.writeln(&format!(
+                            "{}{} {} {}{};",
+                            pub_str, extern_str, kind_str, ident.sym, ty_str
+                        ));
+                    }
+                    continue;
+                }
                 let kw = if var.is_threadlocal {
                     if var.is_pub {
                         "pub threadlocal var"
@@ -4074,8 +4100,7 @@ impl Codegen {
                     default_init
                 ));
             }
-            if !is_generic
-                && !class.is_union
+            if !class.is_union
                 && !class.meta.iter().any(|m| {
                     m.name.sym == "value"
                         || m.name.sym == "packed"
@@ -4083,7 +4108,7 @@ impl Codegen {
                         || m.name.sym == "opaque"
                 })
             {
-                self.writeln(&format!("\npub fn _create(allocator: std.mem.Allocator) !*{} {{ const self_ptr = try allocator.create({}); self_ptr.* = undefined; return self_ptr; }}", class.ident.sym, class.ident.sym));
+                self.writeln("\npub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }");
             }
         }
         if needs_trait_infra {
@@ -8168,6 +8193,8 @@ impl Codegen {
                     is_threadlocal: false,
                     is_pub: false,
                     is_comptime: false,
+                    is_extern: false,
+                    is_c: false,
                 }));
             }
         }
@@ -9022,6 +9049,17 @@ impl Codegen {
                     } else {
                         expr_code.clone()
                     };
+                    if matches!(&var.pat, Pattern::Wildcard)
+                        || matches!(&var.pat, Pattern::Ident(ident) if ident.sym == "_")
+                    {
+                        let init_val = if is_try {
+                            format!("try {}", final_expr)
+                        } else {
+                            expr_code
+                        };
+                        self.write_to_case(&format!("_ = {};", init_val));
+                        return;
+                    }
                     match &var.pat {
                         Pattern::Ident(ident) => {
                             if matches!(var.kind, crate::ast::VarDeclKind::Const) {
@@ -13550,13 +13588,19 @@ impl Codegen {
                 }
             }
             Expr::New(call) => {
-                let class_name = match &*call.callee {
+                let raw_class_name = match &*call.callee {
                     Expr::Ident(id) => id.sym.clone(),
                     _ => "Unknown".to_string(),
                 };
-                if let Some(cls) = self.class_defs.get(&class_name) {
+                let class_name = self.map_type_name(&raw_class_name);
+                let base_name = if let Some(pos) = raw_class_name.find('<') {
+                    &raw_class_name[..pos]
+                } else {
+                    &raw_class_name
+                };
+                if let Some(cls) = self.class_defs.get(base_name) {
                     if cls.is_static {
-                        panic!("CP Compile Error: Cannot instantiate static class or struct '{}' with 'new'", class_name);
+                        panic!("CP Compile Error: Cannot instantiate static class or struct '{}' with 'new'", raw_class_name);
                     }
                 }
                 if class_name == "Error" {
@@ -13573,7 +13617,7 @@ impl Codegen {
                     return format!("Error.init({}, {})", code, msg);
                 }
                 let init_params: Vec<Param> = self
-                    .lookup_method(&class_name, "init")
+                    .lookup_method(base_name, "init")
                     .map(|(p, _, _)| {
                         p.into_iter()
                             .filter(|param| param.ident.sym != "this" && param.ident.sym != "_")
@@ -15268,7 +15312,7 @@ impl Codegen {
                     if id.sym == "Error" {
                         return "Error".to_string();
                     }
-                    return format!("*{}", id.sym);
+                    return format!("*{}", self.map_type_name(&id.sym));
                 }
             }
             if let Expr::Slice(s) = expr {
@@ -15298,7 +15342,7 @@ impl Codegen {
                         if id.sym == "Error" {
                             return "Error".to_string();
                         }
-                        return format!("*{}", id.sym);
+                        return format!("*{}", self.map_type_name(&id.sym));
                     }
                 }
                 Expr::Call(call) => {
@@ -16020,6 +16064,11 @@ impl Codegen {
             match stmt {
                 Stmt::Var(var) => {
                     let ty_str = self.infer_zig_type(var.ty.as_ref(), var.init.as_ref());
+                    if matches!(&var.pat, Pattern::Wildcard)
+                        || matches!(&var.pat, Pattern::Ident(ident) if ident.sym == "_")
+                    {
+                        continue;
+                    }
                     match &var.pat {
                         Pattern::Ident(ident) => {
                             self.locals.insert(ident.sym.clone(), ty_str.clone());

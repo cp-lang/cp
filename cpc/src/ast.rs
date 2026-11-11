@@ -273,6 +273,10 @@ pub struct VarDecl {
     pub is_pub: bool,
     #[serde(default)]
     pub is_comptime: bool,
+    #[serde(default)]
+    pub is_extern: bool,
+    #[serde(default)]
+    pub is_c: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

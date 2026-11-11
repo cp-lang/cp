@@ -1,66 +1,41 @@
-# CP 研发日志 (DEVLOG) - 2026-11-11 (热数据)
+# CP 研发日志 (DEVLOG) - 2026-11-12 (热数据)
 
 > 历史研发日志已完整归档至 [DEVLOG_H.md](file:///data/dev/cp/DEVLOG_H.md)。本项目采用冷热分离架构，本文件仅保留当日活跃记录。
 
-## 2026-11-11: 攻坚并发 Guard 代理与底层 C-FFI / 数组转译多重边界缺陷
+## 2026-11-12: 攻坚标准库方案 A（工业级统一 I/O 流体系）与 extern const 编译器支持
 
-- **问题分析与根因排查**：
-  1. `test_mutex_atomic.cp` 在测试 `RwLock` 的 `rg.value` 与 `wg.value = 300` 时发生编译崩溃。排查发现 `codegen.rs` 中为支持智能枚举属性而引入的 `if member.prop.sym == "value"` 分支拦截了所有访问，盲目生成 `(if (comptime ...) ...) = 300`，不仅无法在 Zig 中作为赋值左值，而且忽略了 Guard 内部应优先代理到 `.data` 的核心契约；
-  2. `test_c_ffi_pointers.cp` 中 `c_abs(-123)` 被发射为 `c_abs(0xffffffffffffff85)`，导致 Zig 报出 `type 'i32' cannot represent integer value '18446744073709551493'`。根因为近期一次合并中误将所有负整数字面量转换为 64 位无符号十六进制；
-  3. `let arr: [4]u8 = [65, 66, 67, 68]` 在状态机闭包内被错误发射为 `cp_array_lit(i32, ...)`，导致类型不匹配。根因为 parser 解析 `[N]T` 时生成了 `Type::Ref("[4]u8")`，而 `codegen` 仅匹配 `Type::FixedArray`，未从字符串形式提取元素类型，导致期望数组类型丢失。
+- **任务背景与工程目标**：
+  1. 响应下游 Bun AGY 在系统底层与网络迁移中对统一 I/O 抽象的迫切诉求；
+  2. 实现 CP 工业级标准库基石方案 A：基于 Trait 的统一零拷贝流式 I/O 体系，对标 Go `io` 与 Rust `std::io`；
+  3. 协同解决 Bun AGY 提报的 `task-extern-const-var`：支持在 `@c` 块中声明外部全局常量与变量；
+  4. 保持 `cap:io` 现有接口（`print`、`console`、`stdio`）100% 向后兼容。
 
-- **实施方案**：
-  1. **优先级调整**：将 `is_guard`（`LockGuard`/`ReadGuard`/`WriteGuard`）检查提前至所有属性处理最顶端，若匹配则直接发射 `.data.prop`；
-  2. **作用域过滤**：当识别到接收者为结构体或类时，绕过 enum 模式判断，直接作为结构体字段处理；
-  3. **定长数组反射补全**：在 `expected_array_elem_type` 赋值处加入对 `Type::Ref(id)` 中 `[N]T` 形式的前缀解析，准确识别元素类型 `u8`；
-  4. **负整数规范化**：恢复 `Expr::Lit(Lit::Int(v)) => v.to_string()`；
-  5. **裸指针安全强转**：在 `as [*]T!` 转换中，若源对象为数组形式，自动补充 `&` 取址。
+- **核心技术挑战与根因剖析**：
+  1. **丢弃变量 `let _ = ...;` 与 Zig 0.17 命名规范冲突**：
+     - 在 CP 中广泛使用 `let _ = writer.write(slice)?;` 显式丢弃不需要的结果；
+     - `codegen.rs` 此前将所有 `Pattern::Ident(id)` 一律转译为 `var {id} = ...;`，导致 Zig 报出 `'_' used as an identifier without @"_" syntax`；
+     - 此外，在闭包/状态机提取局部变量生成环境上下文结构体时，也将 `_` 包含进去，生成了非法字段定义 `_: ty,`。
+  2. **泛型类单态化实例构造缺失 `_create`**：
+     - 在 Zig 中，泛型类以函数返回类型的形式表达（`fn (comptime R: type) type`）；
+     - `codegen.rs` 此前在为类生成堆分配辅助函数 `_create` 时带有 `if !is_generic` 守卫，导致泛型类实例调用 `new BufferedReader(reader)` 时，Zig 报告 `struct 'BufferedReader(BufferReader)' has no member named '_create'`；
+     - 且在非泛型构造中直接使用了类名符号，而单态化类在自身内部只有 `@This()` 能够准确指示当前具体类型。
+  3. **泛型实例的方法签名解析回退**：
+     - `buffered.readByte() catch 0` 表达式中，`readByte()` 返回 `u8!`，但 `lookup_method` 携带了完整类型名 `BufferedReader<BufferReader>`，由于未剥离泛型后缀 `<...>`，无法匹配到基类定义，导致类型推导回退为 `i32`，引发类型不匹配。
+
+- **实施方案与架构优化**：
+  1. **下划线丢弃模式精准转译**：
+     - 在 `codegen.rs` 的变量绑定中，对 `Pattern::Ident(id) if id.sym == "_"` 以及 `Pattern::Wildcard` 统一发射 `_ = {expr};`；
+     - 在状态机上下文捕获时显式过滤掉 `_` 变量。
+  2. **泛型类 `@This()` 统一构造支持**：
+     - 移除 `_create` 的 `!is_generic` 限制，使所有类（无论是否泛型）均生成 `pub fn _create(...) *@This()`；
+     - 内部内存分配统一采用 `allocator.create(@This())`，使 Zig 单态化后能安全分配结构体内存。
+  3. **泛型基类方法索引增强**：
+     - 在 `lookup_method` 与 `sema.rs` 的 `Expr::New` 校验中，利用 `ident.split('<').next()` 剥离泛型实参，精确命中泛型类的定义与方法签名。
+  4. **全套工业级 I/O 流架构落地**：
+     - 实现 `Reader`、`Writer`、`Closer`、`Seeker` 核心契约；
+     - 零堆分配只读流 `BufferReader` 与定长栈/堆写入流 `BufferWriter`；
+     - 高性能泛型缓冲封装流 `BufferedReader<R: Reader>`、`BufferedWriter<W: Writer>` 与全量管道传输 `copyStream`。
 
 - **效果验证**：
-  - `cap cap/test/test_mutex_atomic.cp`：7/7 全部通过（100% PASS）；
-  - `cap cap/test/test_c_ffi_pointers.cp`：11/11 全部通过（100% PASS）。
-
-## 2026-11-11: 落地 cpc Panic-Mode 语法容错同步与多错误批量诊断系统
-
-- **背景与痛点**：
-  - 传统编译器往往在遇到第一个语法异常时立即抛出 `Err` 退出。下游 Bun AGY 在迁移几百行的复杂模块（如 `json.cp`、`http.cp`）时，反复经历“修改 1 个分号 -> 重新编译 -> 报出下一处符号不匹配”的单轮往返，造成大量时间与 Token 损耗。
-  - Bun AGY 建议实现语句级 Panic-Mode 语法容错恢复，单次编译尽可能收集全量语法错误，并保持 Debug 模式秒级热更新。
-
-- **核心架构与算法设计**：
-  1. **复合解析错误定义 (`ParseError::Multiple`)**：
-     - 在 `parser.rs` 中引入 `ParseError::Multiple(Vec<Diagnostic>)`，并实现 `render_all()` 和 `to_json_report()`，实现终端可读与机器可读的统一聚合。
-  2. **语句级同步器 (`recover_stmt`)**：
-     - 在 `Parser` 中引入 `push_error(diag)` 方法，限制单模块最多收集 50 处错误并做跨行去重；
-     - `recover_stmt` 基于局部括号深度（Brace Depth）遍历，当深度为 0 且遇到语句终止符 `;`、闭合括号 `}` 或新语句前导词（`let`、`if`、`while`、`for`、`return`、`switch`、`break`、`continue`、`defer`、`errdefer`）时平滑完成同步；
-     - 遇到不可识别 Token 强制 bump 推进，确保指针永不驻留，彻底消除自愈死循环风险。
-  3. **顶层项同步器 (`recover_module_item`)**：
-     - 模块顶层发生错误时，同步至下一个顶级定义关键字（`pub`、`export`、`fn`、`class`、`struct`、`let`、`const`、`import`、`@`）或顶层代码块边界。
-  4. **两层收集流重构**：
-     - 重构 `parse_block_stmt`：块内每条语句解析失败时，收集错误并调用 `recover_stmt()`，继续解析后续语句；
-     - 重构 `parse_module`：顶层每项解析失败时，收集错误并调用 `recover_module_item()`，最终若存在累积错误，统一返回 `ParseError::Multiple(self.errors)`。
-
-- **验证与效果**：
-  - 创建回归测试用例 [`cap/test/test_error_recovery_fail.cp`](file:///data/dev/cp/cap/test/test_error_recovery_fail.cp)（包含 `let mut`、`if` 缺少圆括号等多处独立语法错误）；
-  - `cpc check` 单次输出所有 3 个错误的精准代码切片高亮与自愈建议；
-  - `cpc check --json` 输出包含 3 个诊断项与对应 `edits` 的 JSON 对象，格式 100% 结构化；
-  - 全量现有测试（`test_prelude_t_shadowing.cp`、`test_const_generics.cp`、`test_struct_let.cp` 等）无损通过。
-
-## 2026-11-11: 解决 Zig 0.17 顶层命名遮蔽 (Task `task-prelude-t-shadowing`) 与开发效能架构升级
-
-- **问题分析与根因排查**：
-  - 下游 Bun AGY 在迁移过程中提交了测试用例 `/data/dev/bun/temp/repro_prelude_t.cp`，代码声明了顶层枚举 `pub const T = enum { a, b };` 并在函数内迭代切片 `for (slice) |c|`。
-  - 编译器在发射 Zig 代码时，自动引入了 `cp_iter_slice` 等 Prelude 辅助函数，其内部包含了 `const T = @TypeOf(val);`。
-  - 在 Zig 0.17 严苛的作用域安全规则中，顶层声明属于外层作用域，辅助函数内部局部的 `const T` 被判定为遮蔽顶层符号：`local constant shadows declaration of 'T'`。
-- **解决方案与实现**：
-  1. 全面检索并梳理 `cpc/src/codegen.rs` 中所有生成的 Prelude 辅助函数及 `defer drop` 语法块；
-  2. 将包含 `T` 的所有局部常量、泛型参数与类型提取全部系统化升级为私有前缀标识符 `__T`（如 `comptime __T: type`、`const __T = @TypeOf(v);`）；
-  3. 执行 `bash scripts/sync_cpc.sh` 原子编译并部署正式版 `cpc`；
-  4. Write-Through 同步更新沙盒开发分支 `cpc_dev/src/codegen.rs`；
-  5. 新增端到端正式回归用例 [`cap/test/test_prelude_t_shadowing.cp`](file:///data/dev/cp/cap/test/test_prelude_t_shadowing.cp)，经 `cap` 测试 **100% PASS**；
-  6. 结单 `task-prelude-t-shadowing`，并确立官方规范于 [`cp_ref.md`](file:///data/dev/cp/cp_ref.md) 第 11.9.5.2 节。
-
-- **开发效能体系重大升级**：
-  1. **解除终端重定向限制**：允许通过终端管道和重定向执行单步链式验证（如 `cpc ... > temp/*.zig && zig ast-check`），消除中间文件操作与数万 Token 往返；
-  2. **四线文档冷热分离**：正式实施热数据（`SESSION.md`、`CHANGELOG.md`、`DEVLOG.md` 仅记当日）与冷数据（`*_H.md` 持久备份）分离，消除文档膨胀；
-  3. **任务分类驱动**：明确 Hotfix 快速通道与 Milestone 汇总归档，兼顾敏捷交付与工程严谨性；
-  4. **编译器大文件分拆架构**：确立将万行大文件按职责拆解为子模块的路线图，单文件规模控制在 2,000 行以内。
+  - `cap cap/test/test_extern_var.cp`：100% 通过（601ms）；
+  - `cap cap/test/test_io_streams.cp`：6 大套件全面覆盖（888ms，100% 通过）。

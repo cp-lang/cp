@@ -2739,6 +2739,11 @@ impl Analyzer {
     fn analyze_stmt(&mut self, stmt: &Stmt) -> SemaResult<()> {
         match stmt {
             Stmt::Var(var) => {
+                if var.is_extern {
+                    let ty = var.ty.clone().unwrap_or(Type::Unknown);
+                    self.analyze_pattern(&var.pat, ty.clone(), &var.kind)?;
+                    return Ok(());
+                }
                 let mut inferred_ty = Type::Unknown;
                 if let Some(init) = &var.init {
                     inferred_ty = self.infer_type(init)?;
@@ -3343,14 +3348,30 @@ impl Analyzer {
                         }
                     }
                 }
-                self.analyze_expr(&call.callee)?;
+                if let Expr::Ident(id) = &*call.callee {
+                    let base_sym = if let Some(pos) = id.sym.find('<') {
+                        &id.sym[..pos]
+                    } else {
+                        &id.sym
+                    };
+                    if !self.classes.contains_key(base_sym) && id.sym != "Error" {
+                        self.analyze_expr(&call.callee)?;
+                    }
+                } else {
+                    self.analyze_expr(&call.callee)?;
+                }
                 for arg in &call.args {
                     self.analyze_expr(arg)?;
                 }
             }
             Expr::New(call) => {
                 if let Expr::Ident(id) = &*call.callee {
-                    if let Some(cls) = self.classes.get(&id.sym).cloned() {
+                    let base_sym = if let Some(pos) = id.sym.find('<') {
+                        &id.sym[..pos]
+                    } else {
+                        &id.sym
+                    };
+                    if let Some(cls) = self.classes.get(base_sym).cloned() {
                         if cls.is_static {
                             return Err(SemaError::CannotInstantiateStatic(
                                 id.sym.clone(),
@@ -3406,7 +3427,18 @@ impl Analyzer {
                         }
                     }
                 }
-                self.analyze_expr(&call.callee)?;
+                if let Expr::Ident(id) = &*call.callee {
+                    let base_sym = if let Some(pos) = id.sym.find('<') {
+                        &id.sym[..pos]
+                    } else {
+                        &id.sym
+                    };
+                    if !self.classes.contains_key(base_sym) && id.sym != "Error" {
+                        self.analyze_expr(&call.callee)?;
+                    }
+                } else {
+                    self.analyze_expr(&call.callee)?;
+                }
                 for arg in &call.args {
                     self.analyze_expr(arg)?;
                 }
@@ -4713,6 +4745,48 @@ impl Analyzer {
                 return true;
             }
         }
+        // Coerce between Type::Ref("[N]T") and Type::FixedArray(T, Literal(N))
+        if let (Type::Ref(id), Type::FixedArray(elem, ArraySize::Literal(n))) = (target, src) {
+            if id.sym.starts_with('[') {
+                if let Some(idx) = id.sym.find(']') {
+                    let len_str = &id.sym[1..idx];
+                    let elem_name = id.sym[idx + 1..].trim_start_matches("const ").trim();
+                    if let Ok(target_len) = len_str.parse::<usize>() {
+                        if target_len == *n {
+                            let target_elem = crate::codegen::Codegen::type_from_name_static(elem_name);
+                            let elem_expr = match init_expr {
+                                Some(Expr::ArrayRepeat(val, _)) => Some(&**val),
+                                Some(Expr::Array(elements)) if !elements.is_empty() => Some(&elements[0]),
+                                _ => None,
+                            };
+                            if **elem == target_elem
+                                || self.can_coerce(&target_elem, elem, elem_expr)
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let (Type::FixedArray(elem, ArraySize::Literal(n)), Type::Ref(id)) = (target, src) {
+            if id.sym.starts_with('[') {
+                if let Some(idx) = id.sym.find(']') {
+                    let len_str = &id.sym[1..idx];
+                    let elem_name = id.sym[idx + 1..].trim_start_matches("const ").trim();
+                    if let Ok(src_len) = len_str.parse::<usize>() {
+                        if src_len == *n {
+                            let target_elem = crate::codegen::Codegen::type_from_name_static(elem_name);
+                            if **elem == target_elem
+                                || self.can_coerce(elem, &target_elem, None)
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if let (
             Type::CPtr(t_inner) | Type::ManyRawPtr(t_inner),
             Type::CPtr(s_inner) | Type::ManyRawPtr(s_inner),
@@ -5560,9 +5634,18 @@ impl Analyzer {
             Expr::OptCall(_) | Expr::OptMember(_) => Ok(Type::Optional(Box::new(Type::Any))),
             Expr::New(call) => {
                 if let Expr::Ident(ident) = &*call.callee {
-                    if self.classes.contains_key(&ident.sym) {
+                    let base_sym = if let Some(pos) = ident.sym.find('<') {
+                        &ident.sym[..pos]
+                    } else {
+                        &ident.sym
+                    };
+                    if self.classes.contains_key(base_sym)
+                        || ident.sym == "Error"
+                        || self.resolve(base_sym).is_some()
+                    {
                         return Ok(Type::Ref(ident.clone()));
                     }
+                    return Err(SemaError::UndefinedSymbol(base_sym.to_string(), ident.span));
                 }
                 Err(SemaError::UndefinedSymbol("Class".to_string(), call.span))
             }
