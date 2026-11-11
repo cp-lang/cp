@@ -775,7 +775,7 @@ impl Codegen {
                             if is_owned_type {
                                 self.check_active_borrows_before_move(&id.sym);
                                 self.moved_vars.insert(id.sym.clone());
-                                if !self.is_state_machine {
+                                if !self.is_state_machine && self.drop_flag_vars.contains(&id.sym) {
                                     self.write_to_case(&format!("__{}_moved = true;", id.sym));
                                 }
                             }
@@ -1477,7 +1477,7 @@ impl Codegen {
                     IterMode::Move => {
                         if let Expr::Ident(coll_id) = &f.expr {
                             self.moved_vars.insert(coll_id.sym.clone());
-                            if !self.is_state_machine {
+                            if !self.is_state_machine && self.drop_flag_vars.contains(&coll_id.sym) {
                                 self.write_to_case(&format!("__{}_moved = true;", coll_id.sym));
                             }
                         }

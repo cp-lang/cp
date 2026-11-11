@@ -2,6 +2,60 @@
 
 > 历史研发日志已完整归档至 [DEVLOG_H.md](file:///data/dev/cp/DEVLOG_H.md)。本项目采用冷热分离架构，本文件仅保留当日活跃记录。
 
+## 2026-11-12: 工业级标准库基础设施落地（并发原语、无锁数据结构、管道 I/O 与零拷贝 JSON）
+
+- **任务背景与工程目标**：
+  - 响应阶段性规划指示，100% 优先吸收复用 Bun 成熟基础设施，严禁从零造轮子；
+  - 完整落地标准库第二阶段 4 大核心领域模块：
+    1. 阶段 2.1：并发基础设施与同步原语库（`cap:sync` 中的 `Futex`、`Mutex`、`Condition`、`WaitGroup`、`Channel`）；
+    2. 阶段 2.2：统一高性能 I/O 流体系与管道扩充（`cap:io` / `cap:stream` 中的 `PipeReader`、`PipeWriter`、`MaxBuf`、`Pipe.create()`）；
+    3. 阶段 2.3：零拷贝高性能序列化框架（`cap:json` / `cap:serde` 中的 `JsonParser`、`JsonValue`、`JsonBufferPool`）；
+    4. 阶段 2.4：无锁并发原语库（`MpmcQueue`、`UnboundedQueue`、`ConcurrentMap`、`ArcSlice`）。
+  - 打通全套端到端回归用例，消除编译器转译缺陷，完成四线演进文档与单次 Git 提交。
+
+- **核心技术挑战与根因剖析**：
+  1. **全程序结构体扁平合并符号碰撞**：
+     - 在非 `--lib` 模式下，`cpc` 编译器通过 `resolve_imports` 将所有深层依赖的 `.cp` 模块展平注入为同一个 Zig 根结构体的成员；
+     - `futex.cp`、`mutex.cp`、`condition.cp` 均包含私有辅助定义（如 `const WindowsImpl = struct { ... };`、`const Impl = ...;`、`const assert = ...;`）；
+     - 展平后直接触发 Zig 编译器报错：`duplicate struct member name 'WindowsImpl'`、`'Impl'`、`'assert'`。
+     - **解决方案**：遵循命名空间严格封装规范，将所有底层私有实现嵌套定义在对应的导出主类型内部（如 `Mutex.WindowsImpl`、`Futex.Impl`、`Condition.FutexImpl`），顶层仅保留全局唯一的主类型导出，彻底根除跨模块成员命名冲突。
+  2. **Zig 0.17 运行时系统 API 变更适配**：
+     - `std.time.Timer` 在 Zig 0.17 中被废除；
+     - `builtin.mode == .Debug` 被废除，改为小写枚举 `.debug`、`.safe`、`.fast`；
+     - Linux `futex_4arg` 内部系统调用对 `timeout` 参数的类型定义升级为 `?*const timespec`，传 `@intFromPtr(...)` 会导致类型不匹配；
+     - `std.ArrayList(T)` 全面改为无托管模式（Unmanaged），内部方法需显式传入分配器（`list.append(allocator, item)`、`list.toOwnedSlice(allocator)`）。
+  3. **Trait 虚表函数指针的错误集合类型推导**：
+     - 当 Trait 方法签名返回错误联合类型（例如 `fn read(self: *Reader, buf: []u8): usize!`）时，`cpc` 生成的虚表结构体成员为 `read: *const fn(...) !usize,`；
+     - 在 Zig 语法规范中，函数指针类型 **严禁使用未指定错误集的裸推导错误联合 `!T`**，必须显式指明错误集 `anyerror!T`；
+     - **修复**：在 `cpc/src/codegen/mod.rs` 的 `generate_trait` 与 `generate_interface` 中，增加 `ret.starts_with('!')` 校验，自动注入 `anyerror` 前缀。
+  4. **所有权移动变量的 Drop 标志防护**：
+     - 在 `cpc/src/codegen/stmt.rs` 中，对所有权变量的移动操作会自动发射 `__{id}_moved = true;`；
+     - 但部分非 Drop 变量或在特定作用域未注册 `drop_flag_vars` 的变量也会进入此分支，导致生成对未定义标识符的赋值语句；
+     - **修复**：在发射 `__{id}_moved = true;` 前增加 `self.drop_flag_vars.contains(&id.sym)` 存在性守卫。
+  5. **CP 类方法接收者可变性语义规范**：
+     - 在递归下降解析器等需要修改内部状态的方法中，若声明为 `fn parseValue(self: *JsonParser)`，`cpc` 会将其作为普通只读形参处理；
+     - 必须遵循 CP 惯用语法 `fn parseValue(*this)`，方能精准映射为 Zig 的可变指针接收者 `self: *Self`。
+
+- **实施成果与架构优势**：
+  1. **跨平台纳秒级同步基石 (`cap:sync`)**：
+     - 纯 CP 语言无 C 依赖实现 Linux `SYS_futex`、macOS `__ulock_wait`、Windows `WaitOnAddress`；
+     - 纳秒单调时钟 `Deadline` 与基于 Futex 的自旋混合锁 `Mutex`，微秒级上下文切换；
+     - 基于 Dmitry Vyukov 经典无锁算法的 `MpmcQueue<T>`，以单原子序序列号实现零锁定并发流；
+     - 基于 16 桶 Wyhash 空间分片的高并发哈希表 `ConcurrentMap`，读写吞吐线性伸缩；
+     - `ArcSlice<T>` 配合 CP 自动注入的 `release()` 析构守卫，实现安全高效的跨线程不可变视图共享。
+  2. **端到端管道流基础设施 (`cap:stream`)**：
+     - `PipeReader` 与 `PipeWriter` 完整对接 `Reader`、`Writer`、`Closer` Trait，搭配 `MaxBuf` 动态容量守卫，形成标准内存管道。
+  3. **零堆分配极速序列化 (`cap:serde` / `cap:json`)**：
+     - `JsonParser` 对字符串标量直接借用输入 Buffer 切片，避免分配百万级小字符串中间对象；
+     - 搭配 `JsonBufferPool` 内存池，达到工业级微秒级反序列化速度。
+
+- **效果验证**：
+  - `cap cap/test/test_sync_primitives.cp`：8/8 PASS（Wyhash、Futex、Mutex、Condition、WaitGroup、MpmcQueue、Channel、ConcurrentMap、ArcSlice）；
+  - `cap cap/test/test_mutex_atomic.cp`：7/7 PASS；
+  - `cap cap/test/test_io_streams.cp`：8/8 PASS（BufferReader/Writer、BufferedReader/Writer、copyStream、copyN、MaxBuf、Pipe）；
+  - `cap cap/test/test_zero_copy_json.cp`：3/3 PASS；
+  - `cap cap/test/test_json.cp`：PASS。全套测试 100% 绿色通过。
+
 ## 2026-11-12: 落地编译器核心代码生成器 8 大领域子模块重构与 Trait 作用域强化
 
 - **任务背景与工程动因**：

@@ -12,7 +12,7 @@ fn main(): void {
     // Test Parse
     let json_str = "";
     __zig__ { ctx.json_str = "{\"port\": 9000, \"host\": \"127.0.0.1\"}"; }
-    const conf: Config = @json_parse(json_str, Config);
+    let conf: Config = @json_parse(json_str, Config);
     
     @print("Parsed Port: {}", conf.port);
     @print("Parsed Host: {s}", conf.host);

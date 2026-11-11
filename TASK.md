@@ -4075,3 +4075,49 @@ ebe8932a-593c-40d2-a931-f9ce1d4de5b9
 
 • 现状：cpc 若使用 cargo build --release 编译耗时约 2535 秒，而 cargo build（Debug）仅需 12 秒，且 Debug 编译出的 cpc 执行转译仅耗时 10ms，对 Bun 整体构建几乎零差异。
 • 建议：在 SESSION.md 中与 cp_agy 约定，修复 bug 验证时优先采用 Debug 模式秒级热更新，阶段性大版本收官时再统一跑 Release 构建。
+
+#### 核心建议：【绝对严禁从零造轮子，100% 优先吸收复用 Bun 已经验证成熟的资产！】
+
+Bun 拥有经过全球数亿级并发高频检验的顶尖 C++/Zig 基础设施，且 Bun AGY 目前已经在 /data/dev/bun/src/ 中将大部分底层系统库迁移/转译为了 .cp
+源代码！若我们从零去造，不仅需要数月时间调试内存模型与边缘 Race Condition，而且极易引入不稳定与未经验证的代码。
+
+各模块在 Bun 中的现有资产与迁移策略如下：
+
+模块基础设施 │ Bun 中现有实现排查 │ 迁移与落地策略建议
+──────────────────────────────────────────────┼─────────────────────────────────────────────────────────────┼─────────────────────────────────────────────────────────────
+
+1.  统一 I/O 流体系(Reader / Writer / Stream) │ Bun 中已有完整实现：• /data/dev/bun/src/io/PipeReader.cp │ 直接提炼复用：从 Bun 的 PipeReader/PipeWriter
+    │ (44KB)• /data/dev/bun/src/io/PipeWriter.cp (51KB)• │ 中抽象出统一的面向对象 Trait 接口（Reader, Writer, Closer,
+    │ /data/dev/bun/src/io/source.cp (9.8KB)• │ Seeker），入驻
+    │ /data/dev/bun/src/io/MaxBuf.cp (零拷贝伸缩缓冲) │ lib/stream/，底层直接复用其零拷贝环形传输逻辑。
+2.  无锁并发原语库(Lock-Free Primitives) │ Bun 中极其丰富且 Bun AGY 刚完成转写：• │ 直接迁移收编：这是 Bun 高性能并发的神髓所在！跨平台（Linux
+    │ /data/dev/bun/src/threading/channel.cp (5.1KB MPMC │ SYS_futex、macOS __ulock、Windows
+    │ CSP管道)• /data/dev/bun/src/threading/unbounded_queue.cp │ WaitOnAddress）已经全部调优。直接作为 CP 官方标准库
+    │ (7.0KB 无锁并发队列)• /data/dev/bun/src/threading/Futex.cp │ cap:sync 入驻！
+    │ (11.4KB 全平台系统Futex封装)• │
+    │ /data/dev/bun/src/threading/ThreadPool.cp (37KB │
+    │ 工作窃取线程池) │
+3.  零拷贝序列化框架(Zero-Copy Serde) │ Bun 拥有原生 SIMD JSON 支持：• │ 两阶段推进：第一阶段：利用 CP 的生命周期借用（&str），封装
+    │ /data/dev/bun/src/interchange/json.zig• CP 现有 @json_parse │ cap:serde，消除二次堆分配；第二阶段：引入 Bun 的 SIMD
+    │ 基于 Zig 深度宏，性能已非常强劲，但目前缺少“在源 Buffer │ 向量化加速探测跳表。
+    │ 上切片产生只读对象视图（借用 &str/&[u8]）”的能力。 │
+    ──────
+
+### 三、 推荐落地规划路线图（分工与执行）
+
+    [主 AGY (CP 编译器)] ──打通底层语法与常量泛型──▶ [cpc 编译器支持 Buffer<N> 与 Tensor<T, Shape>]
+                                                                    │
+    [Bun 资产区 (/data/dev/bun)] ──直接提炼吸收成熟代码──▶ [入驻 CP 官方标准库 lib/]
+      ├── /src/threading/ (Futex, channel, queue) ───▶ cap:sync (无锁并发原语库)
+      └── /src/io/ (PipeReader, PipeWriter, source) ──▶ cap:stream (统一流式 I/O 体系)
+
+#### 第一步：编译器语法攻坚（由我立即执行，约需 1~2 轮）
+
+1. 升级 AST 与 Parser：将 FixedArray 的尺寸参数拓展为支持标识符与编译期常量表达式（允许 [u8; N]、[f32; B * H]）；
+2. 完善 Codegen：在类/结构体与类型别名中完整单态化发射 comptime N: usize，打通 class Buffer<const N: usize> { data: [u8; N]; } 与 Tensor<T, Shape>；
+3. 编写回归测试 cap/test/test_const_generics_buffer.cp 验证通过。
+
+#### 第二步：标准库收编与提炼（随后开展）
+
+1. 将 Bun AGY 经过验证的 /data/dev/bun/src/threading/ 核心原语（Futex.cp、channel.cp、unbounded_queue.cp）收编入 lib/sync/（对应 cap:sync）；
+2. 将 /data/dev/bun/src/io/ 提炼为统一的流式 Trait（Reader / Writer），打通零拷贝生态。

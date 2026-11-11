@@ -10,6 +10,8 @@ import {
     BufferedWriter,
     copyStream,
     copyN,
+    MaxBuf,
+    Pipe,
 } from "cap:io";
 
 fn expect(cond: bool, msg: string): void {
@@ -20,7 +22,7 @@ fn expect(cond: bool, msg: string): void {
 }
 
 pub fn main(): void {
-    print("=== Running Industrial-grade I/O Stream Suite (cap:io) ===");
+    print("=== Running Industrial-grade I/O Stream Suite (cap:io / cap:stream) ===");
 
     // Test 1: BufferReader slicing and byte reads
     let source_text = "The quick brown fox jumps over the lazy dog.";
@@ -80,5 +82,29 @@ pub fn main(): void {
     buf_w.flush() catch {};
     expect(base_w.len() == data_to_write.len, "Underlying BufferWriter received flushed data");
 
-    print("=== All 6 Industrial I/O Stream Test Suites PASSED Successfully! ===");
+    // Test 7: MaxBuf boundary guard (from Bun.js)
+    let max_buf = new MaxBuf(10);
+    let ok1: bool = max_buf.onReadBytes(6) catch false;
+    expect(ok1 == true, "MaxBuf onReadBytes within limit");
+    let ok2: bool = max_buf.onReadBytes(4) catch false;
+    expect(ok2 == true, "MaxBuf onReadBytes reached limit");
+    let ok3: bool = max_buf.onReadBytes(1) catch false;
+    expect(ok3 == false, "MaxBuf onReadBytes exceeded limit triggers error");
+
+    // Test 8: PipeReader and PipeWriter IPC stream
+    let pipe = Pipe.create() catch unreachable;
+    let msg = "Hello from PipeWriter to PipeReader!";
+    let zero_sz: usize = 0;
+    let p_written: usize = pipe.writer.write(msg) catch zero_sz;
+    expect(p_written == msg.len, "PipeWriter written length matches message");
+
+    let p_buf: [64]u8 = [0 as u8; 64];
+    let p_read: usize = pipe.reader.read(p_buf[0..64]) catch zero_sz;
+    expect(p_read == msg.len, "PipeReader read exact bytes written by PipeWriter");
+    expect(p_buf[0] == 72, "First byte is 'H' (72)");
+
+    pipe.reader.close();
+    pipe.writer.close();
+
+    print("=== All 8 Industrial I/O Stream Test Suites PASSED Successfully! ===");
 }

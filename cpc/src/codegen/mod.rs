@@ -715,15 +715,15 @@ impl Codegen {
             self.writeln("    cause_type_id: u64 = 0,");
             self.writeln("    pub const __TYPE_ID: u64 = 0xEE00_0000_0000_0001;");
             self.writeln("    pub fn init(code: i32, msg: []const u8) Err { return Err{ .code = code, .msg = msg }; }");
-            self.writeln("    pub fn with_cause(self: Err, cause: anytype) Err { const CType = @TypeOf(cause); var ptr: ?*const anyopaque = null; var tid: u64 = 0; if (comptime @typeInfo(CType) == .pointer) { ptr = @ptrCast(cause); const Child = @typeInfo(CType).pointer.child; if (comptime @hasDecl(Child, \"__TYPE_ID\")) { tid = Child.__TYPE_ID; } } else if (comptime (@typeInfo(CType) == .@\"struct\" or @typeInfo(CType) == .@\"union\") and @hasField(CType, \"ptr\")) { ptr = @ptrCast(cause.ptr); if (comptime @hasField(CType, \"vtable\")) { tid = cause.vtable.__type_id; } } else if (comptime @typeInfo(CType) == .optional) { if (cause) |c| return self.with_cause(c); } else { if (comptime @hasDecl(CType, \"__TYPE_ID\")) { tid = CType.__TYPE_ID; } ptr = @ptrCast(&cause); } return Err{ .code = self.code, .msg = self.msg, .cause = ptr, .cause_type_id = tid }; }");
+            self.writeln("    pub fn with_cause(self: Err, cause: anytype) Err { const CType = @TypeOf(cause); var ptr: ?*const anyopaque = null; var tid: u64 = 0; if (comptime @typeInfo(CType) == .pointer) { ptr = @ptrCast(cause); const Child = @typeInfo(CType).pointer.child; if (comptime @hasDecl(Child, \"__TYPE_ID\")) { tid = Child.__TYPE_ID; } } else if (comptime (@typeInfo(CType) == .@\"struct\" or @typeInfo(CType) == .@\"union\") and @hasField(CType, \"ptr\")) { ptr = @ptrCast(cause.ptr); if (comptime @hasField(CType, \"vtable\")) { tid = cause.vtable.__type_id; } } else if (comptime @typeInfo(CType) == .optional) { if (cause) |__c| return self.with_cause(__c); } else { if (comptime @hasDecl(CType, \"__TYPE_ID\")) { tid = CType.__TYPE_ID; } ptr = @ptrCast(&cause); } return Err{ .code = self.code, .msg = self.msg, .cause = ptr, .cause_type_id = tid }; }");
             self.writeln("    pub fn downcast(self: Err, comptime Target: type) ?*const Target {");
-            self.writeln("        if (self.cause) |c| {");
+            self.writeln("        if (self.cause) |__c| {");
             self.writeln("            if (comptime @hasDecl(Target, \"__TYPE_ID\")) {");
             self.writeln("                if (self.cause_type_id != 0 and self.cause_type_id != Target.__TYPE_ID) {");
             self.writeln("                    return null;");
             self.writeln("                }");
             self.writeln("            }");
-            self.writeln("            return @ptrCast(@alignCast(c));");
+            self.writeln("            return @ptrCast(@alignCast(__c));");
             self.writeln("        }");
             self.writeln("        return null;");
             self.writeln("    }");
@@ -1790,7 +1790,7 @@ impl Codegen {
             self.writeln("fn cp_unwrap_ok_val(v: anytype) CpUnwrapOkType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_cp_result(__T)) { const OkT = @FieldType(__T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok.?; } else { return v.ok; } } else if (comptime @typeInfo(__T) == .error_union) { return v catch unreachable; } else if (comptime @typeInfo(__T) == .optional) { return v.?; } else { return v; } }");
             self.writeln("fn cp_unwrap_err_val(v: anytype) CpUnwrapErrType(@TypeOf(v)) { const __T = @TypeOf(v); if (comptime is_cp_result(__T)) return v.err; if (comptime @typeInfo(__T) == .error_union) { if (v) |_| unreachable else |e| return e; } return v; }");
             self.writeln("fn cp_is_null_val(v: anytype) bool { const __T = @TypeOf(v); if (comptime is_cp_result(__T)) { if (v != .ok) return false; const OkT = @FieldType(__T, \"ok\"); if (comptime @typeInfo(OkT) == .optional) { return v.ok == null; } else { return false; } } else if (comptime @typeInfo(__T) == .optional) { return v == null; } else { return false; } }");
-            self.writeln("fn cp_convert_err(comptime TargetErr: type, err_val: anytype) TargetErr { const SrcType = @TypeOf(err_val); if (comptime SrcType == TargetErr) { return err_val; } else if (comptime TargetErr == Err or TargetErr == Error) { if (comptime @typeInfo(SrcType) == .@\"union\") { return Err{ .code = @intCast(@intFromEnum(std.meta.activeTag(err_val))), .msg = @tagName(err_val) }; } else if (comptime @typeInfo(SrcType) == .@\"enum\") { return Err{ .code = @intCast(@intFromEnum(err_val)), .msg = @tagName(err_val) }; } else if (comptime @typeInfo(SrcType) == .error_set) { return Err{ .code = 0, .msg = @errorName(err_val) }; } else if (comptime @typeInfo(SrcType) == .@\"struct\") { var c: i32 = 0; var m: []const u8 = \"\"; if (comptime @hasField(SrcType, \"code\")) { c = @as(i32, @intCast(err_val.code)); } if (comptime @hasField(SrcType, \"msg\")) { m = to_string_slice(err_val.msg); } else if (comptime @hasField(SrcType, \"message\")) { m = to_string_slice(err_val.message); } else if (comptime @hasDecl(SrcType, \"message\")) { m = to_string_slice(err_val.message()); } else { m = @typeName(SrcType); } return Err.init(c, m); } else if (comptime @typeInfo(SrcType) == .pointer and @typeInfo(@typeInfo(SrcType).pointer.child) == .@\"struct\") { const Child = @typeInfo(SrcType).pointer.child; var c: i32 = 0; var m: []const u8 = \"\"; if (comptime @hasField(Child, \"code\")) { c = @as(i32, @intCast(err_val.code)); } if (comptime @hasField(Child, \"msg\")) { m = to_string_slice(err_val.msg); } else if (comptime @hasField(Child, \"message\")) { m = to_string_slice(err_val.message); } else if (comptime @hasDecl(Child, \"message\")) { m = to_string_slice(err_val.message()); } else { m = @typeName(Child); } return Err.init(c, m).with_cause(err_val); } else { return Err{ .code = -1, .msg = \"error\" }; } } else if (comptime @typeInfo(TargetErr) == .pointer and @typeInfo(SrcType) != .pointer) { return @ptrCast(@constCast(&err_val)); } else if (comptime @typeInfo(SrcType) == .pointer and @typeInfo(TargetErr) != .pointer and @typeInfo(SrcType).pointer.child == TargetErr) { return err_val.*; } else if (comptime @typeInfo(TargetErr) == .@\"union\" and @hasDecl(TargetErr, \"__from\")) { return TargetErr.__from(err_val); } else if (comptime @hasDecl(TargetErr, \"from\")) { return TargetErr.from(err_val); } else { return err_val; } }");
+            self.writeln("fn cp_convert_err(comptime TargetErr: type, err_val: anytype) TargetErr { const SrcType = @TypeOf(err_val); if (comptime SrcType == TargetErr) { return err_val; } else if (comptime TargetErr == Err or TargetErr == Error) { if (comptime @typeInfo(SrcType) == .@\"union\") { return Err{ .code = @intCast(@intFromEnum(std.meta.activeTag(err_val))), .msg = @tagName(err_val) }; } else if (comptime @typeInfo(SrcType) == .@\"enum\") { return Err{ .code = @intCast(@intFromEnum(err_val)), .msg = @tagName(err_val) }; } else if (comptime @typeInfo(SrcType) == .error_set) { return Err{ .code = 0, .msg = @errorName(err_val) }; } else if (comptime @typeInfo(SrcType) == .@\"struct\") { var __err_code: i32 = 0; var m: []const u8 = \"\"; if (comptime @hasField(SrcType, \"code\")) { __err_code = @as(i32, @intCast(err_val.code)); } if (comptime @hasField(SrcType, \"msg\")) { m = to_string_slice(err_val.msg); } else if (comptime @hasField(SrcType, \"message\")) { m = to_string_slice(err_val.message); } else if (comptime @hasDecl(SrcType, \"message\")) { m = to_string_slice(err_val.message()); } else { m = @typeName(SrcType); } return Err.init(__err_code, m); } else if (comptime @typeInfo(SrcType) == .pointer and @typeInfo(@typeInfo(SrcType).pointer.child) == .@\"struct\") { const Child = @typeInfo(SrcType).pointer.child; var __err_code: i32 = 0; var m: []const u8 = \"\"; if (comptime @hasField(Child, \"code\")) { __err_code = @as(i32, @intCast(err_val.code)); } if (comptime @hasField(Child, \"msg\")) { m = to_string_slice(err_val.msg); } else if (comptime @hasField(Child, \"message\")) { m = to_string_slice(err_val.message); } else if (comptime @hasDecl(Child, \"message\")) { m = to_string_slice(err_val.message()); } else { m = @typeName(Child); } return Err.init(__err_code, m).with_cause(err_val); } else { return Err{ .code = -1, .msg = \"error\" }; } } else if (comptime @typeInfo(TargetErr) == .pointer and @typeInfo(SrcType) != .pointer) { return @ptrCast(@constCast(&err_val)); } else if (comptime @typeInfo(SrcType) == .pointer and @typeInfo(TargetErr) != .pointer and @typeInfo(SrcType).pointer.child == TargetErr) { return err_val.*; } else if (comptime @typeInfo(TargetErr) == .@\"union\" and @hasDecl(TargetErr, \"__from\")) { return TargetErr.__from(err_val); } else if (comptime @hasDecl(TargetErr, \"from\")) { return TargetErr.from(err_val); } else { return err_val; } }");
         }
 
         if features.needs_result_error {
@@ -2419,7 +2419,12 @@ impl Codegen {
                 .as_ref()
                 .map(|t| self.map_type(t))
                 .unwrap_or("void".to_string());
-            self.writeln(&format!("{}: *const fn({}) {},", m.ident.sym, p_str, ret));
+            let ret_fn_ptr = if ret.starts_with('!') {
+                format!("anyerror{}", ret)
+            } else {
+                ret
+            };
+            self.writeln(&format!("{}: *const fn({}) {},", m.ident.sym, p_str, ret_fn_ptr));
         }
         self.dedent();
         self.writeln("};");
@@ -2615,7 +2620,12 @@ impl Codegen {
                 .as_ref()
                 .map(|t| self.map_type(t))
                 .unwrap_or("void".to_string());
-            self.writeln(&format!("{}: *const fn({}) {},", m.ident.sym, p_str, ret));
+            let ret_fn_ptr = if ret.starts_with('!') {
+                format!("anyerror{}", ret)
+            } else {
+                ret
+            };
+            self.writeln(&format!("{}: *const fn({}) {},", m.ident.sym, p_str, ret_fn_ptr));
         }
         self.dedent();
         self.writeln("}; };\n");

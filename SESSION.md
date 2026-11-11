@@ -80,3 +80,57 @@
   2. `cpc/src/codegen.rs`：删除旧单体文件；
   3. `cp_ref.md`：第 20.4 节记录代码生成器模块化演进与作用域防护；
   4. `SESSION.md` / `CHANGELOG.md` / `DEVLOG.md`：当日热日志同步更新。
+
+## 指令 3：完成标准库第二阶段 2.1、2.2、2.3、2.4 基础设施吸收与无锁并发原语收编
+
+- **用户需求**：
+  1. 同意推进 2.1、2.2、2.3，并一并完成 2.4（无锁并发原语库：MPMC 无锁环形队列、并发哈希表、原子引用计数切片等）；
+  2. 100% 优先吸收复用 Bun 已经验证成熟的资产（从 `/data/dev/bun/src/` 中迁移），避免重复造轮子；
+  3. 完成后合并至 `cpc` 正式版本，同步更新四线演进文档，执行单次 Git 提交；
+  4. 完成后分析下一阶段需要从 Bun 中迁移的功能并规划落地。
+
+- **执行结果**：
+  1. **2.1 并发基础设施与同步原语库 (`cap:sync`) 落地**：
+     - `lib/sync/futex.cp`：跨平台系统级 Futex 封装（Linux `SYS_futex`、macOS `__ulock`、Windows `WaitOnAddress`），支持纳秒级单调时钟 `Deadline` 与超时等待；
+     - `lib/sync/mutex.cp`：吸收自 Bun 的自旋与 Futex 混合互斥锁（`tryLock`, `lock`, `unlock`, `withLock`）；
+     - `lib/sync/condition.cp`：跨平台条件变量（`wait`, `timedWait`, `signal`, `broadcast`）；
+     - `lib/sync/wait_group.cp`：信号量并发任务计数器（`add`, `done`, `wait`, `finish`）；
+     - `lib/sync/channel.cp`：线程安全有界 MPMC 管道，支持阻塞与非阻塞通信及广播关闭；
+     - 解决了顶层模块同名结构体扁平合并命名冲突（将底层私有实现嵌套收束至外层导出类型作用域内）。
+  2. **2.2 统一高性能 I/O 流体系与管道扩充 (`cap:io` / `cap:stream`)**：
+     - `lib/io.cp`：扩充 `MaxBuf`（边界防护动态缓冲区）、`PipeReader`（实现 `Reader, Closer`）、`PipeWriter`（实现 `Writer, Closer`）、`Pipe.create()` 工厂；
+     - `lib/stream.cp`：标准库 `cap:stream` 对外统一出口通道；
+     - 测试用例覆盖 8 大端到端套件：`BufferReader`、`BufferWriter`、`BufferedReader`、`BufferedWriter`、`copyStream`、`copyN`、`MaxBuf`、`Pipe` 线程间数据流。
+  3. **2.3 零拷贝高性能序列化框架 (`cap:json` / `cap:serde`)**：
+     - `lib/json/pool.cp`：移植 Bun 的内存池机制 `JsonBufferPool`，实现多轮解析内存零二次分配；
+     - `lib/json/value.cp`：零拷贝 AST 树 `JsonValue`，直接借用原始输入 Buffer 的只读切片（`&str`），消除二次字符串堆分配；
+     - `lib/json/parser.cp`：极速流式递归下降 JSON 解析器，支持任意嵌套 Object/Array 与字段索引；
+     - `lib/json/index.cp`、`lib/json.cp`、`lib/serde.cp`：模块导出与对外入口。
+  4. **2.4 无锁并发原语库 (Lock-Free Primitives)**：
+     - `lib/sync/ring_buffer.cp`：基于 Dmitry Vyukov 经典算法的定长 MPMC 无锁环形队列 `MpmcQueue<T>`；
+     - `lib/sync/unbounded_queue.cp`：侵入式无锁并发链表队列 `UnboundedQueue<T>`；
+     - `lib/sync/wyhash.cp`：从 Bun 移植的 64 位超高速无状态非加密哈希算法 `Wyhash`；
+     - `lib/sync/concurrent_map.cp`：基于 Wyhash 16 桶分片的高并发分段哈希映射表 `ConcurrentMap<V>`；
+     - `lib/sync/arc_slice.cp`：原子引用计数切片 `ArcSlice<T>`，支持跨线程零拷贝不可变只读视图与幂等释放。
+  5. **编译器关键缺陷修复与无损同步**：
+     - `cpc/src/codegen/mod.rs`：修复 Trait 虚表中返回错误联合类型（`!T`）时未加上 `anyerror` 前缀的非法 Zig 函数指针语法；
+     - `cpc/src/codegen/stmt.rs`：对 `move` 后的 `__{var}_moved = true;` 增加 `drop_flag_vars` 存在性守卫，避免未声明标识符错误；
+     - 修改同步至 `cpc_dev` 并运行 `sync_cpc.sh` 编译部署正式发布版。
+  6. **全套回归测试 100% 通过**：
+     - `cap/test/test_sync_primitives.cp`：8 大同步与无锁原语用例全部 PASS；
+     - `cap/test/test_mutex_atomic.cp`：7 大互斥与原子操作全部 PASS；
+     - `cap/test/test_io_streams.cp`：8 大统一 I/O 流与管道用例全部 PASS；
+     - `cap/test/test_zero_copy_json.cp`：3 大零拷贝 JSON 解析用例全部 PASS；
+     - `cap/test/test_json.cp`：原生 `@json_parse` 与 `@json_stringify` 用例 PASS。
+
+## 阶段里程碑 Git 提交 3
+
+- **提交说明**：`feat(stdlib): port sync primitives, lock-free queue, pipe streams, and zero-copy json from bun`
+- **变更范围**：
+  1. `lib/sync/`（`futex.cp`, `mutex.cp`, `condition.cp`, `wait_group.cp`, `channel.cp`, `ring_buffer.cp`, `unbounded_queue.cp`, `wyhash.cp`, `concurrent_map.cp`, `arc_slice.cp`, `index.cp`）及 `lib/sync.cp`；
+  2. `lib/io.cp`（扩充 `MaxBuf`, `PipeReader`, `PipeWriter`, `Pipe`）及 `lib/stream.cp`；
+  3. `lib/json/`（`pool.cp`, `value.cp`, `parser.cp`, `index.cp`）及 `lib/json.cp`, `lib/serde.cp`；
+  4. `cpc/src/codegen/mod.rs`, `cpc/src/codegen/stmt.rs`：Trait 虚函数表错误类型修复与 moved 标志防护；
+  5. `cap/test/test_sync_primitives.cp`, `cap/test/test_zero_copy_json.cp`, `cap/test/test_io_streams.cp`, `cap/test/test_json.cp`；
+  6. `cp_ref.md`：第 12.1、12.3、12.4、12.5 节全面更新标准库索引与技术手册；
+  7. `SESSION.md` / `CHANGELOG.md` / `DEVLOG.md`：当日热日志同步更新。

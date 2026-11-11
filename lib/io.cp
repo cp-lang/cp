@@ -353,3 +353,127 @@ export const stdio = new Stdio();
 export fn print(msg: any): void {
     @print("{any}", msg);
 }
+
+// --- 工业级管道流与缓冲区越界守卫 (Ported from Bun.js io/PipeReader & io/MaxBuf) ---
+
+/**
+ * 缓冲区最大字节限制守卫 (Ported from Bun.js MaxBuf)
+ * 防止未受信进程或超大流耗尽内存
+ */
+export class MaxBuf {
+    remaining_bytes: i64;
+
+    pub fn init(limit: i64) {
+        _.remaining_bytes = limit;
+    }
+
+    pub fn onReadBytes(mut _, bytes: usize): bool! {
+        if (_.remaining_bytes < 0) {
+            return false;
+        }
+        _.remaining_bytes = _.remaining_bytes - (bytes as i64);
+        if (_.remaining_bytes < 0) {
+            return err.BufferFull;
+        }
+        return true;
+    }
+}
+
+/**
+ * 原生非阻塞/阻塞管道读取器
+ * 满足 Reader 与 Closer Trait 契约
+ */
+export class PipeReader implements Reader, Closer {
+    fd: i32;
+    closed: bool;
+
+    pub fn init(fd: i32) {
+        _.fd = fd;
+        _.closed = false;
+    }
+
+    pub fn read(mut _, *buf: []u8): usize! {
+        if (_.closed || _.fd < 0) {
+            return err.Closed;
+        }
+        if (buf.len == 0) {
+            return 0;
+        }
+        const rc = std.os.linux.read(_.fd, buf.ptr, buf.len);
+        const err_code = std.posix.errno(rc);
+        if (err_code != .SUCCESS) {
+            if (err_code == .AGAIN) return 0;
+            return err.EndOfStream;
+        }
+        return rc;
+    }
+
+    pub fn close(mut _): void {
+        if (!_.closed && _.fd >= 0) {
+            _ = std.os.linux.close(_.fd);
+            _.closed = true;
+            _.fd = -1;
+        }
+    }
+}
+
+/**
+ * 原生非阻塞/阻塞管道写入器
+ * 满足 Writer 与 Closer Trait 契约
+ */
+export class PipeWriter implements Writer, Closer {
+    fd: i32;
+    closed: bool;
+
+    pub fn init(fd: i32) {
+        _.fd = fd;
+        _.closed = false;
+    }
+
+    pub fn write(mut _, data: []const u8): usize! {
+        if (_.closed || _.fd < 0) {
+            return err.Closed;
+        }
+        if (data.len == 0) {
+            return 0;
+        }
+        const rc = std.os.linux.write(_.fd, data.ptr, data.len);
+        const err_code = std.posix.errno(rc);
+        if (err_code != .SUCCESS) {
+            return err.ShortWrite;
+        }
+        return rc;
+    }
+
+    pub fn close(mut _): void {
+        if (!_.closed && _.fd >= 0) {
+            _ = std.os.linux.close(_.fd);
+            _.closed = true;
+            _.fd = -1;
+        }
+    }
+}
+
+/**
+ * 管道工厂：创建一对相互连通的 PipeReader 与 PipeWriter
+ */
+export class Pipe {
+    reader: PipeReader;
+    writer: PipeWriter;
+
+    pub fn init(reader: PipeReader, writer: PipeWriter) {
+        _.reader = reader;
+        _.writer = writer;
+    }
+
+    pub static fn create(): Pipe! {
+        var fds: [2]std.posix.fd_t = undefined;
+        const rc = std.os.linux.pipe(&fds);
+        if (std.posix.errno(rc) != .SUCCESS) {
+            return err.Closed;
+        }
+        let r = new PipeReader(fds[0]);
+        let w = new PipeWriter(fds[1]);
+        return new Pipe(r, w);
+    }
+}
