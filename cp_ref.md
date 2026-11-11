@@ -5860,6 +5860,10 @@ export class SocketContext<Handler> {
 | `cap:path`        | 跨平台路径计算 `Path`, `PosixPath`, `WindowsPath`（`join`, `resolve`, `normalize`, `dirname`, `basename`, `extname`, `isAbsolute`） | **已全面实装** |
 | `cap:url`         | WHATWG 规范 `URL`, `URLSearchParams`, `QueryParam`                     | **已全面实装** |
 | `cap:encoding`    | 极速 Base64 编解码器（Standard, URL-Safe, 无填充, 内存池, 统一解码）  | **已全面实装** |
+| `cap:glob`        | Unix Glob 模式匹配（递归 `**`、单级 `*`、`?`、字符集 `[a-z]`、`!`、`hasMagic`） | **已全面实装** |
+| `cap:semver`      | Semver 2.0 版本解析、全语义比较排序与范围匹配（`^`, `~`, `>=`, `<=`, `-`, `||`, `*`） | **已全面实装** |
+| `cap:dotenv`      | 环境变量 `.env` 极速加载器（支持单/双引号、转义符、内联注释、`export` 语法） | **已全面实装** |
+| `cap:ini`         | 工业级 INI 配置文件解析器（多 Section 划分、全局/分段键值提取、默认值回退） | **已全面实装** |
 | `cap:mem`         | `Arena`, `SharedTensor`, 全局共享堆, 原子引用计数                      | **已全面实装** |
 | `cap:task`        | `spawn`, `spawn_cpu`, `join`, `Task.all`, `Task.race`                  | **已全面实装** |
 | `cap:actor`       | `@spawn`, `@receive`, `@reply`, `PID`, 信箱通信                        | **已全面实装** |
@@ -6138,183 +6142,468 @@ let n = reader.read(buf[..])?;
 
 ### 12.4 工业级并发原语与无锁数据结构（`cap:sync`） 【已实装】
 
-吸收自 Bun 高并发核心基础设施，`cap:sync` 提供跨平台底层同步原语与高性能无锁数据结构：
+吸收自 Bun 高并发核心基础设施，`cap:sync` 提供跨平台底层同步原语与高性能无锁数据结构，专为百万级高频 Agent 协同与跨物理线程零锁争用设计：
 
-#### 12.4.1 底层同步原语
+#### 12.4.1 底层同步原语全览
 
-| 原语 | 说明 |
-| :--- | :--- |
-| **`Futex`** | 跨平台轻量用户态互斥原语（Linux `SYS_futex`、macOS `__ulock`、Windows `WaitOnAddress`），支持 `wait()`、`waitForever()`、`wake()` 与单调时钟超时控制。 |
-| **`Mutex` / `Mutex<T>`** | 工业级互斥锁，支持无载荷裸锁与数据容器包装锁，提供 `withLock()` 闭包模式与 `lock()` / `tryLock()` RAII 守卫。 |
-| **`Condition`** | 跨平台条件变量，支持基于 Futex 的毫秒级等待 `timedWait()` 与 `signal()` / `broadcast()` 唤醒。 |
-| **`WaitGroup`** | 计数信号量同步屏障，支持 `add()`、`done()`、`wait()`，精确控制并发批处理任务聚合。 |
-| **`Channel<T>`** | 线程安全有界 MPMC 通道，支持非阻塞 `trySend()` / `tryRecv()` 与超时阻塞 `send()` / `recv()`，自带 `close()` 广播。 |
+| 原语 | 类型 / 签名 | 说明 |
+| :--- | :--- | :--- |
+| **`Futex`** | `struct Futex` | 跨平台轻量系统 Futex 封装（Linux `SYS_futex`、macOS `__ulock`、Windows `WaitOnAddress`），支持 `wait()`、`waitForever()`、`wake()`。 |
+| **`Mutex`** | `struct Mutex` | 工业级互斥锁，支持无竞争秒级原子自旋与慢速 Futex 挂起，提供 `lock()`、`unlock()` 与 `tryLock()`。 |
+| **`Condition`** | `struct Condition` | 跨平台条件变量，支持基于 Futex 的毫秒级等待 `timedWait()` 与 `signal()` / `broadcast()` 唤醒。 |
+| **`WaitGroup`** | `struct WaitGroup` | 计数信号量同步屏障，支持 `add(delta)`、`done()`、`wait()`，精确控制并发批处理任务聚合。 |
+| **`Channel<T>`** | `struct Channel<T>` | 线程安全有界 MPMC 通道，支持非阻塞 `trySend()` / `tryRecv()` 与超时阻塞 `send()` / `recv()`，自带 `close()` 广播。 |
 
-#### 12.4.2 无锁高并发数据结构（Lock-Free Primitives）
+#### 12.4.2 无锁并发数据结构（Lock-Free Primitives）
 
-| 结构 | 说明 |
-| :--- | :--- |
-| **`MpmcQueue<T>`** | 基于 Dmitry Vyukov 经典算法的定长多生产者多消费者（MPMC）无锁环形队列，支持高频跨线程数据吞吐，零全局锁竞争。 |
-| **`UnboundedQueue<T>`** | 侵入式链表无锁无界并发队列，单写多读零争用。 |
-| **`ConcurrentMap<V>`** | 基于 **Wyhash** 64 位超高速哈希分片的分段并发哈希表（Striped Map），将锁竞争分散至 16 个独立桶，支持高并发并发读写。 |
-| **`ArcSlice<T>`** | 原子引用计数切片（Atomic Reference-Counted Slice），提供多线程零拷贝只读共享视图与幂等自动释放。 |
+| 结构 | 类型 / 签名 | 说明 |
+| :--- | :--- | :--- |
+| **`MpmcQueue<T>`** | `struct MpmcQueue<T>` | 基于 Dmitry Vyukov 经典算法的有界多生产者多消费者（MPMC）无锁环形队列，支持 `push()`、`pop()`，高频跨线程数据吞吐零全局锁争用。 |
+| **`UnboundedQueue<T>`**| `struct UnboundedQueue<T>` | 侵入式链表无锁无界并发队列，支持多线程高吞吐安全并发入队。 |
+| **`ConcurrentMap<V>`** | `struct ConcurrentMap<V>` | 基于 **Wyhash** 64 位超高速哈希分片的分段并发哈希表（Striped Map），将锁竞争分散至 16 个独立桶，支持高并发读写 `put()`、`get()`、`remove()`。 |
+| **`ArcSlice<T>`** | `struct ArcSlice<T>` | 原子引用计数切片（Atomic Reference-Counted Slice），提供跨线程零拷贝只读共享视图与幂等释放 `retain()` / `release()`。 |
+| **`Wyhash`** | `struct Wyhash` | 工业级 64 位极速确定性哈希算法，提供 `hash(seed, data)` 与 `hash64(data)`。 |
+
+#### 12.4.3 完整使用示例
 
 ```typescript
-import { MpmcQueue, ConcurrentMap, ArcSlice, Channel, WaitGroup } from "cap:sync";
+import { Futex, Mutex, Condition, WaitGroup, Channel, MpmcQueue, ConcurrentMap, ArcSlice } from "cap:sync";
 
 // 1. 无锁 MPMC 环形队列
-let queue = new MpmcQueue<i32>(1024);
-queue.push(42);
-let val = queue.pop(); // 42
+var queue = MpmcQueue(i32, 16).init();
+queue.push(101);
+queue.push(102);
+let v1 = queue.pop().?; // 101
+let v2 = queue.pop().?; // 102
 
-// 2. 分片高并发哈希表
-let map = new ConcurrentMap<string>(16);
-map.put("agent_id", "cpc_agent_007");
-let id = map.get("agent_id");
+// 2. 线程同步屏障 WaitGroup
+var wg = WaitGroup.init();
+wg.add(2);
+// 工作线程完成时：
+wg.done();
+wg.done();
+wg.wait(); // 屏障解除
 
-// 3. 原子引用计数切片
-let shared = ArcSlice<u8>.create("immutable shared tensor".asBytes());
+// 3. 有界 MPMC 通道 Channel
+var ch = Channel(i32, 8).init();
+ch.send(42);
+let received = ch.recv().?; // 42
+ch.close();
+
+// 4. 分片并发哈希表 ConcurrentMap
+var map = ConcurrentMap([]const u8).init(allocator);
+defer map.deinit();
+try map.put("session_id", "sess_998877");
+let val = map.get("session_id"); // "sess_998877"
+
+// 5. 原子引用计数切片 ArcSlice
+const raw_data = "immutable shared agent tensor payload";
+var arc = ArcSlice(u8).init(allocator, raw_data) catch unreachable;
+defer arc.release();
+let slice_ref = arc.retain(); // 增加引用计数
+defer slice_ref.release();
 ```
 
 ---
 
-### 12.5 零拷贝序列化与流式 JSON 解析框架（`cap:json` / `cap:serde`） 【已实装】
+### 12.5 统一零拷贝流式 I/O 管道体系（`cap:stream` / `cap:io`） 【已实装】
+
+CP 标准库吸收并提炼了 Bun 的工业级管道架构与环形缓冲区机制，在 `cap:io` 与 `cap:stream` 中原生提供无锁/锁同步内存管道与缓冲区边界守卫：
+
+#### 12.5.1 核心组件
+
+- **`PipeReader`**：流式管道读取端，包装底层 `Pipe`，具备非阻塞与阻塞读取能力；
+- **`PipeWriter`**：流式管道写入端，支持向内部环形缓冲区推入数据，并在缓冲区满时挂起协程或阻塞让步；
+- **`MaxBuf`**：安全边界守卫，动态监控流式读写的内存上限，杜绝畸形大报文耗尽系统内存；
+- **`Pipe.create(allocator, capacity)`**：原子成对初始化 `(PipeReader, PipeWriter)`。
+
+#### 12.5.2 完整使用示例
+
+```typescript
+import { Pipe, PipeReader, PipeWriter, MaxBuf } from "cap:stream";
+
+// 创建 4KB 缓冲管道
+var pair = try Pipe.create(allocator, 4096);
+defer pair.deinit();
+
+var writer = pair.writer;
+var reader = pair.reader;
+
+// 写入端推送数据
+const message = "Agent Pipeline Stream Data";
+try writer.writeAll(message);
+try writer.flush();
+
+// 读取端消费数据
+var read_buf: [128]u8 = undefined;
+const bytes_read = try reader.read(&read_buf);
+const received = read_buf[0..bytes_read]; // "Agent Pipeline Stream Data"
+```
+
+---
+
+### 12.6 零拷贝序列化与流式 JSON 解析框架（`cap:json` / `cap:serde`） 【已实装】
 
 CP 语言在 `cap:json` 与 `cap:serde` 中实现了业界领先的**零拷贝递归下降 JSON 解析器**与**内存池**，杜绝堆垃圾与二次字符串深拷贝：
 
-#### 12.5.1 核心特性与架构
+#### 12.6.1 核心机制
 
-1. **零拷贝切片借用（Zero-Copy String Slicing）**：
-   - 提取字符串时，`JsonValue.asString()` 直接借用原始 JSON 输入 Buffer 的只读切片（`[]const u8`），避免任何中间堆字符串分配。
+1. **零拷贝切片借用（Zero-Copy Slicing）**：
+   - 提取字符串时，`JsonValue.String` 直接借用原始 JSON 输入 Buffer 的只读切片（`[]const u8`），指针直接指向输入内存，零分配；
 2. **内存池高速复用（`JsonBufferPool`）**：
-   - 吸收 Bun 的 `HashMapPool` 机制，提供线程级可重用解析内存池，解析复杂树状结构时内存复用率高达 95%+。
-3. **极速流式解析器（`JsonParser`）**：
+   - 吸收 Bun 的 `HashMapPool` 机制，提供节点与哈希表的预分配内存池，解析复杂树状结构时内存复用率高达 95%+；
+3. **极速解析器（`JsonParser`）**：
    - 支持基本标量（`null`、`bool`、`number`、`string`）及任意嵌套的 `Array` 与 `Object`；
-   - 提供 TS 风格对象字段检索（`obj.get("field")`）与数组索引（`arr.at(index)`）。
+   - 提供 TS 风格对象字段检索（`obj.get("field")`）与数组索引（`arr.getIndex(index)`）。
+
+#### 12.6.2 完整使用示例
 
 ```typescript
-import { JsonParser, JsonValue } from "cap:json";
+import { JSON, JsonParser, JsonValue, JsonBufferPool } from "cap:json";
 
-let jsonStr = "{\"id\": 101, \"name\": \"Antigravity\", \"skills\": [\"rust\", \"zig\", \"cp\"]}";
-let parser = new JsonParser(jsonStr);
-let root = parser.parseValue()?;
+const raw_json = "{\"name\": \"Antigravity\", \"version\": 2, \"tools\": [\"cli\", \"cpc\"]}";
+const root = try JSON.parse(allocator, raw_json);
+defer root.deinit(allocator);
 
-// 提取字段并直接零拷贝借用
-let id = root.get("id")?.asNumber()?;       // 101
-let name = root.get("name")?.asString()?;   // "Antigravity" (直接指向 jsonStr 底层指针)
+// 1. 结构体字段零拷贝借用
+if (root.get("name")) |name_val| {
+    const name_str = name_val.asString().?; // "Antigravity"，直接借用 raw_json 内存！
+}
+
+// 2. 数值解析
+if (root.get("version")) |ver_val| {
+    const ver = ver_val.asNumber().?;       // 2.0
+}
+
+// 3. 数组元素访问
+if (root.get("tools")) |tools_val| {
+    const tool0 = tools_val.getIndex(0).?.asString().?; // "cli"
+    const tool1 = tools_val.getIndex(1).?.asString().?; // "cpc"
+}
 ```
 
 ---
 
-### 12.6 超高性能 Radix-Tree 路由引擎（`cap:router`） 【已实装】
+### 12.7 超高性能 Radix-Tree 路由引擎（`cap:router`） 【已实装】
 
 CP 语言在 `cap:router` 中内置了对标 Bun、Fastify 与 Go Chi 的微秒级 Radix-Tree 前缀树路由分发引擎：
 
-#### 12.6.1 核心特性
+#### 12.7.1 核心特性
+
 - **8 树独立动词分发**：针对 `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`, `OPTIONS`, `ALL` 预置独立子树，消除跨方法遍历开销；
 - **全类型参数抽取**：
   - 动态参数：`:param` 与 `[param]` 语法支持；
   - 通配符全匹配：`*path` 与 `[...path]` 尾部贪婪捕获；
 - **零堆分配 `ParamMap`**：参数字典默认以 16 槽位栈内存就地缓存，HTTP 请求路由全链路零动态堆申请。
 
+#### 12.7.2 完整使用示例
+
 ```typescript
 import { Router } from "cap:router";
 
-let router = Router(string).init(allocator);
+var router = Router([]const u8).init(allocator);
+defer router.deinit();
 
-// 注册路由
-router.get("/users/:id", "getUserHandler");
-router.post("/users", "createUserHandler");
-router.get("/static/*filepath", "staticFileHandler");
+// 1. 注册多动词与动态参数路由
+try router.add("GET", "/api/v1/users", "handleListUsers");
+try router.add("GET", "/api/v1/users/:id", "handleGetUser");
+try router.add("POST", "/api/v1/users", "handleCreateUser");
+try router.add("GET", "/static/*filepath", "handleStaticFiles");
 
-// 路由检索
-let match = router.lookup("GET", "/users/1001");
-if (match) |m| {
-    print(`Matched: ${m.handler}`);             // "getUserHandler"
-    print(`User ID: ${m.params.get("id").?}`);   // "1001"
+// 2. 精确路由匹配与参数提取
+const match1 = router.lookup("GET", "/api/v1/users/42");
+if (match1) |m| {
+    const handler = m.handler;               // "handleGetUser"
+    const user_id = m.params.get("id").?;    // "42"
+}
+
+// 3. 通配符贪婪匹配
+const match2 = router.lookup("GET", "/static/images/logo.png");
+if (match2) |m| {
+    const handler = m.handler;               // "handleStaticFiles"
+    const path = m.params.get("filepath").?; // "images/logo.png"
 }
 ```
 
 ---
 
-### 12.7 工业级 HTTP 核心协议栈（`cap:http` 升级） 【已实装】
+### 12.8 现代 HTTP 核心协议抽象（`cap:http`） 【已实装】
 
 吸收自 Bun 的网络协议模型，在 `cap:http` 中全面实装现代 HTTP 核心抽象：
+
+#### 12.8.1 核心组件
 
 - **`Method` 枚举**：完备覆盖 33 种 HTTP 动词，内置 `isIdempotent()`、`hasRequestBody()` 与 `fromString()` / `toString()` 高性能转换；
 - **`Headers` 集合**：基于 ASCII 大小写无关查找的 HTTP 报头字典，具备单缓冲内存优化，提供 `get()`, `set()`, `append()`, `delete()`, `count()`, `at()`；
 - **`ETag` 协商**：支持强弱 ETag 生成、解析与 `ifNoneMatch()` 条件请求高效匹配；
 - **`MimeType` 字典**：覆盖常见网页、媒体、字体、文档等后缀，提供 `fromExtension()` 与 `fromPath()`。
 
+#### 12.8.2 完整使用示例
+
 ```typescript
 import { Method, Headers, ETag, MimeType } from "cap:http";
 
-let headers = Headers.init(allocator);
-headers.set("Content-Type", MimeType.fromExtension("json"));
-headers.append("Authorization", "Bearer token123");
+// 1. HTTP 动词属性判断
+const m_get = Method.GET;
+const is_idempotent = m_get.isIdempotent();   // true
+const has_body = Method.POST.hasRequestBody(); // true
 
-let etag = ETag.generate(bodyData, &buf);
-if (ETag.ifNoneMatch(etag, clientHeader)) {
-    // 命中 304 Not Modified
+// 2. 大小写无关报头集合 Headers
+var headers = Headers.init(allocator);
+defer headers.deinit();
+
+try headers.set("Content-Type", "application/json");
+try headers.append("Accept", "text/html");
+
+const content_type = headers.get("content-type").?; // "application/json"（大小写不敏感检索）
+
+// 3. ETag 缓存协商与 304 判断
+var etag_buf: [64]u8 = undefined;
+const etag = ETag.generate("payload-v1.0.0", false, &etag_buf); // "\"1418837775\""
+const matches = ETag.ifNoneMatch(etag, "\"1418837775\"");       // true -> 响应 304 Not Modified
+
+// 4. MIME 类型秒级检测
+const mime_js = MimeType.fromPath("src/bundle.js");             // "application/javascript"
+const mime_png = MimeType.fromExtension("png");                 // "image/png"
+```
+
+---
+
+### 12.9 跨平台路径计算与 WHATWG URL 规范（`cap:path` & `cap:url`） 【已实装】
+
+CP 标准库提供了完全对标 Node.js `path` 与浏览器 WHATWG `URL` 标准的系统级支持：
+
+#### 12.9.1 跨平台路径操作（`cap:path`）
+
+- 自动抹平 POSIX 与 Windows 差异，支持盘符（`C:`）、UNC 路径（`\\server\share`）与正反斜杠转换；
+- 提供 `join()`, `resolve()`, `normalize()`, `dirname()`, `basename()`, `extname()`, `isAbsolute()`。
+
+#### 12.9.2 WHATWG URL 解析引擎（`cap:url`）
+
+- `URL.parse(urlString, allocator)`：结构化拆解 `protocol`, `username`, `password`, `host`, `hostname`, `port`, `pathname`, `search`, `hash`, `origin`；
+- `URLSearchParams`：查询字符串增删查改与标准 URL 编码重序列化。
+
+#### 12.9.3 完整使用示例
+
+```typescript
+import { path } from "cap:path";
+import { URL, URLSearchParams } from "cap:url";
+
+// 1. 跨平台路径运算
+var path_buf: [256]u8 = undefined;
+const parts = [_][]const u8{ "/home/user", "projects", "../data/config.cp" };
+const joined = path.join(parts[0..], &path_buf); // "/home/user/data/config.cp"
+const base = path.basename(joined, null);        // "config.cp"
+const ext = path.extname(joined);                // ".cp"
+
+// 2. WHATWG URL 解析与操作
+const raw_url = "https://alice:secret@example.com:8080/api/v1/search?q=agents&page=1#results";
+var parsed = try URL.parse(raw_url, allocator);
+defer parsed.deinit();
+
+const host = parsed.hostname;                    // "example.com"
+const port = parsed.port;                        // "8080"
+const query_q = parsed.searchParams.get("q").?;  // "agents"
+```
+
+---
+
+### 12.10 高性能数据编码标准库（`cap:encoding` / Base64） 【已实装】
+
+`cap:encoding` 提供了纯 CP 编写的高性能 Base64 编解码器：
+
+- **多模式支持**：标准 Standard Base64（带 `=` 填充）、URL-Safe Base64（`-` 与 `_` 替代 `+` 与 `/`，无填充）；
+- **自适应解码引擎**：单个 `decode()` / `decodeAlloc()` 自动识别并解码标准与 URL-Safe 两种格式，自动跳过空白符；
+- **零分配就地运算**：提供 `encode(dest, src)` 与 `decode(dest, src)`，杜绝多余堆内存申请。
+
+#### 12.10.1 完整使用示例
+
+```typescript
+import { Base64 } from "cap:encoding";
+
+// 1. 栈上零分配标准 Base64 编码
+var out_buf: [64]u8 = undefined;
+const encoded_len = Base64.encode(&out_buf, "Hello CP World!");
+const b64_str = out_buf[0..encoded_len]; // "SGVsbG8gQ1AgV29ybGQh"
+
+// 2. 栈上解码
+var dec_buf: [64]u8 = undefined;
+const decoded_len = try Base64.decode(&dec_buf, b64_str);
+const original = dec_buf[0..decoded_len]; // "Hello CP World!"
+
+// 3. 动态内存分配与 URL-Safe 模式
+const url_safe = try Base64.encodeURLSafeAlloc(allocator, "data?token=xyz");
+defer allocator.free(url_safe);
+```
+
+---
+
+### 12.11 极速 Unix Glob 模式匹配（`cap:glob`） 【已实装】
+
+`cap:glob` 提供了工业级高性能 Unix 文件路径与通配符模式匹配器，基于分段递归回溯架构，专为构建工具、文件监听及包管理器设计：
+
+#### 12.11.1 语法全特性覆盖
+
+| 语法原语 | 说明 | 示例 |
+| :--- | :--- | :--- |
+| `*` | 匹配单个路径段内的任意字符（不跨越目录边界 `/`） | `*.cp` 匹配 `main.cp`，不匹配 `src/main.cp` |
+| `**` | 递归 Globstar，匹配 0 个或多个任意层级的目录 | `**/*.cp` 匹配 `main.cp`、`src/main.cp`、`a/b/c.cp` |
+| `?` | 匹配单个任意字符 | `test?.cp` 匹配 `test1.cp`、`testA.cp` |
+| `[a-z]` / `[0-9]` | 字符范围集合匹配 | `v[0-9].txt` 匹配 `v1.txt`、`v9.txt` |
+| `[!...]` / `[^...]`| 字符范围集合取反 | `log_[!0-9].txt` 匹配 `log_a.txt` |
+| `!` (前缀) | 整体模式取反 | `!*.tmp` 匹配除 `.tmp` 结尾以外的所有路径 |
+| `hasMagic(pat)` | 极速检查模式串是否含有 Glob 通配符（跳过普通文件的遍历开销） | `hasMagic("**/*.cp") == true` |
+
+#### 12.11.2 完整使用示例
+
+```typescript
+import { Glob } from "cap:glob";
+
+// 1. 单级与多级递归通配
+const is_match1 = Glob.match("*.cp", "main.cp");              // true
+const is_match2 = Glob.match("**/*.cp", "src/core/expr.cp");  // true
+const is_match3 = Glob.match("lib/**/test_*.cp", "lib/a/b/test_deep.cp"); // true
+
+// 2. 字符集与取反
+const is_match4 = Glob.match("v[0-9].json", "v3.json");        // true
+const is_match5 = Glob.match("!*.tmp", "data.json");           // true (模式取反)
+
+// 3. 语法探测
+if (Glob.hasMagic("src/**/*.cp")) {
+    // 启用目录递归遍历探测引擎
 }
 ```
 
 ---
 
-### 12.8 跨平台路径计算与 WHATWG URL 规范（`cap:path` & `cap:url`） 【已实装】
+### 12.12 Semver 2.0 语义化版本与范围匹配（`cap:semver`） 【已实装】
 
-CP 标准库提供了完全对标 Node.js `path` 与浏览器 WHATWG `URL` 标准的系统级支持：
+吸收自 Bun 的包管理器核心算法，`cap:semver` 提供了完全遵循 Semver 2.0 规范的语义化版本解析器、高阶优先级排序与 npm/Cargo 范围匹配引擎：
 
-#### 12.8.1 `cap:path`（跨平台路径处理）
-- `join(...paths)`、`resolve(...paths)`、`normalize(path)`、`isAbsolute(path)`；
-- `basename(path, ext?)`、`dirname(path)`、`extname(path)`；
-- 原生支持 POSIX 与 Windows 双平台驱动器盘符、UNC 路径与斜杠转换。
+#### 12.12.1 规范与比较规则
 
-#### 12.8.2 `cap:url`（WHATWG URL 解析引擎）
-- `URL.parse(urlString, allocator)`：拆解 `protocol`, `username`, `password`, `host`, `hostname`, `port`, `pathname`, `search`, `hash`, `origin`；
-- `URLSearchParams`：查询字符串结构化操作（`get()`, `set()`, `append()`, `delete()`, `toString()`）。
+- **全三段式解析**：支持 `v1.2.3`、`=2.10.5-beta.1+sha.abcdef`，精准分离 `major`, `minor`, `patch`, `prerelease`, `build`；
+- **Semver 2.0 优先级铁律**：
+  - 正式发布版本优先级高于任意预发布版本（`1.0.0 > 1.0.0-alpha`）；
+  - 预发布标识按 `.` 分割逐项比较：纯数字分量按数值大小比较（`1.0.0-beta.2 < 1.0.0-beta.11`），非纯数字按 ASCII 词法排序；
+- **多维度版本范围匹配**：
+  - Caret 锁版本（`^1.2.3`）：允许不改变最左侧非零主/次版本的递增（`^1.2.3` := `>=1.2.3 <2.0.0`，`^0.2.0` := `>=0.2.0 <0.3.0`）；
+  - Tilde 补丁更新（`~1.2.0`）：仅允许 patch 级别递增（`~1.2.0` := `>=1.2.0 <1.3.0`）；
+  - 比较符（`>=`, `<=`, `>`, `<`）与连字符范围（`1.0.0 - 2.0.0`）；
+  - 逻辑或联合集（`||`）：例如 `^1.0.0 || ^3.0.0`；
+  - 通配符（`*` / `x` / `X`）。
+
+#### 12.12.2 完整使用示例
 
 ```typescript
-import { path } from "cap:path";
-import { URL } from "cap:url";
+import { Semver, Version } from "cap:semver";
 
-// 路径处理
-let fullPath = path.join(["/app", "src", "index.cp"]); // "/app/src/index.cp"
-let ext = path.extname(fullPath);                      // ".cp"
+// 1. 解析 Semver 2.0 版本
+const v1 = try Version.parse("v1.5.0-beta.2+build.101");
+const v2 = try Version.parse("1.5.0");
 
-// URL 解析
-let url = try URL.parse("https://user:pass@example.com:8080/api/v1?page=2#top", allocator);
-defer url.deinit();
+// 2. 版本比较与语义排序
+const is_less = v1.lt(v2);   // true (预发布版本优先次序低于正式版)
+const is_greater = v2.gt(v1); // true
 
-print(`Host: ${url.hostname}`);           // "example.com"
-print(`Page: ${url.searchParams.get("page").?}`); // "2"
+// 3. 版本格式化
+var buf: [64]u8 = undefined;
+const formatted = v1.format(&buf); // "1.5.0-beta.2+build.101"
+
+// 4. npm/Cargo 规范范围匹配
+const ok1 = Semver.satisfiesStr("1.2.5", "^1.2.0");          // true
+const ok2 = Semver.satisfiesStr("2.0.0", "^1.2.0");          // false
+const ok3 = Semver.satisfiesStr("1.2.9", "~1.2.0");          // true
+const ok4 = Semver.satisfiesStr("1.5.0", "1.0.0 - 2.0.0");   // true
+const ok5 = Semver.satisfiesStr("3.2.0", "^1.0.0 || ^3.0.0");// true
 ```
 
 ---
 
-### 12.9 数据编码标准库（`cap:encoding` / Base64） 【已实装】
+### 12.13 环境变量 `.env` 极速加载器（`cap:dotenv`） 【已实装】
 
-`cap:encoding` 提供了纯 CP 编写的高性能 Base64 编解码器：
+`cap:dotenv` 提供了工业级 `.env` 环境配置解析器，采用 100% 栈分配就地解析，零堆垃圾：
 
-- **多模式支持**：标准 Standard Base64（带 `=` 填充）、URL-Safe Base64（`-` 与 `_`，无填充）；
-- **自适应解码引擎**：单个 `decode()` / `decodeAlloc()` 自动识别并解码标准与 URL-Safe 两种格式，自动跳过空白符；
-- **零分配就地运算**：提供 `encode(dest, src)` 与 `decode(dest, src)`，杜绝多余堆内存申请。
+#### 12.13.1 核心特性
+
+- **现代语法兼容**：支持 `KEY=VALUE`、`KEY: VALUE`，以及 Bash 风格的 `export KEY=VALUE`；
+- **双引号转义解析**：自动解析 `\n`, `\r`, `\t`, `\"`, `\\`，支持多行长文本字段；
+- **单引号原样保护**：单引号内内容严格保持字面量，不执行任何转义；
+- **智能内联注释截断**：识别 `KEY=value # inline comment` 并自动剔除尾部注释。
+
+#### 12.13.2 完整使用示例
 
 ```typescript
-import { Base64 } from "cap:encoding";
+import { DotEnv } from "cap:dotenv";
 
-// 就地栈编码
-var buf: [128]u8 = undefined;
-let len = Base64.encode(&buf, "Hello CP!");
+const env_content =
+    "# 生产环境应用配置\n" +
+    "APP_NAME=Antigravity\n" +
+    "PORT=8080\n" +
+    "export SECRET_KEY=\"top_secret_key\"\n" +
+    "GREETING=\"Hello\\nWorld\"\n" +
+    "TIMEOUT=30 # 请求超时秒数\n";
 
-// 动态内存分配
-let encoded = try Base64.encodeURLSafeAlloc(allocator, rawData);
-defer allocator.free(encoded);
+const env = DotEnv.parse(env_content);
+
+// 提取变量
+const app = env.get("APP_NAME").?;        // "Antigravity"
+const port = env.get("PORT").?;           // "8080"
+const secret = env.get("SECRET_KEY").?;   // "top_secret_key"
+const greet = env.get("GREETING").?;      // "Hello\nWorld" (转义已就地解析)
+
+// 默认值回退与存在性探测
+const debug = env.getOr("DEBUG", "false");// "false"
+const has_key = env.has("APP_NAME");      // true
 ```
 
 ---
 
-### 12.10 生态演进与路线图（Roadmap）
+### 12.14 工业级 INI 配置文件解析器（`cap:ini`） 【已实装】
+
+`cap:ini` 提供了纯 CP 实现的高性能 INI 配置解析器：
+
+#### 12.14.1 核心特性
+
+- **多段（Section）划分**：支持全局配置区与 `[section_name]` 命名段空间隔离；
+- **双注释符兼容**：无缝支持 `;`（经典 Windows INI）与 `#`（Unix 风格）注释行及行尾注释；
+- **双向快速检索**：提供 `get(section, key)`、`getGlobal(key)`、`getOr()` 以及 `hasSection()`。
+
+#### 12.14.2 完整使用示例
+
+```typescript
+import { Ini } from "cap:ini";
+
+const ini_content =
+    "; 全局应用基础配置\n" +
+    "title = Agent System\n" +
+    "version = 1.0.0\n\n" +
+    "[server]\n" +
+    "host = 127.0.0.1\n" +
+    "port = 3000\n" +
+    "enable_ssl = false\n\n" +
+    "[database]\n" +
+    "name = \"production_db\"\n" +
+    "max_connections = 100 ; 最大连接池大小\n";
+
+const conf = Ini.parse(ini_content);
+
+// 1. 全局配置提取
+const title = conf.getGlobal("title").?;            // "Agent System"
+
+// 2. 区分 Section 提取
+const host = conf.get("server", "host").?;          // "127.0.0.1"
+const port = conf.get("server", "port").?;          // "3000"
+const db_name = conf.get("database", "name").?;     // "production_db"
+
+// 3. Section 存在性探测与默认值回退
+const has_srv = conf.hasSection("server");          // true
+const workers = conf.getOr("server", "workers", "4");// "4"
+```
+
+---
+
+### 12.15 生态演进与路线图（Roadmap）
 
 ```mermaid
 timeline

@@ -182,3 +182,53 @@
   6. `cap/test/test_router.cp`, `cap/test/test_http_features.cp`, `cap/test/test_path_url.cp`, `cap/test/test_encoding.cp`；
   7. `cp_ref.md`：第 12.1、12.6、12.7、12.8 节全面更新标准库文档；
   8. `SESSION.md` / `CHANGELOG.md` / `DEVLOG.md`：当日热日志同步更新。
+
+## 指令 5：完成标准库第四阶段 4.1、4.2、4.3（Unix Glob 模式匹配、Semver 2.0 版本解析与范围匹配、DotEnv 与 INI 配置解析）
+
+- **用户需求**：
+  1. 按次序完成 4.1、4.2、4.3，完成后合并至 `cpc` 正式版本；
+  2. 更新四线文档，特别是 `cp_ref.md` 设计规范，必须说清楚实现的功能及使用示例（指出最近实现的系列功能说明不够清晰/完整、没有示例的问题）；
+  3. 完成单次 Git 提交；
+  4. 完成后分析下一阶段需要从 Bun 中迁移的功能，自主开展迁移，无需每次请示；
+  5. 继续常驻与 Bun AGY 双向通信任务，接收其 cpc 优化任务；
+  6. 如遇到 Bun 中 Zig 文件未迁移，可发送加急迁移任务给 Bun AGY，实现双向协作。
+
+- **执行结果**：
+  1. **4.1 Unix Glob 模式匹配引擎 (`cap:glob`)**：
+     - `lib/glob/matcher.cp`：基于路径分段（Segment-based）递归回溯匹配算法，彻底解决多星号（`**/*.cp`）单指针贪婪匹配回退失败的问题；
+     - 全特性支持：`*` 单段内任意字符、`**` 跨多级目录匹配、`?` 单字符通配、`[a-z]` / `[0-9]` 字符范围集合匹配、`!` 整体或字符集取反、`hasMagic()` 极速通配符探测；
+     - `lib/glob/index.cp` 与 `lib/glob.cp`：官方标准库导出通道 `cap:glob`；
+     - 测试用例 `cap/test/test_glob.cp`：4 大用例套件全部 100% PASS。
+  2. **4.2 Semver 2.0 语义化版本与范围匹配 (`cap:semver`)**：
+     - `lib/semver/version.cp`：全三段式版本解析（`v1.2.3`, `=2.10.5-beta.1+sha.abcdef`），精确提取 `major`, `minor`, `patch`, `prerelease`, `build`；
+     - 严格遵循 Semver 2.0 优先级铁律：正式版本优先于预发布版（`1.0.0 > 1.0.0-alpha`）；预发布版以 `.` 分割，纯数字按数值比较（`1.0.0-beta.2 < 1.0.0-beta.11`），非数字按 ASCII 词法比较；
+     - 纯栈无堆分配 `format()` 格式化器；
+     - `lib/semver/range.cp`：支持 Caret 锁版本（`^1.2.3`, `^0.2.0`, `^0.0.3`）、Tilde 补丁更新（`~1.2.0`）、比较不等式（`>=`, `<=`, `>`, `<`）、连字符范围（`1.0.0 - 2.0.0`）、逻辑或（`||`）与通配符（`*` / `x` / `X`）；
+     - `lib/semver/index.cp` 与 `lib/semver.cp`：官方标准库导出通道 `cap:semver`；
+     - 测试用例 `cap/test/test_semver.cp`：4 大用例套件全部 100% PASS。
+  3. **4.3 环境变量 `.env` 与 INI 配置解析 (`cap:dotenv` & `cap:ini`)**：
+     - `lib/dotenv/loader.cp`：100% 栈分配零堆垃圾 `.env` 解析器，支持 `KEY=VALUE`、`KEY: VALUE` 与 `export KEY=VALUE`；支持单引号原样保护、双引号转义解析（`\n`, `\r`, `\t` 等）与内联注释安全截断；提供 `get()`, `getOr()`, `has()`；
+     - `lib/dotenv/index.cp` 与 `lib/dotenv.cp`：官方标准库导出通道 `cap:dotenv`；
+     - `lib/ini/parser.cp`：工业级 INI 解析器，支持全局配置区与 `[section_name]` 独立段空间；支持 `;` 与 `#` 双注释符及行尾注释；提供 `get(section, key)`, `getGlobal(key)`, `hasSection(section)`, `getOr()`；
+     - `lib/ini/index.cp` 与 `lib/ini.cp`：官方标准库导出通道 `cap:ini`；
+     - 测试用例 `cap/test/test_config.cp`：2 大配置解析套件全部 100% PASS。
+  4. **权威设计手册 `cp_ref.md` 全面深度升级**：
+     - 针对之前文档说明不够完整、缺少代码示例的问题，在第 12 章中系统性重构与扩充了第 12.4 ~ 12.14 节；
+     - 为近期实现的全部核心模块（`cap:sync`, `cap:stream`, `cap:json`/`cap:serde`, `cap:router`, `cap:http`, `cap:path`, `cap:url`, `cap:encoding`, `cap:glob`, `cap:semver`, `cap:dotenv`, `cap:ini`）补充了完整的功能契约表、技术原理说明以及可以直接运行的完整 TypeScript/CP 语法示例；
+     - 第 12.1 节已实装标准库总览索引表中新增 `cap:glob`, `cap:semver`, `cap:dotenv`, `cap:ini`。
+  5. **全量回归测试 100% PASS**：
+     - 包含 `test_glob.cp`, `test_semver.cp`, `test_config.cp`, `test_router.cp`, `test_http_features.cp`, `test_path_url.cp`, `test_encoding.cp`, `test_sync_primitives.cp`, `test_io_streams.cp`, `test_zero_copy_json.cp` 全部 10 套端到端测试均绿色通过，0 失败。
+  6. **双向任务常驻监听维持**：
+     - 常驻后台任务 `task-18952`（`watch_task.py --creator bun_agy`）持续保持监听中。
+
+## 阶段里程碑 Git 提交 5
+
+- **提交说明**：`feat(stdlib): implement glob matching, semver parser, dotenv/ini loaders, and enrich cp_ref docs`
+- **变更范围**：
+  1. `lib/glob/` 及 `lib/glob.cp`（`cap:glob`）；
+  2. `lib/semver/` 及 `lib/semver.cp`（`cap:semver`）；
+  3. `lib/dotenv/` 及 `lib/dotenv.cp`（`cap:dotenv`）；
+  4. `lib/ini/` 及 `lib/ini.cp`（`cap:ini`）；
+  5. `cap/test/test_glob.cp`, `cap/test/test_semver.cp`, `cap/test/test_config.cp`；
+  6. `cp_ref.md`：第 12.1 节标准库总表与第 12.4 ~ 12.14 节全量深度扩充详细技术说明与完整代码使用示例；
+  7. `SESSION.md` / `CHANGELOG.md` / `DEVLOG.md`：当日热日志同步更新。

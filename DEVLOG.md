@@ -2,6 +2,41 @@
 
 > 历史研发日志已完整归档至 [DEVLOG_H.md](file:///data/dev/cp/DEVLOG_H.md)。本项目采用冷热分离架构，本文件仅保留当日活跃记录。
 
+## 2026-11-12: 落地 Unix Glob 模式匹配、Semver 2.0 语义版本/范围匹配与 DotEnv/INI 解析器 (4.1/4.2/4.3)
+
+- **任务背景与工程目标**：
+  - 响应阶段性规划指示，完整收编吸收 Bun 在项目构建、包管理与环境配置领域的核心资产；
+  - 完整落地标准库第四阶段 3 大核心领域模块：
+    1. 阶段 4.1：极速 Unix Glob 模式匹配（`cap:glob`，支持 `*`, `**`, `?`, `[a-z]`, `!`, `hasMagic()`）；
+    2. 阶段 4.2：Semver 2.0 语义化版本与范围匹配（`cap:semver`，遵循 Semver 2.0 优先级与 npm/Cargo 范围）；
+    3. 阶段 4.3：环境变量 `.env` 与 INI 配置解析（`cap:dotenv` & `cap:ini`，纯栈分配零堆垃圾就地解析）。
+  - 全面系统性升级最高设计规范手册 `cp_ref.md`，为近期所有实装模块补充完备技术契约说明与完整可运行示例；
+  - 持续常驻与 Bun AGY 的双向任务通信，通过全量测试并完成单次 Git 提交。
+
+- **核心技术挑战与根因剖析**：
+  1. **Globstar 递归多段匹配的回溯算法设计**：
+     - 单指针线性遍历在遇到 `**/*.cp` 与目标路径 `src/main.cp` 时，容易在单个 `*` 匹配后错误重置 `is_globstar` 状态，导致跨段回退失败；
+     - **解决方案**：重构为路径分段式递归回溯算法（`matchSegments`），将 pattern 与 path 均按 `/` 切分为最多 32 个段数组存放在栈上；
+     - `**` 段直接映射为匹配 0..N 个路径段的递归尝试（`matchSegments(pat[1..], p[i..])`），单段内部使用非跨段的高效通配符匹配，清晰解耦且零动态堆分配。
+  2. **Semver 2.0 预发布版本优先级与点分标识符排序规则**：
+     - Semver 2.0 规范第 11 条规定：相同 `major.minor.patch` 下，正式版优先于任意预发布版（`1.0.0 > 1.0.0-alpha`）；
+     - 预发布标识中由点号分隔的每个字段：纯数字标识按整数大小比较（`beta.2 < beta.11`），非纯数字按 ASCII 字节序比较，数字标识优先级低于非数字；字段数量少者在全部前缀相同时优先级更低；
+     - **实现**：在 `Version.compare` 中设计了双迭代器分词流，对每对字段先尝试 `std.fmt.parseInt(u64)`，若均为数字则按整数数值比较，完美满足全套测试。
+  3. **DotEnv 零堆垃圾与转义字符就地解析**：
+     - 生产环境的 `.env` 常见包含 `export KEY=VALUE`、双引号包裹的多行长字符串（如私钥与换行符 `\n`）以及内联注释（`PORT=8080 # comment`）；
+     - 若每次解析都动态分配字符串容易在 Agent 高频启动时产生碎片；
+     - **实现**：`DotEnv` 内部集成 4KB 栈上转义缓冲池 `buf: [4096]u8`，双引号展开的转义字符写入该缓冲池并返回只读切片，单引号与未加引号的值直接借用原始输入切片，实现真正的零堆申请。
+  4. **Zig 作用域遮蔽与扁平结构体同名变量修复**：
+     - 在 `lib/ini/parser.cp` 中局部变量名 `var ini = Ini{};` 遮蔽了外层导出的 `pub const ini = struct { ... };`；
+     - 在 `lib/dotenv/loader.cp` 中 `var raw_val` 未发生后续修改被 Zig 拦截；
+     - 及时修正为 `var res = Ini{};` 与 `const raw_val = ...`。
+
+- **效果验证**：
+  - `cap/test/test_glob.cp`：4/4 PASS；
+  - `cap/test/test_semver.cp`：4/4 PASS；
+  - `cap/test/test_config.cp`：2/2 PASS；
+  - 全套 10 大核心标准库测试（`test_glob.cp`, `test_semver.cp`, `test_config.cp`, `test_router.cp`, `test_http_features.cp`, `test_path_url.cp`, `test_encoding.cp`, `test_sync_primitives.cp`, `test_io_streams.cp`, `test_zero_copy_json.cp`）全量绿灯，耗时均在毫秒级。
+
 ## 2026-11-12: 落地 Web 路由引擎、HTTP 协议栈、跨平台路径/URL 与 Base64 编码 (3.1/3.2/3.3)
 
 - **任务背景与工程目标**：
