@@ -5855,6 +5855,11 @@ export class SocketContext<Handler> {
 | `cap:stream`      | 工业级零拷贝流式 I/O 管道（重导出 `cap:io` 中的统一流接口）             | **已全面实装** |
 | `cap:sync`        | `Futex`, `Mutex`, `RwLock`, `Condition`, `WaitGroup`, `Channel`, `MpmcQueue`, `UnboundedQueue`, `ConcurrentMap`, `ArcSlice`, `Wyhash`, `Atomic`, `Shared` | **已全面实装** |
 | `cap:json` / `cap:serde` | 零拷贝 JSON 流式解析器 `JsonParser`、`JsonValue`、内存池 `JsonBufferPool`、`@json_parse` / `@json_stringify` | **已全面实装** |
+| `cap:router`      | 超高性能 Radix-Tree 路由引擎 `Router<T>`, `RadixNode<T>`, `ParamMap`, `RouteMatch` | **已全面实装** |
+| `cap:http`        | `Method`, `Headers`, `ETag`, `MimeType`, `Request`, `Response`, `Server`, `fetch`, `serve`, `json` | **已全面实装** |
+| `cap:path`        | 跨平台路径计算 `Path`, `PosixPath`, `WindowsPath`（`join`, `resolve`, `normalize`, `dirname`, `basename`, `extname`, `isAbsolute`） | **已全面实装** |
+| `cap:url`         | WHATWG 规范 `URL`, `URLSearchParams`, `QueryParam`                     | **已全面实装** |
+| `cap:encoding`    | 极速 Base64 编解码器（Standard, URL-Safe, 无填充, 内存池, 统一解码）  | **已全面实装** |
 | `cap:mem`         | `Arena`, `SharedTensor`, 全局共享堆, 原子引用计数                      | **已全面实装** |
 | `cap:task`        | `spawn`, `spawn_cpu`, `join`, `Task.all`, `Task.race`                  | **已全面实装** |
 | `cap:actor`       | `@spawn`, `@receive`, `@reply`, `PID`, 信箱通信                        | **已全面实装** |
@@ -6201,7 +6206,115 @@ let name = root.get("name")?.asString()?;   // "Antigravity" (直接指向 jsonS
 
 ---
 
-### 12.6 生态演进与路线图（Roadmap）
+### 12.6 超高性能 Radix-Tree 路由引擎（`cap:router`） 【已实装】
+
+CP 语言在 `cap:router` 中内置了对标 Bun、Fastify 与 Go Chi 的微秒级 Radix-Tree 前缀树路由分发引擎：
+
+#### 12.6.1 核心特性
+- **8 树独立动词分发**：针对 `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`, `OPTIONS`, `ALL` 预置独立子树，消除跨方法遍历开销；
+- **全类型参数抽取**：
+  - 动态参数：`:param` 与 `[param]` 语法支持；
+  - 通配符全匹配：`*path` 与 `[...path]` 尾部贪婪捕获；
+- **零堆分配 `ParamMap`**：参数字典默认以 16 槽位栈内存就地缓存，HTTP 请求路由全链路零动态堆申请。
+
+```typescript
+import { Router } from "cap:router";
+
+let router = Router(string).init(allocator);
+
+// 注册路由
+router.get("/users/:id", "getUserHandler");
+router.post("/users", "createUserHandler");
+router.get("/static/*filepath", "staticFileHandler");
+
+// 路由检索
+let match = router.lookup("GET", "/users/1001");
+if (match) |m| {
+    print(`Matched: ${m.handler}`);             // "getUserHandler"
+    print(`User ID: ${m.params.get("id").?}`);   // "1001"
+}
+```
+
+---
+
+### 12.7 工业级 HTTP 核心协议栈（`cap:http` 升级） 【已实装】
+
+吸收自 Bun 的网络协议模型，在 `cap:http` 中全面实装现代 HTTP 核心抽象：
+
+- **`Method` 枚举**：完备覆盖 33 种 HTTP 动词，内置 `isIdempotent()`、`hasRequestBody()` 与 `fromString()` / `toString()` 高性能转换；
+- **`Headers` 集合**：基于 ASCII 大小写无关查找的 HTTP 报头字典，具备单缓冲内存优化，提供 `get()`, `set()`, `append()`, `delete()`, `count()`, `at()`；
+- **`ETag` 协商**：支持强弱 ETag 生成、解析与 `ifNoneMatch()` 条件请求高效匹配；
+- **`MimeType` 字典**：覆盖常见网页、媒体、字体、文档等后缀，提供 `fromExtension()` 与 `fromPath()`。
+
+```typescript
+import { Method, Headers, ETag, MimeType } from "cap:http";
+
+let headers = Headers.init(allocator);
+headers.set("Content-Type", MimeType.fromExtension("json"));
+headers.append("Authorization", "Bearer token123");
+
+let etag = ETag.generate(bodyData, &buf);
+if (ETag.ifNoneMatch(etag, clientHeader)) {
+    // 命中 304 Not Modified
+}
+```
+
+---
+
+### 12.8 跨平台路径计算与 WHATWG URL 规范（`cap:path` & `cap:url`） 【已实装】
+
+CP 标准库提供了完全对标 Node.js `path` 与浏览器 WHATWG `URL` 标准的系统级支持：
+
+#### 12.8.1 `cap:path`（跨平台路径处理）
+- `join(...paths)`、`resolve(...paths)`、`normalize(path)`、`isAbsolute(path)`；
+- `basename(path, ext?)`、`dirname(path)`、`extname(path)`；
+- 原生支持 POSIX 与 Windows 双平台驱动器盘符、UNC 路径与斜杠转换。
+
+#### 12.8.2 `cap:url`（WHATWG URL 解析引擎）
+- `URL.parse(urlString, allocator)`：拆解 `protocol`, `username`, `password`, `host`, `hostname`, `port`, `pathname`, `search`, `hash`, `origin`；
+- `URLSearchParams`：查询字符串结构化操作（`get()`, `set()`, `append()`, `delete()`, `toString()`）。
+
+```typescript
+import { path } from "cap:path";
+import { URL } from "cap:url";
+
+// 路径处理
+let fullPath = path.join(["/app", "src", "index.cp"]); // "/app/src/index.cp"
+let ext = path.extname(fullPath);                      // ".cp"
+
+// URL 解析
+let url = try URL.parse("https://user:pass@example.com:8080/api/v1?page=2#top", allocator);
+defer url.deinit();
+
+print(`Host: ${url.hostname}`);           // "example.com"
+print(`Page: ${url.searchParams.get("page").?}`); // "2"
+```
+
+---
+
+### 12.9 数据编码标准库（`cap:encoding` / Base64） 【已实装】
+
+`cap:encoding` 提供了纯 CP 编写的高性能 Base64 编解码器：
+
+- **多模式支持**：标准 Standard Base64（带 `=` 填充）、URL-Safe Base64（`-` 与 `_`，无填充）；
+- **自适应解码引擎**：单个 `decode()` / `decodeAlloc()` 自动识别并解码标准与 URL-Safe 两种格式，自动跳过空白符；
+- **零分配就地运算**：提供 `encode(dest, src)` 与 `decode(dest, src)`，杜绝多余堆内存申请。
+
+```typescript
+import { Base64 } from "cap:encoding";
+
+// 就地栈编码
+var buf: [128]u8 = undefined;
+let len = Base64.encode(&buf, "Hello CP!");
+
+// 动态内存分配
+let encoded = try Base64.encodeURLSafeAlloc(allocator, rawData);
+defer allocator.free(encoded);
+```
+
+---
+
+### 12.10 生态演进与路线图（Roadmap）
 
 ```mermaid
 timeline

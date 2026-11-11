@@ -134,3 +134,51 @@
   5. `cap/test/test_sync_primitives.cp`, `cap/test/test_zero_copy_json.cp`, `cap/test/test_io_streams.cp`, `cap/test/test_json.cp`；
   6. `cp_ref.md`：第 12.1、12.3、12.4、12.5 节全面更新标准库索引与技术手册；
   7. `SESSION.md` / `CHANGELOG.md` / `DEVLOG.md`：当日热日志同步更新。
+
+## 指令 4：完成标准库第三阶段 3.1、3.2、3.3（Radix-Tree 路由、HTTP 协议栈升级、跨平台路径与 WHATWG URL、Base64 编码）
+
+- **用户需求**：
+  1. 按次序完成 3.1、3.2、3.3；
+  2. 完成后合并至 `cpc` 正式版本，同步更新四线演进文档，完成 Git 提交；
+  3. 通过全量功能测试后，分析下一阶段需要从 Bun 中迁移的功能并规划落地。
+
+- **执行结果**：
+  1. **3.1 超高性能 Radix-Tree 路由引擎 (`cap:router`) 与 HTTP 协议栈升级 (`cap:http`)**：
+     - `lib/router/param_map.cp`：纯栈存储 16 项定长零堆分配参数映射字典 `ParamMap` 与 `Param`；
+     - `lib/router/route.cp`：泛型路由匹配结果 `RouteMatch<T>`；
+     - `lib/router/radix.cp`：8 树 HTTP 动词前缀树 `Router<T>` 与 `RadixNode<T>`，支持静态路径、动态参数（`:param` 与 `[param]`）、通配符（`*path` 与 `[...path]`）与 `ALL` 方法回退；
+     - `lib/router/index.cp` 与 `lib/router.cp`：对外官方出口 `cap:router`；
+     - `lib/http/method.cp`：标准化 `Method` 枚举与 `isIdempotent()`、`hasRequestBody()`、`toString()`、`fromString()`；
+     - `lib/http/headers.cp`：大小写无关 ASCII 匹配 HTTP `Headers` 集合，支持 `get`, `set`, `append`, `delete`, `count`；
+     - `lib/http/etag.cp`：`ETag` 生成与强弱 `ifNoneMatch` 条件请求验证；
+     - `lib/http/mime.cp`：`MimeType` 扩展名与文件路径极速映射；
+     - `lib/http/index.cp` 与 `lib/http.cp`：更新对外出口。
+  2. **3.2 跨平台路径规范与 WHATWG URL 解析引擎 (`cap:path` & `cap:url`)**：
+     - `lib/path/posix.cp`：POSIX 标准路径计算（`basename`, `dirname`, `extname`, `isAbsolute`, `normalize`, `join`）；
+     - `lib/path/windows.cp`：Windows 驱动器盘符、UNC 路径与反斜杠处理；
+     - `lib/path/index.cp` 与 `lib/path.cp`：跨平台统一 `Path`（以及 `path.posix`、`path.win32`）；
+     - `lib/url/query.cp`：`URLSearchParams` 查询字符串解析、修改与序列化；
+     - `lib/url/url.cp`：WHATWG 规范 `URL` 对象（解析 `protocol`, `username`, `password`, `host`, `hostname`, `port`, `pathname`, `search`, `hash`, `origin`, `searchParams`）；
+     - `lib/url/index.cp` 与 `lib/url.cp`：对外官方出口 `cap:url`。
+  3. **3.3 数据编码标准库 (`cap:encoding` / Base64)**：
+     - `lib/encoding/base64.cp`：工业级纯 CP Base64 编解码器（标准 Standard 模式、URL-Safe 模式、无填充模式、统一解码自适应 `+`/`-` 与 `/`/`_`、无堆分配与内存分配两种模式）；
+     - `lib/encoding/index.cp` 与 `lib/encoding.cp`：对外官方出口 `cap:encoding`。
+  4. **全套回归测试 100% 通过**：
+     - `cap cap/test/test_router.cp`：3 大路由与参数提取用例全部 PASS；
+     - `cap cap/test/test_http_features.cp`：4 大 Method、Headers、ETag、MimeType 用例全部 PASS；
+     - `cap cap/test/test_path_url.cp`：4 大 POSIX/Windows 路径与 URL/SearchParams 用例全部 PASS；
+     - `cap cap/test/test_encoding.cp`：3 大 Base64 标准、URLSafe 与动态分配用例全部 PASS；
+     - 现有测试（`test_sync_primitives.cp`, `test_io_streams.cp`, `test_zero_copy_json.cp`）全量保持 100% 绿色。
+
+## 阶段里程碑 Git 提交 4
+
+- **提交说明**：`feat(stdlib): implement radix-tree router, http types, path/url parser, and base64 encoding`
+- **变更范围**：
+  1. `lib/router/` 及 `lib/router.cp`（`cap:router`）；
+  2. `lib/http/`（`method.cp`, `headers.cp`, `etag.cp`, `mime.cp`, `index.cp`）及 `lib/http.cp`；
+  3. `lib/path/` 及 `lib/path.cp`（`cap:path`）；
+  4. `lib/url/` 及 `lib/url.cp`（`cap:url`）；
+  5. `lib/encoding/` 及 `lib/encoding.cp`（`cap:encoding`）；
+  6. `cap/test/test_router.cp`, `cap/test/test_http_features.cp`, `cap/test/test_path_url.cp`, `cap/test/test_encoding.cp`；
+  7. `cp_ref.md`：第 12.1、12.6、12.7、12.8 节全面更新标准库文档；
+  8. `SESSION.md` / `CHANGELOG.md` / `DEVLOG.md`：当日热日志同步更新。

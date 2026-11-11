@@ -4,6 +4,10 @@
  */
 
 import { SystemAction } from "cap:beam";
+import { Method } from "./http/method";
+import { Headers, HeaderEntry } from "./http/headers";
+import { ETag, ParsedETag } from "./http/etag";
+import { MimeType } from "./http/mime";
 
 export class Request {
     pub method: string;

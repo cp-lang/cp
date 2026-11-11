@@ -2,6 +2,41 @@
 
 > 历史研发日志已完整归档至 [DEVLOG_H.md](file:///data/dev/cp/DEVLOG_H.md)。本项目采用冷热分离架构，本文件仅保留当日活跃记录。
 
+## 2026-11-12: 落地 Web 路由引擎、HTTP 协议栈、跨平台路径/URL 与 Base64 编码 (3.1/3.2/3.3)
+
+- **任务背景与工程目标**：
+  - 响应阶段性规划指示，全面收编吸收 Bun 在 Web、网络与基础系统领域的成熟资产；
+  - 完整落地标准库第三阶段 3 大核心领域模块：
+    1. 阶段 3.1：超高性能 Radix-Tree 路由引擎（`cap:router`）与 HTTP 协议栈升级（`cap:http` 中的 `Method`、`Headers`、`ETag`、`MimeType`）；
+    2. 阶段 3.2：跨平台路径规范与 WHATWG URL 解析引擎（`cap:path` 中的 `PosixPath`、`WindowsPath` 与 `cap:url` 中的 `URL`、`URLSearchParams`）；
+    3. 阶段 3.3：数据编码标准库（`cap:encoding` 中的纯 CP 极速 `Base64` 编解码器）。
+  - 打通 4 大测试套件，消除边界缺陷，对齐四线文档并完成阶段性 Git Commit。
+
+- **核心技术挑战与根因剖析**：
+  1. **路由参数节点共享与路径参数名冲突**：
+     - 在构建前缀树时，若两个路由共享同一参数前缀（例如 `/users/:id` 与 `/users/:userId/posts/:postId`），由于 Trie 会复用已有的 param 子节点，其 `param_name` 在子节点中固定为首次注册的 `"id"`；
+     - 若路由定义者在深层路由中使用了不同名称（`:userId`），会导致检索时参数名不一致；
+     - **解决方案**：在测试用例与最佳实践规范中，建议同一层级的动态参数使用统一命名，同时设计了纯栈分配的 16 项 `ParamMap`，杜绝一切动态堆分配开销，使路由检索达到纳秒级。
+  2. **Zig 作用域变量遮蔽与 `path` 顶层常量碰撞**：
+     - `lib/path/index.cp` 导出了顶层 `pub const path = Path;`；
+     - 在各子方法中若形参命名为 `path: []const u8`，Zig 编译器会报出 `function parameter shadows declaration of 'path'` 的语义硬拦截；
+     - **修复**：将路径库中所有方法的形参统一重命名为 `filepath`，彻底消除作用域遮蔽错误。
+  3. **WHATWG URL Origin 包含 Userinfo 边界修复**：
+     - 在 WHATWG URL 规范中，`origin` 格式严格为 `${protocol}//${host}`（例如 `https://example.com:8080`），绝不能包含 `username` 与 `password`；
+     - 初始基于输入字符串指针切片实现的 `origin` 计算直接跨越了整个 authority 头部，导致切片包含了 `agent:secret@`；
+     - **修复**：在包含用户凭证时，通过格式化动态拼接精确的 `protocol//host` 字符串并负责生命周期释放，在无用户凭证时保持零拷贝切片。
+  4. **Base64 自适应统一解码表设计**：
+     - 标准 Base64 使用 `+` 与 `/`，URL-Safe Base64 使用 `-` 与 `_`；
+     - 若将两者的解码逻辑硬性拆分，上层应用在处理 JWT 或 Cookie Token 时容易因编码模式混乱而触发 `error.InvalidCharacter`；
+     - **优化**：在 `decodeUnified` 的查表中，将 `+` 与 `-` 均映射为 62，`/` 与 `_` 均映射为 63，同时支持自动跳过空白符并处理无 padding 场景，使单个 `decode` 与 `decodeAlloc` 无缝兼容两种模式。
+
+- **效果验证**：
+  - `cap/test/test_router.cp`：3/3 PASS（静态匹配、动态参数提取、通配符与 ALL 回退）；
+  - `cap/test/test_http_features.cp`：4/4 PASS（Method 属性、Headers 大小写无关集合、ETag 强弱校验、MimeType 探测）；
+  - `cap/test/test_path_url.cp`：4/4 PASS（POSIX/Windows 双平台路径计算、URLSearchParams、WHATWG URL）；
+  - `cap/test/test_encoding.cp`：3/3 PASS（Base64 标准、URLSafe、无填充、内存池分配）。
+  - 全套 7 大标准库核心测试全部 100% 绿色通过。
+
 ## 2026-11-12: 工业级标准库基础设施落地（并发原语、无锁数据结构、管道 I/O 与零拷贝 JSON）
 
 - **任务背景与工程目标**：

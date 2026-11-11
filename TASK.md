@@ -4111,13 +4111,21 @@ Bun 拥有经过全球数亿级并发高频检验的顶尖 C++/Zig 基础设施�
       ├── /src/threading/ (Futex, channel, queue) ───▶ cap:sync (无锁并发原语库)
       └── /src/io/ (PipeReader, PipeWriter, source) ──▶ cap:stream (统一流式 I/O 体系)
 
-#### 第一步：编译器语法攻坚（由我立即执行，约需 1~2 轮）
-
-1. 升级 AST 与 Parser：将 FixedArray 的尺寸参数拓展为支持标识符与编译期常量表达式（允许 [u8; N]、[f32; B * H]）；
-2. 完善 Codegen：在类/结构体与类型别名中完整单态化发射 comptime N: usize，打通 class Buffer<const N: usize> { data: [u8; N]; } 与 Tensor<T, Shape>；
-3. 编写回归测试 cap/test/test_const_generics_buffer.cp 验证通过。
-
-#### 第二步：标准库收编与提炼（随后开展）
+#### 标准库收编与提炼（随后开展）
 
 1. 将 Bun AGY 经过验证的 /data/dev/bun/src/threading/ 核心原语（Futex.cp、channel.cp、unbounded_queue.cp）收编入 lib/sync/（对应 cap:sync）；
 2. 将 /data/dev/bun/src/io/ 提炼为统一的流式 Trait（Reader / Writer），打通零拷贝生态。
+
+### 接下来第二步规划：工业级标准库基础设施（分阶段推进）
+
+我们将按照您的指示，分三个阶段逐步完成，每阶段完成后自动更新四线文档并提交 Git：
+
+• 阶段 2.1：无锁并发原语库与同步基础设施 (cap:sync)
+• 从 /data/dev/bun/src/threading/ 萃取成熟的 Mutex、Condition、WaitGroup 与 Channel（无锁定长队列与线程安全通道）；
+• 创建 lib/sync.cp，编写端到端并发测试用例 cap/test/test_sync_primitives.cp 并提交。
+• 阶段 2.2：统一的高性能 I/O 流体系 (cap:stream)
+• 定义流式契约 Trait：Reader / Writer / Closer / Seeker，提供零拷贝 BufferReader/BufferWriter 与管道 Pipe；
+• 编写端到端测试用例 cap/test/test_stream_io.cp 并提交。
+• 阶段 2.3：零拷贝高性能序列化框架 (cap:serde / cap:json)
+• 充分吸收 Bun AGY 已迁移的 /data/dev/bun/src/interchange/json.cp，实现零拷贝 JSON.parse<T>(slice: string)；
+• 编写端到端测试用例 cap/test/test_serde_json.cp 并提交。
