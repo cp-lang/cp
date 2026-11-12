@@ -84,15 +84,15 @@ fn testMimeType(): !void {
 
 fn main(): void {
     test("HTTP Method enumeration and attributes", () => {
-        try testMethod();
+        testMethod()?;
     });
     test("Case-insensitive HTTP Headers collection", () => {
-        try testHeaders();
+        testHeaders()?;
     });
     test("HTTP ETag generation and If-None-Match evaluation", () => {
-        try testETag();
+        testETag()?;
     });
     test("MIME type extension and path detection", () => {
-        try testMimeType();
+        testMimeType()?;
     });
 }

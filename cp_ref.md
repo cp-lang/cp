@@ -6344,44 +6344,117 @@ if (match2) |m| {
 
 ---
 
-### 12.8 现代 HTTP 核心协议抽象（`cap:http`） 【已实装】
+### 12.8 现代工业级 HTTP 核心协议体系（`cap:http`） 【已全面实装】
 
-吸收自 Bun 的网络协议模型，在 `cap:http` 中全面实装现代 HTTP 核心抽象：
+吸收自 Bun.js 经过全球数亿级并发高频检验的工业级网络协议基础设施，在 `cap:http` 中全面实装 HTTP/1.1、HTTP/2 与 HTTP/3 全协议栈客户端与服务引擎：
 
-#### 12.8.1 核心组件
+#### 12.8.1 模块全景与核心组件
 
-- **`Method` 枚举**：完备覆盖 33 种 HTTP 动词，内置 `isIdempotent()`、`hasRequestBody()` 与 `fromString()` / `toString()` 高性能转换；
-- **`Headers` 集合**：基于 ASCII 大小写无关查找的 HTTP 报头字典，具备单缓冲内存优化，提供 `get()`, `set()`, `append()`, `delete()`, `count()`, `at()`；
-- **`ETag` 协商**：支持强弱 ETag 生成、解析与 `ifNoneMatch()` 条件请求高效匹配；
-- **`MimeType` 字典**：覆盖常见网页、媒体、字体、文档等后缀，提供 `fromExtension()` 与 `fromPath()`。
+1. **协议基础设施 (Step 1)**：
+   - **`Method` 枚举**：完备覆盖 33 种 HTTP 动词，内置 `isIdempotent()`、`hasRequestBody()` 与 `fromString()` / `toString()`；
+   - **`Headers` 集合**：基于 ASCII 大小写无关查找的 HTTP 报头字典，具备单缓冲内存优化，提供 `get()`, `set()`, `append()`, `delete()`, `count()`, `at()`；
+   - **`Encoding`**：内容与传输编码规范（`Identity`, `Gzip`, `Deflate`, `Brotli`, `Zstd`, `Chunked`），内置 `canUseLibDeflate()` 与 `isCompressed()`；
+   - **`FetchCacheMode`, `FetchRedirect`, `FetchRequestMode`**：完全遵循 Web 标准与 Fetch 规范的请求控制模式；
+   - **`URLPath`**：微秒级路径、扩展名（`extname`）、首段目录（`first_segment`）与查询字符串极速切片；
+   - **`SignalStore` & `Signals`**：原子化请求生命周期与取消跟踪器（`isAborted()`, `isStreaming()`, `isUpgraded()`, `abort()`）；
+   - **`HeaderValueIterator`**：无堆分配的逗号分隔报头（如 `Accept-Encoding`）零拷贝 Token 迭代器；
+   - **`HTTPRequestBody`**：支持零拷贝内存切片与流式传输的主体封装；
+   - **`ETag` & `MimeType`**：强弱 ETag 生成、解析与 `ifNoneMatch()` 条件协商；常见扩展名与路径的 MIME 类型秒级检测。
+
+2. **HTTP/2 与 HTTP/3 子系统 (Step 2)**：
+   - **HTTP/2 二进制帧体系 (RFC 7540)**：`FrameHeader`（9字节二进制帧头编解码）、`FrameType`（Data, Headers, Priority, Settings, Ping, Goaway 等）、`ErrorCode`；
+   - **HTTP/2 多路复用流会话**：`H2ClientSession` 跟踪并发流限额、管理服务端初始与对端窗口尺寸（`WindowUpdate`）、分配客户端奇数流 ID（1, 3, 5...）、处理 `Goaway`；`H2Stream` 跟踪单流状态（`Idle`, `Open`, `HalfClosedRemote`, `Closed`）；
+   - **HTTP/3 Alt-Svc 协商 (RFC 7838)**：`AltSvc` 解析 `h3=":443"; ma=86400` 报头，提取目标端口与有效期限；
+   - **HTTP/3 QUIC 客户端流会话**：`H3ClientSession` 分配客户端双向请求流（0, 4, 8...），`H3Stream` 跟踪流生命周期。
+
+3. **工业级核心客户端引擎与生命周期 (Step 3)**：
+   - **`HTTPClient` 引擎**：
+     - 完全遵循 RFC 7230 / RFC 7231 的请求行、Host、User-Agent、Content-Length 及自定义报头序列化；
+     - 分块传输编码解码器（`decodeChunkedBody`），自动识别十六进制块尺寸并完成 `0\r\n\r\n` 零拷贝拼合；
+     - 响应状态码（`parseResponseStatus`）与主体切片（`parseResponseBody`）极速解析；
+   - **`HTTPContext` 连接池**：内置 Keep-Alive 套接字池（`PooledSocket`），支持多域名、多端口与 SSL 隔离复用，提供死链接自动剔除与安全回收；
+   - **`Decompressor` 流式解压**：无缝对接 Gzip / Deflate / Brotli / Zstd 压缩传输流；
+   - **`ProxyTunnel` (RFC 7231)**：支持 HTTP CONNECT 代理握手建立与响应校验；
+   - **`SendFile` 零拷贝文件上传**：基于 Linux 内核 `sendfile` 驱动的零用户态内存拷贝极速流式上传。
 
 #### 12.8.2 完整使用示例
 
 ```typescript
-import { Method, Headers, ETag, MimeType } from "cap:http";
+import {
+    Method,
+    Headers,
+    Encoding,
+    FetchCacheMode,
+    URLPath,
+    SignalStore,
+    HeaderValueIterator,
+    FrameHeader,
+    FrameType,
+    H2ClientSession,
+    AltSvc,
+    ProxyTunnel,
+    HTTPContext,
+    HTTPClient,
+    Decompressor
+} from "cap:http";
 
-// 1. HTTP 动词属性判断
-const m_get = Method.GET;
-const is_idempotent = m_get.isIdempotent();   // true
-const has_body = Method.POST.hasRequestBody(); // true
+// 1. 协议基础设施与路径解析
+const path_info = URLPath.parse("/api/v2/items/archive.json?filter=active");
+const is_json = path_info.extname;       // "json"
+const is_root = URLPath.parse("/").isRoot(); // true
 
-// 2. 大小写无关报头集合 Headers
-var headers = Headers.init(allocator);
-defer headers.deinit();
+// 2. 报头 Token 迭代器 (零拷贝流式解析)
+var iter = HeaderValueIterator.init("gzip, deflate, br;q=1.0, zstd");
+while (iter.next()) |token| {
+    // 依次遍历: "gzip", "deflate", "br;q=1.0", "zstd"
+}
 
-try headers.set("Content-Type", "application/json");
-try headers.append("Accept", "text/html");
+// 3. HTTP/2 9字节二进制帧头编解码
+var h2_header = FrameHeader{
+    length: 512,
+    type: FrameType.Data,
+    flags: 0x01, // EndStream
+    stream_id: 1,
+};
+var wire_buf: [9]u8 = undefined;
+h2_header.encode(&wire_buf);
+const decoded = FrameHeader.decode(&wire_buf).?;
 
-const content_type = headers.get("content-type").?; // "application/json"（大小写不敏感检索）
+// 4. HTTP/2 多路复用会话与流分配
+var h2_session = H2ClientSession{};
+if (h2_session.canCreateStream()) {
+    var stream = h2_session.newStream(); // 分配客户端奇数 Stream ID (1)
+    defer stream.close();
+}
 
-// 3. ETag 缓存协商与 304 判断
-var etag_buf: [64]u8 = undefined;
-const etag = ETag.generate("payload-v1.0.0", false, &etag_buf); // "\"1418837775\""
-const matches = ETag.ifNoneMatch(etag, "\"1418837775\"");       // true -> 响应 304 Not Modified
+// 5. HTTP/3 Alt-Svc 服务发现
+if (AltSvc.parse("h3=\":443\"; ma=86400")) |entry| {
+    const h3_port = entry.port;       // 443
+    const max_age = entry.max_age;    // 86400
+}
 
-// 4. MIME 类型秒级检测
-const mime_js = MimeType.fromPath("src/bundle.js");             // "application/javascript"
-const mime_png = MimeType.fromExtension("png");                 // "image/png"
+// 6. Keep-Alive 连接池管理
+var http_ctx = HTTPContext.init();
+defer http_ctx.deinit();
+
+// 从池中获取或复用长连接
+if (http_ctx.acquireSocket("api.github.com", 443, true)) |fd| {
+    // 复用已建立的 TLS 连接...
+    _ = http_ctx.releaseSocket(fd, "api.github.com", 443, true);
+}
+
+// 7. 客户端请求序列化与分块解码
+var client = HTTPClient.init(Method.POST, "https://api.github.com/v1/events");
+client.body = "{\"event\":\"ping\"}";
+
+var req_buf: [1024]u8 = undefined;
+const req_str = client.formatRequest(&req_buf)?;
+// 自动生成: POST /v1/events HTTP/1.1\r\nHost: api.github.com\r\nContent-Length: 16\r\n...
+
+// 8. 分块传输传输解码 (Chunked Transfer Decoding)
+const chunked = "4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n";
+var out_buf: [64]u8 = undefined;
+const decoded_len = HTTPClient.decodeChunkedBody(chunked, &out_buf)?; // "Wikipedia"
 ```
 
 ---

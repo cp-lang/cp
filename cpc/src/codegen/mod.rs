@@ -3401,6 +3401,61 @@ pub fn lower_struct_body(code: &str) -> String {
             continue;
         }
 
+        // 5. [*]!? and [*]!
+        if i + 5 <= n && &chars[i..i + 5] == ['[', '*', ']', '!', '?'] {
+            res.push_str("?[*]anyopaque");
+            i += 5;
+            continue;
+        }
+        if i + 4 <= n && &chars[i..i + 4] == ['[', '*', ']', '!'] {
+            res.push_str("[*]anyopaque");
+            i += 4;
+            continue;
+        }
+
+        // 6. *!? and *!
+        if i + 3 <= n && &chars[i..i + 3] == ['*', '!', '?'] {
+            res.push_str("?*anyopaque");
+            i += 3;
+            continue;
+        }
+        if i + 2 <= n && &chars[i..i + 2] == ['*', '!'] {
+            res.push_str("*anyopaque");
+            i += 2;
+            continue;
+        }
+
+        // 7. ?fn(...) and fn(...) function pointer types
+        if i + 3 <= n && &chars[i..i + 3] == ['?', 'f', 'n'] {
+            let mut k = i + 3;
+            while k < n && (chars[k] == ' ' || chars[k] == '\t') {
+                k += 1;
+            }
+            if k < n && chars[k] == '(' {
+                res.push_str("?*const fn");
+                i = k;
+                continue;
+            }
+        }
+        if i + 2 <= n && &chars[i..i + 2] == ['f', 'n'] {
+            let prev_ok = i == 0
+                || (!chars[i - 1].is_alphanumeric()
+                    && chars[i - 1] != '_'
+                    && chars[i - 1] != '@'
+                    && chars[i - 1] != '.');
+            if prev_ok {
+                let mut k = i + 2;
+                while k < n && (chars[k] == ' ' || chars[k] == '\t') {
+                    k += 1;
+                }
+                if k < n && chars[k] == '(' {
+                    res.push_str("*const fn");
+                    i = k;
+                    continue;
+                }
+            }
+        }
+
         res.push(c);
         i += 1;
     }

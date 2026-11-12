@@ -4572,6 +4572,8 @@ impl Analyzer {
                     Lit::Str(_) => {
                         if matches!(target, Type::CStr)
                             || matches!(target, Type::Ref(id) if id.sym == "cstring" || id.sym == "cstr")
+                            || matches!(target, Type::Array(inner) if **inner == Type::U8)
+                            || matches!(target, Type::SentinelSlice(inner, _) if **inner == Type::U8)
                         {
                             return true;
                         }
@@ -4602,6 +4604,14 @@ impl Analyzer {
 
         // Layer 1.2: Numeric safe widening
         if Self::is_safe_widening(target, src) {
+            return true;
+        }
+
+        if (*target == Type::String && matches!(src, Type::Array(inner) if **inner == Type::U8))
+            || (*src == Type::String && matches!(target, Type::Array(inner) if **inner == Type::U8))
+            || (*target == Type::String && matches!(src, Type::SentinelSlice(inner, _) if **inner == Type::U8))
+            || (*src == Type::String && matches!(target, Type::SentinelSlice(inner, _) if **inner == Type::U8))
+        {
             return true;
         }
 
@@ -5035,6 +5045,11 @@ impl Analyzer {
             }
             (Type::SentinelSlice(i1, _), Type::Array(i2))
             | (Type::Array(i2), Type::SentinelSlice(i1, _)) => self.types_eq(i1, i2),
+            (Type::String, Type::Array(inner)) | (Type::Array(inner), Type::String)
+                if **inner == Type::U8 => true,
+            (Type::String, Type::SentinelSlice(inner, _))
+            | (Type::SentinelSlice(inner, _), Type::String)
+                if **inner == Type::U8 => true,
             (Type::Array(t1), Type::Array(t2)) => self.types_eq(t1, t2),
             (Type::FixedArray(t1, s1), Type::FixedArray(t2, s2)) => {
                 s1 == s2 && self.types_eq(t1, t2)

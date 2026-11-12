@@ -1,6 +1,38 @@
-# CP 研发日志 (DEVLOG) - 2026-11-12 (热数据)
+# CP 研发日志 (DEVLOG) - 2026-11-13 (热数据)
 
 > 历史研发日志已完整归档至 [DEVLOG_H.md](file:///data/dev/cp/DEVLOG_H.md)。本项目采用冷热分离架构，本文件仅保留当日活跃记录。
+
+## 2026-11-13: 工业级 HTTP 全协议栈体系迁移（Step 1/2/3 闭环）、编译器自愈与下游阻塞极速结单
+
+- **任务背景与工程目标**：
+  - 用户指出此前迁移的 HTTP 库仅包含 8 个基础包装文件，缺失了 Bun 工业核心中 2800 余行的 `http.cp` 客户端引擎以及 `h2_client/` 与 `h3_client/` 子系统；
+  - 用户下达明确指令：“按次序完成 第一步 第二步 第三步”；
+  - 严格按照路线图落地：Step 1（协议类型与基础设施助手）-> Step 2（HTTP/2 帧协议与 HTTP/3 客户端子系统）-> Step 3（工业核心客户端引擎、Keep-Alive 连接池、分块传输编解码与全生命周期）。
+
+- **核心技术挑战与根因剖析**：
+  1. **字符串与字节切片静态类型安全互转 (Sema Coercion)**：
+     - 在编译包含 `CLIENT_PREFACE: []const u8 = "PRI * HTTP/2.0..."` 等常量定义时，语义分析器报错 `error[E0207]: type mismatch: expected 'Array(U8)', found 'String'`；
+     - **原因剖析**：CP 静态类型系统中，字符串字面量推断为 `Type::String`，而 `[]const u8` 在 AST 中被解析为 `Type::Array(Box::new(Type::U8))`。在 `can_coerce` 和 `types_eq` 中，原先未注册 `Type::String` 与元素类型为 `U8` 的数组/切片之间的安全双向兼容规则；
+     - **自愈方案**：在 `cpc/src/sema.rs` 中的 `can_coerce` 与 `types_eq` 分支中，明确加入 `String` 与 `Array(U8)` / `SentinelSlice(U8)` 的双向等价与安全兼容规则，彻底消除字面量切片赋值阻断。
+  2. **`cap` 与 `cpc` 部署路径对齐**：
+     - 发现原子编译脚本 `sync_cpc.sh` 仅拷贝产物至 `/data/dev/cp/cap/bin/cpc`，而 `cap/src/main.zig` 在未显式设置 `CPC_BIN` 时优先寻找 `/data/dev/cp/cpc/target/release/cpc`；
+     - 这导致即使编译了最新的 debug 编译器，`cap` 仍可能加载 3 天前未支持重导出的老 release 二进制；
+     - **自愈方案**：更新 `scripts/sync_cpc.sh`，在编译后原子覆盖 `cap/bin/cpc` 与 `cpc/target/release/cpc` 两处，保障编译链 100% 呼应生效。
+  3. **下游 Bun AGY 阻断极速热修 (Hotfix `task-struct-body-lower-rawptr-fn`)**：
+     - 监听到 Bun AGY 汇报的编译缺陷：`lower_struct_body does not lower CP raw pointer types *!? to ?*anyopaque, *! to *anyopaque, or ?fn/fn to ?*const fn/*const fn in anonymous struct expressions`；
+     - 经定位，匿名结构体表达式 `Expr::Zig` 经 `lower_struct_body` 降级时，缺乏对 CP 特色原始指针（`*!?`, `*!`）与函数类型（`?fn(...)`, `fn(...)`）到 Zig `?*anyopaque`, `*anyopaque`, `?*const fn(...)`, `*const fn(...)` 的转换；
+     - 在 `cpc/src/codegen/mod.rs` 中增强 `lower_struct_body`，编译并复现验证 `/data/dev/bun/temp/repro_struct_lower.cp` 成功转译为完美 Zig AST，瞬时结单。
+  4. **全套工业级 HTTP 核心体系落地**：
+     - **Step 1**：落地 `encoding.cp`, `fetch_modes.cp`, `cert.cp`, `url_path.cp`, `signals.cp`, `header_iterator.cp`, `request_body.cp`, `internal_state.cp`；
+     - **Step 2**：落地 `lib/http/h2/`（RFC 7540 9 字节帧头编解码、流复用与窗口管理）与 `lib/http/h3/`（RFC 7838 Alt-Svc 协商、QUIC 双向请求流）；
+     - **Step 3**：落地 `decompressor.cp`（流式解压缩）、`proxy.cp`（RFC 7231 CONNECT 隧道）、`sendfile.cp`（Linux 内核零拷贝上传）、`context.cp`（Keep-Alive 套接字连接池）以及 `client.cp`（RFC 7230 请求格式化、分块传输解码 `decodeChunkedBody`）。
+
+- **效果验证**：
+  - 编写并运行全新端到端测试套件 [`cap/test/test_http_full.cp`](file:///data/dev/cp/cap/test/test_http_full.cp)，覆盖三阶段所有核心功能，100% 通过；
+  - 现有 [`cap/test/test_http_features.cp`](file:///data/dev/cp/cap/test/test_http_features.cp) 与 [`cap/test/test_sync_primitives.cp`](file:///data/dev/cp/cap/test/test_sync_primitives.cp) 100% 通过；
+  - 全量 14 个标准库核心套件回归 100% 绿色。
+
+---
 
 ## 2026-11-12: 彻底清理根目录冗余同名门面、HTTP 模块拆解入驻与单一真理来源确立
 

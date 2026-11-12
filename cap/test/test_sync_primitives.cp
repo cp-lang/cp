@@ -55,11 +55,11 @@ fn test_mpmc(): !void {
 
 fn test_channel(): !void {
     const allocator = std.heap.page_allocator;
-    var ch = try Channel(i32).init(allocator, 2);
+    var ch = Channel(i32).init(allocator, 2)?;
     defer ch.deinit();
 
-    try ch.send(100);
-    try ch.send(200);
+    ch.send(100)?;
+    ch.send(200)?;
 
     expect_eq(ch.len(), 2);
     expect_eq(ch.tryRecv(), 100);
@@ -72,8 +72,8 @@ fn test_concurrent_map(): !void {
     var map = ConcurrentMap(i32, i32).init(allocator);
     defer map.deinit();
 
-    try map.put(1, 10);
-    try map.put(2, 20);
+    map.put(1, 10)?;
+    map.put(2, 20)?;
     expect_eq(map.get(1), 10);
     expect_eq(map.get(2), 20);
     expect_eq(map.get(3), null);
@@ -86,7 +86,7 @@ fn test_concurrent_map(): !void {
 fn test_arc_slice(): !void {
     const allocator = std.heap.page_allocator;
     const data = "hello cp";
-    var arc = try ArcSlice(u8).init(allocator, data);
+    var arc = ArcSlice(u8).init(allocator, data)?;
 
     expect_eq(arc.len(), 8);
     expect_eq(arc.refCount(), 1);
@@ -103,34 +103,34 @@ fn test_arc_slice(): !void {
 
 fn main(): void {
     test("Wyhash deterministic 64-bit hashing", () => {
-        try test_wyhash();
+        test_wyhash()?;
     });
 
     test("Futex atomic operations", () => {
-        try test_futex();
+        test_futex()?;
     });
 
     test("Mutex lock and unlock", () => {
-        try test_mutex();
+        test_mutex()?;
     });
 
     test("Condition signal and wait group", () => {
-        try test_wait_group();
+        test_wait_group()?;
     });
 
     test("MpmcQueue bounded ring buffer", () => {
-        try test_mpmc();
+        test_mpmc()?;
     });
 
     test("Channel bounded send and receive", () => {
-        try test_channel();
+        test_channel()?;
     });
 
     test("ConcurrentMap thread-safe operations", () => {
-        try test_concurrent_map();
+        test_concurrent_map()?;
     });
 
     test("ArcSlice atomic reference counted slice", () => {
-        try test_arc_slice();
+        test_arc_slice()?;
     });
 }

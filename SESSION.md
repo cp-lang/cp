@@ -1,6 +1,64 @@
-# CP 协同开发执行记录 (SESSION) - 2026-11-12 (热数据)
+# CP 协同开发执行记录 (SESSION) - 2026-11-13 (热数据)
 
 > 历史执行记录已完整归档至 [SESSION_H.md](file:///data/dev/cp/SESSION_H.md)。本项目采用冷热分离架构，本文件仅保留当日活跃记录。
+
+## 指令 1：按次序完成 第一步 第二步 第三步（全面收编 Bun 工业级 HTTP 全协议栈体系）
+
+- **用户需求**：
+  - 针对此前 HTTP 库仅有 8 个基础包装文件、缺失 Bun 2800+ 行 `http.cp` 工业核心及 `h2_client/`、`h3_client/` 的现状，执行“按次序完成 第一步 第二步 第三步”完整迁移收编计划；
+  - Step 1：协议类型与基础设施助手（`encoding.cp`, `fetch_modes.cp`, `cert.cp`, `url_path.cp`, `signals.cp`, `header_iterator.cp`, `request_body.cp`, `internal_state.cp`）；
+  - Step 2：HTTP/2 二进制帧协议与 HTTP/3 客户端子系统（`lib/http/h2/` 与 `lib/http/h3/`）；
+  - Step 3：工业级核心客户端引擎、Keep-Alive 连接池、分块传输编解码与全生命周期（`decompressor.cp`, `proxy.cp`, `sendfile.cp`, `context.cp`, `client.cp`, `index.cp`）；
+  - 编写端到端综合测试套件 `cap/test/test_http_full.cp`，同步更新 `cp_ref.md` 及四线文档，执行单次干净 Git 提交。
+
+- **执行结果**：
+  1. **Step 1（协议类型与基础设施助手）100% 落地**：
+     - `lib/http/encoding.cp`：`Encoding` 枚举与压缩判断；
+     - `lib/http/fetch_modes.cp`：`FetchCacheMode`, `FetchRedirect`, `FetchRequestMode` 标准模式与双向字符串映射；
+     - `lib/http/cert.cp`：`HTTPCertError`, `CertificateInfo`, `InitError`；
+     - `lib/http/url_path.cp`：`URLPath` 极速路径与参数切片；
+     - `lib/http/signals.cp`：`Signals`, `SignalStore` 原子生命周期状态；
+     - `lib/http/header_iterator.cp`：`HeaderValueIterator` 零拷贝逗号分隔报头迭代；
+     - `lib/http/request_body.cp`：`HTTPRequestBody` 内存切片与流式封装；
+     - `lib/http/internal_state.cp`：`InternalState` 客户端状态机。
+  2. **Step 2（HTTP/2 二进制帧与 HTTP/3 客户端子系统）100% 落地**：
+     - `lib/http/h2/frame.cp`：RFC 7540 9 字节二进制帧头编解码与帧常量；
+     - `lib/http/h2/client.cp`：`H2Stream`, `H2StreamState`, `H2ClientSession` 多路复用与奇数流 ID 分配；
+     - `lib/http/h2/index.cp`：HTTP/2 聚合统一导出；
+     - `lib/http/h3/alt_svc.cp`：RFC 7838 Alt-Svc 协商报头解析；
+     - `lib/http/h3/client.cp`：`H3Stream`, `H3StreamType`, `H3ClientSession` 双向请求流会话；
+     - `lib/http/h3/index.cp`：HTTP/3 聚合统一导出。
+  3. **Step 3（工业级核心客户端引擎与全生命周期）100% 落地**：
+     - `lib/http/decompressor.cp`：`Decompressor` 流式解压；
+     - `lib/http/proxy.cp`：RFC 7231 `ProxyTunnel` HTTP CONNECT 代理隧道；
+     - `lib/http/sendfile.cp`：Linux 内核零拷贝极速上传；
+     - `lib/http/context.cp`：`HTTPContext`, `PooledSocket` Keep-Alive 连接池与死链接驱逐；
+     - `lib/http/client.cp`：RFC 7230 请求格式化、分块传输解码（`decodeChunkedBody`）与状态解析；
+     - `lib/http/index.cp`：更新聚合对外导出全部能力。
+  4. **编译器自愈与协同热修**：
+     - `sema.rs`：打通 `Type::String` 与 `Type::Array(Box::new(Type::U8))` / `Type::SentinelSlice`（`[]const u8`）双向强制类型兼容；
+     - `scripts/sync_cpc.sh`：原子更新 `cap/bin/cpc` 与 `cpc/target/release/cpc`；
+     - 极速热修下游 Bun AGY 汇报任务 `task-struct-body-lower-rawptr-fn`，增强 `lower_struct_body` 对 `*!?`, `*!`, `?fn`, `fn (` 的降级转换，验证通过并结单。
+  5. **测试与规范验证**：
+     - `cap cap/test/test_http_full.cp`：全套三阶段端到端测试 100% PASS；
+     - `cap cap/test/test_http_features.cp`：100% PASS；
+     - `cap cap/test/test_sync_primitives.cp`：100% PASS；
+     - 14 大核心标准库套件全量回归 100% PASS。
+
+## 阶段里程碑 Git 提交
+
+- **提交说明**：`feat(http): complete full migration of industrial HTTP/1.1, H2, and H3 subsystems from bun`
+- **变更范围**：
+  1. `lib/http/`：Step 1 协议类型（`encoding.cp`, `fetch_modes.cp`, `cert.cp`, `url_path.cp`, `signals.cp`, `header_iterator.cp`, `request_body.cp`, `internal_state.cp`）、Step 2 H2/H3 子系统（`lib/http/h2/` frame/client/index, `lib/http/h3/` alt_svc/client/index）、Step 3 核心引擎与生命周期（`decompressor.cp`, `proxy.cp`, `sendfile.cp`, `context.cp`, `client.cp`, `index.cp`）；
+  2. `cap/test/test_http_full.cp`：涵盖 Step 1/2/3 所有能力的端到端综合测试；
+  3. `cap/test/test_http_features.cp` & `cap/test/test_sync_primitives.cp`：回归与现代错误处理契约更新；
+  4. `cpc/src/sema.rs`：打通 `String` 与 `[]const u8` 切片双向类型转换；
+  5. `cpc/src/codegen/mod.rs`：匿名结构体降级增强（`*!?`, `*!`, `?fn`, `fn (` 原生指针与函数类型），结单 Bun AGY 汇报任务 `task-struct-body-lower-rawptr-fn`；
+  6. `scripts/sync_cpc.sh`：原子更新并同步部署 debug/release 编译器；
+  7. `cp_ref.md`：第 12.8 节全面更新 HTTP 全协议栈体系设计规范与代码示例；
+  8. `SESSION.md` / `CHANGELOG.md` / `DEVLOG.md`：记录 2026-11-13 热数据日志。
+
+---
 
 ## 指令 1：推进标准库方案 A（工业级统一 I/O 流体系）与 Bun AGY 协同热修
 
