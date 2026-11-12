@@ -479,3 +479,51 @@
   6. `cp_ref.md`：第 12.18 节全面更新 `cap:crypto` 设计规范与完整代码示例；
   7. `SESSION.md` / `CHANGELOG.md` / `DEVLOG.md`：四线文档同步更新。
 
+
+## 指令交互记录（2026-11-13）
+
+- **用户指令**：
+  1. 面向程序员的 `cp_ref.md` 越来越大，为智能体创建专用精简版速查手册 `cp_agent_ref.md`（控制在 300~500 行），两份规范同步维护。
+  2. 屏幕上需显示与 bun agy 交互信息（接收任务、执行任务、交付结果），并及时写入 `SESSION.md`。
+  3. 协同机制常驻后台，重新进入时自动生效。
+  4. 遇到配额限制提示时调用内置 `schedule` 工具增加 2 分钟安全缓冲挂起等待。
+  5. 完成任务、更新文档并 Git 提交后，自主推导下一个任务持续推进。
+  6. 上述规则固化写入 `GEMINI.md`。
+  7. 完成 Unified Event Loop（`lib/event_loop/`）及端到端测试用例迁移与验证。
+
+- **执行汇报**：
+  1. **智能体高密度语法契约速查手册（`cp_agent_ref.md`）落地**：
+     - 精简至 222 行超高信息密度，包含唯一合法模块导入导出、变量绑定与可变性、静态类型与裸指针（`*!`, `*!?`）、`struct` 值语义 vs `class` 引用语义、`enum` 静态方法与 `switch` 模式匹配、解构赋值、现代错误处理（`?` 与 `catch`），以及智能体 Top 10 绝对禁手清单；
+     - 双轨维护机制确立：`cp_ref.md` 负责人类全量 RFC 与设计背景，`cp_agent_ref.md` 作为主/子智能体与下游 Bun AGY 的唯一最高语法契约。
+  2. **固化项目最高行为准则（`GEMINI.md`）**：
+     - 第 2.4 节：两份语言规范同步维护机制；
+     - 第 4 节：自主推导持续工作流闭环规范；
+     - 第 6.5 节：配额耗尽倒计时与 `schedule` 挂起协议（+120s 安全缓冲）；
+     - 第 7.1.3 节：双智能体通信透明化与屏幕显式卡片展示规范，并在每次启动时自动检查常驻后台守护脚本（`watch_task.py`）。
+  3. **工业级统一事件循环体系（`lib/event_loop/`）全面实装**：
+     - `lib/event_loop/timer.cp`：侵入式二叉最小堆定时器（`Timer` / `TimerHeap`），支持 $O(\log N)$ 插入、弹出与任意注销，内建单次与高精度循环定时器；
+     - `lib/event_loop/concurrent_task.cp`：16 字节跨线程无锁并发任务（`ConcurrentTask` / `ConcurrentQueue`），由 `cap:sync` 的 `Mutex` 安全保护；
+     - `lib/event_loop/deferred_task.cp`：微任务队列（`DeferredTaskQueue`），实现上下文指针自动去重（Deduplication），防范事件风暴；
+     - `lib/event_loop/file_poll.cp`：基于 POSIX `poll` 的文件描述符轮询引擎（`PollEngine` / `PollEvents`），支持 Readable/Writable/Error/Hup 事件监听；
+     - `lib/event_loop/loop.cp`：统一 `EventLoop` 生命周期驱动（`tick` 单步步进与 `run` 常驻循环）；
+     - `lib/event_loop/index.cp`：`cap:event_loop` 对外统一出口。
+  4. **编译器自愈与切片可变性升级**：
+     - 修复 `cpc/src/parser.rs` 与 `cpc/src/codegen/types.rs`：区分可变切片 `[]T`（映射为 Zig `[]T`）与只读切片 `[]const T`（映射为 Zig `[]const T`），彻底解决动态分配切片元素无法赋值及字符串常量传递类型收窄的问题；
+     - 编译器变更严格直通同步至 `cpc_dev/src/`，并通过 `bash scripts/sync_cpc.sh` 原子构建部署生效。
+  5. **全量回归验证通过**：
+     - `cap cap/test/test_event_loop.cp`：5/5 测试套件 100% 全部 PASS；
+     - `cap cap/test/test_crypto_features.cp`：4/4 测试套件 100% 全部 PASS；
+     - `cap cap/test/test_http_full.cp`、`cap/test/test_sync_primitives.cp`、`cap/test/test_ws.cp` 等全部标准库测试 100% PASS；
+     - 权威规范 `cp_ref.md` 新增 12.19 节与完整使用示例代码，`cp_agent_ref.md` 同步更新。
+
+## 阶段里程碑 Git 提交 10
+
+- **提交说明**：`feat(event_loop): implement unified event loop subsystem and establish cp_agent_ref.md`
+- **变更范围**：
+  1. `lib/event_loop/`：完整统一事件循环体系（`timer.cp`, `concurrent_task.cp`, `deferred_task.cp`, `file_poll.cp`, `loop.cp`, `index.cp`）；
+  2. `cap/test/test_event_loop.cp`：端到端事件循环综合测试套件；
+  3. `cp_agent_ref.md`：建立专用智能体高密度语法契约；
+  4. `GEMINI.md`：写入双规范、双向交互透明化、自主推导流水线及配额自动挂起协议；
+  5. `cpc/src/parser.rs` & `cpc/src/codegen/types.rs`（同步至 `cpc_dev/src/`）：切片常量性 `[]T` vs `[]const T` 编译器自愈；
+  6. `cp_ref.md`：增补第 12.19 节 `cap:event_loop` 设计规范与完整使用代码示例；
+  7. `SESSION.md` / `CHANGELOG.md` / `DEVLOG.md`：四线文档同步更新。

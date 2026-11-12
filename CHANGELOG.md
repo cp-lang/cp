@@ -309,3 +309,33 @@
   - 在异步状态机闭包上下文提取中跳过 `_` 变量，防止生成非法字段名；
   - 泛型类的 `_create` 构造函数统一采用 `@This()` 申请内存，解决单态化类型缺失 `_create` 的问题；
   - `lookup_method` 剥离类型中的泛型参数后缀，正确解析泛型实例的方法返回值类型。
+
+## [未发布] - 2026-11-13
+
+### 新增 (Added)
+- [`cp_agent_ref.md`](file:///data/dev/cp/cp_agent_ref.md):
+  - 建立专为 AI Agent 设计的高密度（~220行）语法契约手册，涵盖模块导入导出、变量绑定与可变性、类型系统与裸指针、结构体与类、枚举与模式匹配、解构赋值、现代错误处理及 Top 10 禁手清单。
+- [`GEMINI.md`](file:///data/dev/cp/GEMINI.md):
+  - 增补第 2.4 节双轨语言规范维护机制；
+  - 增补第 4 节自主推导持续工作流闭环规范；
+  - 增补第 6.5 节配额耗尽倒计时与 `schedule` 挂起协议；
+  - 增补第 7.1.3 节双智能体通信透明化与后台守护进程自动启动检查。
+- [`lib/event_loop/`](file:///data/dev/cp/lib/event_loop/):
+  - 建立工业级统一事件循环标准库（`cap:event_loop`）：
+    - `timer.cp`：基于侵入式二叉最小堆的定时器系统（`Timer`, `TimerHeap`），支持精确到毫秒的超时管理与 $O(\log N)$ 节点注销；
+    - `concurrent_task.cp`：16 字节跨线程无锁并发任务（`ConcurrentTask`, `ConcurrentQueue`），由 `Mutex` 保护；
+    - `deferred_task.cp`：微任务队列（`DeferredTaskQueue`），实现上下文指针自动去重；
+    - `file_poll.cp`：基于 `std.posix.poll` 的系统描述符监听引擎（`PollEngine`, `PollEvents`）；
+    - `loop.cp`：统一 `EventLoop` 生命周期驱动（`tick` 单步步进与 `run` 常驻循环）；
+    - `index.cp`：模块统一出口。
+- [`cap/test/test_event_loop.cp`](file:///data/dev/cp/cap/test/test_event_loop.cp):
+  - 5 大端到端回归测试套件：二叉最小堆定时器调度、16 字节并发任务队列、微任务队列与去重、I/O 描述符轮询引擎、统一 EventLoop 综合生命周期。
+
+### 优化与修复 (Fixed)
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs) / [`cpc_dev/src/parser.rs`](file:///data/dev/cp/cpc_dev/src/parser.rs):
+  - 解析 `[]const T` 时，保留 `has_const` 标志并将其构建为不可变借用切片 `Type::BorrowType { inner: Box::new(Type::Array(...)), is_mut: false }`；未带 `const` 的 `[]T` 保持为可变数组切片 `Type::Array(...)`。
+- [`cpc/src/codegen/types.rs`](file:///data/dev/cp/cpc/src/codegen/types.rs) / [`cpc_dev/src/codegen/types.rs`](file:///data/dev/cp/cpc_dev/src/codegen/types.rs):
+  - `Type::Array(inner)` 映射生成 Zig 可变切片 `[]T`，解除动态分配切片元素只读限制；
+  - `Type::BorrowType { is_mut: false, inner: Array(elem) }` 映射生成 Zig 只读切片 `[]const T`，保障字符串切片等参数调用的常量性契约。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 增补第 12.19 节工业级统一事件循环体系（`cap:event_loop`）设计规范与完整使用代码示例；调整路线图章节序号为 12.20。

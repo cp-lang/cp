@@ -2178,7 +2178,7 @@ impl Codegen {
             Type::Void => "void".to_string(),
             Type::Any => "*anyopaque".to_string(),
             Type::Auto => "anytype".to_string(),
-            Type::Array(inner) => format!("[]const {}", self.map_type(inner)),
+            Type::Array(inner) => format!("[]{}", self.map_type(inner)),
             Type::FixedArray(inner, size) => format!("[{}]{}", size, self.map_type(inner)),
             Type::Map(_, _) => "*Map".to_string(),
             Type::Dict(_, _) => "*Dict".to_string(),
@@ -2301,6 +2301,9 @@ impl Codegen {
             }
             Type::BorrowType { inner, is_mut, .. } => {
                 if !*is_mut {
+                    if let Type::Array(elem) = &**inner {
+                        return format!("[]const {}", self.map_type(elem));
+                    }
                     if matches!(**inner, Type::CStr) {
                         return "[*:0]const u8".to_string();
                     }

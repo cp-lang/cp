@@ -365,3 +365,63 @@
 - **效果验证**：
   - `cap cap/test/test_extern_var.cp`：100% 通过（601ms）；
   - `cap cap/test/test_io_streams.cp`：6 大套件全面覆盖（888ms，100% 通过）。
+
+## 2026-11-13 统一事件循环体系架构落地、专用智能体速查规范确立与切片可变性自愈
+
+### 1. 架构目标与背景
+- **背景**：
+  - 用户指出面向人类开发者的 `cp_ref.md` 已逾 9,500 行，模型在读取时面临长上下文注意力稀释与海量 Token 消耗，提出建立专供 AI Agent 使用的精简高密度契约手册 `cp_agent_ref.md`；
+  - 要求双智能体通信透明化（屏幕卡片通知 + `SESSION.md` 同步），将工作流自主推导与配额冷却协议固化至 `GEMINI.md`；
+  - 承接 Bun.js 核心事件驱动资产，将高性能事件循环移植为 CP 原生标准库 `cap:event_loop`（`lib/event_loop/`），实现定时器最小堆、跨线程无锁任务、微任务去重队列与 I/O 描述符轮询。
+
+### 2. 核心架构演进与技术攻坚
+
+#### 2.1 智能体专用高密度语法契约 (`cp_agent_ref.md`)
+- **原则**：剥离人类 RFC 历史背景与哲学阐述，纯粹提炼形式化语法与类型规则。
+- **内容覆盖**：
+  1. 唯一合法模块导入导出（顶层直接 `import x from ...`，目录统一出口 `index.cp`）；
+  2. 变量绑定与可变性（`const` 不可变、`let`/`var` 局部可变、禁止 `let mut`、`*param` 可变借用）；
+  3. 类型系统与裸指针（`*!` 非空、`*!?` 可空、`[]u8` 可变切片、`[]const u8` 只读切片）；
+  4. 结构体（值语义，TS 风格对象字面量无前导点）vs 类（引用语义，`*this`/`*self` 显式接收者）；
+  5. 枚举静态方法调用与模式匹配变体解包；
+  6. 解构赋值（元组解构、对象解构与 `...rest` 剩余绑定）；
+  7. 现代控制流与错误传播（`?` 与 `catch`，彻底废除 `try/catch`）；
+  8. Top 10 智能体绝对禁手清单（杜绝幻觉）。
+
+#### 2.2 统一事件循环标准库 (`lib/event_loop/`)
+- **侵入式二叉最小堆 (`TimerHeap`)**：
+  - 每个 `Timer` 节点直接携带 `heap_idx: usize`，在 `siftUp` 和 `siftDown` 维护节点堆索引；
+  - 允许 $O(\log N)$ 任意定时器即时注销（`clearTimeout` / `clearInterval`），彻底避免线性遍历；
+  - 内置 Linux 单调时钟毫秒转换（`clock_gettime(CLOCK.MONOTONIC)`）与高精度睡眠（`nanosleep`）。
+- **16 字节并发跨线程任务队列 (`ConcurrentQueue`)**：
+  - 包含回调函数指针与上下文指针，使用 `cap:sync` 的 `Mutex` 保障多线程安全；
+  - 支持单轮限制步进排出（`drain`），执行后自动销毁任务对象。
+- **微任务去重队列 (`DeferredTaskQueue`)**：
+  - 在事件循环单步执行（`tick`）的 I/O 睡眠前后两次优先排空微任务；
+  - 独创 `postTask(ctx, task)` 上下文指针去重机制：若相同 `ctx` 已在微任务队列中排队，原地更新回调函数指针并抑制重复插入，有效防范 UI/网络高频刷新带来的事件风暴。
+- **文件描述符轮询引擎 (`PollEngine`)**：
+  - 基于原生 `std.posix.poll` 封装，提供 `PollEvents` 位掩码（Readable, Writable, Error, Hup）；
+  - 采用动态数组管理 `pollfd` 与监听注册信息，支持 $O(1)$ 尾部交换安全注销。
+- **统一生命周期驱动 (`EventLoop`)**：
+  - 整合四层事件源，提供单步轮转 `tick(timeout_override)` 与常驻驱动 `run()` / `stop()`。
+
+#### 2.3 编译器自愈：切片常量性契约 (`[]T` vs `[]const T`)
+- **现象**：
+  - 此前编译器在 `codegen/types.rs` 中将所有 `Type::Array(inner)` 硬编码映射为 Zig 的 `[]const T`；
+  - 导致通过 `page_allocator.alloc` 分配的动态可变切片在执行索引赋值（如 `self.items[idx] = timer;`）时，被 Zig 编译器直接拦截：`cannot assign to constant`；
+  - 同时若将 `Type::Array` 粗暴改为 `[]T`，又会导致 `str: []const u8` 丢失常量限定，传递给 `string` 时引发 `cast discards const qualifier`。
+- **自愈方案**：
+  1. 在 `cpc/src/parser.rs` 解析数组类型时保留 `has_const` 标志：当检测到 `[]const ...` 时，构造为不可变借用切片 `Type::BorrowType { inner: Box::new(Type::Array(...)), is_mut: false }`；未带 `const` 的 `[]...` 则保留为普通数组切片 `Type::Array(...)`；
+  2. 在 `cpc/src/codegen/types.rs` 中：
+     - `Type::Array(inner)` 统一生成 Zig 可变切片 `[]T`；
+     - `Type::BorrowType { is_mut: false, inner: Array(elem) }` 生成 Zig 只读切片 `[]const T`；
+  3. 修改经 `cargo check` 验证后，同步更新 `cpc_dev/src/` 并调用 `bash scripts/sync_cpc.sh` 原子构建部署。
+
+### 3. 验证与交付
+- **测试通过**：
+  - `cap cap/test/test_event_loop.cp`：5/5 测试套件 100% 全部 PASS；
+  - `cap cap/test/test_crypto_features.cp`：4/4 测试套件 100% 全部 PASS；
+  - `cap cap/test/test_http_full.cp`、`cap/test/test_sync_primitives.cp`、`cap/test/test_ws.cp` 等全部标准库测试 100% PASS。
+- **规范同步**：
+  - `cp_ref.md` 增补第 12.19 节及使用范式；
+  - `cp_agent_ref.md` 建立并作为最高指令契约运行。

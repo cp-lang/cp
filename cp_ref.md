@@ -6882,7 +6882,91 @@ const ok = Aes256Gcm.decrypt(&key, &nonce, ct_slice, &tag, "", decrypted[0..ct_s
 
 ---
 
-### 12.19 生态演进与路线图（Roadmap）
+### 12.19 工业级统一事件循环体系（`cap:event_loop`） 【已全面实装】
+
+CP 语言事件循环移植并融合了 Bun.js 与 Node.js 极速内核，提供基于侵入式二叉最小堆的高性能定时器、16 字节跨线程无锁并发任务队列、基于上下文指针去重的微任务队列（Deferred Microtasks），以及高并发系统文件描述符轮询引擎（`PollEngine`），由 `EventLoop` 类实现统一生命周期驱动。
+
+#### 12.19.1 核心组件与设计特性
+
+1. **侵入式二叉最小堆定时器 (`Timer` & `TimerHeap`)**：
+   - 节点内嵌堆索引（`heap_idx: usize`），实现 $O(\log N)$ 插入与到期弹出，以及 $O(\log N)$ 任意定时器即时注销（`remove`），彻底消灭扫描查找开销。
+   - 区分单次定时器（`setTimeout`）与高精度循环定时器（`setInterval`），支持毫秒级到期批量排出（`drainExpired`）。
+2. **16 字节跨线程无锁并发任务队列 (`ConcurrentTask` & `ConcurrentQueue`)**：
+   - 任务节点仅占 16 字节（包含紧凑的回调指针与上下文指针），支持 Worker 线程与 I/O 线程极速向主事件循环投递跨线程任务（`postTask`）。
+   - 采用互斥自旋锁守卫单向链表，支持批量单轮排出（`drain`），支持任务执行后自动回收（`auto_delete`）。
+3. **微任务队列与上下文去重 (`DeferredTaskQueue`)**：
+   - 严格遵循现代 JavaScript/Bun 微任务语义，在每轮 I/O 睡眠前后优先排空微任务。
+   - 具备唯一的上下文指针去重能力（Deduplication）：针对相同上下文的重复排队请求，原地更新回调并抑制重复插入，消除事件风暴。
+4. **I/O 文件描述符轮询引擎 (`PollEngine`)**：
+   - 基于原生 `std.posix.poll` 封装，提供 `Readable`, `Writable`, `Error`, `Hup` 事件位掩码。
+   - 具备动态动态扩容缓冲区，支持描述符注册、更新与 $O(1)$ 尾部交换注销。
+5. **统一事件循环驱动 (`EventLoop`)**：
+   - 单轮步进模式：`tick(timeout_override)`，按阶段顺序执行跨线程任务 -> 微任务 -> 计算定时器最短等待 -> I/O 轮询睡眠 -> 到期定时器派发 -> 尾部微任务排空。
+   - 常驻运行模式：`run()` 与 `stop()`，自动监测是否有存活句柄（`hasActiveHandles()`）。
+
+#### 12.19.2 完整使用示例
+
+```typescript
+import {
+    EventLoop,
+    Timer,
+    TimerHeap,
+    ConcurrentQueue,
+    DeferredTaskQueue,
+    PollEngine,
+    PollEvents
+} from "cap:event_loop";
+
+// 1. 初始化统一事件循环
+let loop = EventLoop.init();
+
+class AppState {
+    pub count: i32 = 0;
+    pub static fn create(): *AppState {
+        let p = std.heap.page_allocator.create(AppState) catch unreachable;
+        p.count = 0;
+        return p;
+    }
+}
+
+let state = AppState.create();
+const state_ptr: *anyopaque = @ptrCast(state);
+
+// 2. 投递微任务 (自动按 state_ptr 去重)
+loop.deferTask((ctx: ?*anyopaque) => {
+    let s: *AppState = @ptrCast(@alignCast(ctx.?));
+    s.count += 10;
+}, state_ptr);
+
+// 3. 注册定时器 (10ms 后触发)
+const t = loop.setTimeout((ctx: ?*anyopaque) => {
+    let s: *AppState = @ptrCast(@alignCast(ctx.?));
+    s.count += 1;
+}, 10, state_ptr);
+
+// 4. 注册文件描述符 I/O 监听
+let pipe_fds: [2]i32 = undefined;
+__zig__ {
+    _ = std.os.linux.pipe(&pipe_fds);
+}
+loop.watch(pipe_fds[0], PollEvents.Readable, (fd: i32, events: u32, ctx: ?*anyopaque) => {
+    let s: *AppState = @ptrCast(@alignCast(ctx.?));
+    s.count += 100;
+}, state_ptr);
+
+// 5. 单步轮转驱动
+_ = loop.tick(0); // 触发微任务: count -> 10
+TimerHeap.sleepMs(15);
+_ = loop.tick(0); // 定时器到期触发: count -> 11
+
+// 6. 清理退出
+_ = loop.clearTimeout(t);
+_ = loop.unwatch(pipe_fds[0]);
+```
+
+---
+
+### 12.20 生态演进与路线图（Roadmap）
 
 ```mermaid
 timeline

@@ -2438,7 +2438,15 @@ impl<'a> Parser<'a> {
                     )
                 {
                     let elem_ty = self.parse_base_type()?;
-                    let ty = Type::Array(Box::new(elem_ty));
+                    let ty = if has_const {
+                        Type::BorrowType {
+                            inner: Box::new(Type::Array(Box::new(elem_ty))),
+                            is_mut: false,
+                            lifetimes: vec![],
+                        }
+                    } else {
+                        Type::Array(Box::new(elem_ty))
+                    };
                     return self.parse_postfix_type_modifiers(ty);
                 }
                 let ty = Type::Tuple(Vec::new());
