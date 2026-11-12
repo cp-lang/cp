@@ -1,5 +1,5 @@
 // lib/http/index.cp
-import { Method } from "./method";
-import { Headers, HeaderEntry } from "./headers";
-import { ETag, ParsedETag } from "./etag";
-import { MimeType } from "./mime";
+export { Method } from "./method";
+export { Headers, HeaderEntry } from "./headers";
+export { ETag, ParsedETag } from "./etag";
+export { MimeType } from "./mime";

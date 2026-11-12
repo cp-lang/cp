@@ -512,14 +512,26 @@ import App from "./app.cp";
 // 默认 + 具名混合导入
 import App, { start } from "./app.cp";
 import {default as App, start } from "./app.cp";
+
+// 6. 模块重导出 (Re-export / Facade 统一出口)
+export { Reader, Writer, Closer } from "./traits";
+export { BufferReader, BufferWriter } from "./buffer_stream";
+export * from "./io/index";
 ```
 
-#### 1.1 内置标准库 `cap:*` 协议映射规则
+#### 1.1 模块重导出规范（Re-export 与门面模式）
+
+CP 语言原生支持标准的重导出语法，广泛应用于复合标准库及包门面（Facade）：
+- **具名重导出**：`export { foo, bar } from "./sub_module";` —— 将子模块声明的符号直接公开导出，无需显式写 `import` 再 `export`；
+- **全量重导出**：`export * from "./sub_module";` —— 门面文件（如根目录 `lib/io.cp`、`lib/sync.cp`）将子目录入口（`lib/io/index.cp`）中的所有公开符号一次性透明对外暴露；
+- **标准库分级规范**：任何由多个子文件构成的标准库（如 `io`、`sync`、`router`、`http`），统一采用目录化布局 `lib/<name>/`，由 `lib/<name>/index.cp` 进行高内聚组织与具名导出，根目录对应同名文件 `lib/<name>.cp` 仅作为一行简洁门面：`export * from "./<name>/index";`。
+
+#### 1.2 内置标准库 `cap:*` 协议映射规则
 
 - 所有的内置官方标准库统一通过 `cap:<module>` 协议通道导入（如 `cap:io`、`cap:fs`、`cap:http`、`cap:net`）；
 - 编译器解析器（`resolver.rs`）在解析时自动剥离 `cap:` 前缀，直接在纯正唯一的官方标准库根目录 `lib/` 下精准检索：
-  - **单文件标准模块**（如 `cap:io`、`cap:fs`）：秒级命中 `lib/io.cp`、`lib/fs.cp`；
-  - **复合目录标准模块**（如 `cap:http`、`cap:net`、`cap:crypto`）：自动识别目录并优先检索 `lib/http/index.cp`、`lib/net/index.cp`、`lib/crypto/index.cp`，兼顾模块内部的高内聚分文件拆分。
+  - **单文件标准模块**（如 `cap:io.cp` 门面、`cap:fs.cp`）：秒级命中 `lib/io.cp`、`lib/fs.cp`；
+  - **复合目录标准模块**（如 `lib/io/`、`lib/sync/`、`lib/http/`、`lib/net/`、`lib/crypto/`）：自动识别目录并优先检索 `lib/<module>/index.cp`，兼顾模块内部的高内聚分文件拆分。
 
 #### 2. 禁止行为
 

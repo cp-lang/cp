@@ -2,6 +2,48 @@
 
 > 历史研发日志已完整归档至 [DEVLOG_H.md](file:///data/dev/cp/DEVLOG_H.md)。本项目采用冷热分离架构，本文件仅保留当日活跃记录。
 
+## 2026-11-12: 资产深度审查、编译器原生 Re-export 落地、lib/io 目录化重构与全套标准库规范化
+
+- **任务背景与工程目标**：
+  - 用户深度审查标准库迁移成果，提出四大关键规范与质量核验要求：
+    1. 检查为何此前部分 `index.cp` 只有 `import` 没有 `export` 测试仍能通过？正规语法必须为 `export { foo, bar } from 'my_module';`；
+    2. 核查 `io` 库是否完整迁移？从 Bun 迁移的复合库必须创建目录 `lib/io/`，同名文件改名 `io_0.cp`，确认功能 100% 覆盖后再行删除；
+    3. 深度排查全量从 Bun 迁移的 CP 文件是否存在遗漏；
+    4. 逐一验证所有标准库测试套件的测试覆盖点与实际通过情况；
+    5. 保持与 `bun_agy` 的双向通信后台任务持续监听。
+
+- **核心技术挑战与根因剖析**：
+  1. **为何此前没有 `export` 测试仍能通过？**：
+     - 在 `cpc` 编译器前端的整体依赖收集器 `resolver.rs` 中，`resolve_imports` 采用的是整程序一次性收集模型；
+     - 它遍历源文件所有的 `import` 语句，递归读取目标 `.cp` 文件并将其中的函数、类、结构体直接追加（append）到同一个全局的 `all_items: Vec<ModuleItem>` 列表中；
+     - 当最终将 `all_items` 喂给代码生成器时，所有被传递依赖的文件内容都被转译到了单个生成的 `.zig` 文件的文件作用域（File Scope）内；
+     - 这一扁平化收集机制导致被间接引入的符号在 Zig 顶层是可见的，从而掩盖了模块边界上的 `export` 缺失；
+     - **自愈方案**：在语言层面正式支持完整的 ES6 / CP 重导出语法，并在语义分析（`sema.rs`）与依赖解析（`resolver.rs`）中把 `export { ... } [from "..."]` 作为一等公民处理。
+  2. **编译器原生 Re-export 语法落地**：
+     - **AST 扩展**：在 `ModuleItem` 枚举中增加 `Export(ExportStmt)`，包含 `span`、`specifiers: Vec<Ident>` 与可选来源路径 `source: Option<String>`；
+     - **Parser 扩展**：在 `parser.rs` 中解析 `export { Ident, ... } [from "path"]` 与 `export * from "path"`；
+     - **Resolver 联动**：提取统一的 `resolve_source_path` 路径解析引擎，当遇到 `ModuleItem::Export(exp)` 且带有 `source` 时，无缝递归解析该来源文件并收集依赖项；
+     - **Sema 符号表登记**：在符号收集阶段将 `Export` 语句中的所有标示符作为公共符号纳入作用域管理；
+     - 经调试与测试，`export { add, MAGIC } from "./export_sub"` 与 `export * from "./export_sub"` 端到端秒级转译通过。
+  3. **`lib/io` 严格遵循 `xxx_0.cp` 演进规则进行目录化拆解**：
+     - 将原 `lib/io.cp` 移动为 `lib/io_0.cp`；
+     - 创建 `lib/io/` 目录并根据职责高内聚分拆：
+       - `traits.cp`：`IOError`, `SeekOrigin`, `Reader`, `Writer`, `Closer`, `Seeker`；
+       - `buffer_stream.cp`：`BufferReader`, `BufferWriter`, `BufferedReader`, `BufferedWriter`, `copyStream`, `copyN`；
+       - `stdio.cp`：`Console`, `console`, `Stdio`, `stdio`, `print`, `println`, `eprint`, `eprintln`；
+       - `max_buf.cp`：对标 Bun `MaxBuf` 的流式缓冲区上限与防 OOM 守卫；
+       - `pipe.cp`：原生跨平台管道 `PipeReader`, `PipeWriter`, `Pipe`；
+       - `index.cp`：规范具名重导出全部符号；
+     - 逐行比对原 `lib/io_0.cp`，确认所有契约与实现无一遗漏且性能增强；
+     - 创建门面 `lib/io.cp`：`export * from "./io/index";`；
+     - `cap/test/test_io_streams.cp` 验证 8 大用例全绿通过后，安全删除 `lib/io_0.cp`。
+  4. **全标准库门面规范化升级**：
+     - 彻底消除所有标准库中的“仅 `import` 伪门面”，全部转换为原生 `export { ... } from "..."` 与 `export * from "..."`。
+
+- **效果验证**：
+  - 全套 13 大标准库回归测试（涵盖 45 项细分子测试）全部一次性 100% 绿色通过；
+  - 后台通信监听任务 `task-19361` 持续稳健运行。
+
 ## 2026-11-12: 落地跨平台可执行程序定位 (cap:which)、WebSocket 协议帧 (cap:ws) 与文件系统原子写入 (5.1/5.2/5.3)
 
 - **任务背景与工程目标**：

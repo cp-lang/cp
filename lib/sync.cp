@@ -1,10 +1,4 @@
-import { Futex, Deadline } from "./sync/futex";
-import { Mutex } from "./sync/mutex";
-import { Condition } from "./sync/condition";
-import { WaitGroup } from "./sync/wait_group";
-import { Channel } from "./sync/channel";
-import { MpmcQueue } from "./sync/ring_buffer";
-import { UnboundedQueue } from "./sync/unbounded_queue";
-import { ConcurrentMap } from "./sync/concurrent_map";
-import { ArcSlice } from "./sync/arc_slice";
-import { Wyhash, WyhashStateless } from "./sync/wyhash";
+/**
+ * CP Standard Synchronization Library Facade (cap:sync)
+ */
+export * from "./sync/index";

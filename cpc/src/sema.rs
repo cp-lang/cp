@@ -977,6 +977,18 @@ impl Analyzer {
                         );
                     }
                 }
+                ModuleItem::Export(exp) => {
+                    for spec in &exp.specifiers {
+                        let _ = self.define(
+                            spec.sym.clone(),
+                            SymbolKind::Var {
+                                ty: Type::Any,
+                                kind: VarDeclKind::Const,
+                            },
+                            spec.span,
+                        );
+                    }
+                }
                 ModuleItem::Stmt(Stmt::Var(v)) => {
                     if let Pattern::Ident(id) = &v.pat {
                         let _ = self.define(
@@ -1026,6 +1038,7 @@ impl Analyzer {
                 ModuleItem::Decl(decl) => self.analyze_decl(decl)?,
                 ModuleItem::Stmt(stmt) => self.analyze_stmt(stmt)?,
                 ModuleItem::Import(_) => {}
+                ModuleItem::Export(_) => {}
             }
         }
         Ok(())

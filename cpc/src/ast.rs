@@ -12,6 +12,15 @@ pub enum ModuleItem {
     Decl(Decl),
     Stmt(Stmt),
     Import(ImportStmt),
+    Export(ExportStmt),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExportStmt {
+    pub span: Span,
+    pub specifiers: Vec<Ident>,
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -62,6 +62,76 @@ pub fn resolve_file_or_dir(base: &Path) -> Option<PathBuf> {
     None
 }
 
+pub fn resolve_source_path(path: &Path, source: &str, include_paths: &[PathBuf]) -> Option<PathBuf> {
+    let mut search_source = source.to_string();
+    let is_cap_builtin = if let Some(stripped) = search_source.strip_prefix("cap:") {
+        search_source = stripped.to_string();
+        true
+    } else {
+        false
+    };
+
+    let mut resolved_path = None;
+
+    if is_cap_builtin {
+        for inc in include_paths {
+            let p = inc.join(&search_source);
+            if let Some(res) = resolve_file_or_dir(&p) {
+                resolved_path = Some(res);
+                break;
+            }
+        }
+        if resolved_path.is_none() {
+            let default_lib = PathBuf::from("/data/dev/cp/lib").join(&search_source);
+            if let Some(res) = resolve_file_or_dir(&default_lib) {
+                resolved_path = Some(res);
+            }
+        }
+    } else if search_source.starts_with("./")
+        || search_source.starts_with("../")
+        || search_source.starts_with("/")
+    {
+        let base_path = path.parent().unwrap().join(&search_source);
+        resolved_path = resolve_file_or_dir(&base_path);
+
+        if resolved_path.is_none() {
+            for inc in include_paths {
+                let p = inc.join(&search_source);
+                if let Some(res) = resolve_file_or_dir(&p) {
+                    resolved_path = Some(res);
+                    break;
+                }
+            }
+        }
+    } else {
+        let mut current_dir = path.parent().unwrap();
+        loop {
+            let dep_path = current_dir.join("cap_modules").join(&search_source);
+            if let Some(p) = resolve_file_or_dir(&dep_path) {
+                resolved_path = Some(p);
+                break;
+            }
+            if let Some(parent) = current_dir.parent() {
+                current_dir = parent;
+            } else {
+                break;
+            }
+        }
+
+        if resolved_path.is_none() {
+            let home = std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .unwrap_or_else(|_| String::from("~"));
+            let global_path = PathBuf::from(&home)
+                .join(".cap/global/cap_modules")
+                .join(&search_source);
+            resolved_path = resolve_file_or_dir(&global_path);
+        }
+    }
+
+    resolved_path
+}
+
 pub fn resolve_dependencies(
     path: &Path,
     include_paths: &[PathBuf],
@@ -80,77 +150,15 @@ pub fn resolve_dependencies(
     for item in module.body {
         match item {
             ModuleItem::Import(imp) => {
-                let mut search_source = imp.source.clone();
-                let is_cap_builtin = if let Some(stripped) = search_source.strip_prefix("cap:") {
-                    search_source = stripped.to_string();
-                    true
-                } else {
-                    false
-                };
-
-                let mut resolved_path = None;
-
-                if is_cap_builtin {
-                    // cap: 前缀直接剥离后，在 lib/ 根目录下（通过 include_paths 传入）查找目标模块
-                    for inc in include_paths {
-                        let p = inc.join(&search_source);
-                        if let Some(res) = resolve_file_or_dir(&p) {
-                            resolved_path = Some(res);
-                            break;
-                        }
-                    }
-                    if resolved_path.is_none() {
-                        let default_lib = PathBuf::from("/data/dev/cp/lib").join(&search_source);
-                        if let Some(res) = resolve_file_or_dir(&default_lib) {
-                            resolved_path = Some(res);
-                        }
-                    }
-                } else if search_source.starts_with("./")
-                    || search_source.starts_with("../")
-                    || search_source.starts_with("/")
-                {
-                    let base_path = path.parent().unwrap().join(&search_source);
-                    resolved_path = resolve_file_or_dir(&base_path);
-
-                    if resolved_path.is_none() {
-                        for inc in include_paths {
-                            let p = inc.join(&search_source);
-                            if let Some(res) = resolve_file_or_dir(&p) {
-                                resolved_path = Some(res);
-                                break;
-                            }
-                        }
-                    }
-                } else {
-                    let mut current_dir = path.parent().unwrap();
-                    loop {
-                        let dep_path = current_dir.join("cap_modules").join(&search_source);
-                        if let Some(p) = resolve_file_or_dir(&dep_path) {
-                            resolved_path = Some(p);
-                            break;
-                        }
-                        if let Some(parent) = current_dir.parent() {
-                            current_dir = parent;
-                        } else {
-                            break;
-                        }
-                    }
-
-                    if resolved_path.is_none() {
-                        let home = std::env::var("HOME")
-                            .or_else(|_| std::env::var("USERPROFILE"))
-                            .unwrap_or_else(|_| String::from("~"));
-                        let global_path = PathBuf::from(&home)
-                            .join(".cap/global/cap_modules")
-                            .join(&search_source);
-                        resolved_path = resolve_file_or_dir(&global_path);
-                    }
+                if let Some(p) = resolve_source_path(path, &imp.source, include_paths) {
+                    resolve_dependencies(&p, include_paths, all_items, processed)?;
                 }
-
-                if let Some(p) = resolved_path {
-                    resolve_imports(&p, include_paths, all_items, processed)?;
-                } else {
-                    all_items.push(ModuleItem::Import(imp));
+            }
+            ModuleItem::Export(exp) => {
+                if let Some(source) = &exp.source {
+                    if let Some(p) = resolve_source_path(path, source, include_paths) {
+                        resolve_dependencies(&p, include_paths, all_items, processed)?;
+                    }
                 }
             }
             _ => {}
@@ -181,81 +189,21 @@ pub fn resolve_imports(
     for item in module.body {
         match item {
             ModuleItem::Import(imp) => {
-                let mut search_source = imp.source.clone();
-                let is_cap_builtin = if let Some(stripped) = search_source.strip_prefix("cap:") {
-                    search_source = stripped.to_string();
-                    true
-                } else {
-                    false
-                };
-
-                let mut resolved_path = None;
-
-                if is_cap_builtin {
-                    // cap: 前缀直接剥离后，在 lib/ 根目录下（通过 include_paths 传入）查找目标模块
-                    for inc in include_paths {
-                        let p = inc.join(&search_source);
-                        if let Some(res) = resolve_file_or_dir(&p) {
-                            resolved_path = Some(res);
-                            break;
-                        }
-                    }
-                    if resolved_path.is_none() {
-                        let default_lib = PathBuf::from("/data/dev/cp/lib").join(&search_source);
-                        if let Some(res) = resolve_file_or_dir(&default_lib) {
-                            resolved_path = Some(res);
-                        }
-                    }
-                } else if search_source.starts_with("./")
-                    || search_source.starts_with("../")
-                    || search_source.starts_with("/")
-                {
-                    // Relative or absolute import
-                    let base_path = path.parent().unwrap().join(&search_source);
-                    resolved_path = resolve_file_or_dir(&base_path);
-
-                    // Fallback for include paths if still not found (legacy behavior)
-                    if resolved_path.is_none() {
-                        for inc in include_paths {
-                            let p = inc.join(&search_source);
-                            if let Some(res) = resolve_file_or_dir(&p) {
-                                resolved_path = Some(res);
-                                break;
-                            }
-                        }
-                    }
-                } else {
-                    // Dependency import (search upwards for cap_modules)
-                    let mut current_dir = path.parent().unwrap();
-                    loop {
-                        let dep_path = current_dir.join("cap_modules").join(&search_source);
-                        if let Some(p) = resolve_file_or_dir(&dep_path) {
-                            resolved_path = Some(p);
-                            break;
-                        }
-                        if let Some(parent) = current_dir.parent() {
-                            current_dir = parent;
-                        } else {
-                            break;
-                        }
-                    }
-
-                    // Fallback to global installation
-                    if resolved_path.is_none() {
-                        let home = std::env::var("HOME")
-                            .or_else(|_| std::env::var("USERPROFILE"))
-                            .unwrap_or_else(|_| String::from("~"));
-                        let global_path = PathBuf::from(&home)
-                            .join(".cap/global/cap_modules")
-                            .join(&search_source);
-                        resolved_path = resolve_file_or_dir(&global_path);
-                    }
-                }
-
-                if let Some(p) = resolved_path {
+                if let Some(p) = resolve_source_path(path, &imp.source, include_paths) {
                     resolve_imports(&p, include_paths, all_items, processed)?;
                 } else {
                     all_items.push(ModuleItem::Import(imp));
+                }
+            }
+            ModuleItem::Export(exp) => {
+                if let Some(source) = &exp.source {
+                    if let Some(p) = resolve_source_path(path, source, include_paths) {
+                        resolve_imports(&p, include_paths, all_items, processed)?;
+                    } else {
+                        all_items.push(ModuleItem::Export(exp));
+                    }
+                } else {
+                    all_items.push(ModuleItem::Export(exp));
                 }
             }
             _ => {

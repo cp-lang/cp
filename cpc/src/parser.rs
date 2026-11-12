@@ -766,6 +766,14 @@ impl<'a> Parser<'a> {
             }
             self.bump()?;
         }
+        if is_pub {
+            if self.peek() == Some(&Token::LBrace) {
+                return Ok(vec![ModuleItem::Export(self.parse_export_stmt()?)]);
+            }
+            if self.peek() == Some(&Token::Star) {
+                return Ok(vec![ModuleItem::Export(self.parse_export_star_stmt()?)]);
+            }
+        }
         if self.peek() == Some(&Token::At) {
             // Check for @c { ... } or @c("lib") { ... } block
             let mut clone = self.clone_lookahead();
@@ -1080,6 +1088,66 @@ impl<'a> Parser<'a> {
             specifiers,
             default_specifier,
             source,
+        })
+    }
+
+    fn parse_export_stmt(&mut self) -> ParseResult<ExportStmt> {
+        let start = self.expect(Token::LBrace)?.start;
+        let mut specifiers = Vec::new();
+        while self.peek() != Some(&Token::RBrace) && self.peek().is_some() {
+            specifiers.push(self.parse_ident()?);
+            if self.peek() == Some(&Token::Comma) {
+                self.bump()?;
+            }
+        }
+        let mut end = self.expect(Token::RBrace)?.end;
+        let mut source = None;
+        if self.peek() == Some(&Token::From) {
+            self.bump()?;
+            let (token, span) = self.bump()?;
+            let s = if let Token::StringLiteral(str_val) = token {
+                str_val
+            } else {
+                return Err(ParseError::ExpectedToken(
+                    Token::StringLiteral("source".to_string()),
+                    token,
+                    span,
+                ));
+            };
+            end = span.end;
+            source = Some(s);
+        }
+        if self.peek() == Some(&Token::Semicolon) {
+            end = self.bump()?.1.end;
+        }
+        Ok(ExportStmt {
+            span: Span { start, end },
+            specifiers,
+            source,
+        })
+    }
+
+    fn parse_export_star_stmt(&mut self) -> ParseResult<ExportStmt> {
+        let start = self.expect(Token::Star)?.start;
+        self.expect(Token::From)?;
+        let (token, span) = self.bump()?;
+        let source = if let Token::StringLiteral(s) = token {
+            s
+        } else {
+            return Err(ParseError::ExpectedToken(
+                Token::StringLiteral("source".to_string()),
+                token,
+                span,
+            ));
+        };
+        let mut end = span.end;
+        if self.peek() == Some(&Token::Semicolon) {
+            end = self.bump()?.1.end;
+        }
+        Ok(ExportStmt {
+            span: Span { start, end },
+            specifiers: vec![],
+            source: Some(source),
         })
     }
 

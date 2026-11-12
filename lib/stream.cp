@@ -3,7 +3,7 @@
  * 工业级统一流式 Trait 契约与管道体系
  */
 
-import {
+export {
     IOError,
     SeekOrigin,
     Reader,
@@ -19,5 +19,5 @@ import {
     MaxBuf,
     PipeReader,
     PipeWriter,
-    Pipe,
+    Pipe
 } from "./io";

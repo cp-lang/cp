@@ -1,7 +1,7 @@
 // lib/ws/index.cp
-import { Opcode, CloseCode } from "./opcode";
-import { Mask } from "./mask";
-import { FrameHeader, FrameBuilder } from "./frame";
+export { Opcode, CloseCode } from "./opcode";
+export { Mask } from "./mask";
+export { FrameHeader, FrameBuilder } from "./frame";
 
 pub const ws = struct {
     pub const buildText = FrameBuilder.buildText;

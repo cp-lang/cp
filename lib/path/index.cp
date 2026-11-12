@@ -2,8 +2,8 @@
 // Cross-platform path standard library for CP (cap:path)
 const std = @import("std");
 const builtin = @import("builtin");
-import { PosixPath } from "./posix";
-import { WindowsPath } from "./windows";
+export { PosixPath } from "./posix";
+export { WindowsPath } from "./windows";
 
 pub const Path = struct {
     pub const posix = PosixPath;

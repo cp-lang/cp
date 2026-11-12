@@ -2,6 +2,43 @@
 
 > 历史变更日志已完整归档至 [CHANGELOG_H.md](file:///data/dev/cp/CHANGELOG_H.md)。本项目采用冷热分离架构，本文件仅保留当日活跃记录。
 
+## [2026-11-12] - 阶段审查：原生 Re-export 落地、lib/io 目录化重构与全标准库规范化审计
+
+### 新特性与编译器增强 (Added & Compiler)
+- [`cpc/src/ast.rs`](file:///data/dev/cp/cpc/src/ast.rs) / [`cpc_dev/src/ast.rs`](file:///data/dev/cp/cpc_dev/src/ast.rs):
+  - 在 `ModuleItem` 枚举中新增 `Export(ExportStmt)`，支持记录导出符号列表与可选来源路径 `source`。
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs) / [`cpc_dev/src/parser.rs`](file:///data/dev/cp/cpc_dev/src/parser.rs):
+  - 增加 `parse_export_stmt` 与 `parse_export_star_stmt`，完整支持 `export { foo, bar } from "./path";`、`export { foo, bar };` 与 `export * from "./path";`。
+- [`cpc/src/resolver.rs`](file:///data/dev/cp/cpc/src/resolver.rs) / [`cpc_dev/src/resolver.rs`](file:///data/dev/cp/cpc_dev/src/resolver.rs):
+  - 提取公共 `resolve_source_path` 模块路径解析函数；在 `resolve_dependencies` 与 `resolve_imports` 中对 `ModuleItem::Export` 的来源文件递归展开解析与依赖收集。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs) / [`cpc_dev/src/sema.rs`](file:///data/dev/cp/cpc_dev/src/sema.rs):
+  - 语义分析符号表中对 `ModuleItem::Export` 导出标识符进行符号声明登记与合法性校验。
+- [`cpc/src/codegen/prelude.rs`](file:///data/dev/cp/cpc/src/codegen/prelude.rs):
+  - 在生成运行时预加载时扫描 `ModuleItem::Export`，确保重导出的内部能力得到正确支持。
+
+### 标准库重构与规范化 (Refactored)
+- [`lib/io/`](file:///data/dev/cp/lib/io/) & [`lib/io.cp`](file:///data/dev/cp/lib/io.cp):
+  - 严格遵循 `xxx_0.cp` 演进规则，将原单文件暂存为 `lib/io_0.cp`，创建模块化目录 `lib/io/`；
+  - 拆分为 `traits.cp`、`buffer_stream.cp`、`stdio.cp`、`max_buf.cp`、`pipe.cp` 以及高内聚出口 `index.cp`；
+  - 100% 覆盖原功能后安全移除 `lib/io_0.cp`，重写根目录 `lib/io.cp` 门面为规范的 `export * from "./io/index";`。
+- 全量标准库重导出语法统一改造：
+  - 更新 `lib/sync/index.cp` & `lib/sync.cp`
+  - 更新 `lib/router/index.cp` & `lib/router.cp`
+  - 更新 `lib/http/index.cp` & `lib/http.cp`
+  - 更新 `lib/path/index.cp` & `lib/path.cp`
+  - 更新 `lib/url/index.cp` & `lib/url.cp`
+  - 更新 `lib/encoding/index.cp` & `lib/encoding.cp`
+  - 更新 `lib/glob/index.cp` & `lib/glob.cp`
+  - 更新 `lib/semver/index.cp` & `lib/semver.cp`
+  - 更新 `lib/dotenv/index.cp` & `lib/dotenv.cp`
+  - 更新 `lib/ini/index.cp` & `lib/ini.cp`
+  - 更新 `lib/which/index.cp` & `lib/which.cp`
+  - 更新 `lib/ws/index.cp` & `lib/ws.cp`
+  - 更新 `lib/json/index.cp` & `lib/json.cp` & `lib/serde.cp`
+  - 更新 `lib/stream.cp`
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)：
+  - 增加第 1.1 节重导出规范与门面模式使用指南。
+
 ## [2026-11-12] - 标准库第五阶段：可执行程序定位器、WebSocket 帧协议与文件系统原子增强
 
 ### 新特性 (Added)

@@ -1,6 +1,6 @@
 // lib/semver/index.cp
-import { Version } from "./version";
-import { SemverRange, Comparator, Op } from "./range";
+export { Version } from "./version";
+export { SemverRange, Comparator, Op } from "./range";
 
 pub const Semver = struct {
     pub const parse = Version.parse;

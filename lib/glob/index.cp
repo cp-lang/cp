@@ -1,5 +1,5 @@
 // lib/glob/index.cp
-import { Matcher } from "./matcher";
+export { Matcher } from "./matcher";
 
 pub const Glob = struct {
     pub const match = Matcher.match;

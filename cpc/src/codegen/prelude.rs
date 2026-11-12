@@ -57,6 +57,18 @@ impl ModuleFeatures {
                         f.needs_sync = true;
                     }
                 }
+                ModuleItem::Export(exp) => {
+                    if let Some(source) = &exp.source {
+                        if source == "cap:sync"
+                            || exp
+                                .specifiers
+                                .iter()
+                                .any(|s| s.sym == "Mutex" || s.sym == "RwLock" || s.sym == "Atomic")
+                        {
+                            f.needs_sync = true;
+                        }
+                    }
+                }
             }
         }
         if f.is_lib_mode {
