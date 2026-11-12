@@ -621,3 +621,46 @@
   2. `cp_ref.md`：清洗第 12 章遗留的历史代码示例，将旧版 `var` 统一修正为 `let`，`try` 替换为 `?`，`for()|i|` 修正为 `for (i of ...)`；
   3. `lib/security/csrf.cp`：全量将 `__zig__` 修正为规范 `zig`，`var` 修正为 `let`；
   4. `CHANGELOG.md` / `DEVLOG.md` / `SESSION.md`：四线文档同步更新。
+
+
+## 指令交互记录（2026-11-13 深度查漏补缺与 Bun 迁移全景契约完备化）
+
+- **用户查漏补缺核心清单（17 大核心特性与 4 项工作原则）**：
+  1. `@extern struct` 修正为规范 `@c struct`（与 C-ABI 内存严格对齐）；
+  2. 根结构体 `@root struct Name`（映射至 Zig 顶层根作用域 `@This()`，带 Prelude 运行时命名隔离）；
+  3. `@align(N)` 物理对齐注解与 `@refCount(cleanup)` 侵入式引用计数管理；
+  4. 细粒度字段借用与多字段分离并发借用（Disjoint Field Borrowing：`*data.q_len` 与 `*data.active_timer` 并发持有，按 `(root, field_path)` 追踪）；
+  5. 编译期元编程系统（`comptime fn`、`@{ }` Comptime 块、`@comptime param: auto`、`@if` / `@for` / `inline for`、`@fieldsOf` / `@typeOf` 原语）；
+  6. 宏系统（AST 模板插值宏 `${field}` 与 Comptime 过程宏）；
+  7. 元编程切面体系（`dec` 装饰器、`meta`、`@meta`、`@[...]`、`@reflect` 与 `reflect.*`）；
+  8. `switch` 全景解构体系（元组解构 `.Move [x, y]`、结构体载荷精确解构 `.Compute { batch }`、结构体剩余整包捕获 `.Compute { ...fields }`、单载荷捕获 `.Text text`、Walrus 子模式绑定 `s := 90..=100`、动态类型窄化分支 `w: AIWorker`、区间与多模式联合 `400 | 401`、`if` 守卫条件、编译期动态字段匹配 `@field`、三态错误解构 `err(e: TimeoutError)` / `err(e := SqlError)`）；
+  9. 胖指针与运行时向下转型（`Box<dyn Trait>`、`downcast`、`[:0]const u8` 胖切片）；
+  10. 直接引入 `.zig` 模块规范（`import Foo from "./foo.zig"`、两级类型安全模型、3 种标准姿态）；
+  11. 与 C 交互更丰富指针矩阵（`[*c]T` / `[*c]T?`、`[*:0]T!` / `[*:0]T?!`、`[*]([*:0]u8!)?!`、`[*:null]([*:0]u8?!)?!`、`*!`、`*!?`）；
+  12. 一等公民 C 字符串体系（`cstr` 薄指针 vs `cstring` 带长度胖指针）；
+  13. `void` 省略哲学（无返回值函数省略 `: void`，纯报错函数推荐 `: !`）；
+  14. 编译期自动推导形参占位符 `auto`（对标 Zig `anytype`，新代码统一使用 `auto`）；
+  15. 极简通用弱类型裸指针：`*any!` / `*any!?` 推荐省略 `any`，直接写作 `*!` 与 `*!?`；
+  16. 生命周期相关的 `ref`、`ref struct` 栈绑定视图、显式生命周期 `*(a)T`；
+  17. 多线程并发容器：只读不可变原子引用计数容器 `Shared<T>` 与内部可变性容器 `Shared(Mutex(T))` / `Shared(RwLock(T))`。
+  - **4 项核心原则**：确保无遗漏；适度精简但保证完整性；覆盖全部消除 `zig {}` 的迁移语法；强化 Rust 级所有权与借用检查规则。
+
+- **执行汇报**：
+  1. **全景完备重塑 `cp_agent_ref.md`（657 行）**：
+     - 将上述 17 大类特性与全部子规则完备收录，正交划分为 12 大章节；
+     - 重点展开 Rust 级所有权转移（`move` / `own`）、非词法生命周期（NLL）、读写排他互斥与多字段分离借用（Disjoint Field Borrowing）；
+     - 详细梳理支持 Bun AGY 彻底消灭 `zig {}` 所必需的系统级互操作语法：`@c struct`、`@root struct`、`@value struct`、`@align(N)`、`@refCount`、`[*c]T`、`*!`、`*!?`、`cstr` vs `cstring`、以及直接透明引入 `.zig` 文件规范；
+     - 全面保留每种语法特性最纯正、最简洁的 Canonical 少样本代码片段；
+     - 禁手清单升级至 Top 18，精准拦截各类 Zig/Rust 语法幻觉渗漏。
+  2. **双轨同步核对 `cp_ref.md`**：
+     - 将第 7 章中旧版 `@extern struct Bar` 同步更正为规范 `@c struct Bar`，并增补 `@root struct`、`@value struct`、`@align(N)` 说明，双轨规范绝对一致。
+  3. **标准库测试全量回归**：
+     - 运行 `cap cap/test/test_security_csrf.cp` 等套件，100% 全部通过。
+
+## 阶段里程碑 Git 提交 13
+
+- **提交说明**：`refactor(spec): complete comprehensive expansion of cp_agent_ref.md covering 17 critical migration features`
+- **变更范围**：
+  1. `cp_agent_ref.md`：根据用户指引全面扩充 17 大核心系统特性（@c struct, @root struct, @align, 字段借用, comptime, 宏, 元编程, switch解构, 胖指针/downcast, .zig导入, C指针矩阵, cstr/cstring, void省略, auto, *!/*歪, ref/生命周期, Shared(Mutex));
+  2. `cp_ref.md`：同步第 7 章 `@c struct` 与系统级内存布局注解；
+  3. `SESSION.md` / `CHANGELOG.md` / `DEVLOG.md`：四线文档全量同步更新。

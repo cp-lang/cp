@@ -386,3 +386,16 @@
   - 全面审核并清洗第 12 章中遗留的历史代码示例，将旧版 `var` 统一修正为 `let`，将 Zig 前缀 `try` 替换为 CP 后缀 `?`，将 `for()|i|` 修正为 `for (i of ...)`，消除与 `cp_agent_ref.md` 的任何潜在不一致。
 - [`lib/security/csrf.cp`](file:///data/dev/cp/lib/security/csrf.cp):
   - 将所有 `__zig__` 替换为标准 `zig` 逃逸块，将所有 `var` 替换为现代 `let` 变量声明。
+
+- [`cp_agent_ref.md`](file:///data/dev/cp/cp_agent_ref.md):
+  - 全面扩充 17 大核心系统特性与 Bun Zig 迁移必备语法（657 行）：
+    - 引入直接透明导入 `.zig` 源码文件语法及前柔后刚两级类型模型；
+    - 补充 `@c struct`、`@root struct`、`@value struct`、`@align(N)`、`@refCount(cleanup)` 系统级装饰器；
+    - 详述多字段分离借用（Disjoint Field Borrowing）、`ref struct` 栈绑定视图与显式生命周期；
+    - 丰富 C 指针矩阵：`[*c]T`、`[*:0]T!`、`[*]([*:0]u8!)?!`、`*!`、`*!?`、`cstr` vs `cstring`；
+    - 补全编译期函数与 Comptime 内省原语、AST 模板插值宏与元编程体系；
+    - 全景覆盖 `switch` 12 种模式解构（含结构体整包捕获、元组解构、Walrus 绑定、动态类型匹配、三态错误 downcast）；
+    - 补充多线程并发容器 `Shared<T>` 与内部可变性容器 `Shared(Mutex(T))` / `Shared(RwLock(T))`；
+    - 扩充 Top 18 绝对禁手清单。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 更新第 7 章系统级内存布局列表，将 `@extern struct` 统一更正为现代规范 `@c struct`，并补充 `@root struct` 与 `@align(N)`。

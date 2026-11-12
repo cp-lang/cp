@@ -2461,12 +2461,13 @@ switch (some_user) {
 CP 彻底废除传统的 `interface` 混合模型，实现彻底解耦：
 
 - **`struct` / `class`**：仅用于定义纯内存布局容器（Memory Layout Container），无任何虚表指针额外开销；
-- **`@packed` / `@extern` / `@opaque` / `@value`**：底层系统级布局与类型注解：
+- **`@packed` / `@c` / `@root` / `@opaque` / `@value` / `@align`**：底层系统级布局与类型注解：
   - `@packed struct Foo { ... }`：紧凑位内存布局，禁止填充对齐，不自动生成默认 `init` 构造函数；
-  - `@extern struct Bar { ... }`：严格遵循 C ABI 内存对齐布局，用于无缝对接 C 头文件结构体；
-  - `@opaque class Baz { ... }`：不透明类型声明（转译映射为 Zig 原生 `pub const Baz = opaque { ... };`），专用于 C/C++ 动态库返回的抽象指针或无确定静态尺寸句柄类型（如套接字底层 `us_socket_t`、`udp.Socket`）。编译器自动豁免堆分配器 `_create` 实例构造，支持挂载只读借用（`this`）与独占可变借用（`*this`）方法，并确保在标准库 `{p}` 格式化打印时按指针安全输出；
-  - `@value class Qux { ... }`：值语义类，作为连续内存直接嵌入栈上或父结构体内部，豁免堆指针封装与间接寻址开销；
-  - `@extern @value class Quux { ... }`：C ABI 兼容的值语义类。
+  - `@c struct Bar { ... }`：严格遵循 C ABI 内存物理对齐布局（向下兼容 `@extern struct`），用于无缝对接 C 头文件结构体；
+  - `@root struct Name { ... }`：映射为文件顶层根作用域 `@This()`，支持字段声明与方法，带 Prelude 运行时命名隔离；
+  - `@opaque class Baz { ... }`：不透明类型声明（转译映射为 Zig 原生 `pub const Baz = opaque { ... };`），专用于 C/C++ 动态库返回的抽象指针或无确定静态尺寸句柄类型（如套接字底层 `us_socket_t`、`udp.Socket`）。编译器自动豁免堆分配器 `_create` 实例构造，支持挂载只读借用（`_`）与独占可变借用（`*_`）方法；
+  - `@value struct Qux { ... }`：值语义紧凑结构体，作为连续内存直接嵌入栈上或父结构体内部，按值传递，豁免堆指针封装与间接寻址开销；
+  - `@align(N)`：结构体与字段级物理内存字节对齐注解。
 - **`trait`**：声明纯行为契约与默认实现；
 - **`impl Trait for Target`**：独立实现契约，支持零侵入地为已有第三方结构体实现新行为。
 
