@@ -2,6 +2,27 @@
 
 > 历史变更日志已完整归档至 [CHANGELOG_H.md](file:///data/dev/cp/CHANGELOG_H.md)。本项目采用冷热分离架构，本文件仅保留当日活跃记录。
 
+## [2026-11-12] - 架构清理：全面删除根目录冗余门面文件、规范单一真理来源
+
+### 标准库清理与重构 (Refactored & Removed)
+- **彻底删除 14 个根目录同名空壳门面文件**：
+  - 删除 `lib/io.cp`, `lib/sync.cp`, `lib/router.cp`, `lib/http.cp`, `lib/path.cp`, `lib/url.cp`, `lib/encoding.cp`, `lib/glob.cp`, `lib/semver.cp`, `lib/dotenv.cp`, `lib/ini.cp`, `lib/which.cp`, `lib/ws.cp`, `lib/json.cp`；
+  - 杜绝“既有目录又有同名门面”的双重文件形态，所有多文件复合库一律以 `lib/<module>/index.cp` 作为唯一入口，根目录保持纯正扁平清爽。
+- [`lib/http/`](file:///data/dev/cp/lib/http/):
+  - 新增 `request.cp`：`Request` 类定义；
+  - 新增 `response.cp`：`Response` 类定义；
+  - 新增 `server.cp`：`Server`、`fetch`、`json`、`serve` 服务与客户端函数；
+  - 更新 `index.cp` 统一对外公开导出全部 HTTP 契约与能力。
+- 清理空目录：移除 `lib/io_ext` 与 `lib/json_ext`。
+
+### 编译器修复 (Fixed)
+- [`cpc/src/codegen/expr.rs`](file:///data/dev/cp/cpc/src/codegen/expr.rs) / [`cpc_dev/src/codegen/expr.rs`](file:///data/dev/cp/cpc_dev/src/codegen/expr.rs):
+  - 修复 `r#"..."#` 原生字符串中误将 `@import("std")` 写为 `\"std\"` 导致生成的 Zig 语法中带有非法反斜杠的问题。
+
+### 规范手册更新 (Docs)
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md)：
+  - 第 1.1 与 1.2 节全面更新标准库组织规范：明确复合模块由 `lib/<name>/index.cp` 独立负责，杜绝根目录堆积多余门面。
+
 ## [2026-11-12] - 阶段审查：原生 Re-export 落地、lib/io 目录化重构与全标准库规范化审计
 
 ### 新特性与编译器增强 (Added & Compiler)

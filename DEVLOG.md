@@ -2,6 +2,30 @@
 
 > 历史研发日志已完整归档至 [DEVLOG_H.md](file:///data/dev/cp/DEVLOG_H.md)。本项目采用冷热分离架构，本文件仅保留当日活跃记录。
 
+## 2026-11-12: 彻底清理根目录冗余同名门面、HTTP 模块拆解入驻与单一真理来源确立
+
+- **任务背景与工程目标**：
+  - 用户质疑根目录门面文件（`lib/*.cp` 与 `lib/*/index.cp` 并存）的必要性；
+  - 经技术分析与确认，根目录同名门面不仅在编译器解析层面 100% 冗余（编译器优先命中目录 `index.cp`），而且破坏了代码库单一真理来源（SSOT）并造成维护认知混乱；
+  - 达成共识后彻底清理删除全部 14 个同名空壳门面，并将原 `lib/http.cp` 中的实体逻辑完整拆解入驻 `lib/http/` 目录。
+
+- **核心技术挑战与根因剖析**：
+  1. **HTTP 模块完整性保障**：
+     - 排查发现原 `lib/http.cp` 中包含 `Request`, `Response`, `Server`, `fetch`, `json`, `serve` 实体定义，而原 `lib/http/index.cp` 仅导出了协议枚举与 Header 等子项；
+     - 依照 GEMINI.md 架构规范，将上述实体功能正式解耦拆解为：
+       - `lib/http/request.cp`（请求容器）；
+       - `lib/http/response.cp`（响应封装）；
+       - `lib/http/server.cp`（双模调度服务与客户端）；
+     - 在 `lib/http/index.cp` 统一集中导出，实现 100% 无缝平替，并删除原 `lib/http.cp`。
+  2. **原生字符串转义引发的 Zig 编译报错自愈**：
+     - 在运行 `test_http_serve.cp` 时发现 Zig 报错：`expected expression, found 'invalid token'`；
+     - 溯源定位到 `cpc/src/codegen/expr.rs`：在生成 `json(...)` 内联代码块时，外层使用了 Rust 的原生字符串字面量 `r#"(blk: { ... })"#`，但内部却误写了转义反斜杠 `@import(\"std\")`，导致转译生成的 Zig 源码中出现了字面量反斜杠 `\"` 从而报语法错误；
+     - **修复**：直接使用原生双引号 `@import("std")`，重新编译部署 `cpc` 编译器后彻底解决。
+
+- **效果验证**：
+  - 全套 14 大测试套件全部无需任何门面文件辅助，直接由 `lib/<module>/index.cp` 零冗余解析；
+  - 所有测试 100% 绿色通过，标准库结构达到前所未有的清爽与规范。
+
 ## 2026-11-12: 资产深度审查、编译器原生 Re-export 落地、lib/io 目录化重构与全套标准库规范化
 
 - **任务背景与工程目标**：

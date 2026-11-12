@@ -350,3 +350,39 @@
   5. 14 大标准库 `index.cp` 与根目录门面文件全面重构为标准重导出语法；
   6. `cp_ref.md`：第 1.1 节补充模块重导出与门面规范；
   7. `SESSION.md` / `CHANGELOG.md` / `DEVLOG.md`：四线文档同步更新。
+
+---
+
+## 2026-11-12 指令 11：彻底清理根目录冗余门面文件、沉淀标准库单一真理来源
+
+### 用户指令
+根目录门面文件有必要吗?
+同意
+
+### 执行结果汇报
+1. **全面清除根目录冗余同名门面文件**：
+   - 彻底删除 14 个冗余的同名空壳门面文件：`lib/io.cp`、`lib/sync.cp`、`lib/router.cp`、`lib/http.cp`、`lib/path.cp`、`lib/url.cp`、`lib/encoding.cp`、`lib/glob.cp`、`lib/semver.cp`、`lib/dotenv.cp`、`lib/ini.cp`、`lib/which.cp`、`lib/ws.cp`、`lib/json.cp`；
+   - 清理已空的残留临时目录 `lib/io_ext` 与 `lib/json_ext`；
+   - `lib/` 根目录恢复纯正清爽，单一文件模块与复合目录模块泾渭分明，无任何重叠与歧义。
+2. **HTTP 模块规范化拆解与高内聚收口**：
+   - 将原散落在 `lib/http.cp` 中的核心能力完整拆解入驻 `lib/http/`：
+     - `lib/http/request.cp`：`Request` 类定义与数据载荷方法；
+     - `lib/http/response.cp`：`Response` 类定义与状态判定；
+     - `lib/http/server.cp`：`Server`、`fetch`、`json`、`serve` 服务与客户端函数；
+     - `lib/http/index.cp`：对外唯一统一出口。
+3. **修复代码生成器 raw string 转义缺陷**：
+   - 修复 [cpc/src/codegen/expr.rs](file:///data/dev/cp/cpc/src/codegen/expr.rs) 与沙盒对应文件中，在 `r#"..."#` 原生字符串中误写 `\"std\"` 导致转译 Zig 出现非法反斜杠的问题。
+4. **权威设计手册 [cp_ref.md](file:///data/dev/cp/cp_ref.md) 规则更新**：
+   - 更新第 1.1 与 1.2 节：明确“复合模块统一采用目录化布局 `lib/<name>/`，由 `lib/<name>/index.cp` 作为唯一规范真理出口。根目录下严禁创建多余的同名门面文件，编译器自动识别目录并直通命中 `index.cp`”。
+5. **全量端到端测试 100% 绿灯验证**：
+   - 涵盖 `test_sync_primitives.cp`, `test_io_streams.cp`, `test_zero_copy_json.cp`, `test_router.cp`, `test_http_features.cp`, `test_http_serve.cp`, `test_path_url.cp`, `test_encoding.cp`, `test_glob.cp`, `test_semver.cp`, `test_config.cp`, `test_which.cp`, `test_ws.cp`, `test_fs_extensions.cp` 等全部 14 套测试套件，100% 编译通过且运行全绿。
+
+## 阶段里程碑 Git 提交 8
+
+- **提交说明**：`refactor(stdlib): remove redundant root facade files and enforce single source of truth in lib/`
+- **变更范围**：
+  1. 删除 `lib/` 根目录下 14 个多余的门面文件（`io.cp`, `sync.cp`, `router.cp`, `http.cp`, `path.cp`, `url.cp`, `encoding.cp`, `glob.cp`, `semver.cp`, `dotenv.cp`, `ini.cp`, `which.cp`, `ws.cp`, `json.cp`）；
+  2. `lib/http/`：新增 `request.cp`, `response.cp`, `server.cp`，完善 `index.cp` 统一出口；
+  3. `cpc/src/codegen/expr.rs`：修复原生字符串转义问题；
+  4. `cp_ref.md`：更新标准库规范；
+  5. `SESSION.md` / `CHANGELOG.md` / `DEVLOG.md`：四线文档同步更新。

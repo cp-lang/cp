@@ -1,57 +1,9 @@
 /**
- * CP HTTP API (cap:http)
- * 深度对标 Web Fetch & Bun.serve | 显式双模调度
+ * CP HTTP Server & Client (cap:http)
  */
 
 import { SystemAction } from "cap:beam";
-export { Method } from "./http/method";
-export { Headers, HeaderEntry } from "./http/headers";
-export { ETag, ParsedETag } from "./http/etag";
-export { MimeType } from "./http/mime";
-
-export class Request {
-    pub method: string;
-    pub url: string;
-    pub body: string;
-
-    pub fn init(this, method: string, url: string, body: string): void {
-        this.method = method;
-        this.url = url;
-        this.body = body;
-    }
-
-    pub fn text(this): string {
-        return this.body;
-    }
-
-    pub fn json(this): any {
-        return @json_parse(this.body);
-    }
-}
-
-export class Response {
-    pub status: i32;
-    pub body: string;
-    pub contentType: string;
-
-    pub fn init(this, body: string): void {
-        this.status = 200;
-        this.body = body;
-        this.contentType = "text/plain";
-    }
-
-    pub fn text(this): string {
-        return this.body;
-    }
-
-    pub fn json(this): any {
-        return @json_parse(this.body);
-    }
-
-    pub fn ok(this): bool {
-        if (this.status >= 200) { if (this.status < 300) { return true; } } return false;
-    }
-}
+import { Response } from "./response";
 
 export class Server {
     pub port: i32;

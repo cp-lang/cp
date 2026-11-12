@@ -1639,7 +1639,7 @@ impl Codegen {
                         r#"(blk: {{
     const _val = {};
     const _fmt = if (@typeInfo(@TypeOf(_val)) == .pointer) _val.* else _val;
-    const _raw_json = @import(\"std\").fmt.allocPrint(std.heap.page_allocator, "{{f}}", .{{@import(\"std\").json.fmt(_fmt, .{{}})}}) catch unreachable;
+    const _raw_json = @import("std").fmt.allocPrint(std.heap.page_allocator, "{{f}}", .{{@import("std").json.fmt(_fmt, .{{}})}}) catch unreachable;
     const _res = Response._create(std.heap.page_allocator) catch unreachable;
     _res.init(_raw_json);
     _res.contentType = "application/json";

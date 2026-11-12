@@ -523,15 +523,18 @@ export * from "./io/index";
 
 CP 语言原生支持标准的重导出语法，广泛应用于复合标准库及包门面（Facade）：
 - **具名重导出**：`export { foo, bar } from "./sub_module";` —— 将子模块声明的符号直接公开导出，无需显式写 `import` 再 `export`；
-- **全量重导出**：`export * from "./sub_module";` —— 门面文件（如根目录 `lib/io.cp`、`lib/sync.cp`）将子目录入口（`lib/io/index.cp`）中的所有公开符号一次性透明对外暴露；
-- **标准库分级规范**：任何由多个子文件构成的标准库（如 `io`、`sync`、`router`、`http`），统一采用目录化布局 `lib/<name>/`，由 `lib/<name>/index.cp` 进行高内聚组织与具名导出，根目录对应同名文件 `lib/<name>.cp` 仅作为一行简洁门面：`export * from "./<name>/index";`。
+- **全量重导出**：`export * from "./sub_module";` —— 门面文件将子目录/子模块入口中的所有公开符号一次性透明对外暴露；
+- **标准库目录化规范（单一真理来源，杜绝冗余门面）**：
+  - **单文件简单模块**：仅包含少量声明的标准库直接以单文件形态存在于 `lib/` 根目录（如 `lib/actor.cp`、`lib/beam.cp`、`lib/mem.cp`、`lib/worker.cp`）；
+  - **复合多文件模块**：包含多个子领域文件的标准库统一采用目录化布局 `lib/<name>/`，由 `lib/<name>/index.cp` 作为唯一规范的对外出口（如 `lib/io/index.cp`、`lib/sync/index.cp`、`lib/http/index.cp`、`lib/router/index.cp` 等）；
+  - **杜绝空壳门面堆积**：根目录下严禁创建多余的同名门面文件（如禁止在已有 `lib/io/` 的情况下创建 `lib/io.cp`），编译器自动识别目录并直通命中 `index.cp`，确保标准库结构绝对清爽与单一真理来源。
 
 #### 1.2 内置标准库 `cap:*` 协议映射规则
 
-- 所有的内置官方标准库统一通过 `cap:<module>` 协议通道导入（如 `cap:io`、`cap:fs`、`cap:http`、`cap:net`）；
+- 所有的内置官方标准库统一通过 `cap:<module>` 协议通道导入（如 `cap:io`、`cap:fs`、`cap:http`、`cap:sync`）；
 - 编译器解析器（`resolver.rs`）在解析时自动剥离 `cap:` 前缀，直接在纯正唯一的官方标准库根目录 `lib/` 下精准检索：
-  - **单文件标准模块**（如 `cap:io.cp` 门面、`cap:fs.cp`）：秒级命中 `lib/io.cp`、`lib/fs.cp`；
-  - **复合目录标准模块**（如 `lib/io/`、`lib/sync/`、`lib/http/`、`lib/net/`、`lib/crypto/`）：自动识别目录并优先检索 `lib/<module>/index.cp`，兼顾模块内部的高内聚分文件拆分。
+  - **单文件标准模块**（如 `cap:fs`、`cap:mem`）：直接命中 `lib/fs.cp`、`lib/mem.cp`；
+  - **复合目录标准模块**（如 `lib/io/`、`lib/sync/`、`lib/http/`、`lib/router/` 等）：自动识别目录并优先检索 `lib/<module>/index.cp`，零冗余直通加载。
 
 #### 2. 禁止行为
 
