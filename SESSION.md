@@ -435,12 +435,47 @@
 5. **全量端到端测试 100% 绿灯验证**：
    - 涵盖 `test_sync_primitives.cp`, `test_io_streams.cp`, `test_zero_copy_json.cp`, `test_router.cp`, `test_http_features.cp`, `test_http_serve.cp`, `test_path_url.cp`, `test_encoding.cp`, `test_glob.cp`, `test_semver.cp`, `test_config.cp`, `test_which.cp`, `test_ws.cp`, `test_fs_extensions.cp` 等全部 14 套测试套件，100% 编译通过且运行全绿。
 
-## 阶段里程碑 Git 提交 8
+---
 
-- **提交说明**：`refactor(stdlib): remove redundant root facade files and enforce single source of truth in lib/`
+## 指令 2：工业级现代密码学体系（cap:crypto）建设、编译器枚举静态方法与解构自愈
+
+- **用户需求**：
+  1. 完成工业级密码学体系（`lib/crypto/`，对应 `cap:crypto`）迁移与建设；
+  2. 实现 CSPRNG 真随机数、RFC 4122 v4 UUID、哈希散列（SHA256/512/1/MD5/流式）、HMAC 消息认证、PBKDF2 密钥派生、现代 AEAD 对称加密（AES-256-GCM 与 ChaCha20-Poly1305）；
+  3. 彻底删除旧版平铺 `lib/crypto.cp`，收口至 `lib/crypto/` 复合模块；
+  4. 修复编译器枚举静态方法调用被误降级为结构体初始化的缺陷；
+  5. 响应并结单下游 Bun AGY 汇报的 `task-sema-object-tuple-destructure` 任务；
+  6. 编写端到端全面回归测试套件 `cap/test/test_crypto_features.cp` 并确保 100% 通过；
+  7. 同步更新 `cp_ref.md` 设计规范与四线文档，执行单次原子 Git 提交。
+
+- **执行结果**：
+  1. **现代密码学核心库（`lib/crypto/`）100% 建设完成**：
+     - `lib/crypto/random.cp`：直通 Linux 内核 `getrandom` 熵池的 CSPRNG，实现 RFC 4122 v4 `randomUUID()` 与 `randomInt(min, max)`；
+     - `lib/crypto/hash.cp`：SHA-256、SHA-512、SHA-1、MD5 单次十六进制计算与流式 `Hash` 增量对象（`.update()` / `.digest()`）；
+     - `lib/crypto/hmac.cp`：标准化 `hmacSha256` 与流式 `Hmac` 消息认证签名；
+     - `lib/crypto/pbkdf2.cp`：`pbkdf2Sync` 与零拷贝 `pbkdf2Raw` 密码学安全派生；
+     - `lib/crypto/cipher.cp`：现代 AEAD 对称加密 `Aes256Gcm` 与 `ChaCha20Poly1305` 加密与带认证标签解密；
+     - `lib/crypto/index.cp`：统一标准重导出出口；
+     - 安全移除旧版 `lib/crypto.cp`。
+  2. **编译器自愈与修复**：
+     - **枚举静态方法调用修复**：修复 `cpc/src/codegen/expr.rs` 中在枚举类型上调用静态方法（如 `HashAlgorithm.fromString(algo)`）被误当成带负载变体初始化（`HashAlgorithm{ .fromString = algo }`）的严重缺陷，精准判断 `is_method || !is_variant`；
+     - **方法接收者可变性保留**：在 `cpc/src/codegen/actor.rs` 中修复类方法 `self: *Hash` 接收者被默认降级为 `*const` 的缺陷；
+     - **下游 Bun AGY 协同结单**：修复 `task-sema-object-tuple-destructure`，打通匿名结构体元组解构模式匹配。
+  3. **权威规范与全量测试验证**：
+     - `cap/test/test_crypto_features.cp`：4 大测试套件 100% 全部 PASS；
+     - `cap/test/test_object_destructure.cp`：100% PASS；
+     - `cap/test/test_http_full.cp`、`cap/test/test_sync_primitives.cp`、`cap/test/test_zero_copy_json.cp`、`cap/test/test_io_streams.cp` 等全量标准库套件 100% PASS；
+     - 权威设计手册 `cp_ref.md` 第 12.1 节表格更新，增补第 12.18 节完备规范与可运行示例。
+
+## 阶段里程碑 Git 提交 9
+
+- **提交说明**：`feat(crypto): implement industrial-grade cryptography subsystem and fix enum static method codegen`
 - **变更范围**：
-  1. 删除 `lib/` 根目录下 14 个多余的门面文件（`io.cp`, `sync.cp`, `router.cp`, `http.cp`, `path.cp`, `url.cp`, `encoding.cp`, `glob.cp`, `semver.cp`, `dotenv.cp`, `ini.cp`, `which.cp`, `ws.cp`, `json.cp`）；
-  2. `lib/http/`：新增 `request.cp`, `response.cp`, `server.cp`，完善 `index.cp` 统一出口；
-  3. `cpc/src/codegen/expr.rs`：修复原生字符串转义问题；
-  4. `cp_ref.md`：更新标准库规范；
-  5. `SESSION.md` / `CHANGELOG.md` / `DEVLOG.md`：四线文档同步更新。
+  1. `lib/crypto/`：完整现代化密码学体系（`random.cp`, `hash.cp`, `hmac.cp`, `pbkdf2.cp`, `cipher.cp`, `index.cp`）；
+  2. 删除弃用的平铺单文件 `lib/crypto.cp`；
+  3. `cap/test/test_crypto_features.cp`：端到端密码学综合测试套件；
+  4. `cap/test/test_object_destructure.cp`：解构赋值测试；
+  5. `cpc/src/codegen/expr.rs`、`cpc/src/codegen/actor.rs`、`cpc/src/codegen/mod.rs`、`cpc/src/sema.rs`：编译器修复与自愈；
+  6. `cp_ref.md`：第 12.18 节全面更新 `cap:crypto` 设计规范与完整代码示例；
+  7. `SESSION.md` / `CHANGELOG.md` / `DEVLOG.md`：四线文档同步更新。
+

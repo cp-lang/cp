@@ -5881,6 +5881,7 @@ export class SocketContext<Handler> {
 | `cap:ini`         | 工业级 INI 配置文件解析器（多 Section 划分、全局/分段键值提取、默认值回退） | **已全面实装** |
 | `cap:which`       | 跨平台可执行二进制定位器（支持 `PATH` 环境变量遍历、相对/绝对路径解析与执行权限校验） | **已全面实装** |
 | `cap:ws`          | RFC 6455 现代 WebSocket 协议帧处理（Opcode、打包分片、4 字节极速异或掩码、控制帧） | **已全面实装** |
+| `cap:crypto`      | 工业级密码学体系：CSPRNG、UUID v4、散列哈希（SHA256/512/1/MD5/流式）、HMAC 消息认证、PBKDF2 密钥派生、AEAD 现代对称加密（AES-256-GCM、ChaCha20-Poly1305） | **已全面实装** |
 | `cap:mem`         | `Arena`, `SharedTensor`, 全局共享堆, 原子引用计数                      | **已全面实装** |
 | `cap:task`        | `spawn`, `spawn_cpu`, `join`, `Task.all`, `Task.race`                  | **已全面实装** |
 | `cap:actor`       | `@spawn`, `@receive`, `@reply`, `PID`, 信箱通信                        | **已全面实装** |
@@ -6800,7 +6801,88 @@ const data = readFileSync("/data/app/config.json");
 
 ---
 
-### 12.18 生态演进与路线图（Roadmap）
+### 12.18 工业级现代密码学体系（`cap:crypto`） 【已实装】
+
+CP 语言基于底层操作系统高熵随机源（Linux `getrandom`）与硬件加速加密引擎，在 `cap:crypto` 模块中提供了开箱即用、内存安全的现代化工业级密码学基础设施：
+
+#### 12.18.1 核心组件与特性矩阵
+
+1. **安全真随机数与 UUID 生成 (`random.cp`)**：
+   - `randomBytes(size: usize): []const u8`：直通操作系统 CSPRNG 内核熵池；
+   - `randomUUID(): []const u8`：RFC 4122 v4 标准全局唯一标识符（如 `f47ac10b-58cc-4372-a567-0e02b2c3d479`）；
+   - `randomInt(min: i64, max: i64): i64`：无偏高精度加密随机整数。
+2. **密码学安全散列（SHA-256 / SHA-512 / SHA-1 / MD5，`hash.cp`）**：
+   - 极速单次计算：`sha256(data)`、`sha512(data)`、`sha1(data)`、`md5(data)` 直接返回标准十六进制字符串；
+   - 流式增量散列：`Hash` 类，支持多阶段 `.update(chunk)` 与最终 `.digest()` 输出。
+3. **HMAC 消息认证码 (`hmac.cp`)**：
+   - `hmacSha256(key, data)`：标准化 SHA-256 HMAC 摘要；
+   - 流式 `Hmac` 类：支持流式消息签名校验。
+4. **PBKDF2 口令密钥派生 (`pbkdf2.cp`)**：
+   - `pbkdf2Sync(password, salt, iterations, keylen, algo)`：输出十六进制格式派生密钥；
+   - `pbkdf2Raw(password, salt, iterations, out_key, algo)`：零拷贝直接写入目标原生切片。
+5. **现代 AEAD 对称加密与解密 (`cipher.cp`)**：
+   - `Aes256Gcm`：NIST SP 800-38D 标准 Galois/Counter Mode，兼具保密性与密文完整性校验；
+   - `ChaCha20Poly1305`：RFC 8439 高性能移动端/跨平台认证加密，抗侧信道时序攻击。
+
+#### 12.18.2 完整使用示例
+
+```typescript
+import {
+    randomBytes,
+    randomUUID,
+    randomInt,
+    sha256,
+    sha512,
+    createHash,
+    hmacSha256,
+    createHmac,
+    pbkdf2Sync,
+    Aes256Gcm,
+    ChaCha20Poly1305
+} from "cap:crypto";
+
+// 1. 安全随机数与 UUID v4 生成
+const rand_token = randomBytes(16);
+const trace_id = randomUUID();
+const secret_pin = randomInt(100000, 999999);
+
+// 2. 密码学哈希计算（单次与流式）
+const hash_hex = sha256("hello cp crypto");
+
+// 流式计算大文件 / 数据流哈希
+const hasher = createHash("sha256").?;
+hasher.update("chunk_1_data");
+hasher.update("chunk_2_data");
+const stream_digest = hasher.digest();
+
+// 3. HMAC 消息签名与校验
+const secret_key = "cp-super-secret-key";
+const signature = hmacSha256(secret_key, "request_payload");
+
+// 4. PBKDF2 密码派生安全密匙
+const derived_key = pbkdf2Sync("user_password", "random_salt", 1000, 32, "sha256");
+
+// 5. 现代 AEAD 加密与认证解密 (AES-256-GCM / ChaCha20-Poly1305)
+var key: [32]u8 = undefined;
+var nonce: [12]u8 = undefined;
+for (0..32) |i| key[i] = 0x42;
+for (0..12) |i| nonce[i] = 0x01;
+
+const plaintext = "Sensitive Mission Data";
+var ciphertext: [64]u8 = undefined;
+var tag: [16]u8 = undefined;
+
+// 加密并生成 16 字节完整性认证标签 (Tag)
+const ct_slice = Aes256Gcm.encrypt(&key, &nonce, plaintext, "", ciphertext[0..plaintext.len], &tag);
+
+// 解密并校验认证标签（若密文被篡改则立即返回 false，杜绝填充攻击）
+var decrypted: [64]u8 = undefined;
+const ok = Aes256Gcm.decrypt(&key, &nonce, ct_slice, &tag, "", decrypted[0..ct_slice.len]);
+```
+
+---
+
+### 12.19 生态演进与路线图（Roadmap）
 
 ```mermaid
 timeline

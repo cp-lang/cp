@@ -604,7 +604,10 @@ impl Codegen {
                                 && !self.global_var_types.contains_key(&id.sym)
                                 && id.sym.chars().next().map_or(false, |c| c.is_ascii_uppercase())
                                 && !self.class_defs.contains_key(&id.sym));
-                        if is_enum && (prop == "get" || prop == "fromName" || prop == "fromString") && call.args.len() == 1 {
+                        let is_custom_method = self.enum_defs.get(&id.sym).map_or(false, |ed| {
+                            ed.methods.iter().any(|m| m.ident.sym == prop)
+                        });
+                        if is_enum && !is_custom_method && (prop == "get" || prop == "fromName" || prop == "fromString") && call.args.len() == 1 {
                             let arg = self.generate_expr(&call.args[0]);
                             return format!("{}.get({})", id.sym, arg);
                         }
@@ -932,7 +935,17 @@ impl Codegen {
                             let arg_code = self.generate_expr(&call.args[0]);
                             return format!("cp_string_from({})", arg_code);
                         }
-                        if self.enum_defs.contains_key(&id.sym) {
+                        if let Some(ed) = self.enum_defs.get(&id.sym) {
+                            let is_method = ed.methods.iter().any(|m| m.ident.sym == mem.prop.sym)
+                                || ed.extra_zig.iter().any(|z| z.contains(&format!("fn {}(", mem.prop.sym)));
+                            let is_variant = ed.variants.iter().any(|v| v.ident.sym == mem.prop.sym);
+                            if is_method || !is_variant {
+                                let mut args_code = Vec::new();
+                                for a in &call.args {
+                                    args_code.push(self.generate_expr(a));
+                                }
+                                return format!("{}.{}({})", id.sym, mem.prop.sym, args_code.join(", "));
+                            }
                             let arg_code = if !call.args.is_empty() {
                                 self.generate_expr(&call.args[0])
                             } else {

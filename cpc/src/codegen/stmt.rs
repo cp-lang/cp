@@ -414,6 +414,23 @@ impl Codegen {
                                                         .insert(ident.sym.clone(), t.clone());
                                                 }
                                             }
+                                        } else if let Some(Type::Object(fields)) = &init_ty {
+                                            let ty_idx = if let Some(r_idx) = rest_pos {
+                                                if idx < r_idx {
+                                                    Some(idx)
+                                                } else {
+                                                    let offset = elements.len() - idx;
+                                                    fields.len().checked_sub(offset)
+                                                }
+                                            } else {
+                                                Some(idx)
+                                            };
+                                            if let Some(ti) = ty_idx {
+                                                if let Some(f) = fields.get(ti) {
+                                                    self.var_cp_types
+                                                        .insert(ident.sym.clone(), f.ty.clone());
+                                                }
+                                            }
                                         }
                                         let lhs = if self.is_state_machine {
                                             format!("ctx.{}", ident.sym)
@@ -459,6 +476,18 @@ impl Codegen {
                                                     .get(idx)
                                                     .cloned()
                                                     .or_else(|| tys.first().cloned())
+                                                    .unwrap_or(Type::I32);
+                                                self.var_cp_types.insert(
+                                                    ident.sym.clone(),
+                                                    Type::Array(Box::new(elem_ty)),
+                                                );
+                                            } else if let Some(Type::Object(fields)) = &init_ty {
+                                                let elem_ty = fields
+                                                    .get(idx)
+                                                    .map(|f| f.ty.clone())
+                                                    .or_else(|| {
+                                                        fields.first().map(|f| f.ty.clone())
+                                                    })
                                                     .unwrap_or(Type::I32);
                                                 self.var_cp_types.insert(
                                                     ident.sym.clone(),
@@ -1477,7 +1506,8 @@ impl Codegen {
                     IterMode::Move => {
                         if let Expr::Ident(coll_id) = &f.expr {
                             self.moved_vars.insert(coll_id.sym.clone());
-                            if !self.is_state_machine && self.drop_flag_vars.contains(&coll_id.sym) {
+                            if !self.is_state_machine && self.drop_flag_vars.contains(&coll_id.sym)
+                            {
                                 self.write_to_case(&format!("__{}_moved = true;", coll_id.sym));
                             }
                         }

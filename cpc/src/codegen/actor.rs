@@ -415,18 +415,18 @@ impl Codegen {
                     } else {
                         c.clone()
                     };
-                    let ptr_type = if let Some(first) = func
-                        .params
-                        .first()
-                        .filter(|p| p.ident.sym == "this" || p.ident.sym == "_")
-                    {
-                        if matches!(&first.ty, Type::BorrowType { is_mut: false, .. }) {
-                            format!("*const {}", type_name)
-                        } else if matches!(
-                            &first.ty,
-                            Type::BorrowType { is_mut: true, .. } | Type::RawPtr { .. }
-                        ) {
+                    let ptr_type = if let Some(first) = func.params.first().filter(|p| {
+                        p.ident.sym == "this" || p.ident.sym == "_" || p.ident.sym == "self"
+                    }) {
+                        if first.is_mut
+                            || matches!(
+                                &first.ty,
+                                Type::BorrowType { is_mut: true, .. } | Type::RawPtr { .. }
+                            )
+                        {
                             format!("*{}", type_name)
+                        } else if matches!(&first.ty, Type::BorrowType { is_mut: false, .. }) {
+                            format!("*const {}", type_name)
                         } else if is_val && self.current_receiver_mode == ReceiverMode::ReadOnly {
                             type_name
                         } else if self.current_receiver_mode == ReceiverMode::ReadOnly {
@@ -1006,6 +1006,53 @@ impl Codegen {
                                         }
                                     }
                                 }
+                                Some(Type::Object(fields)) => {
+                                    for (idx, p) in el.iter().enumerate() {
+                                        match p {
+                                            Pattern::Ident(i) => {
+                                                let ty_idx = if let Some(r_idx) = rest_pos {
+                                                    if idx < r_idx {
+                                                        Some(idx)
+                                                    } else {
+                                                        let offset = el.len() - idx;
+                                                        fields.len().checked_sub(offset)
+                                                    }
+                                                } else {
+                                                    Some(idx)
+                                                };
+                                                let t_str = ty_idx
+                                                    .and_then(|ti| fields.get(ti))
+                                                    .map(|f| self.map_type(&f.ty))
+                                                    .unwrap_or_else(|| "[]const u8".to_string());
+                                                self.locals.insert(i.sym.clone(), t_str);
+                                                if let Some(ti) = ty_idx {
+                                                    if let Some(f) = fields.get(ti) {
+                                                        self.var_cp_types
+                                                            .insert(i.sym.clone(), f.ty.clone());
+                                                    }
+                                                }
+                                            }
+                                            Pattern::Rest(inner) => {
+                                                if let Pattern::Ident(i) = &**inner {
+                                                    let elem_ty = fields
+                                                        .get(idx)
+                                                        .map(|f| f.ty.clone())
+                                                        .or_else(|| {
+                                                            fields.first().map(|f| f.ty.clone())
+                                                        })
+                                                        .unwrap_or(Type::I32);
+                                                    let arr_ty = Type::Array(Box::new(elem_ty));
+                                                    self.locals.insert(
+                                                        i.sym.clone(),
+                                                        self.map_type(&arr_ty),
+                                                    );
+                                                    self.var_cp_types.insert(i.sym.clone(), arr_ty);
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
                                 Some(Type::Array(elem_ty)) => {
                                     let t_str = self.map_type(elem_ty);
                                     let arr_ty = Type::Array(elem_ty.clone());
@@ -1356,6 +1403,54 @@ impl Codegen {
                                                         .get(idx)
                                                         .cloned()
                                                         .or_else(|| tys.first().cloned())
+                                                        .unwrap_or(Type::I32);
+                                                    let t_str = self
+                                                        .map_type(&Type::Array(Box::new(elem_ty)));
+                                                    self.locals
+                                                        .insert(ident.sym.clone(), t_str.clone());
+                                                    writeln!(
+                                                        output,
+                                                        "    {}: {},",
+                                                        ident.sym, t_str
+                                                    )
+                                                    .unwrap();
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                                Some(Type::Object(fields)) => {
+                                    for (idx, p) in el.iter().enumerate() {
+                                        match p {
+                                            Pattern::Ident(ident) => {
+                                                let ty_idx = if let Some(r_idx) = rest_pos {
+                                                    if idx < r_idx {
+                                                        Some(idx)
+                                                    } else {
+                                                        let offset = el.len() - idx;
+                                                        fields.len().checked_sub(offset)
+                                                    }
+                                                } else {
+                                                    Some(idx)
+                                                };
+                                                let t_str = ty_idx
+                                                    .and_then(|ti| fields.get(ti))
+                                                    .map(|f| self.map_type(&f.ty))
+                                                    .unwrap_or_else(|| "[]const u8".to_string());
+                                                self.locals
+                                                    .insert(ident.sym.clone(), t_str.clone());
+                                                writeln!(output, "    {}: {},", ident.sym, t_str)
+                                                    .unwrap();
+                                            }
+                                            Pattern::Rest(inner) => {
+                                                if let Pattern::Ident(ident) = &**inner {
+                                                    let elem_ty = fields
+                                                        .get(idx)
+                                                        .map(|f| f.ty.clone())
+                                                        .or_else(|| {
+                                                            fields.first().map(|f| f.ty.clone())
+                                                        })
                                                         .unwrap_or(Type::I32);
                                                     let t_str = self
                                                         .map_type(&Type::Array(Box::new(elem_ty)));

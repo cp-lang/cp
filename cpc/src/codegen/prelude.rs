@@ -468,6 +468,9 @@ impl ModuleFeatures {
             }
             Expr::Call(c) => {
                 if let Expr::Ident(id) = &*c.callee {
+                    if (id.sym == "expect_eq" || id.sym == "@expect_eq") && !self.is_lib_mode {
+                        self.needs_equality = true;
+                    }
                     if id.sym == "@not" && !self.is_lib_mode {
                         self.needs_not = true;
                     }

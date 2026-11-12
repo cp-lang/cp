@@ -2,6 +2,41 @@
 
 > 历史变更日志已完整归档至 [CHANGELOG_H.md](file:///data/dev/cp/CHANGELOG_H.md)。本项目采用冷热分离架构，本文件仅保留当日活跃记录。
 
+## [2026-11-13] - 核心里程碑：工业级现代密码学体系（cap:crypto）建设、编译器枚举方法与解构自愈
+
+### 工业级密码学体系实装 (Added)
+- **真随机数与 CSPRNG (`random.cp`)**:
+  - [`lib/crypto/random.cp`](file:///data/dev/cp/lib/crypto/random.cp)：直通 Linux 内核 `getrandom` 熵池的 CSPRNG，实现 RFC 4122 v4 `randomUUID()` 与无偏高精度 `randomInt(min, max)`。
+- **散列哈希与流式增量散列 (`hash.cp`)**:
+  - [`lib/crypto/hash.cp`](file:///data/dev/cp/lib/crypto/hash.cp)：`sha256`, `sha512`, `sha1`, `md5` 单次快速哈希计算；面向对象的流式 `Hash` 类，支持 `.update(data)` 增量注入与 `.digest()` 最终十六进制输出。
+- **HMAC 消息认证码 (`hmac.cp`)**:
+  - [`lib/crypto/hmac.cp`](file:///data/dev/cp/lib/crypto/hmac.cp)：RFC 2104 `hmacSha256(key, data)` 与流式 `Hmac` 类。
+- **PBKDF2 口令派生密钥 (`pbkdf2.cp`)**:
+  - [`lib/crypto/pbkdf2.cp`](file:///data/dev/cp/lib/crypto/pbkdf2.cp)：`pbkdf2Sync`（返回十六进制字符串）与 `pbkdf2Raw`（直接安全填充目标字节数组）。
+- **现代 AEAD 认证对称加密 (`cipher.cp`)**:
+  - [`lib/crypto/cipher.cp`](file:///data/dev/cp/lib/crypto/cipher.cp)：现代工业标准 `Aes256Gcm`（NIST SP 800-38D）与 `ChaCha20Poly1305`（RFC 8439），兼具保密性加密与带 16 字节认证标签的防篡改解密校验。
+- **模块重导出与单一出口 (`index.cp`)**:
+  - [`lib/crypto/index.cp`](file:///data/dev/cp/lib/crypto/index.cp)：对外统一规范重导出全部密码学符号。
+- **废弃平铺单文件清理 (Removed)**:
+  - 彻底删除旧版平铺单文件 `lib/crypto.cp`，消除同名文件与复合目录歧义。
+
+### 编译器增强与热修自愈 (Compiler & Hotfix)
+- [`cpc/src/codegen/expr.rs`](file:///data/dev/cp/cpc/src/codegen/expr.rs) / [`cpc_dev/src/codegen/expr.rs`](file:///data/dev/cp/cpc_dev/src/codegen/expr.rs):
+  - 修复枚举静态方法调用被误降级为结构体/联合体初始化的关键缺陷：在 `Expr::Call` 访问枚举成员时，严格校验 `is_method || !is_variant`，若为方法或非变体则生成标准函数调用 `Enum.method(...)`，杜绝非法 Zig 语法 `Enum{ .method = arg }`。
+- [`cpc/src/codegen/actor.rs`](file:///data/dev/cp/cpc/src/codegen/actor.rs):
+  - 修复类方法接收者 `self: *T` 在生成参数列表时过滤掉 `first.ident.sym == "self"` 并保留其可变指针类型（`*T` 而非 `*const T`）。
+- [`cpc/src/codegen/mod.rs`](file:///data/dev/cp/cpc/src/codegen/mod.rs):
+  - 适配 Zig 0.17 结构体解包，将 `.@"struct".fields` 升级为 `.field_names` 和 `.field_types`。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs) / `task-sema-object-tuple-destructure`:
+  - 修复匿名结构体位置字段在推断为 `Type::Object` 时被丢弃的缺陷，打通 `const [a, b] = pair` 对匿名对象的解构模式分析，结单归档下游任务。
+
+### 测试验证 (Tests)
+- [`cap/test/test_crypto_features.cp`](file:///data/dev/cp/cap/test/test_crypto_features.cp)：涵盖 CSPRNG/UUID、SHA256/512/1/MD5/Streaming、HMAC/PBKDF2、AES-GCM/ChaCha20-Poly1305 4 大端到端套件，100% PASS。
+- [`cap/test/test_object_destructure.cp`](file:///data/dev/cp/cap/test/test_object_destructure.cp)：匿名结构体元组解构测试，100% PASS。
+- 全量回归测试：`test_http_full.cp`, `test_sync_primitives.cp`, `test_zero_copy_json.cp`, `test_io_streams.cp`, `test_path_url.cp` 等全部 100% PASS。
+
+---
+
 ## [2026-11-13] - 核心里程碑：全面收编 Bun 工业级 HTTP 全协议栈引擎（Step 1/2/3 闭环）与底层编译器自愈
 
 ### 工业级 HTTP 核心体系完整迁入 (Added)

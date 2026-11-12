@@ -2,6 +2,38 @@
 
 > 历史研发日志已完整归档至 [DEVLOG_H.md](file:///data/dev/cp/DEVLOG_H.md)。本项目采用冷热分离架构，本文件仅保留当日活跃记录。
 
+## 2026-11-13: 工业级现代密码学体系（cap:crypto）建设、编译器枚举静态方法自愈与下游阻塞结单
+
+- **任务背景与工程目标**：
+  - 响应用户全面收编 Bun 资产、完善 CP 官方标准库生态的规划，启动现代密码学体系（`lib/crypto/`，对应 `cap:crypto`）迁移；
+  - 彻底淘汰原先仅包含部分未完善接口的平铺单文件 `lib/crypto.cp`，遵循 GEMINI.md 规范收口至模块目录 `lib/crypto/`；
+  - 保证包含真随机数生成（CSPRNG）、RFC 4122 v4 UUID、哈希散列（SHA256/512/1/MD5 与流式）、HMAC 消息认证、PBKDF2 密钥派生、现代 AEAD 对称加密（AES-256-GCM 与 ChaCha20-Poly1305）的 100% 完备功能；
+  - 协助下游 Bun AGY 排查消除 `task-sema-object-tuple-destructure` 编译阻断；
+  - 编写端到端全面回归测试套件 `cap/test/test_crypto_features.cp`。
+
+- **核心技术挑战与根因剖析**：
+  1. **枚举静态方法调用被误判为变体初始化 (Codegen Enum Static Method Call)**：
+     - 在执行 `cap cap/test/test_crypto_features.cp` 时，遇到编译报错：
+       `error: type 'test_crypto_features.HashAlgorithm' does not support struct initialization syntax: const parsed = HashAlgorithm{ .fromString = algo };`
+     - **原因剖析**：在 `cpc/src/codegen/expr.rs` 约 938 行，当处理 `Expr::Call` 且被调用者为 `Expr::Member(mem)`、对象在 `self.enum_defs` 中时，编译器无条件假定这是一个带负载的枚举/联合变体构造函数（如 `Option.Some(val)`），直接格式化输出 `format!("{}{{ .{} = {} }}", id.sym, mem.prop.sym, arg_code)`；
+     - 当枚举定义了静态方法（如 `pub static fn fromString(str: []const u8)`）或 `mem.prop.sym` 并非变体名称时，上述无条件分支导致输出了非法的 Zig 结构体/联合体初始化语法；
+     - **自愈方案**：检索 `self.enum_defs.get(&id.sym)`，判定 `is_method = ed.methods.iter().any(|m| m.ident.sym == mem.prop.sym) || ...` 与 `is_variant = ed.variants.iter().any(|v| v.ident.sym == mem.prop.sym)`。若 `is_method || !is_variant`，生成标准的静态方法调用 `format!("{}.{}({})", id.sym, mem.prop.sym, args_code.join(", "))`，彻底解决枚举静态方法调用问题。
+  2. **类方法接收者可变指针退化 (Actor / Class Method Receiver Mutability)**：
+     - 在流式散列 `Hash.update` 和 `Hmac.update` 中，`self: *Hash` 需要对内部状态进行就地变异。但在 `actor.rs` 降级时，由于接收者参数过滤逻辑遗漏了对 `p.ident.sym == "self"` 的匹配，导致首个参数被当作普通不可变借用生成为 `self: *const Hash`，导致 Zig 报错 `expected *Hash, found *const Hash`；
+     - **自愈方案**：在 `actor.rs` 中补充首参数识别与借用类型判定，当为 `*Hash` 或 `mut` 时生成标准的 `*Hash`，保障类方法内部变异合法。
+  3. **下游 Bun AGY 阻断极速热修 (Hotfix `task-sema-object-tuple-destructure`)**：
+     - Bun AGY 汇报在对匿名结构体进行元组解构（`const [num, flag] = pair;`）时触发 `error[E0207]: type mismatch: expected 'Tuple([])', found 'Object([])'`；
+     - 经排查：`sema.rs` 在 `infer_type(Expr::Object)` 中遇到未具名字段（`f.key == None`）时直接略过，导致生成的 `Type::Object` 字段列表为空；同时 `Pattern::Tuple` 仅匹配 `Type::Tuple`，拒绝 `Type::Object`；
+     - **自愈方案**：在 `sema.rs` 中处理位置字段推断，并在 `Pattern::Tuple` 中支持 `Type::Object` 解构；更新 `codegen/stmt.rs`、`codegen/pattern.rs`、`codegen/actor.rs` 及 Zig 0.17 结构体解构适配，瞬时通过并结单。
+
+- **效果验证**：
+  - 编写并执行全新测试套件 [`cap/test/test_crypto_features.cp`](file:///data/dev/cp/cap/test/test_crypto_features.cp)，4 大测试套件全部 100% PASS；
+  - 回归测试 [`cap/test/test_object_destructure.cp`](file:///data/dev/cp/cap/test/test_object_destructure.cp) 100% PASS；
+  - 全量标准库测试全绿通过；
+  - 权威设计手册 `cp_ref.md` 第 12.18 节全面更新，附带完整可运行代码示例。
+
+---
+
 ## 2026-11-13: 工业级 HTTP 全协议栈体系迁移（Step 1/2/3 闭环）、编译器自愈与下游阻塞极速结单
 
 - **任务背景与工程目标**：

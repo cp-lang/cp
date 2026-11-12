@@ -4609,8 +4609,10 @@ impl Analyzer {
 
         if (*target == Type::String && matches!(src, Type::Array(inner) if **inner == Type::U8))
             || (*src == Type::String && matches!(target, Type::Array(inner) if **inner == Type::U8))
-            || (*target == Type::String && matches!(src, Type::SentinelSlice(inner, _) if **inner == Type::U8))
-            || (*src == Type::String && matches!(target, Type::SentinelSlice(inner, _) if **inner == Type::U8))
+            || (*target == Type::String
+                && matches!(src, Type::SentinelSlice(inner, _) if **inner == Type::U8))
+            || (*src == Type::String
+                && matches!(target, Type::SentinelSlice(inner, _) if **inner == Type::U8))
         {
             return true;
         }
@@ -4982,6 +4984,22 @@ impl Analyzer {
                 }
                 t1.iter().zip(t2).all(|(a, b)| self.can_coerce(a, b, None))
             }
+            (Type::Tuple(t1), Type::Object(f2)) => {
+                if t1.len() != f2.len() {
+                    return false;
+                }
+                t1.iter()
+                    .zip(f2)
+                    .all(|(a, b)| self.can_coerce(a, &b.ty, None))
+            }
+            (Type::Object(f1), Type::Tuple(t2)) => {
+                if f1.len() != t2.len() {
+                    return false;
+                }
+                f1.iter()
+                    .zip(t2)
+                    .all(|(a, b)| self.can_coerce(&a.ty, b, None))
+            }
             _ => false,
         }
     }
@@ -5046,10 +5064,16 @@ impl Analyzer {
             (Type::SentinelSlice(i1, _), Type::Array(i2))
             | (Type::Array(i2), Type::SentinelSlice(i1, _)) => self.types_eq(i1, i2),
             (Type::String, Type::Array(inner)) | (Type::Array(inner), Type::String)
-                if **inner == Type::U8 => true,
+                if **inner == Type::U8 =>
+            {
+                true
+            }
             (Type::String, Type::SentinelSlice(inner, _))
             | (Type::SentinelSlice(inner, _), Type::String)
-                if **inner == Type::U8 => true,
+                if **inner == Type::U8 =>
+            {
+                true
+            }
             (Type::Array(t1), Type::Array(t2)) => self.types_eq(t1, t2),
             (Type::FixedArray(t1, s1), Type::FixedArray(t2, s2)) => {
                 s1 == s2 && self.types_eq(t1, t2)
@@ -5069,6 +5093,17 @@ impl Analyzer {
                 }
                 for (i, p) in t1.iter().enumerate() {
                     if !self.types_eq(p, &t2[i]) {
+                        return false;
+                    }
+                }
+                true
+            }
+            (Type::Tuple(tys), Type::Object(fields)) | (Type::Object(fields), Type::Tuple(tys)) => {
+                if tys.len() != fields.len() {
+                    return false;
+                }
+                for (i, p) in tys.iter().enumerate() {
+                    if !self.types_eq(p, &fields[i].ty) {
                         return false;
                     }
                 }
@@ -5176,6 +5211,38 @@ impl Analyzer {
                                 self.analyze_pattern(&elements[i], elem_ty, kind)?;
                             }
                         }
+                        Type::Object(fields) => {
+                            let element_types: Vec<Type> =
+                                fields.into_iter().map(|f| f.ty).collect();
+                            if element_types.len() < prefix_len + suffix_len {
+                                return Err(SemaError::TypeMismatch(
+                                    Type::Tuple(vec![]),
+                                    Type::Tuple(element_types),
+                                    Span { start: 0, end: 0 },
+                                ));
+                            }
+                            for i in 0..prefix_len {
+                                self.analyze_pattern(&elements[i], element_types[i].clone(), kind)?;
+                            }
+                            if let Pattern::Rest(inner) = &elements[rest_idx] {
+                                let slice_elem_ty = element_types
+                                    .get(rest_idx)
+                                    .cloned()
+                                    .or_else(|| element_types.first().cloned())
+                                    .unwrap_or(Type::Any);
+                                self.analyze_pattern(
+                                    inner,
+                                    Type::Array(Box::new(slice_elem_ty)),
+                                    kind,
+                                )?;
+                            }
+                            for i in (rest_idx + 1)..elements.len() {
+                                let offset_from_end = elements.len() - i;
+                                let elem_ty =
+                                    element_types[element_types.len() - offset_from_end].clone();
+                                self.analyze_pattern(&elements[i], elem_ty, kind)?;
+                            }
+                        }
                         Type::Array(inner) => {
                             for (i, el) in elements.iter().enumerate() {
                                 if i == rest_idx {
@@ -5211,6 +5278,7 @@ impl Analyzer {
                     let element_types = match base_ty {
                         Type::Tuple(tys) => tys,
                         Type::Array(inner) => vec![(*inner).clone(); elements.len()],
+                        Type::Object(fields) => fields.into_iter().map(|f| f.ty).collect(),
                         Type::Any | Type::Unknown => vec![Type::Any; elements.len()],
                         _ => {
                             return Err(SemaError::TypeMismatch(
@@ -5768,8 +5836,15 @@ impl Analyzer {
                 lifetimes: vec![],
             }))),
             Expr::Object(fields) => {
+                if !fields.is_empty() && fields.iter().all(|f| f.key.is_none() && !f.is_spread) {
+                    let mut tys = Vec::new();
+                    for f in fields {
+                        tys.push(self.infer_type(&f.val)?);
+                    }
+                    return Ok(Type::Tuple(tys));
+                }
                 let mut fs: Vec<Field> = Vec::new();
-                for f in fields {
+                for (idx, f) in fields.iter().enumerate() {
                     if f.is_spread {
                         let sp_ty = self.infer_type(&f.val)?;
                         if let Type::Object(sub_fs) = sp_ty {
@@ -5802,6 +5877,21 @@ impl Analyzer {
                         } else {
                             fs.push(new_f);
                         }
+                    } else {
+                        let ty = self.infer_type(&f.val)?;
+                        let new_f = Field {
+                            span: Span { start: 0, end: 0 },
+                            ident: Ident {
+                                span: Span { start: 0, end: 0 },
+                                sym: idx.to_string(),
+                            },
+                            ty,
+                            meta: Vec::new(),
+                            default: None,
+                            is_pub: true,
+                            is_static: false,
+                        };
+                        fs.push(new_f);
                     }
                 }
                 Ok(Type::Object(fs))
@@ -6041,6 +6131,18 @@ impl Analyzer {
                             } else {
                                 break;
                             }
+                        }
+                    } else if let Type::Object(fs) = base_ty {
+                        if let Some(field) = fs.iter().find(|f| f.ident.sym == mem.prop.sym) {
+                            return Ok(field.ty.clone());
+                        }
+                    } else if let Type::Tuple(tys) = base_ty {
+                        if let Ok(idx) = mem.prop.sym.parse::<usize>() {
+                            if let Some(t) = tys.get(idx) {
+                                return Ok(t.clone());
+                            }
+                        } else if mem.prop.sym == "len" || mem.prop.sym == "length" {
+                            return Ok(Type::USize);
                         }
                     } else if (*base_ty == Type::String
                         || *base_ty == Type::CStr

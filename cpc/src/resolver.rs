@@ -62,7 +62,11 @@ pub fn resolve_file_or_dir(base: &Path) -> Option<PathBuf> {
     None
 }
 
-pub fn resolve_source_path(path: &Path, source: &str, include_paths: &[PathBuf]) -> Option<PathBuf> {
+pub fn resolve_source_path(
+    path: &Path,
+    source: &str,
+    include_paths: &[PathBuf],
+) -> Option<PathBuf> {
     let mut search_source = source.to_string();
     let is_cap_builtin = if let Some(stripped) = search_source.strip_prefix("cap:") {
         search_source = stripped.to_string();

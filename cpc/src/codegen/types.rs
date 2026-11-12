@@ -1556,8 +1556,18 @@ impl Codegen {
                 None
             }
             Expr::Object(fields) => {
+                if !fields.is_empty() && fields.iter().all(|f| f.key.is_none() && !f.is_spread) {
+                    let mut tys = Vec::new();
+                    for f in fields {
+                        tys.push(
+                            self.infer_cp_type_with_mock(&f.val, mock_types)
+                                .unwrap_or(Type::Any),
+                        );
+                    }
+                    return Some(Type::Tuple(tys));
+                }
                 let mut fs: Vec<Field> = Vec::new();
-                for f in fields {
+                for (idx, f) in fields.iter().enumerate() {
                     if f.is_spread {
                         if let Some(Type::Object(sub_fs)) =
                             self.infer_cp_type_with_mock(&f.val, mock_types)
@@ -1593,6 +1603,23 @@ impl Codegen {
                         } else {
                             fs.push(new_f);
                         }
+                    } else {
+                        let ty = self
+                            .infer_cp_type_with_mock(&f.val, mock_types)
+                            .unwrap_or(Type::Any);
+                        let new_f = Field {
+                            span: Span { start: 0, end: 0 },
+                            ident: Ident {
+                                span: Span { start: 0, end: 0 },
+                                sym: idx.to_string(),
+                            },
+                            ty,
+                            meta: Vec::new(),
+                            default: None,
+                            is_pub: true,
+                            is_static: false,
+                        };
+                        fs.push(new_f);
                     }
                 }
                 Some(Type::Object(fs))

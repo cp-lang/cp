@@ -525,6 +525,13 @@ impl Codegen {
                                     .or_else(|| tys.first().cloned())
                                     .unwrap_or(Type::I32);
                                 bound_types.push((id.sym.clone(), Type::Array(Box::new(elem_ty))));
+                            } else if let Some(Type::Object(fields)) = val_cp_ty {
+                                let elem_ty = fields
+                                    .get(idx)
+                                    .map(|f| f.ty.clone())
+                                    .or_else(|| fields.first().map(|f| f.ty.clone()))
+                                    .unwrap_or(Type::I32);
+                                bound_types.push((id.sym.clone(), Type::Array(Box::new(elem_ty))));
                             }
                             binds.push_str(&format!(
                                 "const {0} = {1}; _ = &{0}; ",
@@ -554,6 +561,22 @@ impl Codegen {
                                 }
                             } else {
                                 tys.get(idx)
+                            }
+                        }
+                        Some(Type::Object(fields)) => {
+                            if let Some(r_idx) = rest_pos {
+                                if idx > r_idx {
+                                    let offset = pats.len() - idx;
+                                    fields
+                                        .len()
+                                        .checked_sub(offset)
+                                        .and_then(|ti| fields.get(ti))
+                                        .map(|f| &f.ty)
+                                } else {
+                                    fields.get(idx).map(|f| &f.ty)
+                                }
+                            } else {
+                                fields.get(idx).map(|f| &f.ty)
                             }
                         }
                         Some(Type::Array(elem_ty)) => Some(&**elem_ty),
