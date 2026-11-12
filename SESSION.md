@@ -575,3 +575,49 @@
   6. `cpc_dev/src/`：直通同步编译器改动并原子构建部署；
   7. `lib/crypto/`（`hmac.cp`, `random.cp`, `index.cp`）及 `lib/encoding/base64.cp`：扩展 `hmacSha256Raw`、`fillRandom` 并纯化 Base64 纯正 CP 契约；
   8. `SESSION.md` / `CHANGELOG.md` / `DEVLOG.md`：同步更新。
+
+
+## 指令交互记录（2026-11-13 深度审查与全面重构）
+
+- **用户审查意见与精准纠错**：
+  1. `let y: i32 = 0;` 或 `var y: i32 = 0;`：CP 语言中彻底废除 `var` 与 `threadlocal`。独占存储所有权转移使用 `move` 或 `own`。
+  2. 形参传递模式明晰化：
+     - 只读安全借用：`item: &T`（或默认 `item: T`），零拷贝，不可变；
+     - 可变安全借用：`item: *T`（或 `*item: T`），独占写借用，就地修改字段；
+     - 类型化裸指针：`item: *T!`（必须带 trailing `!`，unsafe 级别，通过 `ptr.*` 解引用）；
+     - 所有权转移：`move item: T` 或 `own item: T`。
+  3. 四大原生代码块规范：`zig { ... }`（严禁带下划线的 `__zig__`）、`unsafe { ... }`、`arena { ... }` 与 `@c { ... }`。
+  4. 按照用户 5 步法重构方案严格执行，重新审查与核对 `cp_agent_ref.md`，彻底查漏补缺，消除遗漏，并保持与 `cpc` 编译器前端 AST 解析与 `cp_ref.md` 100% 纯正对称。
+
+- **执行汇报**：
+  1. **依据 5 步法全面重构 `cp_agent_ref.md`（605 行超高信息密度）**：
+     - **变量绑定与所有权**：纯粹使用 `let`（可变）与 `const`（不可变）；全面绝杀 `var`、`let mut` 与 `threadlocal var`；独占所有权移交统一采用 `move` 与 `own`；
+     - **符号矩阵与形参契约正交化**：
+       - `item: &T` / `item: T`（只读借用，只读零拷贝）；
+       - `item: *T` / `*item: T`（可变借用，可修改字段）；
+       - `item: *T!` / `*item: T!`（类型化单项裸指针，unsafe，带 `!`）；
+       - `move item: T` / `own item: T`（所有权转移）；
+       - 接收者保留字 `_`、变异接收者 `*_`、析构接收者 `move _`；
+     - **四大原生代码块确立**：`unsafe { ... }`、`zig { ... }`、`arena { ... }`、`@c { ... }`，全面清剿 `__zig__`；
+     - **补全编译器完整语法特性**：
+       - 泛型与 Trait 约束：`<T: Measurable>`，多约束 `<T: Reader + Closer>`；
+       - 常量泛型：`<const N: usize>`；
+       - 类型别名：`type Name = ...`；
+       - 原生运算符矩阵：标准算术、截断溢出环绕运算（`+%`, `-%`, `*%`）、边界钳位饱和运算（`+|`, `-|`）、管道符（`|>`）；
+     - **Top 15 绝对禁手清单**：收录 15 大最典型幻觉反模式对照表。
+  2. **双轨同步全面巡检 `cp_ref.md` 并完成纯正 CP 净化**：
+     - 全面排查 `cp_ref.md` 中第 12 章遗留的历史代码示例，将旧版 `var` 全部更新为现代 `let`，将 Zig 前缀 `try` 替换为 CP 后缀 `?`，将 `for()|i|` 修正为 `for (i of ...)`；
+     - 双轨设计规范（`cp_ref.md` 9,658 行 vs `cp_agent_ref.md` 605 行）保持 100% 同步且纯正。
+  3. **标准库代码纯化与验证**：
+     - `lib/security/csrf.cp`：全量将 `__zig__` 替换为规范 `zig`，将 `var` 替换为规范 `let`；
+     - 运行 `cap cap/test/test_security_csrf.cp`：4/4 测试套件全部 100% PASS。
+
+
+## 阶段里程碑 Git 提交 12
+
+- **提交说明**：`refactor(spec): complete overhaul of cp_agent_ref.md and clean legacy syntax in cp_ref.md`
+- **变更范围**：
+  1. `cp_agent_ref.md`：依据 5 步法全面重构（605 行），彻底清除 `var`、`let mut`、`threadlocal` 与 `__zig__`，确立正交参数借用与四大原生代码块，补全泛型、常量泛型、类型别名与运算符；
+  2. `cp_ref.md`：清洗第 12 章遗留的历史代码示例，将旧版 `var` 统一修正为 `let`，`try` 替换为 `?`，`for()|i|` 修正为 `for (i of ...)`；
+  3. `lib/security/csrf.cp`：全量将 `__zig__` 修正为规范 `zig`，`var` 修正为 `let`；
+  4. `CHANGELOG.md` / `DEVLOG.md` / `SESSION.md`：四线文档同步更新。

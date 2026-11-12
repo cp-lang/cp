@@ -374,3 +374,15 @@
   - `Type::BorrowType { is_mut: false, inner: Array(elem) }` 映射生成 Zig 只读切片 `[]const T`，保障字符串切片等参数调用的常量性契约。
 - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
   - 增补第 12.19 节工业级统一事件循环体系（`cap:event_loop`）设计规范与完整使用代码示例；调整路线图章节序号为 12.20。
+
+- [`cp_agent_ref.md`](file:///data/dev/cp/cp_agent_ref.md):
+  - 全面按照用户 5 步法重构重写，提炼出 605 行完备且纯正的 CP 语法契约速查手册；
+  - 彻底清除 `var`、`let mut` 与 `threadlocal`，确立 `let` / `const` 纯净绑定与 `move` / `own` 所有权转移；
+  - 完善参数借用与裸指针分类（`&T` 只读借用、`*T` 可变借用、`*T!` 裸指针、`move T`/`own T` 所有权转移）；
+  - 规范四大代码块为 `zig { ... }`、`unsafe { ... }`、`arena { ... }` 与 `@c { ... }`；
+  - 增补泛型与约束、常量泛型、类型别名及原生运算符矩阵；
+  - 升级 Top 15 绝对禁手清单。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 全面审核并清洗第 12 章中遗留的历史代码示例，将旧版 `var` 统一修正为 `let`，将 Zig 前缀 `try` 替换为 CP 后缀 `?`，将 `for()|i|` 修正为 `for (i of ...)`，消除与 `cp_agent_ref.md` 的任何潜在不一致。
+- [`lib/security/csrf.cp`](file:///data/dev/cp/lib/security/csrf.cp):
+  - 将所有 `__zig__` 替换为标准 `zig` 逃逸块，将所有 `var` 替换为现代 `let` 变量声明。

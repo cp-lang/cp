@@ -3356,7 +3356,7 @@ CP 采用符合现代前端（TypeScript/ES6）与系统语言（Go/Swift）直�
 1. **`while` 循环步进表达式 (`: (step_expr)`)**：
    - 支持在条件括号闭合后直接书写 `: (step_expr)`，定义在每次迭代回边（Continue）时必定执行的步进表达式：
      ```typescript
-     var i: usize = 0;
+     let i: usize = 0;
      while (i < 10) : (i += 1) {
          if (i == 5) break;
      }
@@ -5621,7 +5621,7 @@ pub fn main(): void {
     _ = c.puts("Hello from native C stdio via @c header!");
 
     // 2. 直接调用复杂 C 外部库函数
-    var db: *any! = null;
+    let db: *any! = null;
     let rc = c.sqlite3_open(":memory:", &db);
     if (rc == 0) {
         print("SQLite memory database initialized successfully via C-FFI!\n");
@@ -6211,14 +6211,14 @@ let received = ch.recv().?; // 42
 ch.close();
 
 // 4. 分片并发哈希表 ConcurrentMap
-var map = ConcurrentMap([]const u8).init(allocator);
+let map = ConcurrentMap([]const u8).init(allocator);
 defer map.deinit();
-try map.put("session_id", "sess_998877");
+map.put("session_id", "sess_998877");
 let val = map.get("session_id"); // "sess_998877"
 
 // 5. 原子引用计数切片 ArcSlice
 const raw_data = "immutable shared agent tensor payload";
-var arc = ArcSlice(u8).init(allocator, raw_data) catch unreachable;
+let arc = ArcSlice(u8).init(allocator, raw_data) catch unreachable;
 defer arc.release();
 let slice_ref = arc.retain(); // 增加引用计数
 defer slice_ref.release();
@@ -6243,20 +6243,20 @@ CP 标准库吸收并提炼了 Bun 的工业级管道架构与环形缓冲区机
 import { Pipe, PipeReader, PipeWriter, MaxBuf } from "cap:stream";
 
 // 创建 4KB 缓冲管道
-var pair = try Pipe.create(allocator, 4096);
+let pair = Pipe.create(allocator, 4096)?;
 defer pair.deinit();
 
-var writer = pair.writer;
-var reader = pair.reader;
+let writer = pair.writer;
+let reader = pair.reader;
 
 // 写入端推送数据
 const message = "Agent Pipeline Stream Data";
-try writer.writeAll(message);
-try writer.flush();
+writer.writeAll(message)?;
+writer.flush()?;
 
 // 读取端消费数据
-var read_buf: [128]u8 = undefined;
-const bytes_read = try reader.read(&read_buf);
+let read_buf: [128]u8 = undefined;
+const bytes_read = reader.read(&read_buf)?;
 const received = read_buf[0..bytes_read]; // "Agent Pipeline Stream Data"
 ```
 
@@ -6282,21 +6282,21 @@ CP 语言在 `cap:json` 与 `cap:serde` 中实现了业界领先的**零拷贝�
 import { JSON, JsonParser, JsonValue, JsonBufferPool } from "cap:json";
 
 const raw_json = "{\"name\": \"Antigravity\", \"version\": 2, \"tools\": [\"cli\", \"cpc\"]}";
-const root = try JSON.parse(allocator, raw_json);
+const root = JSON.parse(allocator, raw_json)?;
 defer root.deinit(allocator);
 
 // 1. 结构体字段零拷贝借用
-if (root.get("name")) |name_val| {
+if (name_val := root.get("name")) {
     const name_str = name_val.asString().?; // "Antigravity"，直接借用 raw_json 内存！
 }
 
 // 2. 数值解析
-if (root.get("version")) |ver_val| {
+if (ver_val := root.get("version")) {
     const ver = ver_val.asNumber().?;       // 2.0
 }
 
 // 3. 数组元素访问
-if (root.get("tools")) |tools_val| {
+if (tools_val := root.get("tools")) {
     const tool0 = tools_val.getIndex(0).?.asString().?; // "cli"
     const tool1 = tools_val.getIndex(1).?.asString().?; // "cpc"
 }
@@ -6321,18 +6321,18 @@ CP 语言在 `cap:router` 中内置了对标 Bun、Fastify 与 Go Chi 的微秒�
 ```typescript
 import { Router } from "cap:router";
 
-var router = Router([]const u8).init(allocator);
+let router = Router([]const u8).init(allocator);
 defer router.deinit();
 
 // 1. 注册多动词与动态参数路由
-try router.add("GET", "/api/v1/users", "handleListUsers");
-try router.add("GET", "/api/v1/users/:id", "handleGetUser");
-try router.add("POST", "/api/v1/users", "handleCreateUser");
-try router.add("GET", "/static/*filepath", "handleStaticFiles");
+router.add("GET", "/api/v1/users", "handleListUsers")?;
+router.add("GET", "/api/v1/users/:id", "handleGetUser")?;
+router.add("POST", "/api/v1/users", "handleCreateUser")?;
+router.add("GET", "/static/*filepath", "handleStaticFiles")?;
 
 // 2. 精确路由匹配与参数提取
 const match1 = router.lookup("GET", "/api/v1/users/42");
-if (match1) |m| {
+if (m := match1) {
     const handler = m.handler;               // "handleGetUser"
     const user_id = m.params.get("id").?;    // "42"
 }
@@ -6419,44 +6419,44 @@ var h2_header = FrameHeader{
     flags: 0x01, // EndStream
     stream_id: 1,
 };
-var wire_buf: [9]u8 = undefined;
+let wire_buf: [9]u8 = undefined;
 h2_header.encode(&wire_buf);
 const decoded = FrameHeader.decode(&wire_buf).?;
 
 // 4. HTTP/2 多路复用会话与流分配
-var h2_session = H2ClientSession{};
+let h2_session = H2ClientSession{};
 if (h2_session.canCreateStream()) {
-    var stream = h2_session.newStream(); // 分配客户端奇数 Stream ID (1)
+    let stream = h2_session.newStream(); // 分配客户端奇数 Stream ID (1)
     defer stream.close();
 }
 
 // 5. HTTP/3 Alt-Svc 服务发现
-if (AltSvc.parse("h3=\":443\"; ma=86400")) |entry| {
+if (entry := AltSvc.parse("h3=\":443\"; ma=86400")) {
     const h3_port = entry.port;       // 443
     const max_age = entry.max_age;    // 86400
 }
 
 // 6. Keep-Alive 连接池管理
-var http_ctx = HTTPContext.init();
+let http_ctx = HTTPContext.init();
 defer http_ctx.deinit();
 
 // 从池中获取或复用长连接
-if (http_ctx.acquireSocket("api.github.com", 443, true)) |fd| {
+if (fd := http_ctx.acquireSocket("api.github.com", 443, true)) {
     // 复用已建立的 TLS 连接...
     _ = http_ctx.releaseSocket(fd, "api.github.com", 443, true);
 }
 
 // 7. 客户端请求序列化与分块解码
-var client = HTTPClient.init(Method.POST, "https://api.github.com/v1/events");
+let client = HTTPClient.init(Method.POST, "https://api.github.com/v1/events");
 client.body = "{\"event\":\"ping\"}";
 
-var req_buf: [1024]u8 = undefined;
+let req_buf: [1024]u8 = undefined;
 const req_str = client.formatRequest(&req_buf)?;
 // 自动生成: POST /v1/events HTTP/1.1\r\nHost: api.github.com\r\nContent-Length: 16\r\n...
 
 // 8. 分块传输传输解码 (Chunked Transfer Decoding)
 const chunked = "4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n";
-var out_buf: [64]u8 = undefined;
+let out_buf: [64]u8 = undefined;
 const decoded_len = HTTPClient.decodeChunkedBody(chunked, &out_buf)?; // "Wikipedia"
 ```
 
@@ -6483,15 +6483,15 @@ import { path } from "cap:path";
 import { URL, URLSearchParams } from "cap:url";
 
 // 1. 跨平台路径运算
-var path_buf: [256]u8 = undefined;
-const parts = [_][]const u8{ "/home/user", "projects", "../data/config.cp" };
+let path_buf: [256]u8 = undefined;
+const parts = ["/home/user", "projects", "../data/config.cp"];
 const joined = path.join(parts[0..], &path_buf); // "/home/user/data/config.cp"
 const base = path.basename(joined, null);        // "config.cp"
 const ext = path.extname(joined);                // ".cp"
 
 // 2. WHATWG URL 解析与操作
 const raw_url = "https://alice:secret@example.com:8080/api/v1/search?q=agents&page=1#results";
-var parsed = try URL.parse(raw_url, allocator);
+let parsed = URL.parse(raw_url, allocator)?;
 defer parsed.deinit();
 
 const host = parsed.hostname;                    // "example.com"
@@ -6515,17 +6515,17 @@ const query_q = parsed.searchParams.get("q").?;  // "agents"
 import { Base64 } from "cap:encoding";
 
 // 1. 栈上零分配标准 Base64 编码
-var out_buf: [64]u8 = undefined;
+let out_buf: [64]u8 = undefined;
 const encoded_len = Base64.encode(&out_buf, "Hello CP World!");
 const b64_str = out_buf[0..encoded_len]; // "SGVsbG8gQ1AgV29ybGQh"
 
 // 2. 栈上解码
-var dec_buf: [64]u8 = undefined;
-const decoded_len = try Base64.decode(&dec_buf, b64_str);
+let dec_buf: [64]u8 = undefined;
+const decoded_len = Base64.decode(&dec_buf, b64_str)?;
 const original = dec_buf[0..decoded_len]; // "Hello CP World!"
 
 // 3. 动态内存分配与 URL-Safe 模式
-const url_safe = try Base64.encodeURLSafeAlloc(allocator, "data?token=xyz");
+const url_safe = Base64.encodeURLSafeAlloc(allocator, "data?token=xyz")?;
 defer allocator.free(url_safe);
 ```
 
@@ -6592,15 +6592,15 @@ if (Glob.hasMagic("src/**/*.cp")) {
 import { Semver, Version } from "cap:semver";
 
 // 1. 解析 Semver 2.0 版本
-const v1 = try Version.parse("v1.5.0-beta.2+build.101");
-const v2 = try Version.parse("1.5.0");
+const v1 = Version.parse("v1.5.0-beta.2+build.101")?;
+const v2 = Version.parse("1.5.0")?;
 
 // 2. 版本比较与语义排序
 const is_less = v1.lt(v2);   // true (预发布版本优先次序低于正式版)
 const is_greater = v2.gt(v1); // true
 
 // 3. 版本格式化
-var buf: [64]u8 = undefined;
+let buf: [64]u8 = undefined;
 const formatted = v1.format(&buf); // "1.5.0-beta.2+build.101"
 
 // 4. npm/Cargo 规范范围匹配
@@ -6715,15 +6715,15 @@ const workers = conf.getOr("server", "workers", "4");// "4"
 import { which, isExecutable, WhichOptions } from "cap:which";
 
 // 1. 查找系统二进制程序（自动遍历 PATH）
-var buf: [512]u8 = undefined;
+let buf: [512]u8 = undefined;
 const sh_path = which("sh", .{}, &buf);
-if (sh_path) |p| {
+if (p := sh_path) {
     // 命中 "/bin/sh" 或 "/usr/bin/sh"
     const can_run = isExecutable(p); // true
 }
 
 // 2. 自定义 PATH 与工作目录
-var custom_buf: [512]u8 = undefined;
+let custom_buf: [512]u8 = undefined;
 const node_path = which("node", .{
     .path = "/opt/homebrew/bin:/usr/local/bin",
     .cwd = "/app/server",
@@ -6750,28 +6750,28 @@ const node_path = which("node", .{
 import { Opcode, CloseCode, FrameHeader, FrameBuilder, Mask } from "cap:ws";
 
 // 1. 构建带掩码的客户端文本帧
-var frame_buf: [256]u8 = undefined;
-const mask_key = [_]u8{ 0x12, 0x34, 0x56, 0x78 };
-const frame_len = try FrameBuilder.buildText(&frame_buf, "Hello WebSocket!", mask_key);
+let frame_buf: [256]u8 = undefined;
+const mask_key = [0x12, 0x34, 0x56, 0x78];
+const frame_len = FrameBuilder.buildText(&frame_buf, "Hello WebSocket!", mask_key)?;
 
 // 2. 解码服务端收到的数据帧头部
-const header = try FrameHeader.decode(frame_buf[0..frame_len]);
+const header = FrameHeader.decode(frame_buf[0..frame_len])?;
 const is_text = header.opcode == Opcode.Text; // true
 const is_masked = header.masked;              // true
 const payload_len = header.payload_len;       // 16
 
 // 3. 解除掩码还原数据
-var payload: [64]u8 = [0 as u8; 64];
+let payload: [64]u8 = [0 as u8; 64];
 @memcpy(payload[0..payload_len], frame_buf[header.header_len .. frame_len]);
 Mask.apply(payload[0..payload_len], header.mask_key);
 // payload 即为原始字符串 "Hello WebSocket!"
 
 // 4. 构建心跳 Ping 与优雅断开 Close 帧
-var ping_buf: [64]u8 = undefined;
-const ping_len = try FrameBuilder.buildPing(&ping_buf, "heartbeat_ping", null);
+let ping_buf: [64]u8 = undefined;
+const ping_len = FrameBuilder.buildPing(&ping_buf, "heartbeat_ping", null)?;
 
-var close_buf: [64]u8 = undefined;
-const close_len = try FrameBuilder.buildClose(&close_buf, .NormalClosure, "server shutting down", null);
+let close_buf: [64]u8 = undefined;
+const close_len = FrameBuilder.buildClose(&close_buf, .NormalClosure, "server shutting down", null)?;
 ```
 
 ---
@@ -6791,7 +6791,7 @@ import { tmpDir, tmpPath, writeAtomic, readFileSync, remove } from "cap:fs";
 
 // 1. 嗅探系统临时目录并生成唯一临时文件路径
 const temp_dir = tmpDir(); // "/tmp"
-var path_buf: [512]u8 = undefined;
+let path_buf: [512]u8 = undefined;
 const unique_file = tmpPath("agent_task", ".json", &path_buf);
 
 // 2. 崩溃安全的原子写入（避免写入半途断电破坏旧文件）
@@ -6865,20 +6865,20 @@ const signature = hmacSha256(secret_key, "request_payload");
 const derived_key = pbkdf2Sync("user_password", "random_salt", 1000, 32, "sha256");
 
 // 5. 现代 AEAD 加密与认证解密 (AES-256-GCM / ChaCha20-Poly1305)
-var key: [32]u8 = undefined;
-var nonce: [12]u8 = undefined;
-for (0..32) |i| key[i] = 0x42;
-for (0..12) |i| nonce[i] = 0x01;
+let key: [32]u8 = undefined;
+let nonce: [12]u8 = undefined;
+for (i of 0..32) key[i] = 0x42;
+for (i of 0..12) nonce[i] = 0x01;
 
 const plaintext = "Sensitive Mission Data";
-var ciphertext: [64]u8 = undefined;
-var tag: [16]u8 = undefined;
+let ciphertext: [64]u8 = undefined;
+let tag: [16]u8 = undefined;
 
 // 加密并生成 16 字节完整性认证标签 (Tag)
 const ct_slice = Aes256Gcm.encrypt(&key, &nonce, plaintext, "", ciphertext[0..plaintext.len], &tag);
 
 // 解密并校验认证标签（若密文被篡改则立即返回 false，杜绝填充攻击）
-var decrypted: [64]u8 = undefined;
+let decrypted: [64]u8 = undefined;
 const ok = Aes256Gcm.decrypt(&key, &nonce, ct_slice, &tag, "", decrypted[0..ct_slice.len]);
 ```
 

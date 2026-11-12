@@ -16,7 +16,7 @@ export const DEFAULT_EXPIRATION_MS: u64 = 24 * 60 * 60 * 1000; // 24 hours
 
 export fn constantTimeEql(a: []const u8, b: []const u8): bool {
     if (a.len != b.len) return false;
-    var diff: u8 = 0;
+    let diff: u8 = 0;
     for (i of 0..a.len) {
         diff |= (a[i] ^ b[i]);
     }
@@ -24,7 +24,7 @@ export fn constantTimeEql(a: []const u8, b: []const u8): bool {
 }
 
 fn getWallTimeMs(): u64 {
-    __zig__ {
+    zig {
         var ts: std.os.linux.timespec = undefined;
         _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.REALTIME, &ts);
         const sec: u64 = @as(u64, @intCast(ts.sec));
@@ -40,7 +40,7 @@ export class CSRF {
         const now = getWallTimeMs();
 
         // 1. Write timestamp (8 bytes, Big-Endian)
-        __zig__ {
+        zig {
             std.mem.writeInt(u64, out[0..8], now, .big);
         }
 
@@ -49,13 +49,13 @@ export class CSRF {
         fillRandom(nonce_slice);
 
         // 3. Write expires_in_ms (8 bytes, Big-Endian)
-        __zig__ {
+        zig {
             std.mem.writeInt(u64, out[24..32], expires_in_ms, .big);
         }
 
         // 4. Calculate HMAC-SHA256 over the 32-byte payload
         const payload = out[0..32];
-        var digest: [32]u8 = undefined;
+        let digest: [32]u8 = undefined;
         hmacSha256Raw(&digest, secret, payload);
 
         // 5. Append HMAC digest (32 bytes)
@@ -73,7 +73,7 @@ export class CSRF {
         const received_hmac = raw_token[32..64];
 
         // 1. Verify HMAC signature in constant time
-        var expected_hmac: [32]u8 = undefined;
+        let expected_hmac: [32]u8 = undefined;
         hmacSha256Raw(&expected_hmac, secret, payload);
 
         if (!constantTimeEql(&expected_hmac, received_hmac)) {
@@ -81,9 +81,9 @@ export class CSRF {
         }
 
         // 2. Extract timestamp and expiration
-        var timestamp: u64 = 0;
-        var expires_in: u64 = 0;
-        __zig__ {
+        let timestamp: u64 = 0;
+        let expires_in: u64 = 0;
+        zig {
             timestamp = std.mem.readInt(u64, raw_token[0..8], .big);
             expires_in = std.mem.readInt(u64, raw_token[24..32], .big);
         }
@@ -109,8 +109,8 @@ export class CSRF {
     }
 
     pub static fn generate(secret: []const u8, expires_in_ms: u64, format: TokenFormat, allocator: std.mem.Allocator): []const u8! {
-        var raw: [64]u8 = undefined;
-        __zig__ {
+        let raw: [64]u8 = undefined;
+        zig {
             @memset(&raw, 0);
         }
         const len = generateRaw(secret, expires_in_ms, raw[0..])?;
@@ -139,8 +139,8 @@ export class CSRF {
     pub static fn verify(token: []const u8, secret: []const u8, max_age_ms: u64, format: TokenFormat, allocator: std.mem.Allocator): bool {
         if (token.len == 0) return false;
 
-        var raw: [64]u8 = undefined;
-        __zig__ {
+        let raw: [64]u8 = undefined;
+        zig {
             @memset(&raw, 0);
         }
 
