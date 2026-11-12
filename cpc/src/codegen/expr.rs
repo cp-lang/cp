@@ -344,6 +344,10 @@ impl Codegen {
                         {
                             self.narrowed_null_vars.remove(&id.sym);
                         }
+                    } else if let Expr::Index { obj, .. } = &*bin.left {
+                        if let Expr::Ident(id) = &**obj {
+                            self.uninitialized_vars.remove(&id.sym);
+                        }
                     }
                 }
                 let is_null_cmp = matches!(&*bin.left, Expr::Lit(Lit::Null))
@@ -3596,6 +3600,9 @@ impl Codegen {
                 format!("@as([{}]{}, @splat(@as({}, {})))", count_code, elem_zig_ty, elem_zig_ty, val_code)
             },
             Expr::Slice(s) => {
+                if let Expr::Ident(id) = &*s.obj {
+                    self.uninitialized_vars.remove(&id.sym);
+                }
                 let obj_code = self.generate_expr(&s.obj);
                 let start_code = s
                     .start

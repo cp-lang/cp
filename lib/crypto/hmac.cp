@@ -23,6 +23,10 @@ pub fn hmacSha256(key: string, data: string): string {
     return res;
 }
 
+pub fn hmacSha256Raw(out: *[32]u8, key: string, data: string): void {
+    std.crypto.auth.hmac.sha2.HmacSha256.create(out, data, key);
+}
+
 export class Hmac {
     algo: HmacAlgorithm = HmacAlgorithm.Sha256;
     h256: std.crypto.auth.hmac.sha2.HmacSha256 = undefined;

@@ -5312,6 +5312,13 @@ impl Analyzer {
                 }
                 let fields = match base_ty {
                     Type::Object(fs) => fs,
+                    Type::Ref(ref id) => {
+                        if let Some(cls) = self.classes.get(&id.sym).cloned() {
+                            cls.fields
+                        } else {
+                            vec![]
+                        }
+                    }
                     Type::Any | Type::Unknown => vec![],
                     _ => {
                         return Err(SemaError::TypeMismatch(

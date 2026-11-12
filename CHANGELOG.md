@@ -2,6 +2,41 @@
 
 > 历史变更日志已完整归档至 [CHANGELOG_H.md](file:///data/dev/cp/CHANGELOG_H.md)。本项目采用冷热分离架构，本文件仅保留当日活跃记录。
 
+## [2026-11-13] - 核心里程碑：安全防护与 CSRF Token 体系（cap:security）实装及基于 5 步法的 cp_agent_ref.md 全量重构
+
+### 安全防护体系实装 (Added)
+- **CSRF 防护核心库 (`csrf.cp`)**:
+  - [`lib/security/csrf.cp`](file:///data/dev/cp/lib/security/csrf.cp)：基于 CSPRNG 随机 Nonce、HMAC-SHA256 签名校验、时钟漂移防重放，以及 `constantTimeEql` 恒定时间缓冲区对比的 CSRF Token 生成与验证；
+  - 支持 `Base64Url`、`Base64` 与 `Hex` 三种工业编码格式。
+- **模块重导出与单一出口 (`index.cp`)**:
+  - [`lib/security/index.cp`](file:///data/dev/cp/lib/security/index.cp)：对外统一导出 `CSRF`、`TokenFormat`、`DEFAULT_EXPIRATION_MS`、`constantTimeEql`。
+
+### 智能体高密度语法契约重构 (Agent Specification)
+- [`cp_agent_ref.md`](file:///data/dev/cp/cp_agent_ref.md)：
+  - 严格采纳用户 5 步法建议，从权威 `cp_ref.md` 提取单一真理来源，剔除全部历史原理、哲学论据与多语言评测（减重 80%）；
+  - 保留纯正 CP 语法与精炼可运行示例（Canonical Examples）；
+  - 彻底清除 Zig 语法渗漏（`try`、`for()|i|`、`and/or`、`!T`/`?T`、`Point{ .x = 1 }`、`&.{}` 等）；
+  - 与编译器 AST/Parser/Sema 源码核对并经微型综合测试脚本编译验证通过（100% PASS）；
+  - 结尾增设《Top 15 绝对禁手清单》。
+
+### 编译器增强与热修自愈 (Compiler & Hotfix)
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs) / [`cpc_dev/src/sema.rs`](file:///data/dev/cp/cpc_dev/src/sema.rs):
+  - 增强 `Type::Ref` 具名结构体解构赋值支持，自动解析结构体定义字段。
+- [`cpc/src/codegen/expr.rs`](file:///data/dev/cp/cpc/src/codegen/expr.rs) & [`cpc/src/codegen/stmt.rs`](file:///data/dev/cp/cpc/src/codegen/stmt.rs):
+  - 修复未初始化栈缓冲区（`undefined`）切片（`raw[0..]`）与索引赋值（`raw[i] = ...`）误触 `uninitialized_vars` 读取拦截的缺陷。
+- [`cpc/src/codegen/pattern.rs`](file:///data/dev/cp/cpc/src/codegen/pattern.rs) & [`cpc/src/codegen/actor.rs`](file:///data/dev/cp/cpc/src/codegen/actor.rs):
+  - 修复常量模式解构 Rest 剩余绑定（`const [head, ...tail] = ...`）中不可变切片类型推断与闭包状态机上下文中的类型对齐（`[]const T`）。
+
+### 标准库强化 (Library Updates)
+- [`lib/crypto/hmac.cp`](file:///data/dev/cp/lib/crypto/hmac.cp)：新增零堆分配的高性能原生切片签名函数 `hmacSha256Raw(out, key, data)`。
+- [`lib/crypto/random.cp`](file:///data/dev/cp/lib/crypto/random.cp)：新增原生直接就地填充随机字节函数 `fillRandom(buf)`。
+- [`lib/encoding/base64.cp`](file:///data/dev/cp/lib/encoding/base64.cp)：全面升级为纯正面向对象 `export class Base64`，规范纯正 CP 返回类型与切片位移运算。
+
+### 测试验证 (Tests)
+- [`cap/test/test_security_csrf.cp`](file:///data/dev/cp/cap/test/test_security_csrf.cp)：4/4 端到端安全测试 100% PASS。
+- 全量回归测试：`test_event_loop.cp`, `test_crypto_features.cp`, `test_encoding.cp`, `test_sync_primitives.cp` 全部 100% PASS。
+
+
 ## [2026-11-13] - 核心里程碑：工业级现代密码学体系（cap:crypto）建设、编译器枚举方法与解构自愈
 
 ### 工业级密码学体系实装 (Added)

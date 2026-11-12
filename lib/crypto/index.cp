@@ -15,11 +15,13 @@ export {
     HmacAlgorithm,
     Hmac,
     hmacSha256,
+    hmacSha256Raw,
     createHmac,
 } from "./hmac.cp";
 
 export {
     randomBytes,
+    fillRandom,
     randomUUID,
     randomInt,
 } from "./random.cp";

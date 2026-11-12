@@ -3,6 +3,11 @@
 
 const std = @import("std");
 
+pub fn fillRandom(buf: []u8): void {
+    if (buf.len == 0) return;
+    _ = std.os.linux.getrandom(buf.ptr, buf.len, 0);
+}
+
 pub fn randomBytes(size: usize): []u8 {
     const buf = std.heap.page_allocator.alloc(u8, size) catch unreachable;
     _ = std.os.linux.getrandom(buf.ptr, size, 0);

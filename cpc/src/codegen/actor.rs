@@ -994,7 +994,16 @@ impl Codegen {
                                                         .cloned()
                                                         .or_else(|| tys.first().cloned())
                                                         .unwrap_or(Type::I32);
-                                                    let arr_ty = Type::Array(Box::new(elem_ty));
+                                                    let is_const = v.kind == crate::ast::VarDeclKind::Const;
+                                                    let arr_ty = if is_const {
+                                                        Type::BorrowType {
+                                                            inner: Box::new(Type::Array(Box::new(elem_ty))),
+                                                            is_mut: false,
+                                                            lifetimes: vec![],
+                                                        }
+                                                    } else {
+                                                        Type::Array(Box::new(elem_ty))
+                                                    };
                                                     self.locals.insert(
                                                         i.sym.clone(),
                                                         self.map_type(&arr_ty),
@@ -1041,7 +1050,16 @@ impl Codegen {
                                                             fields.first().map(|f| f.ty.clone())
                                                         })
                                                         .unwrap_or(Type::I32);
-                                                    let arr_ty = Type::Array(Box::new(elem_ty));
+                                                    let is_const = v.kind == crate::ast::VarDeclKind::Const;
+                                                    let arr_ty = if is_const {
+                                                        Type::BorrowType {
+                                                            inner: Box::new(Type::Array(Box::new(elem_ty))),
+                                                            is_mut: false,
+                                                            lifetimes: vec![],
+                                                        }
+                                                    } else {
+                                                        Type::Array(Box::new(elem_ty))
+                                                    };
                                                     self.locals.insert(
                                                         i.sym.clone(),
                                                         self.map_type(&arr_ty),
@@ -1066,10 +1084,21 @@ impl Codegen {
                                             }
                                             Pattern::Rest(inner) => {
                                                 if let Pattern::Ident(i) = &**inner {
+                                                    let is_const = v.kind == crate::ast::VarDeclKind::Const;
+                                                    let arr_ty = if is_const {
+                                                        Type::BorrowType {
+                                                            inner: Box::new(Type::Array(elem_ty.clone())),
+                                                            is_mut: false,
+                                                            lifetimes: vec![],
+                                                        }
+                                                    } else {
+                                                        Type::Array(elem_ty.clone())
+                                                    };
+                                                    let arr_t_str = self.map_type(&arr_ty);
                                                     self.locals
-                                                        .insert(i.sym.clone(), arr_t_str.clone());
+                                                        .insert(i.sym.clone(), arr_t_str);
                                                     self.var_cp_types
-                                                        .insert(i.sym.clone(), arr_ty.clone());
+                                                        .insert(i.sym.clone(), arr_ty);
                                                 }
                                             }
                                             _ => {}
@@ -1404,8 +1433,17 @@ impl Codegen {
                                                         .cloned()
                                                         .or_else(|| tys.first().cloned())
                                                         .unwrap_or(Type::I32);
-                                                    let t_str = self
-                                                        .map_type(&Type::Array(Box::new(elem_ty)));
+                                                    let is_const = var.kind == crate::ast::VarDeclKind::Const;
+                                                    let arr_ty = if is_const {
+                                                        Type::BorrowType {
+                                                            inner: Box::new(Type::Array(Box::new(elem_ty))),
+                                                            is_mut: false,
+                                                            lifetimes: vec![],
+                                                        }
+                                                    } else {
+                                                        Type::Array(Box::new(elem_ty))
+                                                    };
+                                                    let t_str = self.map_type(&arr_ty);
                                                     self.locals
                                                         .insert(ident.sym.clone(), t_str.clone());
                                                     writeln!(
@@ -1452,8 +1490,17 @@ impl Codegen {
                                                             fields.first().map(|f| f.ty.clone())
                                                         })
                                                         .unwrap_or(Type::I32);
-                                                    let t_str = self
-                                                        .map_type(&Type::Array(Box::new(elem_ty)));
+                                                    let is_const = var.kind == crate::ast::VarDeclKind::Const;
+                                                    let arr_ty = if is_const {
+                                                        Type::BorrowType {
+                                                            inner: Box::new(Type::Array(Box::new(elem_ty))),
+                                                            is_mut: false,
+                                                            lifetimes: vec![],
+                                                        }
+                                                    } else {
+                                                        Type::Array(Box::new(elem_ty))
+                                                    };
+                                                    let t_str = self.map_type(&arr_ty);
                                                     self.locals
                                                         .insert(ident.sym.clone(), t_str.clone());
                                                     writeln!(
@@ -1470,7 +1517,17 @@ impl Codegen {
                                 }
                                 Some(Type::Array(elem_ty)) => {
                                     let t_str = self.map_type(elem_ty);
-                                    let arr_t_str = self.map_type(&Type::Array(elem_ty.clone()));
+                                    let is_const = var.kind == crate::ast::VarDeclKind::Const;
+                                    let arr_ty = if is_const {
+                                        Type::BorrowType {
+                                            inner: Box::new(Type::Array(elem_ty.clone())),
+                                            is_mut: false,
+                                            lifetimes: vec![],
+                                        }
+                                    } else {
+                                        Type::Array(elem_ty.clone())
+                                    };
+                                    let arr_t_str = self.map_type(&arr_ty);
                                     for p in el {
                                         match p {
                                             Pattern::Ident(ident) => {

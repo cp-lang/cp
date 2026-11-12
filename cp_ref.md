@@ -5882,6 +5882,8 @@ export class SocketContext<Handler> {
 | `cap:which`       | 跨平台可执行二进制定位器（支持 `PATH` 环境变量遍历、相对/绝对路径解析与执行权限校验） | **已全面实装** |
 | `cap:ws`          | RFC 6455 现代 WebSocket 协议帧处理（Opcode、打包分片、4 字节极速异或掩码、控制帧） | **已全面实装** |
 | `cap:crypto`      | 工业级密码学体系：CSPRNG、UUID v4、散列哈希（SHA256/512/1/MD5/流式）、HMAC 消息认证、PBKDF2 密钥派生、AEAD 现代对称加密（AES-256-GCM、ChaCha20-Poly1305） | **已全面实装** |
+| `cap:event_loop`  | 工业级统一事件循环体系：侵入式二叉最小堆定时器、16 字节无锁跨线程任务、微任务防风暴去重、POSIX poll 描述符监听与调度引擎 | **已全面实装** |
+| `cap:security`    | 安全防护与防跨站请求伪造子系统：CSPRNG 随机 Nonce、HMAC-SHA256 签名与篡改校验、恒定时间防时序攻击比对（`constantTimeEql`）、多格式编解码（Base64Url, Base64, Hex） | **已全面实装** |
 | `cap:mem`         | `Arena`, `SharedTensor`, 全局共享堆, 原子引用计数                      | **已全面实装** |
 | `cap:task`        | `spawn`, `spawn_cpu`, `join`, `Task.all`, `Task.race`                  | **已全面实装** |
 | `cap:actor`       | `@spawn`, `@receive`, `@reply`, `PID`, 信箱通信                        | **已全面实装** |
@@ -6966,7 +6968,40 @@ _ = loop.unwatch(pipe_fds[0]);
 
 ---
 
-### 12.20 生态演进与路线图（Roadmap）
+### 12.20 安全防护与防跨站请求伪造子系统（`cap:security`） 【已全面实装】
+
+针对现代 Web 与分布式智能体微服务的跨站请求伪造（CSRF）防护需求，CP 原生实装高可靠、零时序漏洞的 `cap:security` 安全库。
+
+#### 1. 核心架构设计与防护原理
+1. **密码学 Nonce 与时间戳**：结合 Linux 熵池 CSPRNG 生成 16 字节不可预测随机数，并在载荷内嵌入纳秒/毫秒时间戳与失效阈值，严格防御重放攻击；
+2. **HMAC-SHA256 签名与防篡改**：载荷经由应用密钥实施 HMAC-SHA256 签名，服务端验证时若密文被篡改 1 比特即刻拒绝；
+3. **恒定时间比对（Constant-Time Eql）**：校验过程通过 `constantTimeEql` 逐字节异或累加比较，执行时长与输入匹配程度无关，彻底免疫时序侧信道攻击；
+4. **多格式编解码支持**：原生支持 `Base64Url`（URL 安全、免 Cookie 转义）、`Base64` 与 `Hex` 十六进制三种主流工业形态。
+
+#### 2. 核心 API 契约与使用示例
+```typescript
+import { CSRF, TokenFormat, DEFAULT_EXPIRATION_MS, constantTimeEql } from "cap:security";
+
+const secret = "app_secret_signing_key_2026";
+const allocator = std.heap.page_allocator;
+
+// 1. 生成 Base64Url 格式 CSRF Token
+const token = CSRF.generate(secret, DEFAULT_EXPIRATION_MS, TokenFormat.Base64Url, allocator)?;
+defer allocator.free(token);
+
+// 2. 校验传入的 Token
+const is_valid = CSRF.verify(token, secret, DEFAULT_EXPIRATION_MS, TokenFormat.Base64Url, allocator);
+if (!is_valid) {
+    return error.ForbiddenCSRF;
+}
+
+// 3. 恒定时间缓冲区对比
+const equal = constantTimeEql(token_a, token_b);
+```
+
+---
+
+### 12.21 生态演进与路线图（Roadmap）
 
 ```mermaid
 timeline

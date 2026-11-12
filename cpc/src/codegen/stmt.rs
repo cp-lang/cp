@@ -385,6 +385,7 @@ impl Codegen {
                             }
                             let rest_pos =
                                 elements.iter().position(|p| matches!(p, Pattern::Rest(_)));
+                            let is_const = var.kind == crate::ast::VarDeclKind::Const;
                             let keyword = match var.kind {
                                 crate::ast::VarDeclKind::Const => "const",
                                 _ => "var",
@@ -466,10 +467,19 @@ impl Codegen {
                                                 ident.sym.clone(),
                                                 self.current_scope_depth,
                                             );
+                                            let make_rest_ty = |elem: Type| if is_const {
+                                                Type::BorrowType {
+                                                    inner: Box::new(Type::Array(Box::new(elem))),
+                                                    is_mut: false,
+                                                    lifetimes: vec![],
+                                                }
+                                            } else {
+                                                Type::Array(Box::new(elem))
+                                            };
                                             if let Some(Type::Array(elem_ty)) = &init_ty {
                                                 self.var_cp_types.insert(
                                                     ident.sym.clone(),
-                                                    Type::Array(elem_ty.clone()),
+                                                    make_rest_ty((**elem_ty).clone()),
                                                 );
                                             } else if let Some(Type::Tuple(tys)) = &init_ty {
                                                 let elem_ty = tys
@@ -479,7 +489,7 @@ impl Codegen {
                                                     .unwrap_or(Type::I32);
                                                 self.var_cp_types.insert(
                                                     ident.sym.clone(),
-                                                    Type::Array(Box::new(elem_ty)),
+                                                    make_rest_ty(elem_ty),
                                                 );
                                             } else if let Some(Type::Object(fields)) = &init_ty {
                                                 let elem_ty = fields
@@ -491,7 +501,7 @@ impl Codegen {
                                                     .unwrap_or(Type::I32);
                                                 self.var_cp_types.insert(
                                                     ident.sym.clone(),
-                                                    Type::Array(Box::new(elem_ty)),
+                                                    make_rest_ty(elem_ty),
                                                 );
                                             }
                                             let suffix_len = elements.len() - 1 - idx;
@@ -725,6 +735,12 @@ impl Codegen {
                             expected_box = Some(tr_id.sym.clone());
                         }
                         self.uninitialized_vars.remove(&lhs_id.sym);
+                    } else if let Expr::Index { obj, .. } = &*bin.left {
+                        if let Expr::Ident(lhs_id) = &**obj {
+                            self.uninitialized_vars.remove(&lhs_id.sym);
+                        }
+                    }
+                    if let Expr::Ident(lhs_id) = &*bin.left {
                         let lhs_depth = self.var_scope_depth.get(&lhs_id.sym).copied().unwrap_or(1);
                         for (src, _) in &borrow_sources {
                             let src_depth = self.var_scope_depth.get(src).copied().unwrap_or(1);

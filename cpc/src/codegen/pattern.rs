@@ -516,22 +516,31 @@ impl Codegen {
                             let suffix_len = pats.len() - 1 - idx;
                             let slice_expr =
                                 format!("cp_unpack_slice({}, {}, {})", val_expr, idx, suffix_len);
-                            if let Some(Type::Array(elem_ty)) = val_cp_ty {
-                                bound_types.push((id.sym.clone(), Type::Array(elem_ty.clone())));
+                            let read_only_slice = |elem: Type| Type::BorrowType {
+                                inner: Box::new(Type::Array(Box::new(elem))),
+                                is_mut: false,
+                                lifetimes: vec![],
+                            };
+                            if let Some(Type::BorrowType { inner, is_mut: false, .. }) = val_cp_ty {
+                                if let Type::Array(elem_ty) = &**inner {
+                                    bound_types.push((id.sym.clone(), read_only_slice((**elem_ty).clone())));
+                                }
+                            } else if let Some(Type::Array(elem_ty)) = val_cp_ty {
+                                bound_types.push((id.sym.clone(), read_only_slice((**elem_ty).clone())));
                             } else if let Some(Type::Tuple(tys)) = val_cp_ty {
                                 let elem_ty = tys
                                     .get(idx)
                                     .cloned()
                                     .or_else(|| tys.first().cloned())
                                     .unwrap_or(Type::I32);
-                                bound_types.push((id.sym.clone(), Type::Array(Box::new(elem_ty))));
+                                bound_types.push((id.sym.clone(), read_only_slice(elem_ty)));
                             } else if let Some(Type::Object(fields)) = val_cp_ty {
                                 let elem_ty = fields
                                     .get(idx)
                                     .map(|f| f.ty.clone())
                                     .or_else(|| fields.first().map(|f| f.ty.clone()))
                                     .unwrap_or(Type::I32);
-                                bound_types.push((id.sym.clone(), Type::Array(Box::new(elem_ty))));
+                                bound_types.push((id.sym.clone(), read_only_slice(elem_ty)));
                             }
                             binds.push_str(&format!(
                                 "const {0} = {1}; _ = &{0}; ",

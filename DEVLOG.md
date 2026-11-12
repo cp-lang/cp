@@ -2,6 +2,34 @@
 
 > 历史研发日志已完整归档至 [DEVLOG_H.md](file:///data/dev/cp/DEVLOG_H.md)。本项目采用冷热分离架构，本文件仅保留当日活跃记录。
 
+## 2026-11-13: 安全防护与 CSRF Token 体系（cap:security）实装及基于 5 步法的 cp_agent_ref.md 全量重构
+
+- **任务背景与工程目标**：
+  1. 彻底解决智能体在代码生成中的语法漂移与 Zig 渗漏问题，落实面向智能体的权威高密度语法契约 `cp_agent_ref.md`；
+  2. 深度采纳用户提出的“5 步法”重构与检验模型：从 `cp_ref.md` 提取单一真理来源 -> 剔除人类冗余论证（减重 80%） -> 保留语法与关键少样本精炼示例 -> 全文去重 -> 与 `cpc` 编译器源码对齐并由独立语法自测脚本编译检验；
+  3. 推进标准库安全防御矩阵：建设 `cap:security`（`lib/security/`），实装高可靠、零时序漏洞的 `CSRF` 防护子系统；
+  4. 编写端到端回归测试用例 `cap/test/test_security_csrf.cp` 并确保全量套件 100% 通过。
+
+- **核心技术挑战与根因剖析**：
+  1. **智能体规范中的 Zig 语法渗漏根除 (Purging Zig Idiom Leaks)**：
+     - 此前生成的简版契约中潜意识夹杂了部分底层 Zig 实现习惯（如前缀 `try`、`for()|i|` 管道捕获、`and/or`、`!T`/`?T` 前缀修饰符、结构体前导点 `.{ .x = 1 }` 及 `&.{}` 空切片）；
+     - **解决方案**：严格恪守 CP 语言正统设计哲学（TS 的优雅 + Rust 的安全 + Zig 的底层控制）。确立纯正纯后缀修饰符体系（`T!` / `T?` / `T?!`）、TS 风格对象字面量（`Point{ x: 1 }`）与纯方括号数组切片（`[...]`、`[]`），并在末尾增设《Top 15 绝对禁手清单》形成闭环防御。
+  2. **具名结构体解构类型推断支持 (Sema Struct Pattern Destructuring)**：
+     - 在编译 `const { x, y } = pt;` 时，若 `pt` 为具名结构体（`Type::Ref(id)`），此前 `sema.rs` 仅处理了匿名对象 `Type::Object(fs)`，报错 `type mismatch: expected 'Object([])', found 'Point'`；
+     - **自愈方案**：在 `cpc/src/sema.rs` 模式匹配解析中增加对 `Type::Ref(ref id)` 的处理，从 `self.classes.get(&id.sym)` 中查找结构体定义字段并展开，打通具名结构体的解构赋值。
+  3. **未初始化定长栈缓冲区读取误拦截 (Uninitialized Vars on Slice & Index Assign)**：
+     - 当声明 `var raw: [64]u8 = undefined;` 时，编译器将其加入 `self.uninitialized_vars`；但在调用 `raw[0..]` 获取可写切片以供 `generateRaw` 填充、或执行 `raw[i] = val` 索引写入时，`cpc/src/codegen/expr.rs` 判定为“未初始化读取”从而抛出 Panic；
+     - **自愈方案**：在 `Expr::Slice` 与 `Expr::Index` 的赋值目标分析中，若操作主体为 `Expr::Ident`，在生成代码前将其从 `self.uninitialized_vars` 中安全移除，彻底满足系统级编程向未初始化缓冲区写入数据的合法范式。
+  4. **常量数组 Rest 剩余绑定类型对齐 (Const Array Rest Destructuring & Closure Alignment)**：
+     - 在 `const [head, ...tail] = [1, 2, 3, 4];` 中，右侧为常量数组，展开生成的辅助函数 `cp_unpack_slice` 返回只读切片 `[]const T`；但在生成局部变量及闭包上下文捕获结构体 `ctx.tail` 时，此前默认将其定义为可变切片 `[]T`，导致 Zig 编译报错 `cast discards const qualifier`；
+     - **自愈方案**：在 `pattern.rs`、`stmt.rs` 与 `actor.rs` 中检测 `var.kind == Const`，当为常量声明时将 Rest 剩余绑定的类型严格标记为不可变借用 `Type::BorrowType { inner: Array, is_mut: false }`，使生成的 Zig 类型 `[]const T` 与 `cp_unpack_slice` 100% 严密贴合。
+
+- **效果验证**：
+  - 创建语法全量验证测试 `temp/test_agent_ref_syntax.cp`，`cpc` 转译并编译运行通过（4/4 PASS）；
+  - `cap cap/test/test_security_csrf.cp`：4/4 测试套件全部 100% PASS；
+  - `test_event_loop.cp`, `test_crypto_features.cp`, `test_http_full.cp`, `test_encoding.cp`, `test_sync_primitives.cp` 等全量测试 100% 全部 PASS。
+
+
 ## 2026-11-13: 工业级现代密码学体系（cap:crypto）建设、编译器枚举静态方法自愈与下游阻塞结单
 
 - **任务背景与工程目标**：
