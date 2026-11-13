@@ -758,3 +758,9 @@ Bun AGY 在 265 个模块的实战重构中提交了 8 项遗漏审查。经逐�
 ### 1. 架构设计与核心实现
 - **多算法 C-FFI 与 HTTP 编码协商 (`_codecs.cp`)**：吸收 `/data/dev/bun/src/zlib/`、`src/brotli/` 与 `src/zstd/`，提供统一的 Zlib/Brotli/Zstd `@c` C-FFI 原生绑定、`Accept-Encoding` 优先级协商器 `CompressionFormat`（`zstd > br > gzip > deflate`）及零依赖压缩缓冲区上界估算器 `CompressBoundEstimator`。
 - **标准校验和与帧封装 (`checksum.cp`, `gzip.cp`)**：实现通过 IEEE 802.3 标准向量（`"123456789" -> 0xCBF43926`）验证的 `Crc32`、通过 RFC 1950 标准向量（`"Wikipedia" -> 0x11E60398`）验证的 `Adler32`、RFC 1952 10 字节 `GzipHeader` + 8 字节 `CRC32/ISIZE` 帧尾校验，以及纯 CP 零依赖 `RleCodec`。
+
+## 2026-11-14 构建 `lib/sourcemap/` (吸收 Bun Base64 VLQ、二分行偏移表与 SourceMap v3 映射子系统)
+
+### 1. 架构设计与核心实现
+- **栈内联 Base64 VLQ 编解码 (`vlq.cp`)**：吸收 `/data/dev/bun/src/sourcemap/VLQ.cp`，使用 7 字节定长数组 `[7]u8` 存储 Base64 VLQ 序列并搭配 `*this` 指针接收者返回安全切片，支持任意 `i32` 正负整数的最低位符号编码与 5-bit 续位（bit 5 continuation）流式解码。
+- **二分行偏移表与 SourceMap v3 相对状态机 (`line_offset.cp`, `mapping.cp`)**：吸收 `LineOffsetTable.cp` 与 `ParsedSourceMap.cp`，使用编译期常量泛型实现零堆分配的 `LineOffsetTable<MAX_LINES>`（`O(log N)` 二分查找行号）与 `ParsedSourceMap<CAP>`（维护 `gen_line`, `gen_col`, `src_idx`, `orig_line`, `orig_col`, `name_idx` 六维累加寄存器解析 `;`/`,` 分隔的 VLQ 映射串）。

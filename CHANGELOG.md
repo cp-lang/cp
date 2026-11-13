@@ -516,3 +516,10 @@
   - 新增 [`lib/compress/index.cp`](file:///data/dev/cp/lib/compress/index.cp)：`cap:compress` 对外统一出口。
 - [`cap/test/test_compress.cp`](file:///data/dev/cp/cap/test/test_compress.cp):
   - 新增覆盖压缩协商、CRC32/Adler32 标准向量、Gzip 帧头/帧尾与 RleCodec 的 4 大测试套件（4/4 PASS）。
+- [`lib/sourcemap/`](file:///data/dev/cp/lib/sourcemap/):
+  - 新增 [`lib/sourcemap/vlq.cp`](file:///data/dev/cp/lib/sourcemap/vlq.cp)：7 字节栈内联 Base64 `VLQ` 与 `VLQResult` 编解码器；
+  - 新增 [`lib/sourcemap/line_offset.cp`](file:///data/dev/cp/lib/sourcemap/line_offset.cp)：`SourceLocation` 与二分行偏移查找表 `LineOffsetTable<const MAX_LINES: usize>`；
+  - 新增 [`lib/sourcemap/mapping.cp`](file:///data/dev/cp/lib/sourcemap/mapping.cp)：`SourceMapping` 与 SourceMap v3 映射表解析器 `ParsedSourceMap<const CAP: usize>`；
+  - 新增 [`lib/sourcemap/index.cp`](file:///data/dev/cp/lib/sourcemap/index.cp)：`cap:sourcemap` 对外统一出口。
+- [`cap/test/test_sourcemap.cp`](file:///data/dev/cp/cap/test/test_sourcemap.cp):
+  - 新增覆盖 Base64 VLQ、二分行偏移表与 SourceMap v3 映射反查的 3 大测试套件（3/3 PASS）。

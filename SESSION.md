@@ -1063,3 +1063,23 @@
   1. `lib/compress/`（`_codecs.cp`, `checksum.cp`, `gzip.cp`, `index.cp`）；
   2. `cap/test/test_compress.cp`：4 大端到端测试套件；
   3. `SESSION.md`, `CHANGELOG.md`, `DEVLOG.md`：四线文档同步。
+
+---
+
+## 2026-11-14 连续自主推进：构建 `lib/sourcemap/` (`cap:sourcemap`) Base64 VLQ、二分行偏移表与 SourceMap v3 映射子系统
+
+### 1. 执行结果汇报
+1. **吸收 Bun `/data/dev/bun/src/sourcemap/` 资产，构建 [`lib/sourcemap/`](file:///data/dev/cp/lib/sourcemap/) (`cap:sourcemap`)**：
+   - [`lib/sourcemap/vlq.cp`](file:///data/dev/cp/lib/sourcemap/vlq.cp)：7 字节栈内联 Base64 VLQ 编解码器 `VLQ` 与 `VLQResult`（支持正负有符号整数 Base64 VLQ 编码与增量流式解码）；
+   - [`lib/sourcemap/line_offset.cp`](file:///data/dev/cp/lib/sourcemap/line_offset.cp)：`SourceLocation` 与编译期定容行偏移查找表 `LineOffsetTable<const MAX_LINES: usize>`（支持 `O(log N)` 二分查找行号与 `(line, column)` 源码坐标定位）；
+   - [`lib/sourcemap/mapping.cp`](file:///data/dev/cp/lib/sourcemap/mapping.cp)：SourceMap v3 映射项 `SourceMapping` 与解析器 `ParsedSourceMap<const CAP: usize>`（支持标准 `;`/`,` 分隔相对 VLQ `"mappings"` 字符串解析与 `findMapping` 源码位置反查）；
+   - [`lib/sourcemap/index.cp`](file:///data/dev/cp/lib/sourcemap/index.cp)：`cap:sourcemap` 统一对外出口。
+2. **端到端测试验证**：
+   - [`cap/test/test_sourcemap.cp`](file:///data/dev/cp/cap/test/test_sourcemap.cp)：3 大测试套件（Base64 VLQ 正负整数编解码往返、`LineOffsetTable` 二分行/列定位、SourceMap v3 `"mappings"` 解析与坐标反查）首轮零报错 100% PASS（`Total: 3 | Passed: 3 | Failed: 0`）。
+
+### 2. 阶段里程碑 Git 提交 (`lib/sourcemap/`)
+- **提交说明**：`feat(sourcemap): add lib/sourcemap Base64 VLQ, LineOffsetTable and SourceMap v3 parser`
+- **提交范围**：
+  1. `lib/sourcemap/`（`vlq.cp`, `line_offset.cp`, `mapping.cp`, `index.cp`）；
+  2. `cap/test/test_sourcemap.cp`：3 大端到端测试套件；
+  3. `SESSION.md`, `CHANGELOG.md`, `DEVLOG.md`：四线文档同步。
