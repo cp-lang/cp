@@ -485,3 +485,10 @@
   - 新增覆盖 `lib/mem/` 全组件的 5 大端到端测试套件（5/5 PASS）。
 - [`cpc/src/codegen/expr.rs`](file:///data/dev/cp/cpc/src/codegen/expr.rs)（及 `cpc_dev/src/codegen/expr.rs` 镜像同步）:
   - 为 `cap:test` 的 `test("...", () => { ... })` 用例自动绑定栈上 `_test_arena` 并注入 `defer _test_arena.deinit()`，支持在测试闭包内直接使用 `new` 实例化类对象。
+- [`lib/http/_picohttp.cp`](file:///data/dev/cp/lib/http/_picohttp.cp) & [`lib/http/index.cp`](file:///data/dev/cp/lib/http/index.cp):
+  - 新增 `lib/http/_picohttp.cp`：吸收 Bun `picohttp_sys/picohttpparser.cp` 与 `picohttp/picohttp.cp`，提供 `@c { ... }` `phr_*` C-FFI 声明、C-ABI 结构体 `phr_header` / `phr_chunked_decoder` 及零拷贝 HTTP/1.x 报文头解析器 `PicoHttpParser`（`parseRequest`, `parseResponse`, `findHeader`），并在 `lib/http/index.cp` 统一导出。
+- [`cap/test/test_picohttp.cp`](file:///data/dev/cp/cap/test/test_picohttp.cp):
+  - 新增 `PicoHttpParser` 与 C-ABI 布局验证测试套件（3/3 PASS）。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs) & [`cpc/src/codegen/expr.rs`](file:///data/dev/cp/cpc/src/codegen/expr.rs)（及 `cpc_dev/src/*` 镜像同步）:
+  - 完善 `Type::String` 与不可变借用切片 `[]const u8`（`Type::BorrowType { inner: Array(U8), is_mut: false }`）及可变切片 `[]T` -> `[]const T` 的类型协变；
+  - 修复 `catch <Lit>` 表达式代码生成，保留字面量原生无类型常量语义以兼容 `u16`/`u32` 无符号目标。

@@ -724,5 +724,15 @@ Bun AGY 在 265 个模块的实战重构中提交了 8 项遗漏审查。经逐�
   5. `rc.cp`：实现单线程 `RefCounter`、多线程原子 `AtomicRefCounter`（`@atomicRmw` `.monotonic` / `.acq_rel`）及支持强弱引用解耦销毁的 `WeakControlBlock`。
 
 ### 2. `cap:test` 闭包上下文 `test_ctx.arena` 自愈
-- **问题定位**：在 `test("...", () => { const tensor = new SharedTensor(1024); })` 中，测试闭包作为状态机函数编译时通过 `ctx.arena.?.allocator()` 分配类实例，而 `test()` 宏展开此前将 `test_ctx.arena` 初始化为 `null`，导致运行时解包空可选指针触发 Panic。
+- **问题定位**：在 `test("...", () => { const tensor = new SharedTensor(1024); })` 中，测试闭包作为状态机函数编译时通过 `ctx.arena.?.allocator()` 分配类实例，而 `test()` 展开此前将 `test_ctx.arena` 初始化为 `null`，导致运行时解包空可选指针触发 Panic。
 - **自愈方案**：在 `cpc/src/codegen/expr.rs` 的 `test()` 展开块中声明 `var _test_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator); defer _test_arena.deinit(); test_ctx.arena = &_test_arena;`，使每个独立测试闭包拥有自动回收的 Arena 分配器。
+
+## 2026-11-14 补齐 `lib/http/_picohttp.cp` (PicoHTTPParser C-FFI 与零拷贝报文解析) 及切片协变修复
+
+### 1. `lib/http/_picohttp.cp` 设计与实现
+- 对齐架构白皮书第三章第 2 节 `lib/http/_picohttp.cp` 规范，完整吸收 `/data/dev/bun/src/picohttp_sys/picohttpparser.cp` 与 `/data/dev/bun/src/picohttp/picohttp.cp`：
+  - 声明 C-ABI 兼容的 `@c struct phr_header`（32 字节）与 `@c struct phr_chunked_decoder`，并通过 `@c { ... }` 导出 `phr_parse_request`、`phr_parse_response`、`phr_parse_headers`、`phr_decode_chunked`、`phr_decode_chunked_is_in_data`；
+  - 实现纯 CP 零堆分配的 `PicoHttpParser`（`parseRequest`、`parseResponse`、`findHeader`），直接基于原始网络字节流切片提取方法、路径、HTTP 次版本号、状态码、头部键值切片与报文体起始偏移 `bytes_read`。
+
+### 2. `String` <-> `[]const u8` 协变与 `catch` 字面量类型修复
+- 自从 `parser.rs` 将 `[]const u8` 精细化解析为 `Type::BorrowType { inner: Box::new(Type::Array(Box::new(Type::U8))), is_mut: false }` 后，`sema.rs` 的 `can_coerce` 仅匹配了裸 `Type::Array(U8)`，导致 `let msg: []const u8 = "";` 报类型不匹配；在 `can_coerce` 中补齐 `String` 与 `BorrowType { inner: Array(U8), is_mut: false }` 双向兼容及 `[]T` -> `[]const T` 只读协变后彻底消除该类阻断。

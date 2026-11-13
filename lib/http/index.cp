@@ -75,3 +75,19 @@ export {
     HTTPClientResult,
     HTTPClient
 } from "./client";
+
+// --- Step 4: Low-level PicoHTTPParser C-FFI & Zero-Copy Wire Parser ---
+export {
+    phr_header,
+    ChunkedEncodingState,
+    phr_chunked_decoder,
+    phr_parse_request,
+    phr_parse_response,
+    phr_parse_headers,
+    phr_decode_chunked,
+    phr_decode_chunked_is_in_data,
+    PicoHeader,
+    PicoRequest,
+    PicoResponse,
+    PicoHttpParser
+} from "./_picohttp";

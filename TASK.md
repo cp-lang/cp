@@ -4380,3 +4380,5 @@ pub fn connect(): NetworkError!Socket { ... }
 2. 正在调优与推进：
    • 完善 cap/test/test_event_loop.cp 端到端测试；
    • 后台守护任务监听保持常驻，零等待响应 Bun AGY 的热修请求。
+
+_ = expr 忽略返回值

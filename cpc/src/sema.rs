@@ -4643,11 +4643,25 @@ impl Analyzer {
         if (*target == Type::String && matches!(src, Type::Array(inner) if **inner == Type::U8))
             || (*src == Type::String && matches!(target, Type::Array(inner) if **inner == Type::U8))
             || (*target == Type::String
+                && matches!(src, Type::BorrowType { inner, is_mut: false, .. } if matches!(&**inner, Type::Array(elem) if **elem == Type::U8)))
+            || (*src == Type::String
+                && matches!(target, Type::BorrowType { inner, is_mut: false, .. } if matches!(&**inner, Type::Array(elem) if **elem == Type::U8)))
+            || (*target == Type::String
                 && matches!(src, Type::SentinelSlice(inner, _) if **inner == Type::U8))
             || (*src == Type::String
                 && matches!(target, Type::SentinelSlice(inner, _) if **inner == Type::U8))
         {
             return true;
+        }
+        if let Type::BorrowType {
+            inner: t_inner,
+            is_mut: false,
+            ..
+        } = target
+        {
+            if matches!(&**t_inner, Type::Array(_)) && self.can_coerce(t_inner, src, init_expr) {
+                return true;
+            }
         }
 
         if let Type::Ref(id) = target {

@@ -979,3 +979,18 @@
   2. `cap/test/test_mem_bun.cp`：内存分配器与智能指针 5 大测试套件；
   3. `cpc/src/codegen/expr.rs`（及 `cpc_dev/src/codegen/expr.rs`）：`cap:test` 闭包上下文 `test_ctx.arena` 自动初始化与释放；
   4. `SESSION.md`, `CHANGELOG.md`, `DEVLOG.md`：四线文档同步。
+
+### 6. Priority 3 (`lib/http/_picohttp.cp`) 执行结果汇报与进度总结
+1. **收到用户指令**：`你目前完成了哪些工作, 汇报下成果与进度, 为何耗时这么久?`
+2. **Priority 3 (`lib/http/_picohttp.cp`) 落地与验证**：
+   - 新增 [`lib/http/_picohttp.cp`](file:///data/dev/cp/lib/http/_picohttp.cp)：完整补齐白皮书第三章第 2 节定义的 `picohttpparser` C-FFI 声明（`phr_header`, `ChunkedEncodingState`, `phr_chunked_decoder`, `phr_parse_request`, `phr_parse_response`, `phr_parse_headers`, `phr_decode_chunked`, `phr_decode_chunked_is_in_data`）与零拷贝 HTTP/1.x 报文解析器 `PicoHttpParser`（`parseRequest`, `parseResponse`, `findHeader`），并在 [`lib/http/index.cp`](file:///data/dev/cp/lib/http/index.cp) 中统一导出；
+   - 修复 `cpc/src/sema.rs` 中 `String` 与只读切片 `[]const u8`（`Type::BorrowType { inner: Array(U8), is_mut: false }`）及 `[]T` -> `[]const T` 的双向协变规则；修复 `cpc/src/codegen/expr.rs` 中 `catch <Lit>` 分支保留原生字面量类型以兼容 `u16`/`u32` 无符号目标变量；
+   - 新增 [`cap/test/test_picohttp.cp`](file:///data/dev/cp/cap/test/test_picohttp.cp)（3/3 100% PASS）并回归验证 [`cap/test/test_http_full.cp`](file:///data/dev/cp/cap/test/test_http_full.cp)（3/3 100% PASS）。
+
+### 7. 阶段里程碑 Git 提交 (Priority 3)
+- **提交说明**：`feat(http,cpc): add lib/http/_picohttp.cp C-FFI & zero-copy wire parser`
+- **提交范围**：
+  1. `lib/http/_picohttp.cp` & `lib/http/index.cp`：PicoHTTPParser C-FFI 绑定与零拷贝 HTTP/1.x 报文头解析器；
+  2. `cap/test/test_picohttp.cp`：3 大测试套件（3/3 PASS）；
+  3. `cpc/src/sema.rs` & `cpc/src/codegen/expr.rs`（及 `cpc_dev/src/*`）：`String` <-> `[]const u8` 协变与 `catch` 字面量类型保留；
+  4. `SESSION.md`, `CHANGELOG.md`, `DEVLOG.md`：四线文档同步。

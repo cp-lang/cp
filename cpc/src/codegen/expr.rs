@@ -2166,7 +2166,7 @@ impl Codegen {
                                 format!("{};", ec)
                             } else if let Some(ty_str) = &target_payload_ty {
                                 format!("break :{} @as({}, {});", blk_label, ty_str, ec)
-                            } else if self.is_lib_mode {
+                            } else if self.is_lib_mode || matches!(e, Expr::Lit(_)) {
                                 format!("break :{} {};", blk_label, ec)
                             } else {
                                 format!("break :{} cp_val({});", blk_label, ec)
