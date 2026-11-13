@@ -1187,26 +1187,30 @@ impl Codegen {
             self.writeln("        self.count -= 1;");
             self.writeln("        return val;");
             self.writeln("    }");
-            self.writeln("    pub fn peek_front(self: *VecDeque) ?Message {");
+            self.writeln("    pub fn peek_front(self: *const VecDeque) ?Message {");
             self.writeln("        if (self.count == 0) return null;");
             self.writeln("        return self.buf[self.head];");
             self.writeln("    }");
-            self.writeln("    pub fn peek_back(self: *VecDeque) ?Message {");
+            self.writeln("    pub fn peek_back(self: *const VecDeque) ?Message {");
             self.writeln("        if (self.count == 0) return null;");
             self.writeln(
                 "        const idx = if (self.tail == 0) self.capacity - 1 else self.tail - 1;",
             );
             self.writeln("        return self.buf[idx];");
             self.writeln("    }");
-            self.writeln("    pub fn get(self: *VecDeque, index: anytype) ?Message {");
+            self.writeln("    pub fn get(self: *const VecDeque, index: anytype) ?Message {");
             self.writeln("        const m = cp_message_from(index);");
             self.writeln("        const idx_val: usize = switch (m) { .int => |i| if (i >= 0) @intCast(i) else return null, else => return null };");
             self.writeln("        if (idx_val >= self.count) return null;");
             self.writeln("        return self.buf[(self.head + idx_val) % self.capacity];");
             self.writeln("    }");
-            self.writeln("    pub fn len(self: *VecDeque) usize { return self.count; }");
-            self.writeln("    pub fn size(self: *VecDeque) i32 { return @intCast(self.count); }");
-            self.writeln("    pub fn is_empty(self: *VecDeque) bool { return self.count == 0; }");
+            self.writeln("    pub fn len(self: *const VecDeque) usize { return self.count; }");
+            self.writeln(
+                "    pub fn size(self: *const VecDeque) i32 { return @intCast(self.count); }",
+            );
+            self.writeln(
+                "    pub fn is_empty(self: *const VecDeque) bool { return self.count == 0; }",
+            );
             self.writeln("    pub fn clear(self: *VecDeque) void { self.head = 0; self.tail = 0; self.count = 0; }");
             self.writeln("    pub fn next(self: *VecDeque) ?Message { return self.pop_front(); }");
             self.writeln("};");
@@ -1265,18 +1269,18 @@ impl Codegen {
             self.writeln("        }");
             self.writeln("        return top;");
             self.writeln("    }");
-            self.writeln("    pub fn peek(self: *BinaryHeap) ?Message {");
+            self.writeln("    pub fn peek(self: *const BinaryHeap) ?Message {");
             self.writeln("        if (self.items.items.len == 0) return null;");
             self.writeln("        return self.items.items[0];");
             self.writeln("    }");
             self.writeln(
-                "    pub fn len(self: *BinaryHeap) usize { return self.items.items.len; }",
+                "    pub fn len(self: *const BinaryHeap) usize { return self.items.items.len; }",
             );
             self.writeln(
-                "    pub fn size(self: *BinaryHeap) i32 { return @intCast(self.items.items.len); }",
+                "    pub fn size(self: *const BinaryHeap) i32 { return @intCast(self.items.items.len); }",
             );
             self.writeln(
-                "    pub fn is_empty(self: *BinaryHeap) bool { return self.items.items.len == 0; }",
+                "    pub fn is_empty(self: *const BinaryHeap) bool { return self.items.items.len == 0; }",
             );
             self.writeln(
                 "    pub fn clear(self: *BinaryHeap) void { self.items.clearRetainingCapacity(); }",

@@ -20,7 +20,7 @@ fn mutate_btree(*b: BTreeMap, k: string, v: i32): void {
 
 fn main(): void {
     print("=== [Test 1] VecDeque Double-Ended Ring Buffer ===");
-    let mut q = new VecDeque();
+    let q = new VecDeque();
     expect_eq(q.is_empty(), true);
 
     q.push_back(10);
@@ -48,20 +48,20 @@ fn main(): void {
     print("VecDeque basic operations verified successfully!");
 
     print("=== [Test 2] VecDeque Dual-Track Stream Iterator for...of ===");
-    let mut stream_q = new VecDeque();
+    let stream_q = new VecDeque();
     stream_q.push_back(1);
     stream_q.push_back(2);
     stream_q.push_back(3);
-    let mut sum_q = 0;
-    for item of stream_q {
-        sum_q = sum_q + item;
+    let sum_q = 0;
+    for (item of stream_q) {
+        sum_q = sum_q + item.to_int();
     }
     expect_eq(sum_q, 6);
     expect_eq(stream_q.is_empty(), true);
     print("VecDeque for...of stream iteration verified!");
 
     print("=== [Test 3] BinaryHeap Max-Heap Priority Queue ===");
-    let mut heap = new BinaryHeap();
+    let heap = new BinaryHeap();
     expect_eq(heap.is_empty(), true);
 
     mutate_heap(*heap, 15);
@@ -84,12 +84,12 @@ fn main(): void {
     print("BinaryHeap max-heap operations verified!");
 
     print("=== [Test 4] BinaryHeap Priority Stream Iterator ===");
-    let mut sort_heap = new BinaryHeap();
+    let sort_heap = new BinaryHeap();
     sort_heap.push(10);
     sort_heap.push(50);
     sort_heap.push(30);
-    let mut heap_popped_first = 0;
-    for v of sort_heap {
+    let heap_popped_first = 0;
+    for (v of sort_heap) {
         if (heap_popped_first == 0) {
             heap_popped_first = v.to_int();
         }
@@ -99,7 +99,7 @@ fn main(): void {
     print("BinaryHeap priority iteration verified!");
 
     print("=== [Test 5] BTreeMap Ordered Key-Value Map ===");
-    let mut btree = new BTreeMap();
+    let btree = new BTreeMap();
     expect_eq(btree.is_empty(), true);
 
     btree.insert("banana", 20);
@@ -129,7 +129,7 @@ fn main(): void {
     print("BTreeMap sorted key-value operations verified!");
 
     print("=== [Test 6] BTreeSet Ordered Set ===");
-    let mut bset = new BTreeSet();
+    let bset = new BTreeSet();
     bset.add(30);
     bset.add(10);
     bset.add(20);
@@ -154,12 +154,12 @@ fn main(): void {
     print("BTreeSet sorted set operations verified!");
 
     print("=== [Test 7] HashMap & HashSet Parity Aliases ===");
-    let mut hm = new HashMap();
+    let hm = new HashMap();
     hm.set("lang", "CP");
     expect_eq(hm.get("lang"), "CP");
     expect_eq(hm.size, 1);
 
-    let mut hs = new HashSet();
+    let hs = new HashSet();
     hs.add(100);
     expect_eq(hs.has(100), true);
     expect_eq(hs.size, 1);

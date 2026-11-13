@@ -925,3 +925,35 @@
   2. `cap/test/test_net.cp` & `cap/test/test_net.d.cp`：6 大端到端测试套件；
   3. `cpc/src/sema.rs`, `cpc/src/codegen/expr.rs`, `cpc/src/codegen/borrow.rs`, `cpc/src/codegen/mod.rs`, `cpc/src/codegen/prelude.rs`：网络异步原语返回类型、类方法状态机回调及接收者参数过滤修复；
   4. `SESSION.md`, `CHANGELOG.md`, `DEVLOG.md`, `TASK.md`：四线文档同步归档。
+
+---
+
+## 2026-11-14 下一阶段 Bun 资产吸收路线规划与 Priority 1 (`lib/collections/`) 全量落地
+
+### 1. 收到用户指令
+1. `下一阶段, 你建议吸收 bun的哪些资产`
+2. `可以`（批准按优先级推进：Priority 1 扩展 `lib/collections/` 高性能零分配与紧凑容器体系；Priority 2 扩展 `lib/mem/` 系统内存分配器与智能指针体系；Priority 3 补齐 `lib/http/_picohttp.cp` 零拷贝 HTTP 报文头解析器，并在每阶段里程碑完成后自动提交 Git）。
+
+### 2. Priority 1 (`lib/collections/` / `cap:collections`) 执行结果汇报
+1. **将单文件 `lib/collections.cp` 扩展为扁平化 `lib/collections/` 目录子系统（吸收 `/data/dev/bun/src/collections/*.cp` 资产）**：
+   - [`lib/collections/bounded_array.cp`](file:///data/dev/cp/lib/collections/bounded_array.cp)：`BoundedArray<T, const CAP: usize>` 零堆分配定长栈数组容器（`init`, `append`, `appendAssumeCapacity`, `appendSlice`, `pop`, `get`, `set`, `orderedRemove`, `swapRemove`, `slice`, `constSlice`, `clear`, `isFull`, `remainingCapacity`）；
+   - [`lib/collections/baby_list.cp`](file:///data/dev/cp/lib/collections/baby_list.cp)：16 字节紧凑动态数组 `BabyList<T>`（`u32 len` + `u32 cap` 节省 33% 头部开销，`init`, `initCapacity`, `ensureUnusedCapacity`, `append`, `appendSlice`, `pop`, `get`, `set`, `first`, `last`, `slice`, `clearRetainingCapacity`, `release`）与 `u32` 偏移字节流缓冲 `OffsetByteList`（`write`, `writeByte`, `consume`, `remainingSlice`, `writtenSlice`, `reset`）；
+   - [`lib/collections/linear_fifo.cp`](file:///data/dev/cp/lib/collections/linear_fifo.cp)：2 的幂次掩码环形队列 `LinearFifo<T>`（`init`, `writeItem`, `writeSlice`, `readItem`, `peekItem`, `readSlice`, `discard`, `readableLength`, `rewind`, `release`）；
+   - [`lib/collections/hive_array.cp`](file:///data/dev/cp/lib/collections/hive_array.cp)：64 位硬件位图 `BitSet64`（基于 `@ctz` / `@popCount` 实现 $O(1)$ 空闲槽位查找）与对象池 `HiveArray<T, const CAP: usize>`（`init`, `acquire`, `get`, `put`, `releaseSlot`, `indexOf`, `availableCount`, `usedCount`, `reset`）；
+   - [`lib/collections/string_map.cp`](file:///data/dev/cp/lib/collections/string_map.cp)：吸收自 Bun `ComptimeStringMap` 的预按长度分桶零分配字符串查找表 `StringEntry<V>` 与 `FastStringMap<V, const CAP: usize>`（支持 `get` 精确匹配与 `getAsciiIgnoreCase` 大小写不敏感匹配）；
+   - [`lib/collections/index.cp`](file:///data/dev/cp/lib/collections/index.cp)：统一导出上述全部高性能容器，同时与 `cpc` 内置全局容器（`VecDeque`, `BinaryHeap`, `BTreeMap`, `BTreeSet`, `HashMap`, `HashSet`, `Map`, `Set`, `Dict`）100% 向下兼容，移除旧单文件 `lib/collections.cp`。
+2. **`cpc` 编译器泛型方法类型替换与内建容器只读借用增强**：
+   - 在 `cpc/src/codegen/types.rs` 中新增 `substitute_generic_type`，支持泛型类/结构体方法返回类型参数替换（含 `T` 及嵌套 `BabyList<T>` 静态工厂返回类型 `*BabyList(i64)`），并在 `lookup_method` 中优先于通用 `get`/`pop`/`has` 启发式规则执行精确方法查找；
+   - 在 `cpc/src/codegen/mod.rs` 中将内置 `VecDeque` 与 `BinaryHeap` 的只读查询方法（`len`, `size`, `is_empty`, `peek_front`, `peek_back`, `get`, `peek`）接收者升级为 `*const VecDeque` / `*const BinaryHeap`，支持 `&q` 只读借用调用。
+3. **测试验证**：
+   - `lib/collections/*.cp` 全部 6 个模块 100% 通过 `cpc check` 与 `cpc --lib` + `zig ast-check`；
+   - 新增 [`cap/test/test_collections_bun.cp`](file:///data/dev/cp/cap/test/test_collections_bun.cp)：5 大测试套件 100% PASS（`Total: 5 | Passed: 5 | Failed: 0`）；
+   - 回归 [`cap/test/test_collections_matrix.cp`](file:///data/dev/cp/cap/test/test_collections_matrix.cp)：7 大测试套件 100% PASS。
+
+### 3. 阶段里程碑 Git 提交 (Priority 1)
+- **提交说明**：`feat(collections,cpc): expand lib/collections subsystem with bun high-perf containers`
+- **提交范围**：
+  1. `lib/collections/`（`bounded_array.cp`, `baby_list.cp`, `linear_fifo.cp`, `hive_array.cp`, `string_map.cp`, `index.cp`）及移除单文件 `lib/collections.cp`；
+  2. `cap/test/test_collections_bun.cp` & `cap/test/test_collections_matrix.cp`：新旧容器全量回归测试；
+  3. `cpc/src/codegen/types.rs` & `cpc/src/codegen/mod.rs`（及 `cpc_dev/src/*`）：泛型方法返回类型替换与内建容器 `*const` 接收者支持；
+  4. `SESSION.md`, `CHANGELOG.md`, `DEVLOG.md`：四线文档同步。

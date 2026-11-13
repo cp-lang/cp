@@ -696,3 +696,19 @@ Bun AGY 在 265 个模块的实战重构中提交了 8 项遗漏审查。经逐�
 ### 2. 编译器关联问题定位与修复
 - **异步网络内建原语与类方法状态机**：`@net_listen`、`@net_accept_async`、`@net_write_async` 在 `sema.rs` 中补齐 `Type::I32` 返回类型；类内 `async fn` 状态机挂起回调由 `self.current_zig_fn_name`（`Socket_read`）修正为容器限定名 `Socket.read`，且 `await @net_*_async(...)` 直接消费内建状态切换结果而不二次包装为 `*CpTask`。
 - **接收者参数过滤一致性**：在 `sema.rs`、`codegen/expr.rs`、`codegen/borrow.rs` 与 `codegen/mod.rs` 中统一过滤 `this`、`_` 与 `self` 接收者形参，避免调用时将首个业务实参误对齐到接收者形参。
+
+## 2026-11-14 扩展 `lib/collections/` (吸收 Bun 高性能容器体系) 与泛型方法返回类型推导自愈
+
+### 1. 架构设计与 Bun 容器矩阵收编
+- 将单文件 `lib/collections.cp` 扩展为模块化 `lib/collections/` 目录体系，完整吸收 `/data/dev/bun/src/collections/` 下的 5 大零分配与紧凑内存布局容器：
+  1. `BoundedArray<T, const CAP: usize>`：完全駐留栈帧的定长容量动态数组，消除高频小数组场景下的堆分配开销；
+  2. `BabyList<T>` 与 `OffsetByteList`：利用 32 位 `len` / `cap` 将动态列表头部从 24 字节压缩至 16 字节，契合海量 AST 节点与流缓冲场景；
+  3. `LinearFifo<T>`：采用 $2^N$ 容量与 `& (cap - 1)` 位掩码寻址代替取模运算的环形 FIFO 缓冲；
+  4. `BitSet64` 与 `HiveArray<T, const CAP: usize>`：借助硬件级 `@ctz`（尾随零计数）与 `@popCount`（汉明权重）在 $O(1)$ 周期内定位与回收空闲对象槽位；
+  5. `FastStringMap<V, const CAP: usize>`：先校验字符串长度再比对字节切片（支持精确匹配与 ASCII 忽略大小写匹配），避免全量哈希计算。
+
+### 2. 泛型类/结构体方法返回类型替换 (`substitute_generic_type`)
+- **问题定位**：当在测试闭包中调用泛型容器方法（如 `arr.orderedRemove(1)`，其中 `arr: BoundedArray<i32, 8>`，方法签名为 `pub fn orderedRemove(*this, index: usize): T`）或调用泛型类静态构造函数（如 `BabyList<i64>.initCapacity(4)`，返回类型为 `BabyList<T>`）时，此前 `lookup_method` 直接返回未替换泛型形参的原始 `m.return_type`（`Type::Ref("T")` 或 `Type::Ref("BabyList<T>")`），导致闭包捕获上下文结构体生成了未绑定的类型名 `T`，且静态泛型方法丢失了类实例指针 `*`。
+- **自愈方案**：
+  - 在 `cpc/src/codegen/types.rs` 中实现递归类型替换函数 `substitute_generic_type`，解析调用方实参列表 `<i32, 8>` 并与类定义的 `generic_params` 建立映射表，对 `Type::Ref("T")` 及带尖括号的 `Type::Ref("BabyList<T>")` 进行精确替换；
+  - 在 `infer_cp_type_with_mock` 中识别带泛型参数的类标识符（剥离 `<...>` 后查询 `self.class_defs`），并将 `lookup_method` 置于通用 `get`/`pop`/`has` 启发式规则之前，确保自定义泛型容器方法返回类型 100% 精准。

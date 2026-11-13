@@ -475,24 +475,115 @@ impl Codegen {
         false
     }
 
+    fn substitute_generic_type(ty: &Type, subst: &HashMap<String, String>) -> Type {
+        match ty {
+            Type::Ref(id) => {
+                if let Some(rep) = subst.get(&id.sym) {
+                    match rep.as_str() {
+                        "i8" => Type::I8,
+                        "u8" => Type::U8,
+                        "i16" => Type::I16,
+                        "u16" => Type::U16,
+                        "i32" => Type::I32,
+                        "u32" => Type::U32,
+                        "i64" => Type::I64,
+                        "u64" => Type::U64,
+                        "isize" => Type::ISize,
+                        "usize" => Type::USize,
+                        "f32" => Type::F32,
+                        "f64" => Type::F64,
+                        "bool" => Type::Bool,
+                        "string" | "[]const u8" => Type::String,
+                        _ => Type::Ref(Ident {
+                            span: id.span,
+                            sym: rep.clone(),
+                        }),
+                    }
+                } else if let Some(pos) = id.sym.find('<') {
+                    if id.sym.ends_with('>') {
+                        let base = &id.sym[..pos];
+                        let args_part = &id.sym[pos + 1..id.sym.len() - 1];
+                        let new_args: Vec<String> = args_part
+                            .split(',')
+                            .map(|a| {
+                                let trimmed = a.trim();
+                                subst
+                                    .get(trimmed)
+                                    .cloned()
+                                    .unwrap_or_else(|| trimmed.to_string())
+                            })
+                            .collect();
+                        Type::Ref(Ident {
+                            span: id.span,
+                            sym: format!("{}<{}>", base, new_args.join(", ")),
+                        })
+                    } else {
+                        ty.clone()
+                    }
+                } else {
+                    ty.clone()
+                }
+            }
+            Type::Optional(inner) => {
+                Type::Optional(Box::new(Self::substitute_generic_type(inner, subst)))
+            }
+            Type::ErrorUnion(inner) => {
+                Type::ErrorUnion(Box::new(Self::substitute_generic_type(inner, subst)))
+            }
+            Type::BorrowType {
+                inner,
+                is_mut,
+                lifetimes,
+            } => Type::BorrowType {
+                inner: Box::new(Self::substitute_generic_type(inner, subst)),
+                is_mut: *is_mut,
+                lifetimes: lifetimes.clone(),
+            },
+            Type::RawPtr { inner, depth } => Type::RawPtr {
+                inner: Box::new(Self::substitute_generic_type(inner, subst)),
+                depth: *depth,
+            },
+            Type::Array(inner) => {
+                Type::Array(Box::new(Self::substitute_generic_type(inner, subst)))
+            }
+            _ => ty.clone(),
+        }
+    }
+
     pub fn lookup_method(
         &self,
         type_name: &str,
         method_name: &str,
     ) -> Option<(Vec<Param>, Option<Type>, ReceiverMode)> {
         let clean = type_name.trim_start_matches('?').trim_start_matches('*');
-        let base_name = if let Some(pos) = clean.find('<') {
-            &clean[..pos]
+        let (base_name, type_args_str) = if let Some(pos) = clean.find('<') {
+            (&clean[..pos], clean[pos + 1..].trim_end_matches('>'))
+        } else if let Some(pos) = clean.find('(') {
+            (&clean[..pos], clean[pos + 1..].trim_end_matches(')'))
         } else {
-            clean
+            (clean, "")
         };
         if let Some(cls) = self.class_defs.get(base_name) {
+            let mut subst = HashMap::new();
+            if !type_args_str.is_empty() && !cls.generic_params.is_empty() {
+                for (gp, arg_s) in cls.generic_params.iter().zip(type_args_str.split(',')) {
+                    let gp_name = match gp {
+                        GenericParam::Type { ident, .. } | GenericParam::Const { ident, .. } => {
+                            ident.sym.clone()
+                        }
+                    };
+                    subst.insert(gp_name, arg_s.trim().to_string());
+                }
+            }
             if let Some(m) = cls.methods.iter().find(|m| m.ident.sym == method_name) {
-                return Some((
-                    m.params.clone(),
-                    m.return_type.clone(),
-                    Self::get_func_receiver_mode(m),
-                ));
+                let ret_ty = m.return_type.as_ref().map(|rt| {
+                    if subst.is_empty() {
+                        rt.clone()
+                    } else {
+                        Self::substitute_generic_type(rt, &subst)
+                    }
+                });
+                return Some((m.params.clone(), ret_ty, Self::get_func_receiver_mode(m)));
             }
         }
         if let Some(tr) = self.trait_defs.get(base_name) {
@@ -549,9 +640,13 @@ impl Codegen {
 
         if let Some(zig_ty) = self.locals.get(var_name) {
             let clean = zig_ty.trim_start_matches('?').trim_start_matches('*');
+            let base = clean
+                .split(|c| c == '<' || c == '(')
+                .next()
+                .unwrap_or(clean);
             if clean == "Error"
-                || self.class_defs.contains_key(clean)
-                || self.trait_defs.contains_key(clean)
+                || self.class_defs.contains_key(base)
+                || self.trait_defs.contains_key(base)
             {
                 return Some(clean.to_string());
             }
@@ -1027,6 +1122,11 @@ impl Codegen {
                                 sym: "Task".to_string(),
                             }));
                         }
+                        let oid_base = oid
+                            .sym
+                            .split(|ch| ch == '<' || ch == '(')
+                            .next()
+                            .unwrap_or(&oid.sym);
                         let is_enum = self.enum_defs.contains_key(&oid.sym)
                             || (!self.locals.contains_key(&oid.sym)
                                 && !mock_types.contains_key(&oid.sym)
@@ -1036,7 +1136,7 @@ impl Codegen {
                                     .chars()
                                     .next()
                                     .map_or(false, |c| c.is_ascii_uppercase())
-                                && !self.class_defs.contains_key(&oid.sym));
+                                && !self.class_defs.contains_key(oid_base));
                         if is_enum {
                             if mem.prop.sym == "fromName"
                                 || mem.prop.sym == "fromString"
@@ -1048,6 +1148,39 @@ impl Codegen {
                                 return Some(Type::Bool);
                             }
                             return Some(Type::Ref(oid.clone()));
+                        }
+                        let tname_opt = if let Some(mty) = mock_types.get(&oid.sym) {
+                            match mty {
+                                Type::Ref(id) | Type::BoxDyn(id) => Some(id.sym.clone()),
+                                Type::BorrowType { inner, .. } => {
+                                    if let Type::Ref(id) | Type::BoxDyn(id) = &**inner {
+                                        Some(id.sym.clone())
+                                    } else {
+                                        None
+                                    }
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            self.resolve_var_type_name(&oid.sym).or_else(|| {
+                                if self.class_defs.contains_key(oid_base) {
+                                    Some(oid.sym.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                        };
+                        if let Some(tname) = tname_opt {
+                            if let Some((_, Some(rt), _)) =
+                                self.lookup_method(&tname, &mem.prop.sym)
+                            {
+                                if self.in_try_region {
+                                    if let Type::ResultType { ok, .. } = &rt {
+                                        return Some((**ok).clone());
+                                    }
+                                }
+                                return Some(rt);
+                            }
                         }
                         if mem.prop.sym == "get" {
                             if let Some(mut oty) =
@@ -1100,39 +1233,6 @@ impl Codegen {
                                 span: Span { start: 0, end: 0 },
                                 sym: "MethodInfo".to_string(),
                             }))));
-                        }
-                        let tname_opt = if let Some(mty) = mock_types.get(&oid.sym) {
-                            match mty {
-                                Type::Ref(id) | Type::BoxDyn(id) => Some(id.sym.clone()),
-                                Type::BorrowType { inner, .. } => {
-                                    if let Type::Ref(id) | Type::BoxDyn(id) = &**inner {
-                                        Some(id.sym.clone())
-                                    } else {
-                                        None
-                                    }
-                                }
-                                _ => None,
-                            }
-                        } else {
-                            self.resolve_var_type_name(&oid.sym).or_else(|| {
-                                if self.class_defs.contains_key(&oid.sym) {
-                                    Some(oid.sym.clone())
-                                } else {
-                                    None
-                                }
-                            })
-                        };
-                        if let Some(tname) = tname_opt {
-                            if let Some((_, Some(rt), _)) =
-                                self.lookup_method(&tname, &mem.prop.sym)
-                            {
-                                if self.in_try_region {
-                                    if let Type::ResultType { ok, .. } = &rt {
-                                        return Some((**ok).clone());
-                                    }
-                                }
-                                return Some(rt);
-                            }
                         }
                     }
                 }

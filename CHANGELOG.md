@@ -462,3 +462,15 @@
   - 扩充为覆盖 `lib/net/` 全组件及兼容 API 的 6 大端到端测试套件（6/6 PASS）。
 - [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs), [`cpc/src/codegen/expr.rs`](file:///data/dev/cp/cpc/src/codegen/expr.rs), [`cpc/src/codegen/borrow.rs`](file:///data/dev/cp/cpc/src/codegen/borrow.rs), [`cpc/src/codegen/mod.rs`](file:///data/dev/cp/cpc/src/codegen/mod.rs), [`cpc/src/codegen/prelude.rs`](file:///data/dev/cp/cpc/src/codegen/prelude.rs)（及 `cpc_dev/src/*` 镜像同步）:
   - 修正 `@net_listen`、`@net_accept_async`、`@net_write_async` 的 `I32` 返回类型推导及类方法状态机回调符号生成，统一 `self`/`this`/`_` 接收者参数过滤。
+- [`lib/collections/`](file:///data/dev/cp/lib/collections/)（移除单文件 `lib/collections.cp`，新建扁平化高性能容器标准库目录）：
+  - 新增 [`lib/collections/bounded_array.cp`](file:///data/dev/cp/lib/collections/bounded_array.cp)：`BoundedArray<T, const CAP: usize>` 零堆分配栈上定长缓冲容器；
+  - 新增 [`lib/collections/baby_list.cp`](file:///data/dev/cp/lib/collections/baby_list.cp)：16 字节紧凑动态数组 `BabyList<T>` 与 `u32` 偏移字节列表 `OffsetByteList`；
+  - 新增 [`lib/collections/linear_fifo.cp`](file:///data/dev/cp/lib/collections/linear_fifo.cp)：2 的幂次位掩码环形队列 `LinearFifo<T>`；
+  - 新增 [`lib/collections/hive_array.cp`](file:///data/dev/cp/lib/collections/hive_array.cp)：基于硬件 `@ctz`/`@popCount` 的 `BitSet64` 与 $O(1)$ 槽位复用池 `HiveArray<T, const CAP: usize>`；
+  - 新增 [`lib/collections/string_map.cp`](file:///data/dev/cp/lib/collections/string_map.cp)：按长度过滤的快速字符串映射表 `StringEntry<V>` 与 `FastStringMap<V, const CAP: usize>`；
+  - 新增 [`lib/collections/index.cp`](file:///data/dev/cp/lib/collections/index.cp)：`cap:collections` 统一导出入口。
+- [`cap/test/test_collections_bun.cp`](file:///data/dev/cp/cap/test/test_collections_bun.cp) & [`cap/test/test_collections_matrix.cp`](file:///data/dev/cp/cap/test/test_collections_matrix.cp):
+  - 新增 `test_collections_bun.cp`（5 大套件 100% PASS），更新 `test_collections_matrix.cp` 为现代无 `mut` / `for (...)` 语法（7 大套件 100% PASS）。
+- [`cpc/src/codegen/types.rs`](file:///data/dev/cp/cpc/src/codegen/types.rs) & [`cpc/src/codegen/mod.rs`](file:///data/dev/cp/cpc/src/codegen/mod.rs)（及 `cpc_dev/src/*` 镜像同步）:
+  - 新增 `substitute_generic_type` 实现泛型结构体/类方法返回类型参数替换（支持 `Type::Ref("T")` 与参数化 `Type::Ref("BabyList<T>")`），修复静态泛型工厂方法（`BabyList<i64>.initCapacity`）返回指针类型推导；
+  - 升级内置 `VecDeque` 与 `BinaryHeap` 只读方法接收者为 `*const`。
