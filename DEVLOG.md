@@ -712,3 +712,17 @@ Bun AGY 在 265 个模块的实战重构中提交了 8 项遗漏审查。经逐�
 - **自愈方案**：
   - 在 `cpc/src/codegen/types.rs` 中实现递归类型替换函数 `substitute_generic_type`，解析调用方实参列表 `<i32, 8>` 并与类定义的 `generic_params` 建立映射表，对 `Type::Ref("T")` 及带尖括号的 `Type::Ref("BabyList<T>")` 进行精确替换；
   - 在 `infer_cp_type_with_mock` 中识别带泛型参数的类标识符（剥离 `<...>` 后查询 `self.class_defs`），并将 `lookup_method` 置于通用 `get`/`pop`/`has` 启发式规则之前，确保自定义泛型容器方法返回类型 100% 精准。
+
+## 2026-11-14 扩展 `lib/mem/` (吸收 Bun 内存分配器与智能指针体系) 与 `cap:test` Arena 生命周期自愈
+
+### 1. 架构设计与 Bun 内存/指针资产收编
+- 将单文件 `lib/mem.cp` 扩展为模块化 `lib/mem/` 目录体系，完整吸收 `/data/dev/bun/src/mimalloc_sys/`、`/data/dev/bun/src/bun_alloc/` 与 `/data/dev/bun/src/ptr/` 核心组件：
+  1. `_mimalloc.cp`：遵循 `_` 前缀私有 FFI 规范，通过 `@c { ... }` 声明 Mimalloc 完整分配与独立 Heap API（`mi_heap_new`, `mi_heap_malloc_aligned`, `mi_heap_collect` 等）；
+  2. `allocator.cp`：提供栈优先回退分配器 `StackFallbackAllocator<const CAP: usize>`、连续内存池 `BumpArena`、借用/持有双态缓冲 `MaybeOwnedBuf`，并将 `SharedTensor` 升级为内建原子引用计数实现，消除对外部 actors 预置块的耦合；
+  3. `tagged_ptr.cp`：实现高 16 位标签指针 `TaggedPointer`（48 位虚拟地址 + 16 位元数据标签）与低 3 位对齐指针 `LowTagPointer`；
+  4. `cow.cp`：实现写时复制字节切片 `CowBytes`，借用态零拷贝共享底层指针，仅在调用 `setByte` / `ensureOwned` 发生写入时惰性分配独立堆副本；
+  5. `rc.cp`：实现单线程 `RefCounter`、多线程原子 `AtomicRefCounter`（`@atomicRmw` `.monotonic` / `.acq_rel`）及支持强弱引用解耦销毁的 `WeakControlBlock`。
+
+### 2. `cap:test` 闭包上下文 `test_ctx.arena` 自愈
+- **问题定位**：在 `test("...", () => { const tensor = new SharedTensor(1024); })` 中，测试闭包作为状态机函数编译时通过 `ctx.arena.?.allocator()` 分配类实例，而 `test()` 宏展开此前将 `test_ctx.arena` 初始化为 `null`，导致运行时解包空可选指针触发 Panic。
+- **自愈方案**：在 `cpc/src/codegen/expr.rs` 的 `test()` 展开块中声明 `var _test_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator); defer _test_arena.deinit(); test_ctx.arena = &_test_arena;`，使每个独立测试闭包拥有自动回收的 Arena 分配器。

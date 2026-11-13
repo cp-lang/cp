@@ -957,3 +957,25 @@
   2. `cap/test/test_collections_bun.cp` & `cap/test/test_collections_matrix.cp`：新旧容器全量回归测试；
   3. `cpc/src/codegen/types.rs` & `cpc/src/codegen/mod.rs`（及 `cpc_dev/src/*`）：泛型方法返回类型替换与内建容器 `*const` 接收者支持；
   4. `SESSION.md`, `CHANGELOG.md`, `DEVLOG.md`：四线文档同步。
+
+### 4. Priority 2 (`lib/mem/` / `cap:mem`) 执行结果汇报
+1. **将单文件 `lib/mem.cp` 扩展为扁平化 `lib/mem/` 目录子系统（吸收 `/data/dev/bun/src/mimalloc_sys/`、`/data/dev/bun/src/bun_alloc/` 与 `/data/dev/bun/src/ptr/` 资产）**：
+   - [`lib/mem/_mimalloc.cp`](file:///data/dev/cp/lib/mem/_mimalloc.cp)：底层 `@c { ... }` Mimalloc C-FFI 声明（`mi_malloc`, `mi_calloc`, `mi_realloc`, `mi_zalloc`, `mi_free`, `mi_usable_size`, `mi_good_size`, `mi_collect`, `mi_malloc_aligned`, `mi_heap_new`, `mi_heap_delete`, `mi_heap_destroy`, `mi_heap_main`, `mi_heap_contains`, `mi_heap_collect`, `mi_heap_malloc`, `mi_heap_zalloc`, `mi_heap_calloc`, `mi_heap_realloc`, `mi_heap_malloc_aligned`）与不透明句柄 `MiHeap`；
+   - [`lib/mem/allocator.cp`](file:///data/dev/cp/lib/mem/allocator.cp)：吸收自 Bun `BufferFallbackAllocator`、`MaxHeapAllocator`、`maybe_owned` 的 `StackFallbackAllocator<const CAP: usize>`（栈缓冲快路径分配与堆回退统计）、`BumpArena`（连续区域线性及2的幂次对齐分配器）、`MaybeOwnedBuf`（区分借用视图与堆持有拷贝的缓冲区封装），以及向下兼容的 `Arena`、`get_arena()` 与原子引用计数 `SharedTensor`；
+   - [`lib/mem/tagged_ptr.cp`](file:///data/dev/cp/lib/mem/tagged_ptr.cp)：吸收自 Bun `tagged_pointer.cp` 的高 16 位标签指针 `TaggedPointer`（48 位规范地址 + 16 位 `u16` 标签位打包/解包）与低 3 位对齐标签指针 `LowTagPointer`；
+   - [`lib/mem/cow.cp`](file:///data/dev/cp/lib/mem/cow.cp)：吸收自 Bun `CowSlice.cp` / `Cow.cp` 的写时复制字节切片 `CowBytes`（支持零拷贝 `borrow()` 与写操作 `setByte()` 时惰性触发堆复制隔离）；
+   - [`lib/mem/rc.cp`](file:///data/dev/cp/lib/mem/rc.cp)：吸收自 Bun `raw_ref_count.cp` / `ref_count.cp` / `weak_ptr.cp` 的 `DecrementResult`、单线程确定性引用计数 `RefCounter`、多线程原子引用计数 `AtomicRefCounter` 与弱引用控制块 `WeakControlBlock`；
+   - [`lib/mem/index.cp`](file:///data/dev/cp/lib/mem/index.cp)：`cap:mem` 统一对外导出出口，移除旧单文件 `lib/mem.cp`。
+2. **`cpc` 测试运行器 `test_ctx.arena` 生命周期自愈**：
+   - 在 `cpc/src/codegen/expr.rs` 中为每个 `test("...", () => { ... })` 块自动初始化独立的 `_test_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator)` 并在用例结束时 `defer _test_arena.deinit()`，消除在测试闭包中执行 `new Class(...)` 时 `test_ctx.arena` 为 `null` 的解包异常。
+3. **测试验证**：
+   - `lib/mem/*.cp` 全部 6 个模块 100% 通过 `cpc check` 与 `cpc --lib` + `zig ast-check`；
+   - 新增 [`cap/test/test_mem_bun.cp`](file:///data/dev/cp/cap/test/test_mem_bun.cp)：5 大测试套件 100% PASS（`Total: 5 | Passed: 5 | Failed: 0`）。
+
+### 5. 阶段里程碑 Git 提交 (Priority 2)
+- **提交说明**：`feat(mem,cpc): expand lib/mem subsystem with bun allocators and smart pointers`
+- **提交范围**：
+  1. `lib/mem/`（`_mimalloc.cp`, `allocator.cp`, `tagged_ptr.cp`, `cow.cp`, `rc.cp`, `index.cp`）及移除单文件 `lib/mem.cp`；
+  2. `cap/test/test_mem_bun.cp`：内存分配器与智能指针 5 大测试套件；
+  3. `cpc/src/codegen/expr.rs`（及 `cpc_dev/src/codegen/expr.rs`）：`cap:test` 闭包上下文 `test_ctx.arena` 自动初始化与释放；
+  4. `SESSION.md`, `CHANGELOG.md`, `DEVLOG.md`：四线文档同步。

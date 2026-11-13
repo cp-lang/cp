@@ -474,3 +474,14 @@
 - [`cpc/src/codegen/types.rs`](file:///data/dev/cp/cpc/src/codegen/types.rs) & [`cpc/src/codegen/mod.rs`](file:///data/dev/cp/cpc/src/codegen/mod.rs)（及 `cpc_dev/src/*` 镜像同步）:
   - 新增 `substitute_generic_type` 实现泛型结构体/类方法返回类型参数替换（支持 `Type::Ref("T")` 与参数化 `Type::Ref("BabyList<T>")`），修复静态泛型工厂方法（`BabyList<i64>.initCapacity`）返回指针类型推导；
   - 升级内置 `VecDeque` 与 `BinaryHeap` 只读方法接收者为 `*const`。
+- [`lib/mem/`](file:///data/dev/cp/lib/mem/)（移除单文件 `lib/mem.cp`，新建扁平化内存分配器与智能指针标准库目录）：
+  - 新增 [`lib/mem/_mimalloc.cp`](file:///data/dev/cp/lib/mem/_mimalloc.cp)：底层 `@c { ... }` Mimalloc C-FFI 声明与 `MiHeap` 不透明句柄；
+  - 新增 [`lib/mem/allocator.cp`](file:///data/dev/cp/lib/mem/allocator.cp)：`StackFallbackAllocator<const CAP: usize>`、`BumpArena`、`MaybeOwnedBuf` 及向下兼容的 `Arena`、`get_arena()`、`SharedTensor`；
+  - 新增 [`lib/mem/tagged_ptr.cp`](file:///data/dev/cp/lib/mem/tagged_ptr.cp)：64 位高 16 位标签指针 `TaggedPointer` 与低 3 位标签指针 `LowTagPointer`；
+  - 新增 [`lib/mem/cow.cp`](file:///data/dev/cp/lib/mem/cow.cp)：写时复制字节切片 `CowBytes`；
+  - 新增 [`lib/mem/rc.cp`](file:///data/dev/cp/lib/mem/rc.cp)：`DecrementResult`、`RefCounter`、`AtomicRefCounter` 与 `WeakControlBlock`；
+  - 新增 [`lib/mem/index.cp`](file:///data/dev/cp/lib/mem/index.cp)：`cap:mem` 统一导出入口。
+- [`cap/test/test_mem_bun.cp`](file:///data/dev/cp/cap/test/test_mem_bun.cp):
+  - 新增覆盖 `lib/mem/` 全组件的 5 大端到端测试套件（5/5 PASS）。
+- [`cpc/src/codegen/expr.rs`](file:///data/dev/cp/cpc/src/codegen/expr.rs)（及 `cpc_dev/src/codegen/expr.rs` 镜像同步）:
+  - 为 `cap:test` 的 `test("...", () => { ... })` 用例自动绑定栈上 `_test_arena` 并注入 `defer _test_arena.deinit()`，支持在测试闭包内直接使用 `new` 实例化类对象。
