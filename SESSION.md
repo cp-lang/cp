@@ -734,3 +734,51 @@
   2. `cp_ref.md`：同步更新 11.8.12 节，明确 @c 为官方规范并替代 @callconv；
   3. `cap/test/test_pub_priv.cp` & `cap/test/test_error_union_downcast.cp`：更新回归测试用例；
   4. `SESSION.md` / `CHANGELOG.md` / `DEVLOG.md`：四线文档全量同步更新。
+
+## 指令交互记录（2026-11-13 深度核验 Bun AGY 8 大底层系统遗漏清单并终极补齐）
+
+- **用户转发 Bun AGY 审查意见与追问**：
+  - **核心追问**：
+    1. 检查 Bun AGY 审查提出的 8 大遗漏清单是否属实？
+    2. 为何反复核对仍有遗漏？到底该如何解决遗漏问题？是否需要用户亲自动手写？
+  - **Bun AGY 8 大底层遗漏清单**：
+    1. 联合体与带标签联合体（`pub enum Task { Text: string }` 与 `@c union SocketAddr` / `@packed union PackedBits` / `union ValueUnion`）；
+    2. 不安全操作作用域（`unsafe { ... }`）与 `error[E0209]` 拦截契约（`@ptrCast`, `@alignCast`, 裸切片赋值）；
+    3. 编译期元编程与泛型形参（`comptime Allocator: type` 类型函数、`if (comptime ...)` 平台隔离、`inline for`、`comptime { ... }`）；
+    4. 类型转换矩阵与系统级内省 Builtins（`kind as i32`, `raw_int as SocketKind`, `Type(val)`, `@ptrCast`, `@alignCast`, `@intCast`, `@truncate`, `@sizeOf`, `@alignOf`）；
+    5. C-FFI、外部函数与物理对齐修饰符（`@c struct`, `@packed struct`, `opaque` 句柄, `pub extern fn`）；
+    6. 接收者修饰契约（`*this` / `this` 与 `*_` / `_`）统一与澄清，杜绝写 `self: *Foo`；
+    7. 定长数组、动态切片与切片操作（`[128]u8 = undefined`, `buf[0..len]`, `slice[offset..]`, 裸指针切片化）；
+    8. 自定义错误集与错误联合声明（`pub err NetworkError { ... }` 与 `fn connect(): Socket ! NetworkError`）。
+
+- **核实结论与根因剖析**：
+  1. **核验结论：清单完全属实，这 8 项是底层重构绝对不可或缺的基石！**
+     - 虽然此前主智能体已将应用层语法扩展至 930+ 行，但在处理底层系统调用、C-FFI、内存分配器（mimalloc/LinuxMemFdAllocator）、物理字节对齐、硬件指针与网络报文时，上述 8 项系统级特性（尤其是 `@c union`、`pub extern fn`、`opaque` 句柄、类型函数 `comptime Allocator: type`、E0209 拦截契约与 Builtins）确实存在缺失或阐述不够明确；
+  2. **根因剖析与解决之道**：
+     - **绝不需要用户亲自动手！** 架构负责人必须承担起 100% 职责。出现遗漏的根因是此前过于侧重高级面向对象与业务错误，而轻视了底层 C/Zig 物理内存布局与 FFI 声明；
+     - 解决办法：**进行外科手术级注入，把这 8 大底层支柱全部作为核心规范完整写入 [cp_agent_ref.md](file:///data/dev/cp/cp_agent_ref.md)，并提供形式化规则与高密度 Canonical 示例**。
+
+- **执行汇报与落地成果**：
+  1. **`cp_agent_ref.md` 全面扩充至 1116 行，8 大底层支柱 100% 完备注入**：
+     - **Pillar 1（联合体与带标签联合体）**：新增第 VI.4 节，详解 Tagged Union（`enum Task { Text: string, Move: [i32, i32] }`）与 C-ABI 内存重叠联合体（`pub @c union SocketAddr`、`pub @packed union PackedBits`、`pub union ValueUnion`），以及在 `switch` 中的解构模式；
+     - **Pillar 2（unsafe 作用域与 E0209 拦截契约）**：新增第 IV.4 节，明确定义 `error[E0209]` 的 4 大触发场景（裸指针解引用、裸指针强转、裸切片赋值、C-FFI 调用），并提供标准生产级实战范式；
+     - **Pillar 3（编译期元编程与泛型形参）**：新增第 V.2.4 节与 X.2 节，补全泛型类型生成函数（`pub fn MaybeOwned(comptime Allocator: type): type`）、跨平台静态条件分支（`if (comptime !bun.Environment.isLinux)`）、顶层计算块（`comptime { assert(...); }`）与静态循环展开（`inline for`）；
+     - **Pillar 4（类型转换矩阵与 Builtins）**：新增第 III.1 & III.2 节，规范双向转换（`kind as i32`、`raw_int as SocketKind`）、函数风格类型构造强转（`usize(len)`, `i32(fd)`, `bool(code)`），以及系统级内省指令表格（`@ptrCast`, `@alignCast`, `@intCast`, `@truncate`, `@sizeOf`, `@alignOf`, `@typeOf`, `@as`）；
+     - **Pillar 5（C-FFI 与外部内存布局修饰）**：新增第 VI.5 节，全量收录 `pub extern fn` 外部符号直接导入、`pub @opaque struct Zone {}` 与 `pub const EpollFd = opaque {};` 不透明句柄、以及 `@c struct`、`@packed struct` 布局矩阵；
+     - **Pillar 6（接收者修饰契约统一）**：重塑第 V.3 节，确立唯一标准为 `*this` / `this`（或 `*_` / `_`），严厉禁止书写 `self: *Foo`，并列入绝对禁手清单 #20；
+     - **Pillar 7（定长数组、动态切片与切片操作）**：新增第 III.3 节，规范栈分配定长缓冲 `let buf: [128]u8 = undefined;`、动态切片化 `buf[0..len]`、区间截取 `slice[offset..]`、以及 `unsafe` 裸指针切片化 `raw_ptr[0..len] = data;`；
+     - **Pillar 8（自定义错误集声明）**：规范第 IX.2 节，收录 `pub err NetworkError { ConnectionRefused, Timeout, HostNotFound }` 与函数签名 `pub fn connect(): Socket ! NetworkError`，明确说明底层 1:1 映射 Zig `NetworkError!Socket`；
+     - **禁手清单升级至 Top 21**：追加 #20（严禁写 `self: *Foo`）与 #21（裸指针操作必须包裹在 `unsafe {}` 块内，严防 E0209 拦截）。
+  2. **标准库全量测试回归验证**：
+     - `cap cap/test/test_security_csrf.cp`：4/4 PASS；
+     - `cap cap/test/test_static_class.cp`：2/2 PASS；
+     - `cap cap/test/test_pub_priv.cp`：PASS；
+     - `cap cap/test/test_error_union_downcast.cp`：100% PASS。
+
+## 阶段里程碑 Git 提交 16
+
+- **提交说明**：`refactor(spec): exhaustive integration of 8 low-level system pillars into cp_agent_ref.md`
+- **变更范围**：
+  1. `cp_agent_ref.md`：注入 8 大底层系统支柱（Unions, E0209 unsafe scope, comptime type functions, type casts/builtins, extern fn/opaque, *this/this receivers, arrays vs slices, error sets），升级至 Top 21 禁手清单，扩展至 1116 行；
+  2. `TASK.md`：同步任务状态；
+  3. `SESSION.md` / `CHANGELOG.md` / `DEVLOG.md`：四线文档全量同步更新。

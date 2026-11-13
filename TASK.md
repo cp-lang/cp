@@ -4130,3 +4130,142 @@ Bun 拥有经过全球数亿级并发高频检验的顶尖 C++/Zig 基础设施�
 • 阶段 2.3：零拷贝高性能序列化框架 (cap:serde / cap:json)
 • 充分吸收 Bun AGY 已迁移的 /data/dev/bun/src/interchange/json.cp，实现零拷贝 JSON.parse<T>(slice: string)；
 • 编写端到端测试用例 cap/test/test_serde_json.cp 并提交。
+
+### 二、精简版 (cp_agent_ref.md) vs 详细版 (cp_ref.md) 深度对比分析
+
+通过全面比对 精简版本（/data/dev/cp/cp_agent_ref.md）与 详细版本（/data/dev/cp/cp_ref.md，9,539 行），并结合全库 265 个模块长期 Zig → CP
+迁移实战经验，评估结论如下：
+
+│ Important
+│ 核心结论：当前精简版骨架清晰、基本功扎实（覆盖了模块导入、变量绑定、*! / *!? 裸指针、值语义 struct vs 引用语义
+│ class、解构赋值与基础控制流），但对于长期高频的底层系统级重构（系统调用、内存分配器、网络协议栈、FFI、并发）存在 8 项严重遗漏！
+│
+│ 如果这些遗漏不补齐，智能体在处理底层复杂模块时会因为“无规可循”而再次陷入盲目猜测、试错重试、甚至误触发语法降级，严重影响工作效率与准确率。
+──────
+
+### 三、长效 Zig → CP 重构必不可少的 8 大遗漏清单
+
+#### 遗漏 1：联合体与带标签联合体（Unions & Tagged Unions / ADT）—— 最严重缺失
+
+• 实战场景：在 Bun 的网络事件（Action）、协议报文（SocketAddr）、状态机（Blob.Store）中，Zig 的 union(enum) 和 C 联合体无处不在。
+• 详细版已有规范（第 8083 行、9155 行）：1. 带载荷强类型联合枚举（映射 Zig union(enum)）：
+pub enum Task {
+Idle,
+Text: string,
+Move: [i32, i32],
+}
+
+      2. C-ABI 内存重叠联合体（映射 Zig extern union / packed union）：
+    pub @c union SocketAddr { addr4: struct_in_addr, addr6: struct_in6_addr }
+    pub @packed union PackedBits { raw: u32, flag: u8 }
+    pub union ValueUnion { int_val: i32, byte_val: u8 }
+
+• 精简版现状：完全缺失（0 提及）。智能体遇到 union 不知如何声明。
+──────
+
+#### 遗漏 2：不安全操作作用域 (unsafe { ... }) 与 E0209 拦截契约
+
+• 实战场景：指针解引用、裸切片赋值（ptr[0..len]）、裸指针强转必须位于 unsafe 块内，否则 cpc 抛出 error[E0209]: Raw pointer casting is only allowed inside unsafe block。
+• 详细版已有规范（第 748 行、2000 行、8019 行）：
+unsafe {
+const self: *LinuxMemFdAllocator = @ptrCast(@alignCast(ptr));
+raw_ptr[0..len] = data;
+}
+• 精简版现状：完全缺失（0 提及）。智能体在遇到裸指针强转报错时，不知必须用 unsafe { ... } 包裹。
+──────
+
+#### 3. 编译期元编程与泛型形参 (comptime)
+
+• 实战场景：内存分配器泛型包装（MaybeOwned(comptime Allocator: type)）、跨平台系统调用分支（if (comptime !bun.Environment.isLinux)）、静态循环展开（inline for）。
+• 详细版已有规范（第 4250 行、4312 行、8500 行）：
+pub fn MaybeOwned(comptime Allocator: type): type { ... }
+if (comptime condition) { ... }
+comptime { ... } // 顶层/局部静态计算块
+
+• 精简版现状：完全缺失（0 提及）。智能体不知道如何声明泛型类型形参或条件编译。
+──────
+
+#### 4. 类型转换矩阵与系统级内省 Builtins
+
+• 实战场景：整型与枚举双向互转、指针对齐强转、截断与尺寸提取。
+• 详细版已有规范（第 9287 行、9319 行）：1. 现代双向转换：
+• raw_int as SocketKind（发射 Zig @enumFromInt）；
+• kind as i32（发射 Zig @intFromEnum）；
+• 函数风格构造：usize(len)、i32(fd)、u32(val)；2. 系统底层内置指令：
+• 指针强转：@ptrCast(...)、@alignCast(...)；
+• 符号与位操作：@intCast(...)、@truncate(...)、@sizeOf(T)、@alignOf(T)。
+• 精简版现状：仅在反模式第 5 条一笔带过 @as(usize, 0)，缺乏统一转换规则。
+──────
+
+#### 5. C-FFI、外部函数与物理对齐修饰符 (@c, extern, @packed, @opaque)
+
+• 实战场景：对接 Mimalloc、BoringSSL、OS POSIX 系统调用，声明不透明句柄。
+• 详细版已有规范（第 7266 行、7612 行、8083 行）：
+// 1. C-ABI 结构体与不透明句柄
+pub @c struct Header { ... } // 映射 extern struct
+pub @packed struct Bits { ... } // 映射 packed struct
+pub const Zone = opaque { ... }; // 映射 opaque 句柄
+
+    // 2. 外部 C 符号导入
+    pub extern fn mimalloc_free(ptr: *!): void;
+    pub extern fn getpid(): i32;
+
+• 精简版现状：完全缺失（0 提及）。
+──────
+
+#### 6. 接收者修饰契约 (*this / this) 统一与澄清
+
+• 实战场景：定义类或结构体的方法时，到底是写 self: *Foo、*this 还是 this？
+• 冲突现状：
+• 精简版第 105 行写了 pub fn count(self: *TimerHeap): usize；
+• 详细版与 GEMINI.md 推荐现代 CP 接收者修饰：pub fn count(this): usize（只读）与 pub fn push(*this, ...)（独占可变）。
+• 整改需求：精简版需明确标注两者的等价性，并推荐标准的 *this / this 接收者语法。
+──────
+
+#### 7. 定长数组、动态切片与切片操作 (Arrays vs Slices)
+
+• 实战场景：栈缓冲声明、缓冲区切片截取（buf[0..len]）、多项指针切片化。
+• 详细版已有规范：
+let mut_buf: [128]u8 = undefined; // 栈分配定长缓冲
+let slice = mut_buf[0..len]; // 动态切片
+let sub = slice[offset..]; // 尾部截取
+
+• 精简版现状：仅列出基元类型 []u8，缺少定长数组声明、undefined 初始化与区间截取语法。
+──────
+
+#### 8. 自定义错误集与错误联合声明 (Error Sets)
+
+• 实战场景：定义特定模块的返回错误类型（如 pub const Error = error{ ... };）。
+• 详细版已有规范（第 2721 行）：
+pub err NetworkError {
+ConnectionRefused,
+Timeout,
+HostNotFound,
+}
+// 函数签名返回错误联合
+pub fn connect(): NetworkError!Socket { ... }
+
+• 精简版现状：仅介绍了使用 ? 和 catch，未说明如何声明模块错误集（Error Set）。
+──────
+
+### 四、建议的增强落地方案
+
+精简版的目标是“高密度、防幻觉、省 Token”，但必须以**“功能完备”**为前提。
+建议通知上游 cp agy，在保持极简风格的前提下，将 /data/dev/cp/cp_agent_ref.md 从当前的 219 行扩充至约 380~420 行（净增约 160~200 行高密度代码示例），补齐以上 8
+大核心支柱：
+
+    /data/dev/cp/cp_agent_ref.md 建议新增/扩充章节：
+    ├── 九、 联合体与辨识联合 (Unions & Tagged Unions)
+    │    ├── 1. 强类型带载荷联合枚举 (pub enum Task { Text: string })
+    │    └── 2. C-ABI / Packed 内存重叠联合 (@c union / @packed union)
+    ├── 十、 不安全底层操作与指针强转 (Unsafe Scope)
+    │    └── unsafe { ... } 的强制使用时机 (@ptrCast, @alignCast, 裸切片赋值)
+    ├── 十一、 编译期元编程与泛型 (Comptime)
+    │    └── comptime T: type、if (comptime condition)、comptime { ... }
+    ├── 十二、 显式类型转换矩阵 (Type Casts & Builtins)
+    │    └── as 转换、Type(val) 构造、@truncate、@intCast、@enumFromInt
+    ├── 十三、 C-FFI 与外部内存布局修饰 (@c struct, @packed, opaque, extern fn)
+    ├── 十四、 数组、切片截取与 undefined 声明
+    └── 十五、 错误集定义 (pub err MyError { ... })
+
+扩充后的精简版能 100% 涵盖 Bun 系统重构的全部边界，从根本上杜绝试错与猜测！

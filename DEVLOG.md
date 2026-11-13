@@ -591,3 +591,47 @@
 - 运行 `cap cap/test/test_error_union_downcast.cp`（PASS）；
 - 运行 `cap cap/test/test_security_csrf.cp`（4/4 PASS）；
 - 全套验证通过，工作区一致。
+
+
+## 2026-11-13 深度核验 Bun AGY 8 大底层系统遗漏清单并终极补齐
+
+### 1. 遗漏清单核实与反思
+Bun AGY 在 265 个模块的实战重构中提交了 8 项遗漏审查。经逐条核查 `cpc` 编译器源码与底层迁移场景：
+- **审查结论完全属实！**
+- **遗漏根因自省**：
+  此前主智能体在打磨规范时，目光主要聚焦于“高级语言应用层”特性（控制流、面向对象封装、错误传播链、异步并发等），而 Bun AGY 正在攻坚的则是**极底层的系统调用、内存分配器（Mimalloc / LinuxMemFdAllocator）、C-ABI 报文对齐、硬件指针算术与网络套接字地址**；
+  在这些场景中，`union` / `@c union`、`unsafe {}` 作用域与 E0209 拦截、泛型类型函数 `comptime Allocator: type`、Builtins 指令（`@ptrCast`, `@alignCast`）、以及 `pub extern fn` 是每一行代码的核心刚需。缺少这些语法，智能体会陷入无法声明或被迫降级为 `zig {}` 的窘境；
+- **解决原则**：**绝不需要用户亲自动手！** 架构负责人必须承担起 100% 职责，以最高密度的 Canonical 代码将 8 大支柱一次性终极补全到位。
+
+### 2. 8 大底层系统支柱实现方案
+1. **联合体与带标签联合体 (Unions & Tagged Unions / ADT)**：
+   - 补入强类型 Tagged Union（`pub enum Task { Idle, Text: string, Move: [i32, i32] }`）；
+   - 补入物理内存重叠联合体：`pub @c union SocketAddr`（对标 extern union）、`pub @packed union PackedBits`（对标 packed union）、`pub union ValueUnion`（对标 union）；
+2. **unsafe 作用域与 E0209 拦截契约**：
+   - 明确指出编译器 `sema.rs` 抛出 `error[E0209]` 的 4 大触发点：裸指针解引用、对齐强转、裸切片读写赋值、C-FFI 调用；
+   - 给出标准实战范式，要求上述操作必须 100% 包裹在 `unsafe { ... }` 内；
+3. **编译期元编程与泛型形参 (Comptime)**：
+   - 补全泛型类型生成函数 `pub fn MaybeOwned(comptime Allocator: type): type`；
+   - 补全跨平台静态条件分支 `if (comptime !bun.Environment.isLinux)`；
+   - 补全顶层计算块 `comptime { assert(...); }` 与静态循环展开 `inline for`；
+4. **显式类型转换矩阵与 Builtins**：
+   - 规范 `kind as i32` 与 `raw_int as SocketKind` 双向映射；
+   - 规范函数风格构造转换 `usize(len)`、`i32(fd)`、`bool(code)`；
+   - 整理系统底层内建指令表：`@ptrCast`, `@alignCast`, `@intCast`, `@truncate`, `@sizeOf`, `@alignOf`, `@typeOf`, `@as`；
+5. **C-FFI 与外部内存布局修饰**：
+   - 补全 `pub extern fn mimalloc_free(ptr: *!): void` 外部符号导入；
+   - 补全不透明句柄 `pub @opaque struct Zone {}` 与 `pub const EpollFd = opaque {};`；
+6. **接收者修饰契约统一**：
+   - 确立唯一规范为 `*this` / `this`（或 `*_` / `_`）；
+   - 严厉禁止 `self: *Foo`，列入绝对禁手清单 #20；
+7. **定长数组、动态切片与切片操作**：
+   - 规范栈分配定长缓冲 `let buf: [128]u8 = undefined;`；
+   - 规范数组切片化与区间截取（`buf[0..len]`, `slice[offset..]`）；
+   - 规范裸指针切片赋值（`unsafe { raw_ptr[0..len] = data; }`）；
+8. **自定义错误集声明**：
+   - 规范 `pub err NetworkError { ConnectionRefused, Timeout, HostNotFound }` 与函数签名 `pub fn connect(): Socket ! NetworkError`，底层直通 Zig `NetworkError!Socket`。
+
+### 3. 验证与资产归档
+- 手册扩充至 1116 行，全量覆盖所有底层与高级语言特性；
+- 4 组回归测试套件 100% 通过；
+- 完成原子 Git 提交。

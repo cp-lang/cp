@@ -143,22 +143,66 @@ fn process_loop(*data: InternalLoopData) {
 
 ## 三、 静态强类型系统、C-ABI 指针与纯后缀修饰符 (Types & Pointers)
 
-### 1. 标量类型与整型/枚举双向转换
+### 1. 标量类型系统与函数风格类型构造 (`Type(val)`)
 - **整数**：`i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `i128`, `u128`, `isize`, `usize`；
 - **浮点与逻辑**：`f32`, `f64`, `bool` (`true` / `false`), `void`；
-- **整型与枚举显式双向智能转换 (`as`)**：
-  - `kind as i32`：枚举转整数（发射 `@intFromEnum`）；
-  - `raw_int as SocketKind`：整数转枚举（发射 `@enumFromInt`）；
-- **类型显式转换**：数值转换使用 `@as(TargetType, expr)` 或 `@intCast(expr)`。整数字面量默认为 `i32`，给 `usize` 赋值显式使用 `@as(usize, 0)` 或依靠类型推导；
-- **未初始化内存**：使用 `undefined` 声明未初始化的栈缓冲区（如 `let buf: [64]u8 = undefined;`）。业务中的“空”必须使用可选类型 `T?` 与 `null`，严禁滥用 `undefined`。
+- **函数风格标量构造转换（推荐）**：支持直接将类型名称作为函数调用完成显式强转，干净利落零样板：
+  ```typescript
+  let fd_num: i32 = i32(raw_fd);
+  let len: usize = usize(byte_count);
+  let val_u32: u32 = u32(val_i32);
+  let is_ok: bool = bool(code); // 非零转 true，0 转 false
+  ```
 
-### 2. 编译期自动推导形参占位符 (`auto`)
+### 2. 显式类型转换矩阵与系统底层 Builtins (Type Casts & Intrinsics)
+#### 1. 现代双向转换规范 (`as`)
+- **枚举转换为整型**：`kind as i32`、`kind as usize`（编译器自动发射底层 `@intFromEnum(kind)`）；
+- **整型转换为枚举**：`raw_int as SocketKind`、`0 as SocketKind`（编译器自动发射底层 `@enumFromInt(raw_int)`）；
+- **指针互转与地址转换**：在 `unsafe` 块内使用 `p as *u8!` 或 `p as usize`。
+
+#### 2. 系统底层内建指令矩阵 (Compiler Builtins)
+| Builtin 指令 | 核心语义与用途 | 典型应用场景 |
+| :--- | :--- | :--- |
+| **`@ptrCast(ptr)`** | 裸指针强制重解释强转 | `unsafe` 内将 `*anyopaque` 转换为强类型结构体裸指针 `*T!` |
+| **`@alignCast(ptr)`**| 裸指针物理内存对齐属性断言/升级 | 与 `@ptrCast` 链式组合：`@ptrCast(@alignCast(ctx))` |
+| **`@intCast(expr)`** | 整型安全数值转换（带运行时溢出截断校验） | 将 `usize` 安全降级为 `u32` 或 `i32` |
+| **`@truncate(expr)`**| 显式低位截断位操作（无溢出异常） | 获取低 8 位或低 16 位：`@truncate(flags)` |
+| **`@as(T, expr)`**   | 显式静态类型推导辅助 | 常量泛型推导或整数字面量类型强制赋予：`@as(usize, 0)` |
+| **`@sizeOf(T)`**     | 编译期获取类型占用物理内存字节数 | 缓冲区分配大小计算：`@sizeOf(Header)` |
+| **`@alignOf(T)`**    | 编译期获取类型的内存字节对齐边界 | SIMD 与内核结构体边界断言 |
+| **`@typeOf(expr)`**  | 编译期获取表达式的准确强类型 | 元编程与泛型单态化探测 |
+
+### 3. 定长数组、动态切片与切片截取操作 (Arrays vs Slices)
+> **设计哲学**：定长数组 `[N]T` 是栈上连续内联值；动态切片 `[]T` / `[]const T` 是 `{ ptr, len }` 零拷贝胖指针视图。
+
+```typescript
+// 1. 栈分配定长数组与 undefined 初始化
+let mut_buf: [128]u8 = undefined; // 栈上未初始化缓冲区，零堆开销
+
+// 2. 定长数组切片化为动态切片视图 []u8
+let slice: []u8 = mut_buf[0..len];
+
+// 3. 切片区间截取操作
+let tail: []u8 = slice[offset..];    // 尾部半开区间截取（offset 到结尾）
+let head: []u8 = slice[..end];       // 头部半开区间截取（0 到 end）
+let sub: []u8 = slice[start..end];   // 中间固定区间截取
+
+// 4. 裸指针切片化与切片写入（必须置于 unsafe 块中，严防 E0209 拦截）
+unsafe {
+    // 将裸指针 raw_ptr 与长度构造为动态切片视图
+    let view: []u8 = raw_ptr[0..len];
+    // 裸切片就地内存拷贝赋值
+    raw_ptr[0..data.len] = data;
+}
+```
+
+### 4. 编译期自动推导形参占位符 (`auto`)
 > **核心规范**：官方首选语法为 **`auto`**（对标 Zig 的 `anytype`，`anytype` 仅作历史兼容）：
 - 仅用于函数形参以触发编译期单态化推导：`pub fn print(v: auto) { ... }`；
 - 结合编译期参数：`pub fn wrapper(@comptime callback: auto) { ... }`；
 - 🚨 严禁在局部变量（`let x: auto`）或结构体字段中声明 `auto`。
 
-### 3. 一等公民 C 字符串体系：`cstr` vs `cstring`
+### 5. 一等公民 C 字符串体系：`cstr` vs `cstring`
 | 字符串类型 | 底层物理映射 | 是否带长度 | 安全级别 | 典型应用场景 |
 | :--- | :--- | :---: | :---: | :--- |
 | **`string`** | `[]const u8` (切片) | ✅ 带长度 | Safe | CP 原生字符串，只读字节切片 |
@@ -167,7 +211,7 @@ fn process_loop(*data: InternalLoopData) {
 
 - **多态字符串转换**：使用 `string.from(cstr_val)` 零开销将 `cstr` 转换为 `string`；`string` 可零拷贝直通传给接收只读 C 缓冲区的接口。
 
-### 4. 纯正纯后缀修饰符体系 (STRICT POSTFIX NOTATION)
+### 6. 纯正纯后缀修饰符体系 (STRICT POSTFIX NOTATION)
 > **最高设计铁律**：CP 彻底废除前缀 `?T` 与 `!T`，确立“类型主体永远居首、修饰状态纯后缀链式向右展开”：
 
 | 类型标注 | 语义说明 | 映射底层 | 典型示例 |
@@ -179,7 +223,7 @@ fn process_loop(*data: InternalLoopData) {
 | `T?!` | **可空且可能报错** | `!?T` | `fn find(): User?! { ... }` |
 | `void!` 或 `!` | **无成功返回值但可能报错**（推荐极简 `!`） | `!void` | `fn flush(): ! { ... }` |
 
-### 5. 全面 C-ABI 与系统级指针矩阵 (Global Symbol Matrix)
+### 7. 全面 C-ABI 与系统级指针矩阵 (Global Symbol Matrix)
 | 语法标注 | 核心语义与底层映射 | 安全级别 | 典型场景 |
 | :--- | :--- | :--- | :--- |
 | `&T` | **只读安全借用** | 安全 | 函数形参传递不可变数据视图，零拷贝只读 |
@@ -197,14 +241,14 @@ fn process_loop(*data: InternalLoopData) {
 | `[]const T` | **动态只读切片** | 安全 | 常量视图或字符串（`string` 等价于 `[]const u8`） |
 | `[N]T` | **栈分配定长数组** | 安全 | 固定长度本地缓存，如 `let buf: [64]u8 = undefined;` |
 
-### 6. 类型别名 (`type`)
+### 8. 类型别名 (`type`)
 ```typescript
 pub type FileDescriptor = i32;
 pub type ByteSlice = []const u8;
 pub type Callback = @c fn (ctx: *!?, status: i32): void;
 ```
 
-### 7. 原生运算符矩阵
+### 9. 原生运算符矩阵
 - **标准算术**：`+`, `-`, `*`, `/`, `%`
 - **环绕运算（截断溢出）**：`+%`, `-%`, `*%`
 - **饱和运算（边界钳位）**：`+|`, `-|`
@@ -287,7 +331,34 @@ unsafe {
 }
 ```
 
-### 4. `zig { ... }` 原生逃逸舱语义
+### 4. 不安全底层操作作用域 (`unsafe { ... }`) 与 E0209 拦截契约 (Unsafe Scope & E0209)
+> **静态编译安全契约**：任何可能破坏物理内存安全的操作，若未置于 `unsafe { ... }` 块中，CP 编译器（`sema.rs`）在静态语义检查期直接硬性报错拦截：  
+> `error[E0209]: memory-unsafe operation detected outside unsafe block`
+
+#### 必须包裹在 `unsafe { ... }` 内的四大核心场景：
+1. **裸指针解引用**：`ptr.*`、`ptr.*.field`；
+2. **底层裸指针类型转换**：`@ptrCast(...)`、`@alignCast(...)`、`p as *T!`、`&v as *T!`；
+3. **裸指针切片化与切片写入**：`raw_ptr[0..len]` 与 `raw_ptr[0..len] = data;`；
+4. **C-FFI 外部裸函数调用**：调用由 `extern fn` 声明的外部符号。
+
+```typescript
+// Canonical 生产级底层操作范式
+unsafe {
+    // 1. 结构体裸指针重解释与内存对齐断言
+    const self: *LinuxMemFdAllocator = @ptrCast(@alignCast(ptr));
+
+    // 2. 裸指针解引用修改
+    self.*.is_active = true;
+
+    // 3. 裸切片内存就地写入
+    raw_ptr[0..len] = data;
+
+    // 4. 调用外部 C 运行时函数
+    mimalloc_free(ptr);
+}
+```
+
+### 5. `zig { ... }` 原生逃逸舱语义
 - **内嵌 Zig 代码完全脱离 CP 借用检查**，等价于最大程度 unsafe，由 Zig 自身的编译期规则管控；
 - 专用于调用极端底层 OS 原生能力（如 `clock_gettime`、`epoll_create`）；
 - 🚨 严禁使用带下划线的 `__zig__`。
@@ -333,7 +404,7 @@ fn flushSocket(): ! { ... }              // 纯报错函数推荐省略 void，�
 fn handleCallback(@comptime callback: auto) { ... }
 ```
 
-### 2. 泛型与编译期约束 (Generics & Bounds)
+### 2. 泛型、常量泛型与类型函数 (Generics & Type Functions)
 ```typescript
 // 1. 类型泛型与 Trait 约束
 fn map<T, U>(list: []T, func: fn(T): U): []U { ... }
@@ -349,15 +420,27 @@ fn makeBuffer<const N: usize>(): [N]u8 {
     let buf: [N]u8 = undefined;
     return buf;
 }
+
+// 4. 泛型类型生成函数 (Type Functions，映射 Zig 的 fn(comptime T: type) type)
+pub fn MaybeOwned(comptime Allocator: type): type {
+    return struct {
+        allocator: Allocator,
+        is_owned: bool = false,
+
+        pub fn init(alloc: Allocator): Self {
+            return Self{ allocator: alloc, is_owned: false };
+        }
+    };
+}
 ```
 
-### 3. 方法接收者（Receiver）终极规则：`_`
-- 在结构体与类方法中，**`_` 是接收者（Receiver）的唯一专属符号**（等同于 TS 中的 `this`）；
-- **只读实例方法**：形参列表中的接收者**完全省略**，方法体内直接裸写字段名（如 `return x * x;`）；
-- **变异实例方法**：形参列表必须显式声明 **`*_`**（独占可变借用）；
-- **所有权消耗方法**：形参列表声明 **`move _`** 或 **`own _`**（调用后实例即刻销毁）；
-- **遮蔽消除**：仅当形参或局部变量与成员字段同名时，写 `_.x` 消除二义性；
-- **静态方法**：必须冠以 `static` 修饰符，无接收者，通过 `ClassName.method()` 调用。
+### 3. 方法接收者（Receiver）统一规范：`*this` / `this` 与 `*_` / `_`
+> **核心架构契约**：CP 规范方法接收者修饰符统一采用标准的 **`*this` / `this`**（完全等同于极简保留字 **`*_` / `_`**）：
+- **只读实例方法**：形参写 `this` 或 `_`（亦可在无二义性时完全省略形参接收者，直接在方法体内裸写字段名 `return balance;`）；
+- **独占变异方法**：形参必须显式声明为 **`*this`** 或 **`*_`**（表示独占可变借用，允许修改内部字段）；
+- **所有权消耗方法**：形参声明为 `move this` 或 `move _`（调用后对象即刻被 drop 销毁）；
+- **静态方法**：必须冠以 `static` 修饰符，不含任何 `this` / `_` 接收者，通过 `ClassName.method()` 调用；
+- **🚨 绝对禁手**：**严禁书写 `self: *Foo` 或 `self: *TimerHeap`！** CP 语法解析器将 `*this` / `this` 和 `*_` / `_` 视为接收者保留语法，自定义参数名如 `self` 会破坏隐式绑定机制。
 
 ### 4. 纯静态命名空间容器 (`static class` 与 `static struct`)
 > **核心规范 (5.15 节)**：用于声明纯静态工具函数库与常量容器，全员自动静态：
@@ -461,19 +544,71 @@ pub class GpuDevice extends Device {
 }
 ```
 
-### 4. 系统级核心装饰器与内存布局体系（Bun 迁移必备）
+### 4. 联合体与带标签联合体 (Unions & Tagged Unions / ADT)
+> **系统级核心支柱**：彻底终结底层网络报文、内核系统调用中繁复的内存重叠与状态机表示。
+
+#### 1. 带载荷强类型联合枚举（Tagged Unions / ADT，映射 Zig `union(enum)`）
+```typescript
+pub enum Task {
+    Idle,                                      // 无载荷变体
+    Text: string,                              // 标量载荷（亦写作 Text(string)）
+    Move: [i32, i32],                          // 元组载荷（亦写作 Move([i32, i32])）
+    Compute: { batch: i32, priority: i32 },    // 结构体属性载荷
+}
+
+// 在 switch 模式匹配中自动安全解构
+switch (task) {
+    .Idle => print("idle"),
+    .Text text => print(text),
+    .Move [x, y] => print(x, y),
+    .Compute { batch, priority } => process(batch, priority),
+}
+```
+
+#### 2. C-ABI / Packed 内存重叠联合体（Unions，映射 Zig `extern union` / `packed union`）
+```typescript
+// 1. C-ABI 兼容重叠联合体（严格遵循 C-ABI 物理对齐，映射 Zig extern union）
+pub @c union SocketAddr {
+    addr4: struct_in_addr,
+    addr6: struct_in6_addr,
+}
+
+// 2. 紧凑位内存联合体（无对齐填充，映射 Zig packed union）
+pub @packed union PackedBits {
+    raw: u32,
+    flag: u8,
+}
+
+// 3. 原生无标签裸联合体（同一块内存多类型视图，映射 Zig union）
+pub union ValueUnion {
+    int_val: i32,
+    byte_val: u8,
+}
+```
+
+### 5. C-FFI 外部函数导入与系统物理布局修饰符 (@c, extern, @packed, @opaque)
+#### 1. 外部 C 符号直接导入 (`pub extern fn`)
+对接底层 Mimalloc、BoringSSL、OS POSIX 系统调用，直接声明 C 原型，无需书写胶水代码：
+```typescript
+pub extern fn mimalloc_free(ptr: *!): void;
+pub extern fn getpid(): i32;
+pub extern fn write(fd: i32, buf: *const !?, count: usize): isize;
+```
+
+#### 2. 系统级核心装饰器全景矩阵
 | 装饰器注解 | 语义与底层发射 | 典型应用场景 |
 | :--- | :--- | :--- |
 | **`@c struct Bar { ... }`** | 严格遵循 C-ABI 内存物理对齐（对标 Zig `extern struct`，向下兼容 `@extern`） | 与 C 动态库/头文件物理结构体对齐（如 `phr_header`） |
+| **`@c union Bar { ... }`**  | 严格遵循 C-ABI 内存重叠联合体（对标 Zig `extern union`） | 跨协议网络地址（`SocketAddr`）、报文重叠头 |
 | **`@root struct Name { ... }`** | 映射至 Zig 文件顶层根作用域 `@This()`，带 Prelude 运行时命名隔离 | 将 Zig“文件即结构体”模块无缝迁移至 CP 纯正结构体 |
 | **`@value struct Compact { ... }`**| 值语义紧凑 POD 结构体，直接嵌入栈上或父结构体，按值传递无指针间接开销 | 短索引、句柄包装器，免除析构守卫 |
-| **`@packed struct Foo { ... }`** | 紧凑位内存布局，无对齐填充，不生成默认 init | 二进制协议头、网络数据包位域 |
-| **`@opaque struct/class Baz { ... }`**| 不透明抽象类型（映射为 `pub const Baz = opaque {};`） | 外部 C 返回的系统指针/句柄（`us_loop_t`） |
+| **`@packed struct/union Foo { ... }`** | 紧凑位内存布局，无对齐填充，不生成默认 init | 二进制协议头、网络数据包位域、硬件寄存器映射 |
+| **`@opaque struct/class Baz { ... }`**<br>或 `pub const Baz = opaque {};` | 不透明抽象类型（映射为 `pub const Baz = opaque {};`） | 外部 C 返回的系统指针/句柄（`us_loop_t`） |
 | **`@align(N)`** | 字段级或结构体级物理内存字节对齐注解（如 `@align(16) buf: [64]u8`） | SIMD 向量化计算、硬件高速缓存行对齐 |
 | **`@refCount(cleanup)`** | 类顶层自动侵入式引用计数管理（提供 `.ref()` 与 `.deref()`） | 共享网络套接字、资源池自动归零析构（对标 `bun.ptr.RefCount`） |
 | **`@c fn` / `@c pub fn`** | **修饰函数直接生成 `callconv(.c)`**，官方推荐全面替代冗长的 `@callconv(.c)` | C 回调函数跳板、动态链接库导出（`@callconv` 仅作兼容保留） |
 
-### 5. 行为契约 (`trait`)、关联静态契约与实现 (`impl`)
+### 6. 行为契约 (`trait`)、关联静态契约与实现 (`impl`)
 ```typescript
 pub trait Factory<T> {
     fn create(): T; // Trait 静态构造契约
@@ -490,7 +625,7 @@ impl Measurable for Circle {
 }
 ```
 
-### 6. 动态分发胖指针与运行时向下转型 (`dyn` & `downcast`)
+### 7. 动态分发胖指针与运行时向下转型 (`dyn` & `downcast`)
 ```typescript
 // 1. 异构容器持有胖指针 Box<dyn Trait>
 let handlers: [Box<dyn EventHandler>] = [];
@@ -678,22 +813,27 @@ _ = flushSocket();
 ### 2. 错误声明与处理代码示例
 ```typescript
 // 1. 具名错误集合声明（模块级导出 pub err Error 直接对标 Zig 的 pub const Error = error{ ... };）
+pub err NetworkError {
+    ConnectionRefused,
+    Timeout,
+    HostNotFound,
+}
+
 pub err FileErr {
     NotFound,
     AccessDenied,
 }
 
-pub err NetErr {
-    Timeout,
-    ConnectionReset,
-}
-
-// 2. 具名错误函数：直接返回变体，无需 err() 包裹
-fn openFile(path: string): string ! FileErr {
-    if (path == "missing.txt") {
-        return FileErr.NotFound; // 或直接 return .NotFound;
+// 2. 具名错误函数签名：返回 'Type ! ErrorSet'（底层转译为 Zig 的 'NetworkError!Socket'）
+// 函数内直接返回错误变体，支持全称与点推断语法，无需 err() 包裹
+pub fn connect(host: string, port: u16): Socket ! NetworkError {
+    if (port == 0) {
+        return NetworkError.ConnectionRefused; // 显式全称
     }
-    return "file content";
+    if (timeout_occurred) {
+        return .Timeout; // 点推断变体（Dot Inference）
+    }
+    return openSocket(host, port);
 }
 
 // 3. 全局错误 AnyErr / T!：函数内只能返回 err.TagName 即席静态标签
@@ -781,16 +921,61 @@ fn processFile(path: string): ! {
 | `@c { ... }` | 内联 C 头文件声明块：引入系统 C 符号与库函数原型 | FFI | 引入 POSIX 系统头文件 `<unistd.h>`、底层常数 |
 
 ### 2. 编译期元编程系统 (Comptime Metaprogramming)
-- **编译期代码块**：`@{ ... }` 或 `comptime { ... }`；
-- **编译期计算函数**：声明 `comptime fn getArraySize(factor: usize): usize { return factor * 64; }`；或对普通纯函数使用 `@func(...)` 在编译期求值；
-- **编译期控制流**：`@if` / `@else` 与 `@for (item of items)` 或 `inline for`；
-- **编译期内省原语 (Intrinsics)**：
+#### 1. 泛型类型生成函数 (Type Functions，映射 Zig 的 fn(comptime T: type) type)
+```typescript
+pub fn MaybeOwned(comptime Allocator: type): type {
+    return struct {
+        allocator: Allocator,
+        is_owned: bool = false,
+
+        pub fn init(alloc: Allocator): Self {
+            return Self{ allocator: alloc, is_owned: false };
+        }
+    };
+}
+```
+
+#### 2. 跨平台静态条件编译 (Comptime Conditionals)
+```typescript
+// 静态分支修剪：死分支在编译期被彻底剔除，零运行时开销
+if (comptime !bun.Environment.isLinux) {
+    return err.NotSupported;
+}
+// 亦支持属性前缀写法
+@if (target_os == .linux) {
+    setupEpoll();
+} @else {
+    setupKqueue();
+}
+```
+
+#### 3. 顶层与局部静态计算块 (`comptime { ... }`)
+```typescript
+comptime {
+    // 模块顶层静态断言或物理内存尺寸校验
+    assert(@sizeOf(SocketAddr) == 128);
+}
+```
+
+#### 4. 静态循环展开 (`inline for` 与 `@for`)
+```typescript
+// 编译期内联完全展开循环，彻底消灭运行时循环跳转与分支预测开销
+inline for (fields) |field| {
+    processField(field);
+}
+// 亦支持范围展开：@for (i of 0..4) { ... }
+```
+
+#### 5. 编译期计算函数与内省原语 (Comptime Intrinsics)
+- **编译期纯计算函数**：声明 `comptime fn getArraySize(factor: usize): usize { return factor * 64; }`；或对纯函数使用 `@func(...)` 即席编译期求值；
+- **内省原语指令**：
   - `@typeOf(x)`：获取表达式类型；
   - `@fieldsOf(T)`：获取结构体编译期字段数组；
   - `@field(obj, "name")`：编译期字段动态反射访问；
   - `@typeName(T)`：获取类型名称字符串；
   - `@sizeOf(T)` / `@alignOf(T)`：物理内存尺寸与字节对齐；
-  - `@hasDecl(T, "method")` / `@hasField(T, "field")`：声明与字段探测。
+  - `@hasDecl(T, "method")` / `@hasField(T, "field")`：声明与字段探测；
+  - `@compileError(msg)`：编译期主动中断构建并输出致命错误。
 
 ### 3. 宏系统 (Macro Metaprogramming)
 ```typescript
@@ -904,7 +1089,7 @@ receive {
 
 ---
 
-## 十三、 智能体 Top 19 绝对禁手清单 (Top 19 Antipatterns)
+## 十三、 智能体 Top 21 绝对禁手清单 (Top 21 Antipatterns)
 
 | 禁手序号 | 错误幻觉写法 (WRONG) | CP 唯一合法写法 (CORRECT) | 根因与规则说明 |
 | :---: | :--- | :--- | :--- |
@@ -927,3 +1112,5 @@ receive {
 | **#17** | `const [first, _] = pair;` | `const [first, *] = pair;` | CP 的模式匹配通配符是 `*`（而非 `_`），`_` 是方法接收者专属保留字 |
 | **#18** | `let p: *any! = ...;` (冗余 any) | `let p: *! = ...;` / `let p: *!? = ...;` | 通用弱类型裸指针推荐省略 `any`，直接使用极简 `*!` 与 `*!?` |
 | **#19** | 根目录创建同名门面（如 `lib/io.cp`） | 仅在 `lib/io/index.cp` 导出单一真理来源 | 根目录同名门面已全面废弃，编译器原生优先目录寻路，避免冲突 |
+| **#20** | `pub fn count(self: *Foo)` / `self: &Foo` | `pub fn count(*this)` / `pub fn count(this)` (或 `*_` / `_`) | 方法接收者必须使用 `*this` / `this` 或 `*_` / `_`，严禁写形参名 `self: *Type` |
+| **#21** | 在 `unsafe {}` 外部解引用 `ptr.*` 或强转 | `unsafe { const p: *T! = @ptrCast(@alignCast(ptr)); p.* = 1; }` | 裸指针解引用、裸切片赋值与强转必须包裹在 `unsafe {}` 块内，否则触发 `error[E0209]` |
