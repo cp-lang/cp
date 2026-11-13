@@ -994,3 +994,32 @@
   2. `cap/test/test_picohttp.cp`：3 大测试套件（3/3 PASS）；
   3. `cpc/src/sema.rs` & `cpc/src/codegen/expr.rs`（及 `cpc_dev/src/*`）：`String` <-> `[]const u8` 协变与 `catch` 字面量类型保留；
   4. `SESSION.md`, `CHANGELOG.md`, `DEVLOG.md`：四线文档同步。
+
+---
+
+## 2026-11-14（续） 吸收 Bun String / Unicode SIMD 与 UTF-8/UTF-16 资产 (`lib/string/` & `lib/encoding/`) 及连续自主吸收指令
+
+### 1. 收到用户指令
+1. `批量收集编译错误：不要遇到一个报错就修改cpc编译器，要批量收集编译报错，集中修改 cpc 编译器，通过测试，提高效率。继续吸收 Bun 的 Unicode / String 高速 SIMD 扫描与 UTF-8/UTF-16 编解码资产（/data/dev/bun/src/string/ 与 /data/dev/bun/src/unicode/）你要想办法节省token情况下, 加快速度`
+2. `打断一下 你完成上述zig 转换cp后, 要继续选择目录/文件, 继续不停吸收 bun的资产, 壮大 cp 生态.`
+
+### 2. 执行结果汇报 (`lib/string/` & `lib/encoding/` + Bun AGY 热修结单)
+1. **极速热修结单 (`task-20261114-field-shadow-readonly-e0201`)**：
+   - 修复 `cpc/src/codegen/types.rs` 中 `is_class_field()` 未排除同名局部变量/形参（`self.locals` / `self.var_cp_types` / `self.block_locals`）导致只读方法内修改同名局部变量误触发 `E0201` 的问题，实测 `/data/dev/bun/temp/repro_field_shadow_borrow.cp` 100% 通过并瞬间结单。
+2. **全量构建 `lib/string/` (`cap:string`) 并联动扩展 `lib/encoding/` (`cap:encoding`)**：
+   - [`lib/string/simd_scan.cp`](file:///data/dev/cp/lib/string/simd_scan.cp)：基于 16 字节 `@Vector(16, u8)`、`@splat`、`@bitCast`、`@ctz`、`@popCount` 的高速扫描器 `SimdScanner`（`firstNonAsciiIndex`, `isAscii`, `indexOfByte`, `indexOfAny2`, `countByte`, `eqlCaseInsensitiveAscii`）；
+   - [`lib/string/utf.cp`](file:///data/dev/cp/lib/string/utf.cp)：吸收自 Bun `unicode.zig`、`wtf.zig`、`visible.zig` 的 `Utf8`（SIMD ASCII 快跳 + RFC 3629 校验 `isValid`、`decodeNext`、`encodeCodepoint`、`codepointCount`）、`Utf16`（UTF-8 <-> UTF-16LE 互转与代理对 `0xD800..0xDFFF` 编解码 `utf16LengthFromUtf8`, `encodeUtf8ToUtf16Le`, `decodeUtf16LeToUtf8`）与 `UnicodeWidth`（CJK/Emoji 双宽判定及自动剥离 ANSI CSI 转义序列的终端可视宽度 `visibleWidth`）；
+   - [`lib/string/builder.cp`](file:///data/dev/cp/lib/string/builder.cp)：吸收自 Bun `HashedString.zig`、`SmolStr.zig`、`StringBuilder.zig` 的 `HashedString`（预计算 FNV-1a 32 位哈希实现 $O(1)$ 快速不等排除）、`SmolStr`（$\le 15$ 字节栈内联零堆分配小字符串优化）与两阶段零重分配 `StringBuilder`（`count` + `allocate` + `append`）；
+   - [`lib/string/escape.cp`](file:///data/dev/cp/lib/string/escape.cp)：吸收自 Bun `escapeHTML.zig` 与 `escapeRegExp.cp` 的 `StringEscape`（`needsHtmlEscape`, `escapeHtml`, `escapeRegExp`）；
+   - [`lib/string/index.cp`](file:///data/dev/cp/lib/string/index.cp) & [`lib/encoding/index.cp`](file:///data/dev/cp/lib/encoding/index.cp)：统一导出 `cap:string` 全组件并将 `Utf8`/`Utf16`/`UnicodeWidth` 同步导出至 `cap:encoding`。
+3. **测试验证**：
+   - [`cap/test/test_string_unicode.cp`](file:///data/dev/cp/cap/test/test_string_unicode.cp)：5 大测试套件 100% PASS（`Total: 5 | Passed: 5 | Failed: 0`）；
+   - [`cap/test/test_encoding.cp`](file:///data/dev/cp/cap/test/test_encoding.cp)：3 大测试套件 100% PASS。
+
+### 3. 阶段里程碑 Git 提交 (`lib/string/` & `lib/encoding/`)
+- **提交说明**：`feat(string,encoding,cpc): add lib/string SIMD & UTF-8/16 subsystem and fix field shadow E0201`
+- **提交范围**：
+  1. `lib/string/`（`simd_scan.cp`, `utf.cp`, `builder.cp`, `escape.cp`, `index.cp`）与 `lib/encoding/index.cp`；
+  2. `cap/test/test_string_unicode.cp`：5 大端到端测试套件；
+  3. `cpc/src/codegen/types.rs`（及 `cpc_dev/src/codegen/types.rs`）：修复 `is_class_field` 局部变量遮蔽误报（结单 `task-20261114-field-shadow-readonly-e0201`）；
+  4. `SESSION.md`, `CHANGELOG.md`, `DEVLOG.md`：四线文档同步。

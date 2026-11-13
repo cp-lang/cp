@@ -736,3 +736,12 @@ Bun AGY 在 265 个模块的实战重构中提交了 8 项遗漏审查。经逐�
 
 ### 2. `String` <-> `[]const u8` 协变与 `catch` 字面量类型修复
 - 自从 `parser.rs` 将 `[]const u8` 精细化解析为 `Type::BorrowType { inner: Box::new(Type::Array(Box::new(Type::U8))), is_mut: false }` 后，`sema.rs` 的 `can_coerce` 仅匹配了裸 `Type::Array(U8)`，导致 `let msg: []const u8 = "";` 报类型不匹配；在 `can_coerce` 中补齐 `String` 与 `BorrowType { inner: Array(U8), is_mut: false }` 双向兼容及 `[]T` -> `[]const T` 只读协变后彻底消除该类阻断。
+
+## 2026-11-14 构建 `lib/string/` (吸收 Bun SIMD 字符串扫描与 UTF-8/16 编解码体系) 及批量错误收集提速
+
+### 1. 批量验证与集中修复策略
+- 严格执行“一次性批量写入全部子模块 + 单条脚本遍历检查 + 集中修复”模式：5 个 `lib/string/*.cp` 模块、`lib/encoding/index.cp` 与 `cap/test/test_string_unicode.cp` 在单轮批量写入后，通过单条 `for f in ...; cpc check` 一次性定位唯一两处小细节（`0x10000 as u32` 与 `SmolStr.slice(*this)` 栈内联缓冲借用），零额外 `cpc` 重编译即实现 5/5 测试套件 100% 通过。
+
+### 2. 核心技术要点
+- **16 字节 SIMD 向量扫描 (`SimdScanner`)**：利用 `@Vector(16, u8)`、`@splat`、向量比较与 `@bitCast` 轉 `u16` 位掩码配合 `@ctz` / `@popCount`，在单指令周期内处理 16 字节的 ASCII 校验、单/双字节查找与频次统计；
+- **UTF-8 / UTF-16 代理对互转与终端显示宽度 (`Utf8`, `Utf16`, `UnicodeWidth`)**：对 ASCII 前缀执行 SIMD 快跳，对多字节序列执行完整 RFC 3629 校验（拦截过长编码与代理区 `0xD800..0xDFFF`），支持 `U+10000..U+10FFFF` 补充平面与 UTF-16LE 高低代理对互转，以及自动剥离 ANSI CSI 转义序列的 CJK/Emoji 终端列宽计算。

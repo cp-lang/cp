@@ -492,3 +492,13 @@
 - [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs) & [`cpc/src/codegen/expr.rs`](file:///data/dev/cp/cpc/src/codegen/expr.rs)（及 `cpc_dev/src/*` 镜像同步）:
   - 完善 `Type::String` 与不可变借用切片 `[]const u8`（`Type::BorrowType { inner: Array(U8), is_mut: false }`）及可变切片 `[]T` -> `[]const T` 的类型协变；
   - 修复 `catch <Lit>` 表达式代码生成，保留字面量原生无类型常量语义以兼容 `u16`/`u32` 无符号目标。
+- [`lib/string/`](file:///data/dev/cp/lib/string/) & [`lib/encoding/index.cp`](file:///data/dev/cp/lib/encoding/index.cp):
+  - 新增 [`lib/string/simd_scan.cp`](file:///data/dev/cp/lib/string/simd_scan.cp)：16 字节 `@Vector(16, u8)` 高速扫描器 `SimdScanner`；
+  - 新增 [`lib/string/utf.cp`](file:///data/dev/cp/lib/string/utf.cp)：`Utf8`、`Utf16`、`DecodeResult` 与 `UnicodeWidth`；
+  - 新增 [`lib/string/builder.cp`](file:///data/dev/cp/lib/string/builder.cp)：`HashedString`、15 字节栈内联 `SmolStr` 与两阶段零重分配 `StringBuilder`；
+  - 新增 [`lib/string/escape.cp`](file:///data/dev/cp/lib/string/escape.cp)：`StringEscape`（HTML 实体与 RegExp 元字符转义）；
+  - 新增 [`lib/string/index.cp`](file:///data/dev/cp/lib/string/index.cp) 并扩展 `lib/encoding/index.cp`。
+- [`cap/test/test_string_unicode.cp`](file:///data/dev/cp/cap/test/test_string_unicode.cp):
+  - 新增覆盖 SIMD 扫描、UTF-8/16 编解码、Unicode/ANSI 宽度、`SmolStr`/`StringBuilder` 与转义的 5 大测试套件（5/5 PASS）。
+- [`cpc/src/codegen/types.rs`](file:///data/dev/cp/cpc/src/codegen/types.rs)（及 `cpc_dev/src/codegen/types.rs` 镜像同步）:
+  - 修复 `is_class_field` 在局部变量或参数与字段同名时的遮蔽判定（结单 `task-20261114-field-shadow-readonly-e0201`）。

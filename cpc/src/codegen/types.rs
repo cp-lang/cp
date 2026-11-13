@@ -467,6 +467,12 @@ impl Codegen {
     }
 
     pub fn is_class_field(&self, field_name: &str) -> bool {
+        if self.locals.contains_key(field_name)
+            || self.var_cp_types.contains_key(field_name)
+            || self.block_locals.contains(field_name)
+        {
+            return false;
+        }
         if let Some(c_name) = &self.current_class_name {
             if let Some(cls) = self.class_defs.get(c_name) {
                 return cls.fields.iter().any(|f| f.ident.sym == field_name);
