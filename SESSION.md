@@ -1023,3 +1023,23 @@
   2. `cap/test/test_string_unicode.cp`：5 大端到端测试套件；
   3. `cpc/src/codegen/types.rs`（及 `cpc_dev/src/codegen/types.rs`）：修复 `is_class_field` 局部变量遮蔽误报（结单 `task-20261114-field-shadow-readonly-e0201`）；
   4. `SESSION.md`, `CHANGELOG.md`, `DEVLOG.md`：四线文档同步。
+
+---
+
+## 2026-11-14 连续自主推进：构建 `lib/dns/` (`cap:dns`) 异步 DNS 与 RFC 1035 Wire 协议子系统
+
+### 1. 执行结果汇报
+1. **吸收 Bun `/data/dev/bun/src/cares_sys/` 与 `/data/dev/bun/src/dns/` 资产，构建 [`lib/dns/`](file:///data/dev/cp/lib/dns/) (`cap:dns`)**：
+   - [`lib/dns/_cares.cp`](file:///data/dev/cp/lib/dns/_cares.cp)：基于 `@c { ... }` 声明 c-ares C-FFI 绑定（`ares_channeldata`, `ares_addrinfo`, `ares_options`, `ares_init_options`, `ares_destroy`, `ares_getaddrinfo`, `ares_query`, `ares_process_fd` 等）、`ARES_*` 状态与标志常量、`NSClass`、`NSType` 与 `CaresStatus`；
+   - [`lib/dns/packet.cp`](file:///data/dev/cp/lib/dns/packet.cp)：RFC 1035 DNS 12 字节大端序报文头 `DnsHeader`、响应状态码 `DnsRCode`、解码结果 `DecodedDomain` 与零拷贝 Wire 编解码器 `DnsWireCodec`（支持 `encodeDomainName` 标签长度编码、`0xC0` 指针压缩跳转与环路防护的 `decodeDomainName`、以及一键构造标准 DNS 查询报文的 `buildQueryPacket`）；
+   - [`lib/dns/cache.cp`](file:///data/dev/cp/lib/dns/cache.cp)：地址族 `DnsFamily`、解析后端 `DnsBackend`、查询配置 `ResolveOptions`、缓存条目 `DnsCacheEntry` 与编译期定容零堆分配 TTL 缓存表 `DnsCache<const CAP: usize>`（支持 `put`、`lookup` 过期淘汰、`evictExpired` 与 `invalidate`）；
+   - [`lib/dns/index.cp`](file:///data/dev/cp/lib/dns/index.cp)：`cap:dns` 统一对外出口。
+2. **端到端测试验证**：
+   - [`cap/test/test_dns.cp`](file:///data/dev/cp/cap/test/test_dns.cp)：4 大测试套件（c-ares 常量与类型、RFC 1035 12 字节报文头编解码、域名 Wire 编码与 `0xC0` 指针压缩解码、TTL 缓存生命周期）100% PASS（`Total: 4 | Passed: 4 | Failed: 0`）。
+
+### 2. 阶段里程碑 Git 提交 (`lib/dns/`)
+- **提交说明**：`feat(dns): add lib/dns c-ares C-FFI, RFC 1035 wire codec and TTL cache`
+- **提交范围**：
+  1. `lib/dns/`（`_cares.cp`, `packet.cp`, `cache.cp`, `index.cp`）；
+  2. `cap/test/test_dns.cp`：4 大端到端测试套件；
+  3. `SESSION.md`, `CHANGELOG.md`, `DEVLOG.md`：四线文档同步。

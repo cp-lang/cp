@@ -745,3 +745,10 @@ Bun AGY 在 265 个模块的实战重构中提交了 8 项遗漏审查。经逐�
 ### 2. 核心技术要点
 - **16 字节 SIMD 向量扫描 (`SimdScanner`)**：利用 `@Vector(16, u8)`、`@splat`、向量比较与 `@bitCast` 轉 `u16` 位掩码配合 `@ctz` / `@popCount`，在单指令周期内处理 16 字节的 ASCII 校验、单/双字节查找与频次统计；
 - **UTF-8 / UTF-16 代理对互转与终端显示宽度 (`Utf8`, `Utf16`, `UnicodeWidth`)**：对 ASCII 前缀执行 SIMD 快跳，对多字节序列执行完整 RFC 3629 校验（拦截过长编码与代理区 `0xD800..0xDFFF`），支持 `U+10000..U+10FFFF` 补充平面与 UTF-16LE 高低代理对互转，以及自动剥离 ANSI CSI 转义序列的 CJK/Emoji 终端列宽计算。
+
+## 2026-11-14 构建 `lib/dns/` (吸收 Bun c-ares C-FFI 与 RFC 1035 Wire 协议及 TTL 缓存体系)
+
+### 1. 架构设计与核心实现
+- **c-ares C-FFI 声明 (`_cares.cp`)**：吸收 `/data/dev/bun/src/cares_sys/c_ares.cp`，通过 `@c { ... }` 声明 `ares_channeldata`、`ares_addrinfo`、`ares_options` 及异步查询与 fd 驱动接口，并封装类型安全的 `NSClass`、`NSType`（A, AAAA, CNAME, TXT, MX, SRV, HTTPS）与 `CaresStatus`。
+- **RFC 1035 Wire 协议与 `0xC0` 指针压缩 (`packet.cp`)**：实现 12 字节网络大端序 `DnsHeader` 位域打包/解包与 `DnsWireCodec`，在 `decodeDomainName` 中支持 RFC 1035 4.1.4 的 `0xC0` 14 位偏移指针压缩跳转与最大跳转次数守卫（防止畸形循环指针），首次消费位置精确定格在首个指针的 2 字节之后。
+- **定容 TTL 解析缓存 (`cache.cp`)**：基于常量泛型 `DnsCache<const CAP: usize>` 实现零堆分配的域名解析缓存表，支持按 `(host, qtype, family)` 精确匹配、TTL 到期自动惰性失效及 LRU/最早过期槽位替换。

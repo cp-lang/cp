@@ -502,3 +502,10 @@
   - 新增覆盖 SIMD 扫描、UTF-8/16 编解码、Unicode/ANSI 宽度、`SmolStr`/`StringBuilder` 与转义的 5 大测试套件（5/5 PASS）。
 - [`cpc/src/codegen/types.rs`](file:///data/dev/cp/cpc/src/codegen/types.rs)（及 `cpc_dev/src/codegen/types.rs` 镜像同步）:
   - 修复 `is_class_field` 在局部变量或参数与字段同名时的遮蔽判定（结单 `task-20261114-field-shadow-readonly-e0201`）。
+- [`lib/dns/`](file:///data/dev/cp/lib/dns/):
+  - 新增 [`lib/dns/_cares.cp`](file:///data/dev/cp/lib/dns/_cares.cp)：c-ares C-FFI 绑定、`NSClass`、`NSType` 与 `CaresStatus`；
+  - 新增 [`lib/dns/packet.cp`](file:///data/dev/cp/lib/dns/packet.cp)：RFC 1035 12 字节 `DnsHeader`、`DnsRCode`、`DecodedDomain` 与支持 `0xC0` 指针压缩的 `DnsWireCodec`；
+  - 新增 [`lib/dns/cache.cp`](file:///data/dev/cp/lib/dns/cache.cp)：`DnsFamily`、`DnsBackend`、`ResolveOptions`、`DnsCacheEntry` 与定容 TTL 缓存 `DnsCache<const CAP: usize>`；
+  - 新增 [`lib/dns/index.cp`](file:///data/dev/cp/lib/dns/index.cp)：`cap:dns` 对外统一出口。
+- [`cap/test/test_dns.cp`](file:///data/dev/cp/cap/test/test_dns.cp):
+  - 新增覆盖 c-ares 类型、RFC 1035 报文头、Wire 域名编解码与指针压缩、TTL 缓存的 4 大测试套件（4/4 PASS）。
