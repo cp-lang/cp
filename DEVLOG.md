@@ -635,3 +635,32 @@ Bun AGY 在 265 个模块的实战重构中提交了 8 项遗漏审查。经逐�
 - 手册扩充至 1116 行，全量覆盖所有底层与高级语言特性；
 - 4 组回归测试套件 100% 通过；
 - 完成原子 Git 提交。
+
+
+## 2026-11-13 结构体指针自动解引用纠偏与类型转换 Builtins 终极清洗
+
+### 1. 结构体指针自动解引用的语言设计原则
+- **问题根因**：此前在示例中写出了 `self.*.is_active = true;`，这是典型的 Zig 语法泄漏。
+- **CP 语言权威规则**：
+  - CP 语言具有与 TypeScript / Rust 一致的指针/借用**自动解引用机制**：通过结构体指针或可变借用访问内部字段时，编译器自动解引用，直接书写 `alloc.is_active = true;`；
+  - `ptr.*` 在 CP 中具有严格正交的职责：**仅用于对基础标量类型的值进行整体解引用读写**（如 `let p: *i32! = ...; p.* = 100;` 或 `let v = p.*;`）；
+  - 严禁在字段访问时书写冗余的 `.*.`（已加入禁手清单 #22）。
+
+### 2. 指针强转与 Builtins 哲学：彻底废除手写 `@ptrCast` / `@alignCast`
+- **为什么不需要 `@ptrCast`？**
+  - CP 提供了现代统一的 `as` 运算符：`ptr as *TargetType!`。
+  - 在 `cpc/src/codegen/expr.rs:3815` 中，代码生成器检测到指针强转时，自动将其发射为 Zig 的 `@as(TargetZigTy, @ptrCast(@alignCast(ptr)))`；
+  - 因此，开发者书写 `ptr as *TargetType!` 已经完全表达了强转语义，再手动书写 `@ptrCast` 属于冗余样板！
+- **`@alignCast` 是什么？CP 中必须保留吗？**
+  - `@alignCast` 是 Zig 专有的对齐检查断言（当指针从低对齐如 `*anyopaque` 转换为高对齐如 `*u64` 时，Zig 强迫显式断言对齐）；
+  - **在 CP 中，普通开发者绝对不需要感知或手动书写 `@alignCast`！**
+  - CP 编译器在转译时自动为开发者处理对齐断言脏活，彻底屏蔽对底层细节的心智负担。
+- **`@intCast` 与 `@truncate` 的清洗**：
+  - CP 提供了整洁的高级类型转换语法：`as u32` / `as i32`，以及函数构造式 `u32(val)` / `i32(val)`，截断算术提供 `+%`, `-%`；
+  - 从 `cp_agent_ref.md` 内建指令表中彻底剔除 Zig 强转 Builtins，仅保留真正属于 CP 编译期的内省指令（`@sizeOf`, `@alignOf`, `@typeOf`, `@typeName`, `@fieldsOf`, `@field`, `@compileError`, `@as`）。
+
+### 3. 结果验证与资产归档
+- 禁手清单升级为 Top 23；
+- `cp_ref.md` 第 12 章完成遗留 `@ptrCast(@alignCast)` 与 `__zig__` 清洗；
+- 4 组回归测试 100% PASS；
+- 执行原子 Git 提交。

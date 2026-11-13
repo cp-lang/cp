@@ -6931,27 +6931,27 @@ class AppState {
 }
 
 let state = AppState.create();
-const state_ptr: *anyopaque = @ptrCast(state);
+const state_ptr: *! = state as *!;
 
 // 2. 投递微任务 (自动按 state_ptr 去重)
 loop.deferTask((ctx: ?*anyopaque) => {
-    let s: *AppState = @ptrCast(@alignCast(ctx.?));
+    let s: *AppState = ctx.? as *AppState;
     s.count += 10;
 }, state_ptr);
 
 // 3. 注册定时器 (10ms 后触发)
 const t = loop.setTimeout((ctx: ?*anyopaque) => {
-    let s: *AppState = @ptrCast(@alignCast(ctx.?));
+    let s: *AppState = ctx.? as *AppState;
     s.count += 1;
 }, 10, state_ptr);
 
 // 4. 注册文件描述符 I/O 监听
 let pipe_fds: [2]i32 = undefined;
-__zig__ {
+zig {
     _ = std.os.linux.pipe(&pipe_fds);
 }
 loop.watch(pipe_fds[0], PollEvents.Readable, (fd: i32, events: u32, ctx: ?*anyopaque) => {
-    let s: *AppState = @ptrCast(@alignCast(ctx.?));
+    let s: *AppState = ctx.? as *AppState;
     s.count += 100;
 }, state_ptr);
 

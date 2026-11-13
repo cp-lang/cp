@@ -782,3 +782,37 @@
   1. `cp_agent_ref.md`：注入 8 大底层系统支柱（Unions, E0209 unsafe scope, comptime type functions, type casts/builtins, extern fn/opaque, *this/this receivers, arrays vs slices, error sets），升级至 Top 21 禁手清单，扩展至 1116 行；
   2. `TASK.md`：同步任务状态；
   3. `SESSION.md` / `CHANGELOG.md` / `DEVLOG.md`：四线文档全量同步更新。
+
+## 指令交互记录（2026-11-13 结构体指针自动解引用纠偏与类型转换 Builtins 终极清洗）
+
+- **用户纠偏指令与核心追问**：
+  1. `self.*.is_active = true;` 这个是错误的，应该为：`self.is_active = true;`；
+  2. `@ptrCast(@alignCast(ptr));` CP 有函数式或 `as` 指针转换，还需要 `@ptrCast` 吗？`@alignCast` 是什么，CP 中必须保留吗？类似的还有：`@intCast(expr)`、`@truncate(expr)`；
+  3. 重新再仔细对比 `cp_agent_ref.md` 和 `cp_ref.md`，`cp_agent_ref.md` 中完全确定无用的内容可以去掉，无法确定的保留，最大限度保证内容完整。
+
+- **执行汇报与架构答复**：
+  1. **结构体指针字段访问自动解引用纠偏**：
+     - 用户判断 100% 正确！在 CP 中，结构体指针或借用访问字段享有编译器原生自动解引用（`alloc.is_active = true;`），书写 `alloc.*.field` 是 Zig 的语法泄漏残留，不仅冗长且心智负担高；
+     - `ptr.*` 仅用于基础标量整值解引用读写（如 `p.* = 100;` 或 `let v = p.*;`）；
+     - 已将代码示例修正为标准 CP：`const alloc: *LinuxMemFdAllocator! = ptr as *LinuxMemFdAllocator!; alloc.is_active = true;`，并同步清除了局部变量名 `self`；
+  2. **指针与整型强转 Builtins 哲学澄清（彻底废除手写底层 Builtins 样板）**：
+     - **还需要 `@ptrCast` 吗？** 开发者在 CP 中**完全不需要手写 `@ptrCast`**！统一使用现代原生 `ptr as *TargetType!`，编译器在代码生成时会自动发射底层所需的 `@ptrCast`；
+     - **`@alignCast` 是什么？CP 中必须保留吗？** `@alignCast` 是 Zig 强制要求的指针内存对齐断言（从低对齐 `*anyopaque` 转换为高对齐强类型指针时必须显式标注）。**在 CP 中，普通开发者绝对不需要感知或手动书写 `@alignCast`！** 开发者书写 `ptr as *T!` 时，CP 编译器会在代码生成阶段自动按需织入 `@alignCast`，对上层完全屏蔽底层脏活；
+     - **`@intCast` 与 `@truncate` 呢？** 同样，CP 提供了纯正的高级类型转换语法：`as u32` / `as i32`，以及函数构造式 `u32(val)` / `i32(val)`，截断算术提供 `+%`, `-%`。开发者无需也不能手动调用 Zig 底层 `@intCast` 或 `@truncate`；
+     - **内置指令清洗**：从 `cp_agent_ref.md` 常用 Builtin 表中彻底剔除属于 Zig 冗余样板的 `@ptrCast`, `@alignCast`, `@intCast`, `@truncate`，仅保留真正属于 CP 编译期的内省指令（`@sizeOf`, `@alignOf`, `@typeOf`, `@typeName`, `@fieldsOf`, `@field`, `@compileError`, `@as`）；
+  3. **双轨规范全面对比与无用内容深度清洗**：
+     - 全文剔除一切遗留的 Zig 风格样板；
+     - 禁手清单扩充升级为 **Top 23 绝对禁手清单**：
+       - **#22**：严禁书写 `ptr.*.field = val`，结构体指针访问自动解引用，统一写 `ptr.field = val`；
+       - **#23**：严禁书写 `@ptrCast(@alignCast(ptr))` 或 `@intCast(x)`，统一写 `ptr as *T!` 与 `u32(x)`；
+     - 同步清洗 `cp_ref.md` 第 12 章遗留示例中的 `@ptrCast(@alignCast)` 与 `__zig__`，换用纯正 CP `as` 与 `zig {}`；
+  4. **标准库全量测试回归验证**：
+     - 运行 4 组回归测试套件 100% 全部通过。
+
+## 阶段里程碑 Git 提交 17
+
+- **提交说明**：`refactor(spec): eliminate zig builtins, enforce struct auto-deref, and update Top 23 antipatterns`
+- **变更范围**：
+  1. `cp_agent_ref.md`：清洗 Zig 强转 builtins，确立 as 唯一性，纠正结构体指针自动解引用（alloc.is_active），升级 Top 23 禁手清单；
+  2. `cp_ref.md`：清洗第 12 章遗留的 @ptrCast/@alignCast 与 __zig__；
+  3. `SESSION.md` / `CHANGELOG.md` / `DEVLOG.md`：四线文档全量同步更新。

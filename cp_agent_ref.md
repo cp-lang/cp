@@ -154,23 +154,30 @@ fn process_loop(*data: InternalLoopData) {
   let is_ok: bool = bool(code); // 非零转 true，0 转 false
   ```
 
-### 2. 显式类型转换矩阵与系统底层 Builtins (Type Casts & Intrinsics)
-#### 1. 现代双向转换规范 (`as`)
-- **枚举转换为整型**：`kind as i32`、`kind as usize`（编译器自动发射底层 `@intFromEnum(kind)`）；
-- **整型转换为枚举**：`raw_int as SocketKind`、`0 as SocketKind`（编译器自动发射底层 `@enumFromInt(raw_int)`）；
-- **指针互转与地址转换**：在 `unsafe` 块内使用 `p as *u8!` 或 `p as usize`。
+### 2. 统一显式类型转换哲学 (`as` 与 `Type(val)`)
+> **核心架构契约**：CP 彻底摒弃 Zig 繁杂的手动强转 Builtins（如 `@ptrCast`, `@alignCast`, `@intCast`, `@truncate`），确立现代统一的 **`as` 运算符** 与 **函数风格构造 `Type(val)`**：
 
-#### 2. 系统底层内建指令矩阵 (Compiler Builtins)
-| Builtin 指令 | 核心语义与用途 | 典型应用场景 |
+#### 1. 现代双向转换规范 (`as`)
+- **指针显式强转**：在 `unsafe` 块内统一写 `ptr as *TargetType!`。
+  - **无需手写 `@ptrCast` 与 `@alignCast`**：编译器在代码生成时会自动为目标强类型裸指针织入底层所需的 `@ptrCast(@alignCast(...))`，无需开发者手工管理对齐断言！
+  - **地址互转**：`ptr as usize`（获取内存物理地址）、`addr as *i32!`（还原强类型裸指针）。
+- **枚举与整型双向互转**：
+  - `kind as i32` / `kind as usize`（编译器自动发射底层 `@intFromEnum(kind)`）；
+  - `raw_int as SocketKind` / `0 as SocketKind`（编译器自动发射底层 `@enumFromInt(raw_int)`）；
+- **整型标量转换**：优先使用函数风格构造 `usize(len)`、`i32(fd)`、`u32(val)` 或 `x as u32`（无需也不推荐写 Zig 的 `@intCast` / `@truncate`）。
+
+#### 2. CP 编译期内省指令矩阵 (Comptime Reflection Intrinsics)
+CP 仅保留真正服务于编译期元编程、内省探测与系统尺寸断言的专有指令：
+| 内省指令 | 核心语义与用途 | 典型应用场景 |
 | :--- | :--- | :--- |
-| **`@ptrCast(ptr)`** | 裸指针强制重解释强转 | `unsafe` 内将 `*anyopaque` 转换为强类型结构体裸指针 `*T!` |
-| **`@alignCast(ptr)`**| 裸指针物理内存对齐属性断言/升级 | 与 `@ptrCast` 链式组合：`@ptrCast(@alignCast(ctx))` |
-| **`@intCast(expr)`** | 整型安全数值转换（带运行时溢出截断校验） | 将 `usize` 安全降级为 `u32` 或 `i32` |
-| **`@truncate(expr)`**| 显式低位截断位操作（无溢出异常） | 获取低 8 位或低 16 位：`@truncate(flags)` |
-| **`@as(T, expr)`**   | 显式静态类型推导辅助 | 常量泛型推导或整数字面量类型强制赋予：`@as(usize, 0)` |
 | **`@sizeOf(T)`**     | 编译期获取类型占用物理内存字节数 | 缓冲区分配大小计算：`@sizeOf(Header)` |
-| **`@alignOf(T)`**    | 编译期获取类型的内存字节对齐边界 | SIMD 与内核结构体边界断言 |
+| **`@alignOf(T)`**    | 编译期获取类型的内存字节对齐边界 | SIMD 与内核结构体物理对齐断言 |
 | **`@typeOf(expr)`**  | 编译期获取表达式的准确强类型 | 元编程与泛型单态化探测 |
+| **`@typeName(T)`**   | 获取类型的字符串名称 | 调试与序列化元数据 |
+| **`@fieldsOf(T)`**   | 获取结构体在编译期的字段数组 | 自动生成序列化/反序列化代码 |
+| **`@field(obj, name)`** | 编译期动态反射字段访问与赋值 | 动态 ORM 映射与属性遍历 |
+| **`@compileError(msg)`** | 在编译期主动抛出编译失败错误 | 不受支持的架构/平台静态拦截 |
+| **`@as(T, expr)`**   | 显式静态类型推导辅助 | 常量泛型推导或整数字面量类型强制赋予：`@as(usize, 0)` |
 
 ### 3. 定长数组、动态切片与切片截取操作 (Arrays vs Slices)
 > **设计哲学**：定长数组 `[N]T` 是栈上连续内联值；动态切片 `[]T` / `[]const T` 是 `{ ptr, len }` 零拷贝胖指针视图。
@@ -336,19 +343,21 @@ unsafe {
 > `error[E0209]: memory-unsafe operation detected outside unsafe block`
 
 #### 必须包裹在 `unsafe { ... }` 内的四大核心场景：
-1. **裸指针解引用**：`ptr.*`、`ptr.*.field`；
-2. **底层裸指针类型转换**：`@ptrCast(...)`、`@alignCast(...)`、`p as *T!`、`&v as *T!`；
+1. **基础标量裸指针解引用**：`p.* = 100` 或 `let v = p.*;`；
+2. **底层裸指针类型转换**：`p as *T!`、`&v as *T!`、`p as usize`；
 3. **裸指针切片化与切片写入**：`raw_ptr[0..len]` 与 `raw_ptr[0..len] = data;`；
 4. **C-FFI 外部裸函数调用**：调用由 `extern fn` 声明的外部符号。
+
+> **🚨 关键语法规则（结构体指针自动解引用）**：在 CP 中，通过结构体指针或借用访问其成员字段时**全自动解引用**（标准书写 `alloc.is_active = true;`），**严禁书写 Zig 风格冗余的 `alloc.*.is_active`**！`ptr.*` 仅用于基础标量类型（如 `i32`, `usize`）的整体值解引用读写。
 
 ```typescript
 // Canonical 生产级底层操作范式
 unsafe {
-    // 1. 结构体裸指针重解释与内存对齐断言
-    const self: *LinuxMemFdAllocator = @ptrCast(@alignCast(ptr));
+    // 1. 结构体裸指针强转：统一使用 CP 原生 'as' 语法（编译器底层自动织入 @ptrCast(@alignCast(...))）
+    const alloc: *LinuxMemFdAllocator! = ptr as *LinuxMemFdAllocator!;
 
-    // 2. 裸指针解引用修改
-    self.*.is_active = true;
+    // 2. 字段访问自动解引用（规范书写 alloc.is_active，严禁冗余 alloc.*.is_active）
+    alloc.is_active = true;
 
     // 3. 裸切片内存就地写入
     raw_ptr[0..len] = data;
@@ -1089,7 +1098,7 @@ receive {
 
 ---
 
-## 十三、 智能体 Top 21 绝对禁手清单 (Top 21 Antipatterns)
+## 十三、 智能体 Top 23 绝对禁手清单 (Top 23 Antipatterns)
 
 | 禁手序号 | 错误幻觉写法 (WRONG) | CP 唯一合法写法 (CORRECT) | 根因与规则说明 |
 | :---: | :--- | :--- | :--- |
@@ -1113,4 +1122,6 @@ receive {
 | **#18** | `let p: *any! = ...;` (冗余 any) | `let p: *! = ...;` / `let p: *!? = ...;` | 通用弱类型裸指针推荐省略 `any`，直接使用极简 `*!` 与 `*!?` |
 | **#19** | 根目录创建同名门面（如 `lib/io.cp`） | 仅在 `lib/io/index.cp` 导出单一真理来源 | 根目录同名门面已全面废弃，编译器原生优先目录寻路，避免冲突 |
 | **#20** | `pub fn count(self: *Foo)` / `self: &Foo` | `pub fn count(*this)` / `pub fn count(this)` (或 `*_` / `_`) | 方法接收者必须使用 `*this` / `this` 或 `*_` / `_`，严禁写形参名 `self: *Type` |
-| **#21** | 在 `unsafe {}` 外部解引用 `ptr.*` 或强转 | `unsafe { const p: *T! = @ptrCast(@alignCast(ptr)); p.* = 1; }` | 裸指针解引用、裸切片赋值与强转必须包裹在 `unsafe {}` 块内，否则触发 `error[E0209]` |
+| **#21** | 在 `unsafe {}` 外部解引用 `ptr.*` 或强转 | `unsafe { const p: *T! = ptr as *T!; p.* = 1; }` | 裸指针解引用、裸切片赋值与强转必须包裹在 `unsafe {}` 块内，否则触发 `error[E0209]` |
+| **#22** | `ptr.*.field = val` (冗余解引用) | `ptr.field = val` | 结构体指针/借用访问成员字段由编译器自动解引用，严禁书写 Zig 风格冗余的 `.*.` |
+| **#23** | `@ptrCast(@alignCast(ptr))` / `@intCast(x)` | `ptr as *T!` / `u32(x)` | 统一使用 CP 现代 `as` 运算符与函数风格构造强转，彻底废除繁琐的手动 Zig Builtins 样板 |

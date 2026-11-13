@@ -421,14 +421,11 @@
     - 补全第九章胖指针动态错误与 `downcast` 双轨解构模式匹配语法（`err(e: T)` 与 `err(e := T)`）；
     - 补全第十章编译期计算函数 `comptime fn` 与 `@func(...)`。
 - [`cp_agent_ref.md`](file:///data/dev/cp/cp_agent_ref.md):
-  - 全面注入 Bun AGY 审查确立的 8 大底层系统支柱，手册全面扩充至 1116 行：
-    - 新增第六章第 4 节：`union` 与 `tagged union`（`pub enum Task { Text: string, Move: [i32, i32] }` 与 `@c union SocketAddr` / `@packed union` / `union ValueUnion`）；
-    - 新增第四章第 4 节：`unsafe { ... }` 作用域与 `error[E0209]` 拦截契约（裸指针解引用、对齐强转、裸切片读写赋值必须包裹在 unsafe 中）；
-    - 新增第五章第 2.4 节与第十章第 2 节：泛型类型生成函数 `pub fn MaybeOwned(comptime Allocator: type): type`、跨平台静态条件编译 `if (comptime !bun.Environment.isLinux)`、顶层计算块 `comptime { ... }` 与静态循环展开 `inline for`；
-    - 新增第三章第 1 与第 2 节：整型/枚举双向转换（`kind as i32`, `raw_int as SocketKind`）、函数风格类型构造强转（`usize(len)`, `i32(fd)`, `bool(code)`），以及系统级内省 Builtins 指令表（`@ptrCast`, `@alignCast`, `@intCast`, `@truncate`, `@sizeOf`, `@alignOf`）；
-    - 新增第六章第 5 节：C-FFI 外部函数导入 `pub extern fn mimalloc_free` 与不透明系统句柄 `pub @opaque struct Zone {}` / `pub const EpollFd = opaque {};`；
-    - 重塑第五章第 3 节：确立方法接收者统一规范为 `*this` / `this`（或 `*_` / `_`），绝对禁止 `self: *Foo`；
-    - 新增第三章第 3 节：定长数组 `[128]u8 = undefined`、动态切片化 `mut_buf[0..len]`、区间截取与裸指针切片赋值；
-    - 完善第九章第 2 节：自定义错误集声明 `pub err NetworkError { ... }` 与函数签名 `pub fn connect(): Socket ! NetworkError`；
-    - 禁手清单扩充升级为 Top 21（追加 #20 接收者禁用 self、#21 裸指针必须在 unsafe 中操作）。
+  - 彻底清除 Zig 繁琐底层强转 Builtins（`@ptrCast`, `@alignCast`, `@intCast`, `@truncate`），确立 CP 现代统一的 `as` 运算符与 `Type(val)` 构造：
+    - 明确 `ptr as *TargetType!` 在代码生成时由编译器底层自动发射 `@ptrCast(@alignCast(...))`，无需开发者手工管理对齐断言；
+    - 纠正结构体指针/借用字段访问为自动解引用（`alloc.is_active = true;`），彻底杜绝 Zig 风格冗余的 `alloc.*.field`；
+    - 清洗内建指令表，仅保留属于 CP 编译期的内省指令（`@sizeOf`, `@alignOf`, `@typeOf`, `@typeName`, `@fieldsOf`, `@field`, `@compileError`, `@as`）；
+    - 禁手清单升级为 Top 23：追加 #22 严禁 `ptr.*.field` 冗余解引用、#23 严禁手动书写 `@ptrCast(@alignCast(ptr))`。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 清洗第 12 章遗留示例中的 `@ptrCast(@alignCast)` 与 `__zig__`，同步更新为规范 CP `as` 与 `zig {}`。
 
