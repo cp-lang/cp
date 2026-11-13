@@ -752,3 +752,9 @@ Bun AGY 在 265 个模块的实战重构中提交了 8 项遗漏审查。经逐�
 - **c-ares C-FFI 声明 (`_cares.cp`)**：吸收 `/data/dev/bun/src/cares_sys/c_ares.cp`，通过 `@c { ... }` 声明 `ares_channeldata`、`ares_addrinfo`、`ares_options` 及异步查询与 fd 驱动接口，并封装类型安全的 `NSClass`、`NSType`（A, AAAA, CNAME, TXT, MX, SRV, HTTPS）与 `CaresStatus`。
 - **RFC 1035 Wire 协议与 `0xC0` 指针压缩 (`packet.cp`)**：实现 12 字节网络大端序 `DnsHeader` 位域打包/解包与 `DnsWireCodec`，在 `decodeDomainName` 中支持 RFC 1035 4.1.4 的 `0xC0` 14 位偏移指针压缩跳转与最大跳转次数守卫（防止畸形循环指针），首次消费位置精确定格在首个指针的 2 字节之后。
 - **定容 TTL 解析缓存 (`cache.cp`)**：基于常量泛型 `DnsCache<const CAP: usize>` 实现零堆分配的域名解析缓存表，支持按 `(host, qtype, family)` 精确匹配、TTL 到期自动惰性失效及 LRU/最早过期槽位替换。
+
+## 2026-11-14 构建 `lib/compress/` (吸收 Bun Zlib/Brotli/Zstd 绑定、CRC32/Adler32 与 Gzip/RLE 子系统)
+
+### 1. 架构设计与核心实现
+- **多算法 C-FFI 与 HTTP 编码协商 (`_codecs.cp`)**：吸收 `/data/dev/bun/src/zlib/`、`src/brotli/` 与 `src/zstd/`，提供统一的 Zlib/Brotli/Zstd `@c` C-FFI 原生绑定、`Accept-Encoding` 优先级协商器 `CompressionFormat`（`zstd > br > gzip > deflate`）及零依赖压缩缓冲区上界估算器 `CompressBoundEstimator`。
+- **标准校验和与帧封装 (`checksum.cp`, `gzip.cp`)**：实现通过 IEEE 802.3 标准向量（`"123456789" -> 0xCBF43926`）验证的 `Crc32`、通过 RFC 1950 标准向量（`"Wikipedia" -> 0x11E60398`）验证的 `Adler32`、RFC 1952 10 字节 `GzipHeader` + 8 字节 `CRC32/ISIZE` 帧尾校验，以及纯 CP 零依赖 `RleCodec`。

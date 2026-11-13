@@ -509,3 +509,10 @@
   - 新增 [`lib/dns/index.cp`](file:///data/dev/cp/lib/dns/index.cp)：`cap:dns` 对外统一出口。
 - [`cap/test/test_dns.cp`](file:///data/dev/cp/cap/test/test_dns.cp):
   - 新增覆盖 c-ares 类型、RFC 1035 报文头、Wire 域名编解码与指针压缩、TTL 缓存的 4 大测试套件（4/4 PASS）。
+- [`lib/compress/`](file:///data/dev/cp/lib/compress/):
+  - 新增 [`lib/compress/_codecs.cp`](file:///data/dev/cp/lib/compress/_codecs.cp)：Zlib / Brotli / Zstd C-FFI 声明、`ZlibFlush`、`ZlibStatus`、`CompressionFormat` 与 `CompressBoundEstimator`；
+  - 新增 [`lib/compress/checksum.cp`](file:///data/dev/cp/lib/compress/checksum.cp)：IEEE 802.3 `Crc32` 与 RFC 1950 `Adler32` 校验器；
+  - 新增 [`lib/compress/gzip.cp`](file:///data/dev/cp/lib/compress/gzip.cp)：RFC 1952 `GzipHeader` 帧头/帧尾编解码与 `RleCodec` 字节压缩器；
+  - 新增 [`lib/compress/index.cp`](file:///data/dev/cp/lib/compress/index.cp)：`cap:compress` 对外统一出口。
+- [`cap/test/test_compress.cp`](file:///data/dev/cp/cap/test/test_compress.cp):
+  - 新增覆盖压缩协商、CRC32/Adler32 标准向量、Gzip 帧头/帧尾与 RleCodec 的 4 大测试套件（4/4 PASS）。

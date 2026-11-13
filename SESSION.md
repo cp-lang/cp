@@ -1043,3 +1043,23 @@
   1. `lib/dns/`（`_cares.cp`, `packet.cp`, `cache.cp`, `index.cp`）；
   2. `cap/test/test_dns.cp`：4 大端到端测试套件；
   3. `SESSION.md`, `CHANGELOG.md`, `DEVLOG.md`：四线文档同步。
+
+---
+
+## 2026-11-14 连续自主推进：构建 `lib/compress/` (`cap:compress`) Zlib/Brotli/Zstd 绑定、CRC32/Adler32 与 Gzip/RLE 子系统
+
+### 1. 执行结果汇报
+1. **吸收 Bun `/data/dev/bun/src/zlib/`、`/data/dev/bun/src/brotli/` 与 `/data/dev/bun/src/zstd/` 资产，构建 [`lib/compress/`](file:///data/dev/cp/lib/compress/) (`cap:compress`)**：
+   - [`lib/compress/_codecs.cp`](file:///data/dev/cp/lib/compress/_codecs.cp)：Zlib / Brotli / Zstd `@c` C-FFI 绑定（`z_stream_s`, `BrotliDecoderStateStruct`, `BrotliEncoderStateStruct`, `compress2`, `uncompress`, `ZSTD_compress`, `ZSTD_decompress`, `BrotliDecoderCreateInstance` 等）、`ZlibFlush`、`ZlibStatus`、`BrotliOperation`、`CompressionFormat`（`Accept-Encoding` 协商）与 `CompressBoundEstimator`；
+   - [`lib/compress/checksum.cp`](file:///data/dev/cp/lib/compress/checksum.cp)：IEEE 802.3 多项式 (`0xEDB88320`) `Crc32` 与 RFC 1950 `Adler32` 流式增量与单次校验和计算器；
+   - [`lib/compress/gzip.cp`](file:///data/dev/cp/lib/compress/gzip.cp)：RFC 1952 10 字节 `GzipHeader` 帧头与 8 字节 `CRC32 + ISIZE` 帧尾编解码器，以及无损高速 `RleCodec` 字节流压缩/解压器；
+   - [`lib/compress/index.cp`](file:///data/dev/cp/lib/compress/index.cp)：`cap:compress` 统一对外出口。
+2. **端到端测试验证**：
+   - [`cap/test/test_compress.cp`](file:///data/dev/cp/cap/test/test_compress.cp)：4 大测试套件（`Accept-Encoding` 协商与压缩上界估算、CRC32/Adler32 标准测试向量、RFC 1952 Gzip 帧头/帧尾校验、RleCodec 压缩/解压往返）100% PASS（`Total: 4 | Passed: 4 | Failed: 0`）。
+
+### 2. 阶段里程碑 Git 提交 (`lib/compress/`)
+- **提交说明**：`feat(compress): add lib/compress zlib/brotli/zstd FFI, CRC32/Adler32, Gzip frame and RLE codec`
+- **提交范围**：
+  1. `lib/compress/`（`_codecs.cp`, `checksum.cp`, `gzip.cp`, `index.cp`）；
+  2. `cap/test/test_compress.cp`：4 大端到端测试套件；
+  3. `SESSION.md`, `CHANGELOG.md`, `DEVLOG.md`：四线文档同步。
