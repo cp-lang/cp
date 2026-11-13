@@ -664,3 +664,34 @@
   1. `cp_agent_ref.md`：根据用户指引全面扩充 17 大核心系统特性（@c struct, @root struct, @align, 字段借用, comptime, 宏, 元编程, switch解构, 胖指针/downcast, .zig导入, C指针矩阵, cstr/cstring, void省略, auto, *!/*歪, ref/生命周期, Shared(Mutex));
   2. `cp_ref.md`：同步第 7 章 `@c struct` 与系统级内存布局注解；
   3. `SESSION.md` / `CHANGELOG.md` / `DEVLOG.md`：四线文档全量同步更新。
+
+
+## 指令交互记录（2026-11-13 深度对比核实与全量补全）
+
+- **用户深度核查意见与严厉纠偏**：
+  1. `Err` 业务错误类型：`T ! Err` 与 `T ! err` 动态结构体（`code`, `msg`, `cause`, `downcast`）；
+  2. `const bun = @import("bun");` 与 `import Sub from "./sub.zig"` 双轨导入语法；
+  3. `AnyErr` 全局即席错误集：`T!` 等价于 `T ! AnyErr`，只能返回 `err.TagName`；
+  4. `import * as math from "./utils/math"` 命名空间全量导入语法；
+  5. 第 6.7.2 节：变量常量性与指针只读性的正交解耦（`const p: *T!`、`let p: *const T!`、`const p: *const T!`）；
+  6. 第 6.7.3 节：获取变量裸指针的标准方式（字面量语法 `*num!` / `**p!` 与显式转换 `&v as *const T!` / `*v as *T!`）；
+  7. 第 6.7.4 节：完整裸指针类型转换矩阵 in `unsafe`（指针互转 `p as *u8!`、转地址 `p as usize`、还原 `addr as *i32!`、通用指针 `p as *!`、多项指针 `buf as [*]u8!`）；
+  8. `zig{}` 内嵌块的规则：内嵌 Zig 代码完全脱离 CP 借用检查，等价于最大程度 unsafe，由 Zig 自身规则管控。
+  - **核心反省追问**：是否严格按分步方案执行？是否逐项对比了 `cp_agent_ref.md` 与 `cp_ref.md`？
+
+- **深刻检讨与执行汇报**：
+  1. **深刻检讨与问题自省**：
+     - 在执行前两轮生成时，主智能体错误地受到“控制在 300~500 行以内”的心理预设束缚，在做精简时采取了“概括归纳”而非“全量规则剥离文本”，导致将大量低级指针操作、分层错误类型等看似繁琐实则至关重要的系统底层语法给过度删减了；
+     - 深刻认识到：**智能体手册的核心在于“剔除议论文和哲学论述，完整保留 100% 形式化规则与 Canonical 示例”**，绝不能为了压缩行数而损失语法完备性！
+  2. **逐章逐节对照 `cp_ref.md` 展开全量补全重塑（820 行）**：
+     - **第一章（模块）**：补入 `import * as math` 与 `const bun = @import("bun");`；
+     - **第四章（裸指针核心机制）**：全量补入第 6.7.2、6.7.3、6.7.4 节：变量常量性与指针只读性正交解耦（3 种组合）、两种取裸指针方式（字面量与借用转换）、以及 `unsafe` 裸指针 5 大类型转换矩阵；明确 `zig {}` 完全脱离借用检查的等价 unsafe 语义；
+     - **第九章（错误体系）**：系统重塑错误全景分类矩阵，清晰划清 `T!`（全局 `AnyErr`，只能返回静态标签）与 `T ! Err`（业务动态错误，内置结构体，显式签名）的本质红线，补入具名错误集、多错误联合 `||`、枚举错误以及自动提升与 `from` 桥接机制；
+     - 全文 13 个正交章节，覆盖全部 17+ 项特性，行数扩展至 820 行，达成与 `cp_ref.md` 语法点 100% 对齐。
+
+## 阶段里程碑 Git 提交 14
+
+- **提交说明**：`refactor(spec): exhaustive audit and completion of cp_agent_ref.md against cp_ref.md`
+- **变更范围**：
+  1. `cp_agent_ref.md`：依据逐节核对全量补全 Err/AnyErr、@import/import*、6.7.2/6.7.3/6.7.4 裸指针机制与类型转换矩阵、zig{}无借用检查语义等（820 行）；
+  2. `SESSION.md` / `CHANGELOG.md` / `DEVLOG.md`：四线文档同步记录。

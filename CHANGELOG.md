@@ -399,3 +399,12 @@
     - 扩充 Top 18 绝对禁手清单。
 - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
   - 更新第 7 章系统级内存布局列表，将 `@extern struct` 统一更正为现代规范 `@c struct`，并补充 `@root struct` 与 `@align(N)`。
+
+- [`cp_agent_ref.md`](file:///data/dev/cp/cp_agent_ref.md):
+  - 逐章逐节对照 `cp_ref.md` 展开穷尽式查漏补缺，手册全面扩充至 820 行：
+    - 补入命名空间全量导入 `import * as math` 与 Zig 风格原生物理导入 `const bun = @import("bun")`；
+    - 新增第四章专门阐述 6.7.2 变量常量性与指针只读性的正交解耦（`const p: *T!`、`let p: *const T!`、`const p: *const T!`）；
+    - 补全 6.7.3 获取变量裸指针的标准方式（字面量语法 `*v!` / `**v!` 与安全借用转换 `&v as *T!` / `*v as *T!`）；
+    - 补全 6.7.4 完整裸指针类型转换矩阵 in `unsafe`（指针互转、物理内存整型地址、通用裸指针与未定长多项指针）；
+    - 明确 `zig {}` 内嵌逃逸舱完全脱离 CP 借用检查的系统级定义；
+    - 系统重构第九章错误体系：严密区分 `T!`（全局 `AnyErr`，禁止动态装箱）与 `T ! Err`（业务动态结构体，显式签名），补齐具名错误集、多错误联合声明 `T ! E1 || E2` 与 `from` 桥接机制。
