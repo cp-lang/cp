@@ -788,7 +788,11 @@ impl Codegen {
                             {
                                 let non_recv_params: Vec<&Param> = params
                                     .iter()
-                                    .filter(|p| p.ident.sym != "this" && p.ident.sym != "_")
+                                    .filter(|p| {
+                                        p.ident.sym != "this"
+                                            && p.ident.sym != "_"
+                                            && p.ident.sym != "self"
+                                    })
                                     .collect();
                                 match ret_ty {
                                     Type::BorrowType {

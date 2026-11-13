@@ -450,3 +450,15 @@
   - 完结 Bun AGY 7 项编译热修任务。
 - [`cp_agent_ref.md`](file:///data/dev/cp/cp_agent_ref.md) & [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
   - 完成两轮 Gemini 4 审计项及 Bun AGY Wave 1/2 建议的双向同步：补齐 `.Variant` 载荷简写构造、`move u |> fn(*)` 与管道尾部 `?`/`??`、`*(*T?!)` 二级可空出参裸指针、`(&T)?`/`&(T!E)` 与 `: *x T`/`: *(x | y) T`/`: *_ T` 可变借用返回、`@inline` 与 `unsafe fn`、`let * = expr;`、`Err.init(...).with_cause(move b)`、内置 `/pattern/flags` 与 `RegExp`、`@bitCast` vs `as`、SIMD 与位计数原语（`@Vector`, `@splat`, `@clz`, `@ctz`, `@popCount`, `@reduce`, `@select`, `@byteSwap`, `@bitSizeOf`）、`@typeInfo(T)` 反射、多级点路径值类型直通（`Dotted Path Types`）、`T ! FileErr || err{...}` 匿名即席错误联合、单行 `@c fn`、枚举 `.get`/`.has`、前缀 `try` 迁移兼容说明，并修正 `cp_ref.md` 中 `export` 与 `Trait` 拼写笔误。
+- [`lib/net/`](file:///data/dev/cp/lib/net/)（移除单文件 `lib/net.cp`，新建扁平化网络标准库目录）：
+  - 新增 [`lib/net/_usockets.cp`](file:///data/dev/cp/lib/net/_usockets.cp)：底层 `@c { ... }` uSockets C-FFI 声明、不透明结构体句柄与监听常量/状态枚举；
+  - 新增 [`lib/net/address.cp`](file:///data/dev/cp/lib/net/address.cp)：`AddressFamily`、`Ipv4Addr`、`Ipv6Addr` 与 `SocketAddress` 解析及检测；
+  - 新增 [`lib/net/socket.cp`](file:///data/dev/cp/lib/net/socket.cp)：`SocketState`、`SocketStats`、`SafeSocket`（含 `> 240s` 自动拆分 `long_timeout_min` 及 RAII 释放）与兼容层 `Socket`；
+  - 新增 [`lib/net/tcp_stream.cp`](file:///data/dev/cp/lib/net/tcp_stream.cp)：16KB `StreamBuffer` 软塞缓冲与 `TcpStream`；
+  - 新增 [`lib/net/tcp_server.cp`](file:///data/dev/cp/lib/net/tcp_server.cp)：`ListenConfig`、`TcpServer` 与兼容层 `Server` / `listen()` / `connect()`；
+  - 新增 [`lib/net/udp.cp`](file:///data/dev/cp/lib/net/udp.cp)：`UdpPacket` 与 `UdpSocket` 数据报套接字抽象；
+  - 新增 [`lib/net/index.cp`](file:///data/dev/cp/lib/net/index.cp)：`cap:net` 统一导出入口。
+- [`cap/test/test_net.cp`](file:///data/dev/cp/cap/test/test_net.cp):
+  - 扩充为覆盖 `lib/net/` 全组件及兼容 API 的 6 大端到端测试套件（6/6 PASS）。
+- [`cpc/src/sema.rs`](file:///data/dev/cp/cpc/src/sema.rs), [`cpc/src/codegen/expr.rs`](file:///data/dev/cp/cpc/src/codegen/expr.rs), [`cpc/src/codegen/borrow.rs`](file:///data/dev/cp/cpc/src/codegen/borrow.rs), [`cpc/src/codegen/mod.rs`](file:///data/dev/cp/cpc/src/codegen/mod.rs), [`cpc/src/codegen/prelude.rs`](file:///data/dev/cp/cpc/src/codegen/prelude.rs)（及 `cpc_dev/src/*` 镜像同步）:
+  - 修正 `@net_listen`、`@net_accept_async`、`@net_write_async` 的 `I32` 返回类型推导及类方法状态机回调符号生成，统一 `self`/`this`/`_` 接收者参数过滤。

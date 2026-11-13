@@ -2420,7 +2420,11 @@ impl Analyzer {
                             let params = cm
                                 .params
                                 .iter()
-                                .filter(|p| p.ident.sym != "this" && p.ident.sym != "_")
+                                .filter(|p| {
+                                    p.ident.sym != "this"
+                                        && p.ident.sym != "_"
+                                        && p.ident.sym != "self"
+                                })
                                 .map(|p| p.ty.clone())
                                 .collect();
                             let _ = self.define(
@@ -2447,7 +2451,11 @@ impl Analyzer {
                                 let params = tm
                                     .params
                                     .iter()
-                                    .filter(|p| p.ident.sym != "this" && p.ident.sym != "_")
+                                    .filter(|p| {
+                                        p.ident.sym != "this"
+                                            && p.ident.sym != "_"
+                                            && p.ident.sym != "self"
+                                    })
                                     .map(|p| p.ty.clone())
                                     .collect();
                                 let _ = self.define(
@@ -6073,12 +6081,14 @@ impl Analyzer {
             Expr::Move(inner) => self.infer_type(inner),
             Expr::Builtin(call) => match call.name.as_str() {
                 "@print" | "@fs_write_file" | "@fs_mkdir" | "@fs_remove" | "@fs_copy"
-                | "@net_send" | "@net_close" | "@net_listen" => Ok(Type::Void),
+                | "@net_send" | "@net_close" => Ok(Type::Void),
                 "@fs_read_file" | "@fs_read_async" | "@net_read_async" | "@http_fetch" => {
                     Ok(Type::String)
                 }
                 "@fs_exists" => Ok(Type::Bool),
-                "@net_connect" => Ok(Type::I32),
+                "@net_connect" | "@net_listen" | "@net_accept_async" | "@net_write_async" => {
+                    Ok(Type::I32)
+                }
                 "@self" => Ok(Type::PID),
                 "@yield_to_beam" | "@json_parse" | "@alloc" => Ok(Type::Any),
                 "@get_arena" | "@arena" => Ok(Type::Ref(Ident {

@@ -4367,3 +4367,16 @@ pub fn connect(): NetworkError!Socket { ... }
 3. @typeInfo(T) 编译期反射内省：src/collections/ 与 src/ptr/ 泛型数据结构大量依靠 @typeInfo(T) 判断 .pointer、.@"struct" 与 .@"enum"。
 
 提前将这些高频内置指令写入 cp_agent_ref.md，可确保 Wave 1 与 Wave 2 并行子智能体零阻力、零试错高效推进！
+
+### 四、 当前正在推进的任务与后续规划
+
+1. 统一事件循环与任务调度体系 (cap:event_loop / lib/event_loop/)：
+   • lib/event_loop/timer.cp：侵入式二叉最小堆高精度定时器（Timer / TimerHeap）；
+   • lib/event_loop/concurrent_task.cp：16 字节无锁跨线程任务与队列（ConcurrentTask / ConcurrentQueue）；
+   • lib/event_loop/file_poll.cp：跨平台系统描述符事件轮询（基于 std.posix.poll）；
+   • lib/event_loop/deferred_task.cp：微任务与 I/O 批处理排空队列；
+   • lib/event_loop/loop.cp：统一 EventLoop 调度引擎；
+   • lib/event_loop/index.cp：对外统一导出。
+2. 正在调优与推进：
+   • 完善 cap/test/test_event_loop.cp 端到端测试；
+   • 后台守护任务监听保持常驻，零等待响应 Bun AGY 的热修请求。

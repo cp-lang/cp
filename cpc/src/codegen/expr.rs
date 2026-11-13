@@ -1256,7 +1256,11 @@ impl Codegen {
 
                                 let non_recv_params: Vec<Param> = params
                                     .into_iter()
-                                    .filter(|p| p.ident.sym != "this" && p.ident.sym != "_")
+                                    .filter(|p| {
+                                        p.ident.sym != "this"
+                                            && p.ident.sym != "_"
+                                            && p.ident.sym != "self"
+                                    })
                                     .collect();
                                 let obj_code = self.generate_expr(&mem.obj);
                                 let mut args = String::new();
@@ -1491,7 +1495,11 @@ impl Codegen {
                                 }
                                 let non_recv_params: Vec<Param> = params
                                     .into_iter()
-                                    .filter(|p| p.ident.sym != "this" && p.ident.sym != "_")
+                                    .filter(|p| {
+                                        p.ident.sym != "this"
+                                            && p.ident.sym != "_"
+                                            && p.ident.sym != "self"
+                                    })
                                     .collect();
                                 let mut args = String::new();
                                 for (idx, arg) in call.args.iter().enumerate() {
@@ -2730,7 +2738,11 @@ impl Codegen {
                     .lookup_method(base_name, "init")
                     .map(|(p, _, _)| {
                         p.into_iter()
-                            .filter(|param| param.ident.sym != "this" && param.ident.sym != "_")
+                            .filter(|param| {
+                                param.ident.sym != "this"
+                                    && param.ident.sym != "_"
+                                    && param.ident.sym != "self"
+                            })
                             .collect()
                     })
                     .unwrap_or_default();
@@ -2865,7 +2877,7 @@ impl Codegen {
                         } else if inferred == "[]const u8" {
                             "ctx.await_result.?.string".to_string()
                         } else if inferred == "i32" || inferred == "usize" || inferred == "u32" {
-                            "@intCast(ctx.await_result.?.int)".to_string()
+                            format!("@as({}, @intCast(ctx.await_result.?.int))", inferred)
                         } else if inferred.starts_with('*') {
                             format!(
                                 "@as({}, @ptrCast(@alignCast(ctx.await_result.?.any)))",
@@ -2882,6 +2894,8 @@ impl Codegen {
                     } else {
                         self.generate_expr(inner)
                     }
+                } else if matches!(&**inner, Expr::Builtin(_)) {
+                    self.generate_expr(inner)
                 } else if self.is_state_machine {
                     let task_code = self.generate_expr(inner);
                     let next_pc = self.pc_counter + 1;
@@ -3099,10 +3113,15 @@ impl Codegen {
                     }
                     let handle = self.generate_expr(&call.args[0]);
                     let next_pc = self.pc_counter + 1;
+                    let current_fn = if let Some(c) = &self.current_class_name {
+                        format!("{}.{}", c, self.current_fn_zig_name)
+                    } else {
+                        self.current_zig_fn_name.clone()
+                    };
                     let logic = if self.is_beam_mode {
                         "unreachable;".to_string()
                     } else {
-                        format!("const h: std.posix.fd_t = @intCast({}); const rc = std.os.linux.accept4(h, null, null, std.posix.SOCK.NONBLOCK | std.posix.SOCK.CLOEXEC); const err = std.posix.errno(rc); if (err == .SUCCESS) {{ ctx.received_msg = .{{ .int = @intCast(rc) }}; ctx.pc = {}; continue; }} else if (err == .AGAIN or err == .WOULDBLOCK) {{ register_fd(h, @ptrCast(&{}), @ptrCast(ctx), std.posix.POLL.IN); return; }} else {{ schedule(@ptrCast(&{}), @ptrCast(ctx)); return; }}", handle, next_pc, self.current_zig_fn_name, self.current_zig_fn_name)
+                        format!("const h: std.posix.fd_t = @intCast({}); const rc = std.os.linux.accept4(h, null, null, std.posix.SOCK.NONBLOCK | std.posix.SOCK.CLOEXEC); const err = std.posix.errno(rc); if (err == .SUCCESS) {{ ctx.received_msg = .{{ .int = @intCast(rc) }}; ctx.pc = {}; continue; }} else if (err == .AGAIN or err == .WOULDBLOCK) {{ register_fd(h, @ptrCast(&{}), @ptrCast(ctx), std.posix.POLL.IN); return; }} else {{ schedule(@ptrCast(&{}), @ptrCast(ctx)); return; }}", handle, next_pc, current_fn, current_fn)
                     };
                     self.write_to_case(&logic);
                     self.next_state();
@@ -3114,10 +3133,15 @@ impl Codegen {
                     }
                     let handle = self.generate_expr(&call.args[0]);
                     let next_pc = self.pc_counter + 1;
+                    let current_fn = if let Some(c) = &self.current_class_name {
+                        format!("{}.{}", c, self.current_fn_zig_name)
+                    } else {
+                        self.current_zig_fn_name.clone()
+                    };
                     let logic = if self.is_beam_mode {
                         "unreachable;".to_string()
                     } else {
-                        format!("const h: std.posix.fd_t = @intCast({}); var buf = ctx.arena.?.allocator().alloc(u8, 4096) catch unreachable; if (std.posix.read(h, buf)) |bytes_read| {{ if (bytes_read > 0) {{ ctx.received_msg = .{{ .string = buf[0..bytes_read] }}; ctx.pc = {}; continue; }} else {{ schedule(@ptrCast(&{}), @ptrCast(ctx)); return; }} }} else |err| switch (err) {{ error.WouldBlock => {{ register_fd(h, @ptrCast(&{}), @ptrCast(ctx), std.posix.POLL.IN); return; }}, else => {{ schedule(@ptrCast(&{}), @ptrCast(ctx)); return; }}, }}", handle, next_pc, self.current_zig_fn_name, self.current_zig_fn_name, self.current_zig_fn_name)
+                        format!("const h: std.posix.fd_t = @intCast({}); var buf = ctx.arena.?.allocator().alloc(u8, 4096) catch unreachable; if (std.posix.read(h, buf)) |bytes_read| {{ if (bytes_read > 0) {{ ctx.received_msg = .{{ .string = buf[0..bytes_read] }}; ctx.pc = {}; continue; }} else {{ schedule(@ptrCast(&{}), @ptrCast(ctx)); return; }} }} else |err| switch (err) {{ error.WouldBlock => {{ register_fd(h, @ptrCast(&{}), @ptrCast(ctx), std.posix.POLL.IN); return; }}, else => {{ schedule(@ptrCast(&{}), @ptrCast(ctx)); return; }}, }}", handle, next_pc, current_fn, current_fn, current_fn)
                     };
                     self.write_to_case(&logic);
                     self.next_state();
@@ -3130,10 +3154,15 @@ impl Codegen {
                     let handle = self.generate_expr(&call.args[0]);
                     let data = self.generate_expr(&call.args[1]);
                     let next_pc = self.pc_counter + 1;
+                    let current_fn = if let Some(c) = &self.current_class_name {
+                        format!("{}.{}", c, self.current_fn_zig_name)
+                    } else {
+                        self.current_zig_fn_name.clone()
+                    };
                     let logic = if self.is_beam_mode {
                         "unreachable;".to_string()
                     } else {
-                        format!("const h: std.posix.fd_t = @intCast({}); const data_slice: []const u8 = {}; const rc = std.os.linux.write(h, data_slice.ptr, data_slice.len); const err = std.posix.errno(rc); if (err == .SUCCESS) {{ ctx.received_msg = .{{ .int = @intCast(rc) }}; ctx.pc = {}; continue; }} else if (err == .AGAIN or err == .WOULDBLOCK) {{ register_fd(h, @ptrCast(&{}), @ptrCast(ctx), std.posix.POLL.OUT); return; }} else {{ schedule(@ptrCast(&{}), @ptrCast(ctx)); return; }}", handle, data, next_pc, self.current_zig_fn_name, self.current_zig_fn_name)
+                        format!("const h: std.posix.fd_t = @intCast({}); const data_slice: []const u8 = {}; const rc = std.os.linux.write(h, data_slice.ptr, data_slice.len); const err = std.posix.errno(rc); if (err == .SUCCESS) {{ ctx.received_msg = .{{ .int = @intCast(rc) }}; ctx.pc = {}; continue; }} else if (err == .AGAIN or err == .WOULDBLOCK) {{ register_fd(h, @ptrCast(&{}), @ptrCast(ctx), std.posix.POLL.OUT); return; }} else {{ schedule(@ptrCast(&{}), @ptrCast(ctx)); return; }}", handle, data, next_pc, current_fn, current_fn)
                     };
                     self.write_to_case(&logic);
                     self.next_state();

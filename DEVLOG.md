@@ -685,3 +685,14 @@ Bun AGY 在 265 个模块的实战重构中提交了 8 项遗漏审查。经逐�
 ### 2. `@Vector(N, T)` 与类型实参表达式 (`Expr::TypeVal`) 闭环
 - 针对 SIMD 高速扫描场景中高频出现的 `const V = @Vector(16, u8); const v: V = chunk; const cmp = v == zeros;`，在 `sema` 与 `codegen` 中同步打通 `const` 向量类型别名注册、`[N]T` 与数组字面量到 `@Vector` 的隐式协变，以及向量间 `==` / `!=` 直接发射 Zig 原生逐元素向量比较（返回 `@Vector(N, bool)` 供 `@bitCast` 提取位掩码，而非调用返回标量 `bool` 的 `cp_eq`）。
 - 针对编译期反射与泛型函数接收类型实参（如 `std.mem.zeroes([16]u8)`、`isPointerType(*i32)`、`@c fn(...)`），统一通过 `Expr::TypeVal` 承载并在代码生成阶段映射为原生 Zig 类型表达式。
+
+## 2026-11-13 扩展 `lib/net/` (基于 uSockets C-FFI 的扁平化网络子系统) 与 Bun Net 资产吸收
+
+### 1. 架构设计与模块划分
+- 遵循架构白皮书第三章第 2 节扁平化标准库规范，将原单文件 `lib/net.cp` 重构扩展为 `lib/net/` 目录体系：
+  - `_usockets.cp` 以 `_` 前缀承载底层 `@c { ... }` uSockets C-FFI 声明与不透明句柄（`us_loop_t`, `us_socket_t`, `us_listen_socket_t`, `us_udp_socket_t` 等），使未直接调用 C 符号的纯 CP 测试与业务在编译期零外部静态库耦合，同时为底层事件循环提供完整 C ABI 声明；
+  - `address.cp`、`socket.cp`、`tcp_stream.cp`、`tcp_server.cp`、`udp.cp` 吸收 Bun `uws_sys`、`uws` 与 `runtime/socket` 核心机制（包括 `> 240s` 超时自动提升为分钟级 `long_timeout_min`、16KB `StreamBuffer` 软塞聚合写入、`ListenConfig.toLibusOptions()` 位掩码构建），同时完整保留 `Socket`、`Server`、`listen(port: i32)` 向下兼容接口。
+
+### 2. 编译器关联问题定位与修复
+- **异步网络内建原语与类方法状态机**：`@net_listen`、`@net_accept_async`、`@net_write_async` 在 `sema.rs` 中补齐 `Type::I32` 返回类型；类内 `async fn` 状态机挂起回调由 `self.current_zig_fn_name`（`Socket_read`）修正为容器限定名 `Socket.read`，且 `await @net_*_async(...)` 直接消费内建状态切换结果而不二次包装为 `*CpTask`。
+- **接收者参数过滤一致性**：在 `sema.rs`、`codegen/expr.rs`、`codegen/borrow.rs` 与 `codegen/mod.rs` 中统一过滤 `this`、`_` 与 `self` 接收者形参，避免调用时将首个业务实参误对齐到接收者形参。

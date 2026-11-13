@@ -2299,6 +2299,8 @@ impl Codegen {
                 self.writeln("pub var __cap_test_total: usize = 0;");
                 self.writeln("pub var __cap_test_passed: usize = 0;");
                 self.writeln("pub var __cap_test_failed: usize = 0;");
+            } else if features.needs_actors {
+                self.writeln("\npub var global_io: std.Io = undefined;");
             }
 
             let has_main = self.fn_sigs.contains_key("main");
@@ -3310,7 +3312,9 @@ impl Codegen {
                     let non_recv_params: Vec<String> = m
                         .params
                         .iter()
-                        .filter(|p| p.ident.sym != "this" && p.ident.sym != "_")
+                        .filter(|p| {
+                            p.ident.sym != "this" && p.ident.sym != "_" && p.ident.sym != "self"
+                        })
                         .map(|p| format!("\"{}\"", p.ident.sym))
                         .collect();
                     let params_str = if non_recv_params.is_empty() {

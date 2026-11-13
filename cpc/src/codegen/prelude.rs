@@ -71,10 +71,6 @@ impl ModuleFeatures {
                 }
             }
         }
-        if f.is_lib_mode {
-            f.needs_actors = false;
-        }
-
         if f.needs_collections || f.needs_actors {
             f.needs_string_helpers = true;
             f.needs_equality = true;
@@ -107,7 +103,7 @@ impl ModuleFeatures {
     fn scan_decl(&mut self, d: &Decl) {
         match d {
             Decl::Func(func) => {
-                if func.ident.sym == "main" {
+                if func.ident.sym == "main" || func.is_async {
                     self.needs_actors = true;
                 }
                 if let Some(ret) = &func.return_type {
@@ -126,6 +122,9 @@ impl ModuleFeatures {
                     self.scan_type(&f.ty);
                 }
                 for m in &c.methods {
+                    if m.is_async {
+                        self.needs_actors = true;
+                    }
                     if let Some(ret) = &m.return_type {
                         self.scan_type(ret);
                     }
@@ -526,6 +525,11 @@ impl ModuleFeatures {
                     self.needs_hash = true;
                 } else if b.name == "@not" && !self.is_lib_mode {
                     self.needs_not = true;
+                } else if matches!(
+                    b.name.as_str(),
+                    "@net_listen" | "@net_accept_async" | "@net_read_async" | "@net_write_async"
+                ) {
+                    self.needs_actors = true;
                 }
                 for a in &b.args {
                     self.scan_expr(a);

@@ -888,3 +888,40 @@
   1. `cpc/src/*` & `cpc_dev/src/*`：内置 `/pattern/flags` 正则字面量、`Expr::TypeVal`、`@Vector` 常量别名与向量比较、`[*]const T?!` 与 `[N]T` 类型实参、`*T!` -> `*const T!` 协变、`ErrorUnion` 降级解包及 Bun AGY 7 项编译热修；
   2. `cp_agent_ref.md`、`cp_ref.md`：完成两轮 Gemini 4 审计项与 Bun AGY Wave 1/2 底层原语双向 100% 同步；
   3. `TASK.md`、`SESSION.md`、`CHANGELOG.md`、`DEVLOG.md`：任务状态与四线文档同步。
+
+---
+
+## 2026-11-13（续 3） `cap:event_loop` 验收汇报与 `lib/net/` (uSockets C-FFI 扁平网络子系统) 全量构建
+
+### 1. 收到用户指令
+1. 核查此前规划的统一事件循环与任务调度体系 (`cap:event_loop` / `lib/event_loop/`) 及 `cap/test/test_event_loop.cp` 执行情况；
+2. 将单文件 `lib/net.cp` 扩展为基于 uSockets C-FFI 的扁平化 `lib/net/` 目录体系，吸收 Bun 的 `net` 资产。
+
+### 2. 执行结果汇报
+1. **`cap:event_loop` (`lib/event_loop/`) 端到端验收**：
+   - 验证 `lib/event_loop/` 下全套 6 个核心模块（`timer.cp`, `concurrent_task.cp`, `file_poll.cp`, `deferred_task.cp`, `loop.cp`, `index.cp`）与 `cap/test/test_event_loop.cp`，5 项端到端测试套件 100% 通过（`Total: 5 | Passed: 5 | Failed: 0`）。
+2. **扁平化 `lib/net/` (`cap:net`) 目录体系落地（吸收 Bun `uws_sys` / `uws` / `runtime/socket` 资产）**：
+   - [`lib/net/_usockets.cp`](file:///data/dev/cp/lib/net/_usockets.cp)：底层 `@c { ... }` uSockets C-FFI 函数绑定、不透明句柄（`us_loop_t`, `us_socket_t`, `us_socket_context_t`, `us_listen_socket_t`, `us_connecting_socket_t`, `us_udp_socket_t`, `us_udp_packet_buffer_t`, `us_timer_t`）、常量（`LIBUS_TIMEOUT_GRANULARITY`, `LIBUS_RECV_BUFFER_PADDING`, `LIBUS_EXT_ALIGNMENT`, `LIBUS_LISTEN_*`）与枚举（`SocketCloseCode`, `SocketKind`, `SendStatus`）；
+   - [`lib/net/address.cp`](file:///data/dev/cp/lib/net/address.cp)：吸收自 Bun `SocketAddress.cp` 的 `AddressFamily`、`Ipv4Addr`（点分十进制解析、回环/私有网段/多播判定、网络字节序整型互转）、`Ipv6Addr`（IPv4 映射地址与回环检测）与 `SocketAddress`（`v4`, `v6`, `loopbackV4`, `loopbackV6`, `parseV4`, `socklen`）；
+   - [`lib/net/socket.cp`](file:///data/dev/cp/lib/net/socket.cp)：吸收自 Bun `socket.cp` / `us_socket_t.cp` 的 `SocketState`、`SocketStats`、`SafeSocket`（RAII 生命周期、`setNoDelay`、`setKeepAlive`、`> 240s` 自动晋升分钟级 `long_timeout_min` 的 `setTimeout`、`pause`/`resumeSocket`、`detach`、`shutdown`/`close`/`release`）及向下兼容的异步 `Socket` 类；
+   - [`lib/net/tcp_stream.cp`](file:///data/dev/cp/lib/net/tcp_stream.cp)：吸收自 Bun `us_socket_stream_buffer_t` 的 16KB `StreamBuffer` 软塞缓冲池与 `TcpStream`（`cork`/`uncork` 聚合写入、流式接收缓冲与统计追踪）；
+   - [`lib/net/tcp_server.cp`](file:///data/dev/cp/lib/net/tcp_server.cp)：吸收自 Bun `Listener.cp` / `ListenSocket.cp` 的 `ListenConfig`（`toLibusOptions()` 位掩码构建）、`TcpServer`（绑定、连接接纳与活跃连接计数）及向下兼容的 `Server`、`listen(port: i32)`、`connect(port: i32)`；
+   - [`lib/net/udp.cp`](file:///data/dev/cp/lib/net/udp.cp)：吸收自 Bun `udp.cp` 的 `UdpPacket` 与 `UdpSocket`（绑定、对端连接、广播/单播 TTL/多播 TTL/多播回环控制与数据报收发统计）；
+   - [`lib/net/index.cp`](file:///data/dev/cp/lib/net/index.cp)：`cap:net` 统一对外导出出口，移除旧单文件 `lib/net.cp`。
+3. **`cpc` 编译器关联增强**：
+   - 修复 `@net_listen`、`@net_accept_async`、`@net_write_async` 在 `sema.rs` 中的返回类型推导（`Type::I32`）；
+   - 修复类内 `async fn` 状态机在 `@net_*_async` 下的方法引用名（`Class.method`）与 `await` 内建异步原语直通；
+   - 统一 `self` / `this` / `_` 接收者在 `sema` 与 `codegen` 中的非接收者参数过滤逻辑，并支持含 `async fn` 的模块在 `--lib` 模式下通过 `zig ast-check`。
+4. **全量验证通过**：
+   - `lib/net/*.cp` 全部 7 个文件 100% 通过 `cpc check` 与 `cpc --lib` + `zig ast-check`；
+   - [`cap/test/test_net.cp`](file:///data/dev/cp/cap/test/test_net.cp) 6 大端到端测试套件 100% PASS（`Total: 6 | Passed: 6 | Failed: 0`）；
+   - [`cap/test/test_net_async.cp`](file:///data/dev/cp/cap/test/test_net_async.cp) 与 [`cap/test/test_http_server.cp`](file:///data/dev/cp/cap/test/test_http_server.cp) 100% 向下兼容通过。
+
+### 3. 阶段里程碑 Git 提交
+- **用户指令**：`git 提交了吗? 阶段性成果,你需自动提交git`
+- **提交说明**：`feat(net,cpc): expand lib/net to flat uSockets C-FFI subsystem and absorb bun net assets`
+- **提交范围**：
+  1. `lib/net/`（`_usockets.cp`, `address.cp`, `socket.cp`, `tcp_stream.cp`, `tcp_server.cp`, `udp.cp`, `index.cp`）及移除单文件 `lib/net.cp`；
+  2. `cap/test/test_net.cp` & `cap/test/test_net.d.cp`：6 大端到端测试套件；
+  3. `cpc/src/sema.rs`, `cpc/src/codegen/expr.rs`, `cpc/src/codegen/borrow.rs`, `cpc/src/codegen/mod.rs`, `cpc/src/codegen/prelude.rs`：网络异步原语返回类型、类方法状态机回调及接收者参数过滤修复；
+  4. `SESSION.md`, `CHANGELOG.md`, `DEVLOG.md`, `TASK.md`：四线文档同步归档。
