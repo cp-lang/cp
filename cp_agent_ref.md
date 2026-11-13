@@ -68,19 +68,26 @@ let max_conn: u32 = bun.getMaxConnections() as u32;
 // 对外面向用户的模块（如 socket.cp, fs.cp）包装为纯 Safe 的 CP class 或 struct 导出。
 ```
 
-### 3. 导出与聚合重导出 (`export` / `pub`)
+### 3. 模块级导出与 `pub` 推荐规范
+> **架构契约**：在模块顶层（`struct` 与 `class` 之外），**`pub` 等价于 `export`，官方推荐统一使用简洁现代的 `pub`**：
 ```typescript
-// 1. 声明并直接导出
-export const MAX_BUFFER_SIZE: usize = 65536;
-export let global_status: i32 = 0;
-export fn add(a: i32, b: i32): i32 { return a + b; }
-export @c struct Point { pub x: i32 = 0; pub y: i32 = 0; }
-export class Engine { ... }
-export enum State { Idle, Running }
-export trait Reader { fn read(*_, buf: []u8): usize!; }
-export default class AgentCore { ... }
+// 1. 推荐统一使用 pub 声明顶层导出
+pub const MAX_BUFFER_SIZE: usize = 65536;
+pub let global_status: i32 = 0;
+pub fn add(a: i32, b: i32): i32 { return a + b; }
+pub @c struct Point { x: i32 = 0; y: i32 = 0; }
+pub class Engine { ... }
+pub static class MathUtils { ... }
+pub enum State { Idle, Running }
+pub err Error { OutOfMemory, Timeout }
+pub trait Reader { fn read(*_, buf: []u8): usize!; }
+pub type SocketFD = i32;
+pub default class AgentCore { ... }
 
-// 2. 聚合重导出（index.cp 单一真理来源出口规范）
+// 2. export 完全向下兼容保留
+export const OLD_FLAG: bool = true;
+
+// 3. 聚合重导出（index.cp 单一真理来源出口规范）
 export { Reader, Writer, Closer } from "./traits.cp";
 export { BufferReader, BufferWriter } from "./buffer.cp";
 export { add as sum, PI as TAU };
@@ -95,7 +102,7 @@ export * from "./sub_module.cp"; // 批量重导出
 
 ### 1. 变量声明矩阵
 CP 彻底废除 `let mut`、`var` 与 `threadlocal var`，全面拥抱清晰确定的可变性语义：
-- **`let`**：可变变量声明。局部变量写 `let x = ...;`，模块顶层可变变量写 `export let g_state = ...;`。允许重新赋值与就地修改内部字段；
+- **`let`**：可变变量声明。局部变量写 `let x = ...;`，模块顶层可变变量写 `pub let g_state = ...;`。允许重新赋值与就地修改内部字段；
 - **`const`**：常量与深度不可变声明。阻止一切重新赋值与内部属性修改；
 - **`@tls let`**：线程局部存储变量声明（对标 Zig `threadlocal var`，严禁书写 `threadlocal var`）；
 - **🚨 绝对禁止 `var`**：CP 中不存在 `var` 关键字（`var` 是 Zig 遗留语法），源代码中声明可变变量必须 100% 写作 `let`；
@@ -192,9 +199,9 @@ fn process_loop(*data: InternalLoopData) {
 
 ### 6. 类型别名 (`type`)
 ```typescript
-export type FileDescriptor = i32;
-export type ByteSlice = []const u8;
-export type Callback = @c fn (ctx: *!?, status: i32): void;
+pub type FileDescriptor = i32;
+pub type ByteSlice = []const u8;
+pub type Callback = @c fn (ctx: *!?, status: i32): void;
 ```
 
 ### 7. 原生运算符矩阵
@@ -209,7 +216,7 @@ export type Callback = @c fn (ctx: *!?, status: i32): void;
 
 ## 四、 裸指针核心机制与 Unsafe 内存操作 (Raw Pointers & Unsafe)
 
-### 1. 变量常量性与指针只读性的正交解耦
+### 1. 变量常量性与指针只读性的正交解耦 (6.7.2 规范)
 在 CP 中，“变量本身的重新赋值约束”与“指针指向的内存数据只读性”是两个完全解耦的维度：
 1. **`const p: *T! = ...;`（指针自身不可变，指向的内存可写）**：
    - `const` 约束的是变量 `p` 自身，不能让 `p` 重新指向别的地址（禁止 `p = other;`）；
@@ -220,7 +227,7 @@ export type Callback = @c fn (ctx: *!?, status: i32): void;
 3. **`const p: *const T! = ...;`（双重不可变）**：
    - 指针不可换，指向的内存数据亦绝对只读。
 
-### 2. 获取变量裸指针的标准方式 (在 `unsafe` 块中)
+### 2. 获取变量裸指针的标准方式 (6.7.3 规范，在 `unsafe` 块中)
 在 CP 中，获取变量的底层裸指针支持以下两种标准方式（均须在 `unsafe` 上下文中进行）：
 - **方式一：直接裸指针字面语法（`*v!` 与 `**v!`）**
   ```typescript
@@ -252,7 +259,7 @@ export type Callback = @c fn (ctx: *!?, status: i32): void;
   }
   ```
 
-### 3. 完整裸指针类型转换矩阵 (Type Casting Matrix in Unsafe)
+### 3. 完整裸指针类型转换矩阵 (6.7.4 规范，Type Casting Matrix in Unsafe)
 所有涉及裸指针的类型转换均须在 `unsafe` 块内通过 `as` 完成：
 ```typescript
 unsafe {
@@ -287,7 +294,7 @@ unsafe {
 
 ---
 
-## 五、 函数系统、形参契约与泛型 (Functions & Generics)
+## 五、 函数系统、形参契约、静态容器与泛型 (Functions & Generics)
 
 ### 1. 函数声明与四种形参传递模式
 ```typescript
@@ -352,49 +359,109 @@ fn makeBuffer<const N: usize>(): [N]u8 {
 - **遮蔽消除**：仅当形参或局部变量与成员字段同名时，写 `_.x` 消除二义性；
 - **静态方法**：必须冠以 `static` 修饰符，无接收者，通过 `ClassName.method()` 调用。
 
+### 4. 纯静态命名空间容器 (`static class` 与 `static struct`)
+> **核心规范 (5.15 节)**：用于声明纯静态工具函数库与常量容器，全员自动静态：
+- **全员自动静态**：内部所有的字段、常量与方法**默认自动拥有 `static` 属性**，无需逐个书写 `static`；
+- **严禁实例化**：`new MathUtils()` 或 `StringHelper{}` 均被编译器静态拦截（报错 `Cannot instantiate static class or struct`）；
+- **免除生命周期负担**：彻底无需也不允许声明 `init` 构造函数与 `release` 析构函数；
+- **禁止继承**：`static class` 严禁使用 `extends` 继承或被继承；
+- **成员可见性**：支持 `pub` / `priv` 控制对外导出。
+
+```typescript
+pub static class MathUtils {
+    pub const PI: f64 = 3.141592653589793;
+    const E: f64 = 2.718281828459045; // 私有常量
+
+    pub fn clamp(val: f64, min: f64, max: f64): f64 {
+        if (val < min) return min;
+        if (val > max) return max;
+        return val;
+    }
+}
+
+// 外部直接调用，无需 new
+let res = MathUtils.clamp(15.0, 0.0, 10.0); // 10.0
+// let m = new MathUtils(); // ❌ 编译拦截：Cannot instantiate static class 'MathUtils'
+```
+
 ---
 
 ## 六、 面向对象与系统级内存布局 (@c, @root, @value, @align, @refCount)
 
-### 1. 结构体 (`struct`) —— 值语义（纯栈分配，零额外开销）
+### 1. 结构体 (`struct`) —— 值语义（纯栈分配，成员默认 `pub`）
+- **默认全员 `pub`（Public by Default）**：作为纯数据模型与系统内存布局容器，`struct` 内部的所有字段与方法**默认全为公开（`pub`）**，透明访问零样板代码；可显式加 `priv` 设为私有；
+- **实例化语法**：采用 TS 对象风格字面量（严禁 Zig 的 `.{ .x = 1 }`）。
 ```typescript
-export struct Point {
-    pub x: i32 = 0;
-    pub y: i32 = 0;
+pub struct Point {
+    x: i32 = 0; // 默认 pub
+    y: i32 = 0; // 默认 pub
+    priv secret_tag: u32 = 0; // 私有字段
 
-    pub fn distanceSq(): i32 { return x * x + y * y; }
+    fn distanceSq(): i32 { return x * x + y * y; } // 默认 pub
     pub fn translate(*_, dx: i32, dy: i32) { x += dx; y += dy; }
 }
 
-// 泛型结构体
-export struct Vector<T> {
-    pub items: []T = [];
-    pub fn len(): usize { return items.len; }
-}
-
-// 实例化语法（严格禁止 Zig 的 .x = 1 前导点风格！）
 let pt = Point{ x: 10, y: 20 };
 ```
 
-### 2. 类 (`class`) —— 引用语义（堆分配，支持 RC/RAII 自动生命周期）
+### 2. 类 (`class`) —— 引用语义（堆分配，成员默认 `priv`）
+- **默认全员 `priv`（Private by Default）**：作为面向对象强封装体，`class` 内部字段与方法**默认全为私有（`priv`）**，外部访问被编译器严格拦截；对外公开必须显式声明 `pub`；
+- **实例化语法**：使用 `new ClassName()` 或静态工厂方法 `ClassName.create()`。
 ```typescript
-export class TimerQueue {
-    capacity: usize = 64;
-    count: usize = 0;
+pub class BankAccount {
+    account_no: string;      // 默认 priv
+    balance: i64 = 0;        // 默认 priv
 
-    pub fn init(*_, initial_cap: usize) { capacity = initial_cap; count = 0; }
-    pub fn release(*_) { /* 清理底层非托管资源 */ }
-
-    pub static fn create(cap: usize): *TimerQueue {
-        let q = new TimerQueue();
-        q.init(cap);
-        return q;
+    pub fn init(*_, acc: string, initial: i64) {
+        account_no = acc;
+        balance = initial;
     }
+
+    pub fn getBalance(): i64 { return balance; } // 显式 pub 公开方法
+    fn validateAmount(amt: i64): bool { return amt > 0; } // 默认 priv 私有方法
 }
-let tq = new TimerQueue();
+let account = new BankAccount();
+account.init("ACC-1001", 5000);
 ```
 
-### 3. 系统级核心装饰器与内存布局体系（Bun 迁移必备）
+### 3. 单继承、生命周期钩子与 `super` 调用 (7.2 规范)
+- **单继承语法**：使用 `class Child extends Parent`；
+- **构造函数钩子 (`init`) 与 `super.init`**：
+  - 子类构造函数中，通过 **`super.init(...)`** 调用父类构造器；
+- **析构清理钩子 (`release`)**：
+  - 声明 `pub fn release(*_)`，离开作用域或被 drop 时编译器自动织入执行，确定性释放非托管资源；
+- **父类方法重写与 `super.method`**：
+  - 子类重写父类方法时，形参接收者修饰符（`_` / `*_` / `move _`）必须与父类契约完全对齐；通过 `super.method(...)` 调用父类实现。
+
+```typescript
+pub class Device {
+    id: u32;
+
+    pub fn init(*_, id: u32) {
+        _.id = id;
+    }
+
+    // 显式析构钩子：离开作用域或对象释放时自动触发执行
+    pub fn release(*_) {
+        print("Releasing hardware device context:", _.id);
+    }
+}
+
+pub class GpuDevice extends Device {
+    cuda_stream: usize;
+
+    pub fn init(*_, id: u32, stream: usize) {
+        super.init(id);          // 调用父类构造函数
+        _.cuda_stream = stream;
+    }
+
+    pub fn reset(*_) {
+        // 重写与调用父类方法
+    }
+}
+```
+
+### 4. 系统级核心装饰器与内存布局体系（Bun 迁移必备）
 | 装饰器注解 | 语义与底层发射 | 典型应用场景 |
 | :--- | :--- | :--- |
 | **`@c struct Bar { ... }`** | 严格遵循 C-ABI 内存物理对齐（对标 Zig `extern struct`，向下兼容 `@extern`） | 与 C 动态库/头文件物理结构体对齐（如 `phr_header`） |
@@ -404,26 +471,26 @@ let tq = new TimerQueue();
 | **`@opaque struct/class Baz { ... }`**| 不透明抽象类型（映射为 `pub const Baz = opaque {};`） | 外部 C 返回的系统指针/句柄（`us_loop_t`） |
 | **`@align(N)`** | 字段级或结构体级物理内存字节对齐注解（如 `@align(16) buf: [64]u8`） | SIMD 向量化计算、硬件高速缓存行对齐 |
 | **`@refCount(cleanup)`** | 类顶层自动侵入式引用计数管理（提供 `.ref()` 与 `.deref()`） | 共享网络套接字、资源池自动归零析构（对标 `bun.ptr.RefCount`） |
-| **`@callconv(.c)`** | 强制 C 函数调用约定 | C 回调函数跳板、动态链接库导出 |
+| **`@c fn` / `@c pub fn`** | **修饰函数直接生成 `callconv(.c)`**，官方推荐全面替代冗长的 `@callconv(.c)` | C 回调函数跳板、动态链接库导出（`@callconv` 仅作兼容保留） |
 
-### 4. 行为契约 (`trait`)、关联静态契约与实现 (`impl`)
+### 5. 行为契约 (`trait`)、关联静态契约与实现 (`impl`)
 ```typescript
-export trait Factory<T> {
+pub trait Factory<T> {
     fn create(): T; // Trait 静态构造契约
 }
 
-export trait Measurable {
+pub trait Measurable {
     fn area(_): f64;
 }
 
-export struct Circle { pub radius: f64 = 0.0; }
+pub struct Circle { pub radius: f64 = 0.0; }
 
 impl Measurable for Circle {
     fn area(_): f64 { return 3.1415926535 * _.radius * _.radius; }
 }
 ```
 
-### 5. 动态分发胖指针与运行时向下转型 (`dyn` & `downcast`)
+### 6. 动态分发胖指针与运行时向下转型 (`dyn` & `downcast`)
 ```typescript
 // 1. 异构容器持有胖指针 Box<dyn Trait>
 let handlers: [Box<dyn EventHandler>] = [];
@@ -509,6 +576,29 @@ switch (expr) {
 }
 ```
 
+### 4. 字符串模板插值、原生正则表达式与管道操作符 (`|>`)
+```typescript
+// 1. 字符串模板插值（`${expr}` 运行时计算并格式化）
+let agent_name = "Nexus-9";
+let task_count = 42;
+let summary = "Agent ${agent_name} executed ${task_count} reductions.";
+
+// 2. 原生正则表达式字面量
+let email_regex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+if (email_regex.test("admin@cp-nest.org")) {
+    print("Valid email format");
+}
+
+// 3. 管道操作符 (|>) 与通配占位符 (*)
+fn add(a: i32, b: i32): i32 { return a + b; }
+fn mul(a: i32, b: i32): i32 { return a * b; }
+
+let x = 10;
+let r1 = x |> mul(2);        // 默认作为首参传入 -> mul(10, 2) = 20
+let r2 = r1 |> add(5, *);    // 通配符 * 精确指定右侧插槽 -> add(5, 20) = 25
+let trimmed = "  cp-lang  " |> .trim(); // 点号调用实例方法 -> "cp-lang"
+```
+
 ---
 
 ## 八、 控制流与流式类型智能收窄 (Control Flow & Type Narrowing)
@@ -519,9 +609,15 @@ switch (expr) {
 // 1. 标准条件分支（逻辑运算符必须用 && 和 ||，严禁 and / or）
 if (count > 0 && is_active) { process(); } else { reset(); }
 
-// 2. 海象非空解包赋值 (Walrus Unwrap)
+// 2. 海象非空解包条件赋值 (Walrus Unwrap in if)
 if (timer := heap.pop()) {
     timer.callback(timer.ctx);
+}
+
+// 3. 海象流式迭代解包循环 (Walrus Unwrap in while)
+let iter = std.mem.splitScalar(u8, header_str, ',');
+while (tag_str := iter.next()) {
+    processTag(tag_str); // tag_str 自动从 string? 收窄为 string
 }
 ```
 
@@ -558,11 +654,16 @@ outer: for (x of rows) {
 _ = flushSocket();
 ```
 
+### 4. 换行与分号可选规范 (Optional Semicolons & ASI)
+- CP 语言内建自动分号推导（ASI）机制，在换行清晰、块结构完整时，**行末分号 `;` 原则上可选**；
+- 官方规范推荐在常规语句末尾保留分号以保持最严谨的工程清晰度；
+- 在单行简单语句、表达式结尾或控制流跳转（如 `return`、`break`）后可自然省略分号。
+
 ---
 
 ## 九、 统一原生错误体系：AnyErr、动态业务 Err 与具名联合 (Unified Error Architecture)
 
-### 1. 错误返回类型全景分类矩阵
+### 1. 错误返回类型全景分类矩阵 (8.2.1 规范)
 在 CP 中，所有可产生错误的函数，其返回值类型在底层对应清晰的分层错误体系：
 
 | 错误类型形态 | 函数返回值签名 | 抛出语法 | 底层物理映射 | 规则与约束说明 |
@@ -620,11 +721,17 @@ fn fetchResource(id: i32): string ! FileErr || NetErr {
 }
 ```
 
-### 3. 错误自动转换机制 (Auto-Conversion) 与 `from` 规则
+### 3. 错误自动转换机制 (Auto-Conversion)、`from` 桥接与 `downcast` 还原 (8.2.2 & 8.2.4 规范)
 1. **安全拓扑自动转换**：
    - 具名错误集 `FileErr`、枚举错误 `HttpError`、全局错误 `AnyErr` 在通过 `?` 冒泡到返回 `T ! Err` 的函数时，编译器自动织入 `cp_convert_err`，将其自动转换为统一的动态错误实例 `Err`，并将原始错误无损记录至 `cause`；
 2. **声明式 `from` 自动桥接**：
-   - 若目标错误类型定义了 `pub fn from(e: SourceErr): Self`，在通过 `?` 传播时，编译器优先调用用户声明的 `from` 进行确定性语义转换。
+   - 若目标错误类型定义了 `pub fn from(e: SourceErr): Self`，在通过 `?` 传播时，编译器优先调用用户声明的 `from` 进行确定性语义转换；
+3. **胖指针多态错误与 `downcast` 运行时还原**：
+   - 针对复杂的微服务错误栈或插件体系，`Err` 可通过 `Err.with_cause(move box_err)` 挂载堆上动态分配的多态胖指针（如 `Box<dyn Trait>`）；
+   - 在 `switch` 模式匹配中，双轨支持 `:`（类型窄化匹配）与 `:=`（Walrus 海象解构绑定）：
+     - `err(e: TimeoutError) => ...`
+     - `err(e := SqlError) => ...`
+   - 成功 downcast 还原后，变量 `e` 安全获得 `*const ConcreteError` 具体类型指针，支持直接访问其专有字段与方法，零运行时 panic 风险。
 
 ### 4. 错误传播与降级控制
 ```typescript
@@ -675,6 +782,7 @@ fn processFile(path: string): ! {
 
 ### 2. 编译期元编程系统 (Comptime Metaprogramming)
 - **编译期代码块**：`@{ ... }` 或 `comptime { ... }`；
+- **编译期计算函数**：声明 `comptime fn getArraySize(factor: usize): usize { return factor * 64; }`；或对普通纯函数使用 `@func(...)` 在编译期求值；
 - **编译期控制流**：`@if` / `@else` 与 `@for (item of items)` 或 `inline for`；
 - **编译期内省原语 (Intrinsics)**：
   - `@typeOf(x)`：获取表达式类型；
@@ -717,11 +825,11 @@ dec log(target, options) {
 @log
 @meta(author = "Antigravity", version = 2)
 @[sealed, audited]
-export class PaymentService { ... }
+pub class PaymentService { ... }
 
 // 3. 编译期与运行时反射
 @reflect
-export class User { pub id: i32; pub name: string; }
+pub class User { pub id: i32; pub name: string; }
 const has_id = reflect.hasField(User, "id"); // true
 ```
 
@@ -796,7 +904,7 @@ receive {
 
 ---
 
-## 十三、 智能体 Top 18 绝对禁手清单 (Top 18 Antipatterns)
+## 十三、 智能体 Top 19 绝对禁手清单 (Top 19 Antipatterns)
 
 | 禁手序号 | 错误幻觉写法 (WRONG) | CP 唯一合法写法 (CORRECT) | 根因与规则说明 |
 | :---: | :--- | :--- | :--- |
@@ -808,13 +916,14 @@ receive {
 | **#6** | `cond1 and cond2` / `cond1 or cond2` | `cond1 && cond2` / `cond1 \|\| cond2` | 逻辑与/或使用纯正 C/TS 符号 `&&`、`\|\|`，词法解析器无 `and`/`or` 关键字 |
 | **#7** | `fn f(): !usize` 或 `fn f(): ?User` | `fn f(): usize!` / `fn f(): User?` | 废除前缀 `!T`/`?T`，确立类型主体居首的纯正纯后缀修饰符体系 |
 | **#8** | `@extern struct Bar { ... }` | `@c struct Bar { ... }` | 声明严格对齐 C-ABI 内存布局结构体统一使用 `@c struct` |
-| **#9** | `Point{ .x = 1, .y = 2 }` | `Point{ x: 1, y: 2 }` | 结构体初始化采用 TS 风格（无前导点），严禁 Zig 的 `.{ .x = ... }` |
-| **#10** | `const p = .{ 10, 20 };` | `const p = [10, 20];` | 元组/数组字面量使用方括号 `[...]`，严禁 Zig 匿名元组 `.{ ... }` |
-| **#11** | `const o = .{ .x = 1 };` | `const o = { x: 1 };` | 匿名对象字面量使用花括号 `{ x: 1 }`，严禁 Zig 的 `.{ .x = 1 }` |
-| **#12** | `items: []*Timer = &.{};` | `items: []*Timer = [];` | 切片字面量使用方括号 `[]`，严禁 Zig 的 `&.{}` |
-| **#13** | `__zig__ { ... }` | `zig { ... }` | 内嵌 Zig 原生块必须使用 `zig {}`，严禁带下划线的 `__zig__` |
-| **#14** | `try { ... } catch (e) { ... }` | `const val = expr catch fallback;` | CP 彻底废除 Java/JS 风格的 try-catch 异常块 |
-| **#15** | `catch \|_\| { return false; }` | `catch return false;` | 废除 Zig 风格的 catch 错误捕获管道，直接接降级表达式或语句 |
-| **#16** | `const [first, _] = pair;` | `const [first, *] = pair;` | CP 的模式匹配通配符是 `*`（而非 `_`），`_` 是方法接收者专属保留字 |
-| **#17** | `let p: *any! = ...;` (冗余 any) | `let p: *! = ...;` / `let p: *!? = ...;` | 通用弱类型裸指针推荐省略 `any`，直接使用极简 `*!` 与 `*!?` |
-| **#18** | 根目录创建同名门面（如 `lib/io.cp`） | 仅在 `lib/io/index.cp` 导出单一真理来源 | 根目录同名门面已全面废弃，编译器原生优先目录寻路，避免冲突 |
+| **#9** | `@callconv("c") pub fn f()` | `@c pub fn f()` | 声明 C 语言调用约定函数首选极简 `@c`（直接映射 `callconv(.c)`），彻底废除繁琐冗长的 `@callconv` |
+| **#10** | `Point{ .x = 1, .y = 2 }` | `Point{ x: 1, y: 2 }` | 结构体初始化采用 TS 风格（无前导点），严禁 Zig 的 `.{ .x = ... }` |
+| **#11** | `const p = .{ 10, 20 };` | `const p = [10, 20];` | 元组/数组字面量使用方括号 `[...]`，严禁 Zig 匿名元组 `.{ ... }` |
+| **#12** | `const o = .{ .x = 1 };` | `const o = { x: 1 };` | 匿名对象字面量使用花括号 `{ x: 1 }`，严禁 Zig 的 `.{ .x = 1 }` |
+| **#13** | `items: []*Timer = &.{};` | `items: []*Timer = [];` | 切片字面量使用方括号 `[]`，严禁 Zig 的 `&.{}` |
+| **#14** | `__zig__ { ... }` | `zig { ... }` | 内嵌 Zig 原生块必须使用 `zig {}`，严禁带下划线的 `__zig__` |
+| **#15** | `try { ... } catch (e) { ... }` | `const val = expr catch fallback;` | CP 彻底废除 Java/JS 风格的 try-catch 异常块 |
+| **#16** | `catch \|_\| { return false; }` | `catch return false;` | 废除 Zig 风格的 catch 错误捕获管道，直接接降级表达式或语句 |
+| **#17** | `const [first, _] = pair;` | `const [first, *] = pair;` | CP 的模式匹配通配符是 `*`（而非 `_`），`_` 是方法接收者专属保留字 |
+| **#18** | `let p: *any! = ...;` (冗余 any) | `let p: *! = ...;` / `let p: *!? = ...;` | 通用弱类型裸指针推荐省略 `any`，直接使用极简 `*!` 与 `*!?` |
+| **#19** | 根目录创建同名门面（如 `lib/io.cp`） | 仅在 `lib/io/index.cp` 导出单一真理来源 | 根目录同名门面已全面废弃，编译器原生优先目录寻路，避免冲突 |

@@ -408,3 +408,21 @@
     - 补全 6.7.4 完整裸指针类型转换矩阵 in `unsafe`（指针互转、物理内存整型地址、通用裸指针与未定长多项指针）；
     - 明确 `zig {}` 内嵌逃逸舱完全脱离 CP 借用检查的系统级定义；
     - 系统重构第九章错误体系：严密区分 `T!`（全局 `AnyErr`，禁止动态装箱）与 `T ! Err`（业务动态结构体，显式签名），补齐具名错误集、多错误联合声明 `T ! E1 || E2` 与 `from` 桥接机制。
+
+- [`cp_agent_ref.md`](file:///data/dev/cp/cp_agent_ref.md):
+  - 彻底解除行数限制，全面对齐 `cp_ref.md` 语法体系，扩充至 930+ 行权威智能体契约手册：
+    - 补全第五章 `static class` 与 `static struct` 纯静态命名空间容器规则（全员自动静态、严禁实例化、无 `init`/`release`、禁止 `extends`）；
+    - 补全第六章成员默认可见性差异：`struct` 成员默认 `pub`（公开透明 POD），`class` 成员默认 `priv`（强封装私有）；
+    - 补全第一章模块级 `pub` 等价于 `export` 并作为官方首选推荐的规范；
+    - 补全第六章 `class` 单继承生命周期体系：`class Child extends Parent`，`super.init(...)` 构造器调用，`pub fn release(*_)` 确定性析构钩子，`super.method(...)` 父类方法调用；
+    - 确立 `@c` 全面替代 `@callconv(.c)`（同步更新第 VI.4 节与禁手清单 #9）；
+    - 补全第七章字符串模板插值 `${expr}`、原生正则表达式字面量 `/pattern/`、管道操作符 `|>` 与通配占位符 `*`；
+    - 补全第八章海象迭代解包循环 `while (binding := expr)` 与自动分号推导（ASI）规范；
+    - 补全第九章胖指针动态错误与 `downcast` 双轨解构模式匹配语法（`err(e: T)` 与 `err(e := T)`）；
+    - 补全第十章编译期计算函数 `comptime fn` 与 `@func(...)`。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 同步更新第 11.8.12 节，明确 `@c` 关键字为声明 C 调用约定函数的官方规范语法，直接替代 `@callconv("c")` / `@callconv(.c)`。
+- [`cap/test/test_pub_priv.cp`](file:///data/dev/cp/cap/test/test_pub_priv.cp):
+  - 修复测试中的旧版 `mut this` 为规范 `*this`，移除 `let mut`。
+- [`cap/test/test_error_union_downcast.cp`](file:///data/dev/cp/cap/test/test_error_union_downcast.cp):
+  - 修正 `if` 条件括号包裹，确保符合 CP 控制流条件圆括号铁律。

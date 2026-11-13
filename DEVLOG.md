@@ -543,3 +543,51 @@
 - 补全后 `cp_agent_ref.md` 达到 820 行，全景覆盖所有系统特性，结构分为 13 个正交章节；
 - 运行 `cap cap/test/test_security_csrf.cp` 验证通过；
 - 执行原子提交归档。
+
+
+## 2026-11-13 面向智能体规范全面对齐与消除大小限制：面向对象、可见性默认与 C-ABI 深度核验
+
+### 1. 消除行数限制的设计思考
+- 用户明确指示：“解除 cp_agent_ref.md 文件大小限制，必须确保 cp_ref.md 中的语法内容完全包含在 cp_agent_ref.md 中，你能明确判断与语法无关的内容可以删除，不确定的保留。相对 cp_ref.md 1万行，cp_agent_ref.md 能少一点是一点，不追求极致小，损失 cp 语法内容。”
+- 这为双轨设计规范体系确立了最权威的定海神针：
+  - **`cp_ref.md`（~9600 行）**：人类工程师全量手册，保留全套设计哲学推演、历史 RFC、跨语言背景对比、架构图文与完备教程；
+  - **`cp_agent_ref.md`（~930 行）**：AI 智能体语法与类型契约手册，剥离一切议论文与背景哲学，完整保留 100% 形式化语法定义、类型与指针符号矩阵、面向对象/生命周期契约、以及紧凑 Canonical 示例代码。
+
+### 2. 核心特性与架构核验
+1. **`static class` 与 `static struct` 的语义边界**：
+   - 彻底解决工具函数库与全局命名空间的纯粹性问题；
+   - 编译器在前端解析期与语义期设立硬性防护：严禁 `new` 实例化，严禁值字面量实例化，严禁 `extends` 继承，严禁定义 `init` / `release` 构造与析构函数；
+   - 内部成员自动全部具备 `static` 属性，零样板代码。
+2. **成员默认可见性差异（Public by Default vs Private by Default）**：
+   - `struct` 作为 POD 与系统物理内存布局容器，成员**默认全为 `pub`**，避免 DTO 传输时冗长的 `pub` 样板代码；
+   - `class` 作为面向对象强封装容器，成员**默认全为 `priv`**，外部无法访问，必须显式附加 `pub` 导出。
+3. **模块级 `pub` 与 `export` 的等价性与推荐规范**：
+   - 在模块顶层（`struct`/`class` 之外），`pub` 完全等价于 `export`；
+   - 官方推荐统一使用 `pub`，与 Rust/Zig/Go 现代系统级语言体验高度对齐，语法更加统一与现代化。
+4. **单继承、生命周期钩子与 `super` 调用**：
+   - `class Child extends Parent` 单继承树；
+   - 构造阶段通过 `super.init(...)` 调用父类构造器；
+   - 析构阶段通过 `pub fn release(*_)` 钩子由编译器在 drop 或作用域退出时自动织入确定性清理；
+   - 方法重写通过 `super.method(...)` 向上复用。
+5. **编译器源码深度核验：`@c` 是否完全替代 `@callconv(.c)`**：
+   - 经审查 `cpc/src/codegen/actor.rs:499-523` 与 `cpc/src/codegen/stmt.rs:2101-2103`：
+     ```rust
+     let callconv_clause = if is_c {
+         "callconv(.c) ".to_string()
+     } else if let Some(m) = f.meta.iter().find(|m| m.name.sym == "callconv") { ... }
+     ```
+   - 结论确凿：在 CP 编译器中，`@c`（或 `@c pub fn`）在代码生成时直接发射 Zig 原生 `callconv(.c)`，官方已正式确立使用极简对称的 `@c` 替代繁琐冗长的 `@callconv("c")` / `@callconv(.c)`。`@callconv` 仅保留作为向下兼容。已在两份规范中同步修正。
+6. **其他现代语法糖与系统特性全量补齐**：
+   - 字符串模板插值 `${expr}` 与原生正则表达式字面量 `/pattern/`；
+   - 管道操作符 `|>` 与通配占位符 `*`（支持位置指定与方法链 `.method()`）；
+   - 海象解包迭代循环 `while (binding := expr)`；
+   - 自动分号推导（ASI）规范；
+   - 胖指针动态错误与 `downcast` 双轨解构语法（`err(e: T)` 与 `err(e := T)`）；
+   - 编译期计算函数 `comptime fn` 与 `@func(...)`。
+
+### 3. 测试与验证
+- 运行 `cap cap/test/test_static_class.cp`（2/2 PASS）；
+- 运行 `cap cap/test/test_pub_priv.cp`（PASS）；
+- 运行 `cap cap/test/test_error_union_downcast.cp`（PASS）；
+- 运行 `cap cap/test/test_security_csrf.cp`（4/4 PASS）；
+- 全套验证通过，工作区一致。

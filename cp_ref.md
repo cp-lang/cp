@@ -5513,21 +5513,20 @@ export @value struct Compact {
 
 CP 编译器在每个库模块头部自动注入 `const string = []const u8;`。无论是纯 CP 类型推导、还是内嵌 `zig { ... }` 块中复用的宿主代码（如 Bun 内部普遍使用的 `string`），均能天然无缝解析，彻底消除未声明标识符报错。
 
-#### 11.8.12 函数调用约定装饰器（`@callconv`）与 C-ABI 回调兼容
+#### 11.8.12 函数调用约定装饰器与 C-ABI 回调兼容（推荐 `@c` 替代 `@callconv`）
 
 在对接底层 C 库、OS 系统调用或第三方 C 动态库回调（如 BoringSSL, libuv, lsquic, JSC 回调函数）时，回调函数通常必须严格遵循 C 语言调用约定（`callconv(.c)`）。
 
-CP 语言提供了 `@callconv` 函数级装饰器：
+**官方标准语法**：CP 统一使用简洁现代的 `@c` 关键字/修饰符直接声明 C 调用约定函数（全面替代历史繁琐的 `@callconv("c")` / `@callconv(.c)`）：
 
 ```typescript
-@callconv("c")
-pub fn onHskDone(qs: *quic.Socket, ok: c_int): void {
+@c pub fn onHskDone(qs: *quic.Socket, ok: c_int): void {
     // ...
 }
 ```
 
-- **语义**：修饰函数在转译为 Zig 时自动生成 `callconv(.c)` 函数调用约定修饰；
-- **支持格式**：`@callconv("c")`、`@callconv(".c")` 或 `@callconv(c)`；
+- **语义**：修饰函数在转译为 Zig 时直接生成 `callconv(.c)` 函数调用约定修饰；
+- **向下兼容性说明**：`@callconv("c")`、`@callconv(".c")` 或 `@callconv(c)` 仍作为向下兼容语法由编译器解析，但官方规范与新代码中一律推荐使用 `@c`；
 - **生成的 Zig 产物**：
   ```zig
   pub fn onHskDone(qs: *quic.Socket, ok: c_int) callconv(.c) void {
@@ -5537,11 +5536,10 @@ pub fn onHskDone(qs: *quic.Socket, ok: c_int): void {
 - **类/结构体内部的静态 C 回调方法**：
   若在 `class` 或 `struct` 内部定义需要传递给底层 C 运行时的回调函数，必须附加 `static` 修饰符，防止编译器自动注入实例 `self` 接收者：
   ```typescript
-  export class GarbageCollectionController {
-      // 静态 C-ABI 回调方法，无 self 隐式参数
-      @callconv("c")
-      pub static fn onGCTimer(timer: *uws.Timer): void {
-          var this = timer.as(*GarbageCollectionController);
+  pub class GarbageCollectionController {
+      // 静态 C-ABI 回调方法，无 self 隐式参数，使用 @c 直接声明
+      @c pub static fn onGCTimer(timer: *uws.Timer): void {
+          let inst: *GarbageCollectionController = timer.as(*GarbageCollectionController);
           // 处理定时器逻辑
       }
   }

@@ -12,10 +12,10 @@ err NetErr {
 
 // 1. Named + Anonymous union: FileErr || err{Timeout, Canceled}
 fn test_anon_union(flag: i32): string ! FileErr || err{Timeout, Canceled} {
-    if flag == 1 {
+    if (flag == 1) {
         return FileErr.NotFound;
     }
-    if flag == 2 {
+    if (flag == 2) {
         return err.Timeout;
     }
     return "ok_anon";
@@ -23,10 +23,10 @@ fn test_anon_union(flag: i32): string ! FileErr || err{Timeout, Canceled} {
 
 // 2. Named + Dynamic Err union: FileErr || Err
 fn test_err_union(flag: i32): string ! FileErr || Err {
-    if flag == 1 {
+    if (flag == 1) {
         return FileErr.NotFound;
     }
-    if flag == 2 {
+    if (flag == 2) {
         return err(500, "internal server failure");
     }
     return "ok_err";

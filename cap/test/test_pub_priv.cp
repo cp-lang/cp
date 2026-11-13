@@ -9,7 +9,7 @@ class BankAccount {
         this.balance = initial_balance;
     }
 
-    pub fn deposit(mut this, amount: i32): i32 {
+    pub fn deposit(*this, amount: i32): i32 {
         this.balance += amount;
         return this.get_balance();
     }
@@ -24,7 +24,7 @@ class BankAccount {
 }
 
 pub fn main(): void {
-    let mut acc = new BankAccount("Alice", 100);
+    let acc = new BankAccount("Alice", 100);
     print(acc.owner);
     let b1 = acc.check_balance();
     print(b1);
