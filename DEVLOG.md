@@ -664,3 +664,14 @@ Bun AGY 在 265 个模块的实战重构中提交了 8 项遗漏审查。经逐�
 - `cp_ref.md` 第 12 章完成遗留 `@ptrCast(@alignCast)` 与 `__zig__` 清洗；
 - 4 组回归测试 100% PASS；
 - 执行原子 Git 提交。
+
+
+## 2026-11-13 `fn foo(let p: T)` 实装与双轨规范终极对比审计
+
+### 1. `fn foo(let p: T)` 形参机制设计与 Zig 代码生成闭环
+- **提案评估**：值拷贝可变参数（原 `mut p: T`）在调用约定上仍为值传递，仅允许函数局部栈帧修改自身拷贝。改写为 `let p: T` 与局部变量声明 `let x = ...` 的可变语义完全统一，从而彻底淘汰 `mut` 关键字。
+- **Codegen 方案**：由于 Zig 0.17.0 函数参数默认常量不可变且禁止函数体声明同名局部变量遮蔽参数，因此对非 extern、非 comptime、非借用的可变值拷贝形参，在 Zig 签名发射 `_cp_<name>`，并在函数入口自动注入 `var <name> = _cp_<name>; _ = &<name>;`。
+
+### 2. 双轨规范与真实编译器/标准库的零冲突对齐方法
+- 采用“文档对照 + 前端源码（`lexer.rs` / `parser.rs` / `resolver.rs` / `main.rs`）+ `lib/` 实装目录交叉审计”策略，引入独立审查子智能体逐项验证语法解析边界；
+- 重点剔除“文档想象但前端未实现”或“历史 Zig 残留”语法（如 `pub default class`、`/regex/` 字面量、`receive { |res| }`、`downcast(T)`、`inline for (x) |x|` 与虚构 `cap:task`），确保任何智能体按 `cp_agent_ref.md` 生成的代码均能精准通过 `cpc` 解析与借用检查。

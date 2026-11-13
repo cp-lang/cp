@@ -39,10 +39,10 @@ impl ParseError {
                     .with_cause("CP has completely abolished try/catch in favor of zero-cost error unions and '?' operator.")
                     .with_help("use '?' to propagate errors upward, or 'expr catch err => { ... }' / '?? fallback' to handle them.")
                     .with_suggestion("use 'let val = expr ?;' or 'expr catch err => { ... }'"),
-                Token::Mut => Diagnostic::new("E0104", "'mut' keyword is not used for variable declarations")
+                Token::Mut => Diagnostic::new("E0104", "'mut' keyword is not used in CP")
                     .with_span(*span)
                     .with_cause("in CP, variables declared with 'let' are already mutable by default, and 'const' is used for immutable bindings.")
-                    .with_help("CP has abolished 'let mut'. Use 'let' directly for mutable variables. For mutable borrows in function parameters, prefix with '*': '*param: Type'.")
+                    .with_help("CP has abolished 'mut'. Use 'let' directly for mutable variables and mutable local parameters ('let param: Type'), and use '*' for mutable borrows ('*param: Type').")
                     .with_suggestion("remove 'mut': use 'let ...' instead"),
                 Token::Any => Diagnostic::new("E0105", "'any' type is not supported in CP")
                     .with_span(*span)
@@ -1416,7 +1416,7 @@ impl<'a> Parser<'a> {
                 is_comptime = true;
             }
 
-            if self.peek() == Some(&Token::Mut) {
+            if self.peek() == Some(&Token::Mut) || self.peek() == Some(&Token::Let) {
                 self.bump()?;
                 is_mut = true;
             } else if self.peek() == Some(&Token::Move) || self.peek() == Some(&Token::Own) {
@@ -7745,7 +7745,10 @@ impl<'a> Parser<'a> {
     fn parse_arrow_params(&mut self) -> ParseResult<Vec<Pattern>> {
         let mut params = Vec::new();
         while self.peek() != Some(&Token::RParen) && self.peek().is_some() {
-            if self.peek() == Some(&Token::Star) || self.peek() == Some(&Token::Mut) {
+            if self.peek() == Some(&Token::Star)
+                || self.peek() == Some(&Token::Mut)
+                || self.peek() == Some(&Token::Let)
+            {
                 self.bump()?;
             }
             let ident = self.parse_ident()?;

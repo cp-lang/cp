@@ -429,3 +429,14 @@
 - [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
   - 清洗第 12 章遗留示例中的 `@ptrCast(@alignCast)` 与 `__zig__`，同步更新为规范 CP `as` 与 `zig {}`。
 
+
+- [`cpc/src/parser.rs`](file:///data/dev/cp/cpc/src/parser.rs) & [`cpc_dev/src/parser.rs`](file:///data/dev/cp/cpc_dev/src/parser.rs):
+  - `parse_params` 与 `parse_arrow_params` 支持 `Token::Let`（`fn foo(let p: T)`）作为可变局部值拷贝形参官方规范，`E0104` 错误提示同步引导使用 `let param: Type` / `*param: Type`。
+- [`cpc/src/codegen/actor.rs`](file:///data/dev/cp/cpc/src/codegen/actor.rs) & [`cpc_dev/src/codegen/actor.rs`](file:///data/dev/cp/cpc_dev/src/codegen/actor.rs):
+  - 为 `mutable_copy_params`（`let p: T` / `mut p: T`）生成 `_cp_<name>` 底层形参并在函数入口注入 `var <name> = _cp_<name>; _ = &<name>;`，消除 Zig 常量形参不可修改与同名前置遮蔽错误。
+- [`cap/test/test_let_param.cp`](file:///data/dev/cp/cap/test/test_let_param.cp):
+  - 新增 `fn foo(let p: T)` 标量、结构体值拷贝与循环计数器回归测试。
+- [`cp_ref.md`](file:///data/dev/cp/cp_ref.md):
+  - 修复第 5.2、9.4、11.9.4、14.12 节内部表述冲突，修正第 485/503-504、2660、5894 行的默认导出、`handler.downcast<NetworkHandler>()`、`cap:parallel` 与 `cap:actor` 导入示例错误。
+- [`cp_agent_ref.md`](file:///data/dev/cp/cp_agent_ref.md):
+  - 全面重构全 13 章并经独立审计核对修正，消除全部 Zig 管道残留（`inline for`、`receive {}`）、错误语法（`downcast(T)`、`/regex/`、`pub default class`、`import { @spawn }`）及命名冲突（`toString()`），对齐 **32 大官方 `cap:*` 模块矩阵**，补齐 `cstr?`、`->`、`?.`、`.?`、`orelse`、匿名块 `({ ... break val; })`、开放枚举 `_`、Zig 常量区间、`extern const`/`let`、`inline while`、`@getPageSize(4)`、块级 `@if/@else`、`@This()`/`@is_beam`/`@panic`、`_ = expr;` 忽略返回值、原生类型实参（`std.mem.trim(u8, ...)`）、`macro AutoReset(target)` 完整模板宏示例、表达式级 `arena { @alloc(...) }` 与完整 `cap`/`cpc` CLI（定稿 990 行）。

@@ -4269,3 +4269,101 @@ pub fn connect(): NetworkError!Socket { ... }
     └── 十五、 错误集定义 (pub err MyError { ... })
 
 扩充后的精简版能 100% 涵盖 Bun 系统重构的全部边界，从根本上杜绝试错与猜测！
+
+通过全库源码扫描与依赖图谱分析，为您整理了当前全仓状态及后续 Zig → CP 迁移的五大梯队战略路线图，同时结合上游 cp agy 正在优化 cp_agent_ref.md
+的契机，附上了近期即将高频触发的语法联动清单。
+──────
+
+### 一、全库迁移现状盘点（实测扫描数据）
+
+• 已完成纯正 CP 迁移：265 个文件（已覆盖网络协议栈 http/h2/h3、uws_sys、runtime/server/socket/timer/webcore/crypto、io/aio/event_loop、router、url、threading
+等核心运行引擎）。
+• 待迁移存量资产：1,029 个文件，共 588,241 行 Zig 源码。
+──────
+
+### 二、后续迁移目录与模块先后次序（五大梯队路线图）
+
+核心排序原则：自底向上（遵循依赖拓扑，先叶子/底座后上层）+ 内存安全 ROI 最大化 + 收尾优先防碎片化。
+
+#### 第一梯队（Wave 1：半成品收尾 + 内存安全底座与 C 包装）— 【当前最高优先级】
+
+策略逻辑：消除当前跨语言半成品目录，率先加固全库底层指针、集合、分配器与 C-ABI 边界，彻底稳固地基。
+
+1. 半成品目录立刻清零（收尾闭环）：
+   • src/bun_alloc/（剩 6 文件 / 2,237 行：LinuxMemFdAllocator, memory, MimallocArena, allocation_scope, bun_alloc, fallback/z）
+   • src/sys/（剩 4 文件 / 9,446 行）
+   • src/http_types/（剩 1 文件 / 4,664 行）
+   • src/options_types/（剩 5 文件 / 4,377 行）
+2. 内存安全与底层核心底座（极高 ROI，被全库高频调用）：
+   • src/ptr/（11 文件 / 2,654 行）：引用计数 RefCount、智能指针、Tagged Pointer（直接对接 CP 借用与所有权体系）
+   • src/collections/（12 文件 / 6,433 行）：高频容器与哈希表
+   • src/safety/（6 文件 / 625 行）、src/bun_core/（11 文件 / 5,912 行）、src/platform/（2 文件 / 198 行）、src/perf/（5 文件 / 977 行）、src/meta/（4 文件 / 759 行）
+3. 独立轻量级 C-Sys 包装库（1~3 文件/目录，极易并行秒杀）：
+   • mimalloc_sys (226行), picohttp_sys (30行), picohttp (386行), zlib_sys (337行), zlib (966行), zstd (275行), brotli_sys (334行), brotli (287行), libdeflate_sys
+   (150行), simdutf_sys (412行), highway (307行), lolhtml_sys (867行), libarchive_sys (1,506行), libarchive (688行), tcc_sys (323行), uws (177行), libuv_sys (3,213行)
+   • 注：boringssl_sys（1 文件 / 19,306 行）属自动生成的庞大头文件绑定，建议最后按需处理。
+   ──────
+
+#### 第二梯队（Wave 2：字符串编码、错误映射与核心运行时）— 【内存泄漏重灾区】
+
+策略逻辑：依赖 Wave 1 的 bun_alloc 与 ptr，直接支撑 JS 运行时核心能力，解决历史内存泄漏高发区。
+
+1. 字符编码与字符串引擎（全仓生命线）：
+   • src/unicode/（18 文件 / 5,704 行，先于 string/）
+   • src/string/（16 文件 / 45,763 行，核心核心！待 unicode 完成后分多组并行攻坚）
+2. 诊断与源码映射（轻量过渡）：
+   • src/sourcemap/（6 文件 / 3,287 行）、src/sourcemap_jsc/（4 文件 / 1,164 行）、src/logger.zig（1,522 行）、src/crash_handler/（3 文件 / 2,400 行）
+3. Bun 与 Node.js 核心运行时 API：
+   • src/runtime/api/（35 文件 / 29,177 行）
+   • src/runtime/node/（37 文件 / 24,350 行：node:fs, node:child_process, node:zlib 等）
+   • src/runtime/image/（12 文件 / 4,055 行）、src/runtime/ffi/（2 文件 / 3,115 行）、src/watcher/（5 文件 / 1,736 行）
+
+──────
+
+#### 第三梯队（Wave 3：内置数据驱动与 JSC JavaScriptCore 绑定层）
+
+策略逻辑：文件数量多但单文件极小（SQL 驱动平均仅 44~70 行），极其适合派发子智能体高并发吞吐；JSC 绑定则耦合 C++ ABI，需在 string 与 runtime/api 稳固后集中推进。
+
+1. 内置 SQL / Valkey 驱动集群（极度适合并行）：
+   • src/sql/shared/（4 文件 / 144 行，先迁公共头） → src/sql/postgres/（48 文件 / 2,112 行）+ src/sql/mysql/（35 文件 / 2,464 行） → src/sql_jsc/（38 文件 / 9,888 行）
+   • src/valkey/（1 文件 / 564 行） → src/runtime/valkey_jsc/（7 文件 / 4,845 行）
+2. JSC & N-API 绑定体系：
+   • src/jsc/（104 文件 / 32,817 行）、src/http_jsc/（9 文件 / 4,202 行）、src/napi/（1 文件 / 2,554 行）
+
+──────
+
+#### 第四梯队（Wave 4：解析器、打包器与编译器前端集群）
+
+策略逻辑：重度依赖 collections、string、bun_alloc、logger，状态机复杂庞大，必须按解析依赖顺序严格自底向上推进。
+
+1. src/resolver/（8 文件 / 9,671 行）：模块路径解析与 package.json（打包器与包管理器的共同前置锁）。
+2. src/js_parser/（51 文件 / 43,289 行）+ src/js_printer/（2 文件 / 7,378 行）：JS/TS 词法语法解析与代码生成核心。
+3. src/bundler/（25 文件 / 20,130 行）+ src/bundler/linker_context/（24 文件 / 10,865 行）+ src/standalone_graph/（1,548 行）：全栈打包与链接核心。
+4. 独立样式与文档解析子系统（互不依赖，可单独建群并行攻克）：
+   • src/css/（94 文件 / 71,888 行 —— 全仓代码量最大单目录）
+   • src/md/（16 文件 / 10,546 行）
+
+──────
+
+#### 第五梯队（Wave 5：包管理器、Shell、SSR 与 CLI 终极合拢）
+
+策略逻辑：处于全仓依赖链最顶端，聚合调用前四梯队几乎所有模块，适合最后统一收官。
+
+1. src/install/ 包管理器家族（约 67 文件 / 5.2 万行：install/, PackageManager/, lockfile/, isolated_install/, install_types/, install_jsc/）
+2. src/shell/（43 文件 / 21,351 行）+ src/shell_parser.zig（740 行）：跨平台 Bun Shell
+3. src/bake/（16 文件 / ~1.3 万行）：DevServer 与服务端渲染框架
+4. src/test_runner/（92 文件 / 17,998 行）：bun test 执行引擎
+5. src/cli/（58 文件 / 36,801 行）与根入口 src/*.zig（8 文件 / 5,618 行）：全系统总装入口闭环。
+   ──────
+
+### 三、给 cp agy 优化 cp_agent_ref.md 的联动建议（针对即将迎来的 Wave 1 & Wave 2）
+
+在核查当前 /data/dev/cp/cp_agent_ref.md 时发现，即将攻坚的 Wave 1 (ptr, collections) 与 Wave 2 (unicode, string) 将高频使用以下底层原语，而目前 cp_agent_ref.md
+中尚未列出，建议同步通知 cp agy 补充进速查表（第 3.2 节或第 10.2 节）：
+
+1. @bitCast 与指针/整型物理位重解释：src/ptr/ 中 Tagged Pointer（指针低位/高位打标）重度使用 @bitCast、@intFromPtr、@ptrFromInt（说明 CP 中 p as usize / addr as *T! 与
+   @bitCast 的对应标准）；
+2. SIMD 向量与位计数指令：src/string/ 与 src/unicode/ 大量使用 @Vector(N, T)、@clz、@ctz、@popCount、@splat 进行 SIMD 高速扫描；
+3. @typeInfo(T) 编译期反射内省：src/collections/ 与 src/ptr/ 泛型数据结构大量依靠 @typeInfo(T) 判断 .pointer、.@"struct" 与 .@"enum"。
+
+提前将这些高频内置指令写入 cp_agent_ref.md，可确保 Wave 1 与 Wave 2 并行子智能体零阻力、零试错高效推进！

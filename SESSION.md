@@ -816,3 +816,41 @@
   1. `cp_agent_ref.md`：清洗 Zig 强转 builtins，确立 as 唯一性，纠正结构体指针自动解引用（alloc.is_active），升级 Top 23 禁手清单；
   2. `cp_ref.md`：清洗第 12 章遗留的 @ptrCast/@alignCast 与 __zig__；
   3. `SESSION.md` / `CHANGELOG.md` / `DEVLOG.md`：四线文档全量同步更新。
+
+---
+
+## 2026-11-13（续） `fn foo(let p: T)` 编译器实装与双轨规范零冲突/零遗漏终极审计
+
+### 1. 收到用户指令
+1. 评估并实施 Bun AGY 提案：在 `cpc/src/parser.rs` 中将 `fn foo(let param: T)` 确立为可变局部值拷形参首选规范，彻底淘汰 `mut`；
+2. 全面比对校验 `cp_agent_ref.md` 与 `cp_ref.md`、编译器真实实现（`cpc/src/`、`lib/`、`cap/test/`），确保给到编程智能体一份 100% 完备、0 语法冲突、0 遗漏的权威契约指南。
+
+### 2. 执行结果汇报
+1. **`cpc` & `cpc_dev` 支持 `fn foo(let p: T)` 与 Zig 代码生成修复**：
+   - 更新 `cpc/src/parser.rs` 与 `cpc_dev/src/parser.rs`（`E0104` 提示及 `parse_params`/`parse_arrow_params` 支持 `Token::Let`），保留 `Token::Mut` 向下兼容；
+   - 更新 `cpc/src/codegen/actor.rs` 与 `cpc_dev/src/codegen/actor.rs`：非 extern、非 comptime、非借用的可变值参数生成 `_cp_<name>` 形参并在函数入口注入 `var <name> = _cp_<name>; _ = &<name>;`，彻底解决 Zig 0.17.0 形参不可变与同名前置遮蔽错误；
+   - 新增回归测试 [`cap/test/test_let_param.cp`](file:///data/dev/cp/cap/test/test_let_param.cp)，运行 `cpc check` 与 `cap run` 均 100% 通过。
+2. **`cp_ref.md` 冲突与历史过时表述消除**：
+   - 同步 5.2 节 `let arg: T` 规范、11.9.4 节 `[*c]` FFI 边界限定（与 14.7/17.3.5 一致）、14.12 节枚举 `.name`/`as i32` 规范、9.4 节模板字符串反引号 `` `...${expr}...` ``；
+   - 修正第 485/503-504 行（`export { AgentCore as default }`、`cap:parallel` 与 `cap:actor` 导入及内建原语界限）、第 2660 行破损示例 `handler.downcast<NetworkHandler>()`、第 5894 行 `cap:parallel`/`cap:actor` 实装清单。
+3. **`cp_agent_ref.md` 全面重写并通过独立子智能体终极审计定稿**：
+   - 邀请独立 `research` 子智能体对照 `cp_ref.md`、`lexer.rs`、`parser.rs`、`resolver.rs`、`main.rs`、`lib/` 与 `cap/test/` 执行全量审计，核实并全部修复 8 处冲突/错漏与核心遗漏：
+     - 修正 `inline for (field of fields)` 去除 Zig `|field|` 管道残留；
+     - 修正 `handler.downcast<T>()` / `downcast_mut<T>()` 尖括号语法及 `Box.new(...)` 构造；
+     - 修正不存在的 `/pattern/` 正则字面量与 `pub default class`，统一采用 `cap:regex` 的 `new RegExp(...)` 与 `export { X as default }`；
+     - 修正虚假 `import { @spawn }` 与虚构 `receive { => |res| }` 块，回归真实 `@spawn`/`@send`/`@reply`/`@receive`/`@self`/`@sender` + `switch` 写法；
+     - 补全并校准 **32 个**真实 `lib/` 标准库通道矩阵（用 `cap:parallel` 替换虚构 `cap:task`，补齐 `cap:beam`、`cap:parallel`、`cap:regex`、`cap:sqlite`、`cap:worker`）；
+     - 补全 `cstr?`、`(*T) -> R`、`?.`、`.?`、`orelse`（上下文软关键字澄清）、开放枚举末尾 `_`、`switch` 常量/负数范围 `1...ARES_ENOSERVER` / `-ARES_ENOSERVER...-1`、匿名带值块 `({ ... break val; })`、`extern const`/`extern let`、`inline while`、`error` 别名、`unreachable`、`@fn(...)` 调用前缀、块级 `@if/@else`、`@This()`/`@is_beam`/`@panic()` 等关键语法与底层互操作原语；统一 `toString()` 命名；补全 `cap`/`cpc` 完整 CLI 子命令。
+     - 二次自动化全量 415 标题扫描复核后追加补齐：`_ = expr;` 忽略返回值惯用法、原生类型标识符实参（`std.mem.trim(u8, ...)`）、`macro AutoReset(target)` 过程宏完整定义示例与表达式级 `arena { @alloc(64); ... }`，定稿 990 行。
+4. **格式化与回归验证**：
+   - 运行 `cargo fmt` 格式化 `cpc` 与 `cpc_dev` 并执行 `bash scripts/sync_cpc.sh`（`[CPC_SYNC_OK]`）；
+   - `cpc check` 与重建后 `cap run` 验证 `test_let_param.cp`、`test_ptr_capture.cp`、`test_switch_binding_pass.cp`、`test_basic.cp` 全部通过；
+   - 清理 `temp/` 下所有临时探测文件，保持工作区整洁。
+
+### 3. 阶段里程碑 Git 提交
+- **用户指令**：`git 提交`
+- **提交说明**：`feat(cpc,spec): support fn(let param: T) and align cp_agent_ref.md with cp_ref.md and cpc`
+- **提交范围**：
+  1. `cpc/src/parser.rs`、`cpc/src/codegen/actor.rs`、`cpc/src/codegen/pattern.rs`、`cpc/src/codegen/stmt.rs`、`cap/test/test_let_param.cp`：`fn(let param: T)` 形参解析与 Zig 代码生成闭环及前置关联修复/回归测试；
+  2. `cp_agent_ref.md`、`cp_ref.md`：双轨规范全量对齐与独立交叉审计修正定稿（消除全部 Zig 残留与未实现幻觉，补齐 32 大标准库与全部核心语法）；
+  3. `TASK.md`、`SESSION.md`、`CHANGELOG.md`、`DEVLOG.md`：任务状态与四线文档全量同步。

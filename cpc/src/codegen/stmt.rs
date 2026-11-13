@@ -467,14 +467,18 @@ impl Codegen {
                                                 ident.sym.clone(),
                                                 self.current_scope_depth,
                                             );
-                                            let make_rest_ty = |elem: Type| if is_const {
-                                                Type::BorrowType {
-                                                    inner: Box::new(Type::Array(Box::new(elem))),
-                                                    is_mut: false,
-                                                    lifetimes: vec![],
+                                            let make_rest_ty = |elem: Type| {
+                                                if is_const {
+                                                    Type::BorrowType {
+                                                        inner: Box::new(Type::Array(Box::new(
+                                                            elem,
+                                                        ))),
+                                                        is_mut: false,
+                                                        lifetimes: vec![],
+                                                    }
+                                                } else {
+                                                    Type::Array(Box::new(elem))
                                                 }
-                                            } else {
-                                                Type::Array(Box::new(elem))
                                             };
                                             if let Some(Type::Array(elem_ty)) = &init_ty {
                                                 self.var_cp_types.insert(

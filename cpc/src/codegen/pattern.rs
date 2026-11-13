@@ -521,12 +521,21 @@ impl Codegen {
                                 is_mut: false,
                                 lifetimes: vec![],
                             };
-                            if let Some(Type::BorrowType { inner, is_mut: false, .. }) = val_cp_ty {
+                            if let Some(Type::BorrowType {
+                                inner,
+                                is_mut: false,
+                                ..
+                            }) = val_cp_ty
+                            {
                                 if let Type::Array(elem_ty) = &**inner {
-                                    bound_types.push((id.sym.clone(), read_only_slice((**elem_ty).clone())));
+                                    bound_types.push((
+                                        id.sym.clone(),
+                                        read_only_slice((**elem_ty).clone()),
+                                    ));
                                 }
                             } else if let Some(Type::Array(elem_ty)) = val_cp_ty {
-                                bound_types.push((id.sym.clone(), read_only_slice((**elem_ty).clone())));
+                                bound_types
+                                    .push((id.sym.clone(), read_only_slice((**elem_ty).clone())));
                             } else if let Some(Type::Tuple(tys)) = val_cp_ty {
                                 let elem_ty = tys
                                     .get(idx)

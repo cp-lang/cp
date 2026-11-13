@@ -481,8 +481,9 @@ CP 彻底摒弃了老旧沉重的 C/C++ `#include` 头文件包含与 CommonJS �
 // 1. 命名导出与默认导出
 export const PI = 3.1415926;
 export fn add(a: i32, b: i32): i32 { return a + b; }
-// 说明：default export 适合主类型、主类；一个模块不允许多个 `export default`。
-export default class AgentCore {}
+// 说明：default export 适合主类型、主类；当前通过 export { AgentCore as default } 导出默认成员。
+pub class AgentCore {}
+export { AgentCore as default };
 
 fn foo() {}
 fn bar() {}
@@ -500,8 +501,9 @@ export { add as sum, PI as TAU };
 // 4. 内置标准库协议（使用专有的 cap:* 统一协议通道）
 import { print, print_err } from "cap:io";
 import { SharedTensor } from "cap:mem";
-import { spawn, spawn_cpu } from "cap:task";
-import { @spawn, @receive, @reply } from "cap:actor";
+import { spawn, join } from "cap:parallel";
+import { send, reply, receive, self_pid, sender, yield, sleep, join as join_actor } from "cap:actor";
+import { PID } from "cap:beam"; // 说明：@spawn/@receive/@reply/@send/@sender/@self 为编译器内建原语，无需导入
 
 // 5. 第三方包导入 (自动触发向上攀升解析引擎)
 import { Matrix } from "tensor-math";
@@ -1307,46 +1309,50 @@ export fn calculate(val: i32): i32 {
 
 ---
 
-### 5.2 参数分类：值、所有权、只读借用、可变借用
+### 5.2 参数分类：值/只读借用、可变本地拷贝、所有权、可变借用
 
-参数的传递语义写在参数类型前，**四种参数修饰**，严格区分：
+参数的传递语义严格区分，默认值参/借用为**只读不可变**：
 
-1. **值/只读借用参数**：`arg: T`
-   - 基础Copy类型（bool、整数、浮点数）：传入副本。
-   - 复合类型：只读借用，调用方传入只读借用变量或所有权变量，所有权变量编译时，自动转为只读借用变量。
-   - 只读借用只读访问，不获取所有权；不能修改内部数据。
-2. **所有权转移参数**：`move arg: T`
-   - 函数取得这个值的所有权；函数退出时资源释放
-   - 调用方只可传入所有权变量。
-3. **可变借用参数**：`arg: *T`
-   - 独占可变访问，可以修改；遵守借用互斥规则
+1. **值/只读借用参数（默认）**：`arg: T`（或显式 `arg: &T`）
+   - 基础 Copy 类型（bool、整数、浮点数、小值结构体）：传入副本，函数体内只读不可重新赋值。
+   - 复合类型：零拷贝只读借用，不获取所有权；禁止修改内部数据。
+2. **可变本地值拷贝参数**：`let arg: T`（彻底淘汰历史残留的 `mut arg: T`）
+   - 传入值副本，但声明该参数在当前函数局部栈帧内为可变绑定（允许 `arg = ...` 或 `arg += 1` 等重新赋值），**对调用方无任何副作用**。
+3. **所有权转移参数**：`own arg: T` 或 `move arg: T`
+   - 函数取得这个值的所有权；函数退出时资源自动释放；调用方原变量失效。
+4. **可变借用参数**：`arg: *T` 或 `*arg: T`
+   - 独占可变访问，允许就地修改原数据字段或集合内容；遵守借用互斥规则。
 
 示例汇总：
 
 ```ts
-// 值参数，复合类型自动转为只读借用
+// 1. 默认值参 / 只读借用，禁止内部重新赋值与原地修改
 fn accept_val(u: i32) {}
-// data 默认为只读借用，传参零拷贝，禁止内部任何原地修改
-fn inspect(data: [i32]) {}
-// move 参数，函数接管所有权
-fn take_own(move u: User) {}
+fn inspect(data: []i32) {}
+
+// 2. 可变本地值拷贝参数（不影响调用方原变量）
+fn accumulate_steps(let steps: i32, delta: i32): i32 {
+    steps += delta;
+    return steps;
+}
+
+// 3. own / move 参数，函数接管所有权
+fn take_own(own u: User) {}
 fn take_ownership(move data: Tensor) {
     // data 所有权完全移交进函数体，调用方原变量变为未初始化失效态
 }
-// 只读借用
-fn read_u(u: User) {}
-// 可变借用
+
+// 4. 可变借用（就地修改调用方实参）
 fn modify_u(u: *User) {}
-fn append_seed(*data: [i32], seed: i32) {
+fn append_seed(*data: []i32, seed: i32) {
     data.push(seed); // 允许对调用方传入的实参进行原地修改
 }
 
 let u = User{id:1};
 accept_val(u.id);
+let next_steps = accumulate_steps(u.id, 5); // u.id 保持不变
 take_own(u);
-read_u(u);
 modify_u(*u);
-
 ```
 
 > 重要：借用参数不会触发所有权转移；借用生命周期不能超过调用方原始所有者。
@@ -2652,7 +2658,7 @@ handlers.push(Box.new(NetworkHandler.init()));
 
 // 运行时安全向下转型 (Downcast)
 for (handler of handlers) {
-    if (net := NetworkHandler>) {
+    if (net := handler.downcast<NetworkHandler>()) {
         net.flush_socket();
     }
 }
@@ -3556,8 +3562,8 @@ let is_same = std.mem.eql(u8, slice_a, slice_b);
 let agentName = "Nexus-9";
 let taskCount = 42;
 
-// 模板插值
-let summary = "Agent ${agentName} executed ${taskCount} reductions.";
+// 模板插值（必须使用反引号）
+let summary = `Agent ${agentName} executed ${taskCount} reductions.`;
 
 // 原生正则字面量
 let emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
@@ -5696,11 +5702,12 @@ export class VTable {
 | **`[*]T!` / `[*]T?!`** | `[*]T` / `?[*]T`                          | **未定长多项指针 (Many-Item Pointer)**。表示连续内存缓冲，支持切片与下标算术，提供非空与可空（`?`）双轨。           | 接收底层的 raw packet payload、IOVEC 缓冲区。       |
 | **`*any!` / `*any?!`** | `*anyopaque` / `?*anyopaque`              | **通用非类型化系统裸指针 (Universal Raw Pointer)**。对齐 C 语言 `void*`，彻底废除 `anyopaque` 冗余关键字。          | 跨语言不透明句柄、用户自定义指针 `user_data`。      |
 | **`*T!` / `*T?!`**     | `*T` / `?*T`                              | **单对象强类型裸指针**。在 unsafe 作用域下直接映射为 C-ABI 单对象指针，**严格禁止下标操作（如 `p[i]` 编译报错）**。 | 指向具体的单一 C 结构体实例（如 `*quic.Socket!`）。 |
+| **`[*c]T` / `[*c]T?`** | `[*c]T` / `?[*c]T`                        | **C-ABI 兼容指针（仅限 FFI 边界）**。专门用于对齐未定语义的传统 C 头文件签名，支持与 `&buf` 无缝互通。         | 绑定传统 C 语言外部头文件 API 声明。              |
 
-> [!CAUTION]
-> **绝对杜绝宽松指针 `[*c]` 与单对象越界下标**：
+> [!IMPORTANT]
+> **指针边界防滥用铁律与单对象越界禁止**：
 >
-> 1. CP 坚决不引入 C 语言的 `[*c]` 宽松可空不确定指针。所有的可空性必须通过 `?` 显式显化，所有的数组遍历必须通过 `[*]` 显式显化，禁止任何隐式可空与隐式降级转换！
+> 1. **纯 CP 业务代码中严禁滥用 `[*c]`**：在非 FFI 的纯 CP 代码与标准库实现中，所有的可空性必须通过 `?` 显式显化，所有的连续内存遍历必须通过 `[*]T!` 或切片 `[]T` 显式表达；`[*c]T` 仅限用于 C-ABI 头文件声明与互操作边界（详见 17.3.5）。
 > 2. `*T!` 仅代表单个对象的裸指针，不支持下标访问 `p[i]`；若需要进行连续内存数组访问，必须明确使用 `[*]T!` 或切片 `[]T`。
 
 #### 11.9.5 常量泛型类（Const Generic Classes）与定长张量/定长缓冲区
@@ -5884,8 +5891,8 @@ export class SocketContext<Handler> {
 | `cap:event_loop`  | 工业级统一事件循环体系：侵入式二叉最小堆定时器、16 字节无锁跨线程任务、微任务防风暴去重、POSIX poll 描述符监听与调度引擎 | **已全面实装** |
 | `cap:security`    | 安全防护与防跨站请求伪造子系统：CSPRNG 随机 Nonce、HMAC-SHA256 签名与篡改校验、恒定时间防时序攻击比对（`constantTimeEql`）、多格式编解码（Base64Url, Base64, Hex） | **已全面实装** |
 | `cap:mem`         | `Arena`, `SharedTensor`, 全局共享堆, 原子引用计数                      | **已全面实装** |
-| `cap:task`        | `spawn`, `spawn_cpu`, `join`, `Task.all`, `Task.race`                  | **已全面实装** |
-| `cap:actor`       | `@spawn`, `@receive`, `@reply`, `PID`, 信箱通信                        | **已全面实装** |
+| `cap:parallel`    | `spawn`, `join`, `Task`（注：`cap:task` / `Task.all` / `Task.race` 规划中） | **已全面实装** |
+| `cap:actor`       | `yield`, `receive`, `sleep`, `join`, `self_pid`, `sender`, `send`, `reply`（内建 `@spawn`/`@receive`/`@reply`/`@send`/`@self`/`@sender`） | **已全面实装** |
 | `cap:fs`          | 异步/同步文件读取、写入、目录创建、流式 I/O                            | **已全面实装** |
 | `cap:net`         | TCP 套接字、UDP 广播、轻量 HTTP 协议栈                                 | **已全面实装** |
 | `cap:reflect`     | 编译期与运行时 `type_of`, `fields_of`, 结构体自省                      | **已全面实装** |
@@ -7362,12 +7369,10 @@ let branch = @if (reflect.hasMethod(Handler, "onOpen")) 100 else 200;
 
 ### 14.12 枚举内省与双向类型转换
 
-#### 1. 内置内省属性
+#### 1. 内置内省属性与数值提取
 
-枚举变量或变体直接支持 `.name` 与 `.value`：
-
-- `e.name`：获取变体的字面量名称字符串（发射为 Zig `@tagName(e)`）。
-- `e.value`：获取枚举的数值（发射为 Zig `@intFromEnum(e)`）。
+- `e.name`：唯一推荐的枚举内置内省属性，获取变体的字面量名称字符串（发射为 Zig `@tagName(e)`）。
+- 数值提取：因为枚举自身即强类型值，规范推荐直接使用类型转换 `e as i32` 或 `i32(e)` 获取底层整数值（编译器亦兼容语法糖 `e.value`，底层均发射为 `@intFromEnum(e)`）。
 
 #### 2. 枚举双向转换
 
@@ -7382,8 +7387,8 @@ enum TaskState {
 }
 
 let st = TaskState.Running;
-let name = st.name; // "Running"
-let val = st.value; // 1
+let name = st.name;       // "Running"
+let val = st as i32;      // 1（首选：直接强转获取底层数值）
 
 let from_int = TaskState(2); // TaskState.Completed
 let from_as = 1 as TaskState; // TaskState.Running

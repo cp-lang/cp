@@ -445,6 +445,10 @@ impl Codegen {
                     params_str.push_str(&format!("self: {}", ptr_type));
                 }
             }
+            let c_meta = func.meta.iter().find(|m| m.name.sym == "c");
+            let is_c = c_meta.is_some() || func.meta.iter().any(|m| m.name.sym == "extern");
+            let is_extern_decl = is_c && func.body.body.is_empty();
+            let mut mutable_copy_params: Vec<String> = Vec::new();
             for p in &func.params {
                 if self.is_class_method
                     && (p.ident.sym == "this" || p.ident.sym == "_" || p.ident.sym == "self")
@@ -475,10 +479,20 @@ impl Codegen {
                     params_str.push_str(", ");
                 }
                 let comptime_prefix = if p.is_comptime { "comptime " } else { "" };
-                params_str.push_str(&format!(
-                    "{}{}: {}",
-                    comptime_prefix, p.ident.sym, mapped_ty
-                ));
+                let needs_mut_copy = !is_extern_decl
+                    && p.is_mut
+                    && !p.is_comptime
+                    && p.ident.sym != "this"
+                    && p.ident.sym != "_"
+                    && p.ident.sym != "self"
+                    && !matches!(p.ty, Type::BorrowType { is_mut: true, .. });
+                let emit_name = if needs_mut_copy {
+                    mutable_copy_params.push(p.ident.sym.clone());
+                    format!("_cp_{}", p.ident.sym)
+                } else {
+                    p.ident.sym.clone()
+                };
+                params_str.push_str(&format!("{}{}: {}", comptime_prefix, emit_name, mapped_ty));
             }
             self.extract_locals_simple(&func.body);
             let is_inline = func.meta.iter().any(|m| m.name.sym == "inline");
@@ -490,8 +504,6 @@ impl Codegen {
             } else {
                 ""
             };
-            let c_meta = func.meta.iter().find(|m| m.name.sym == "c");
-            let is_c = c_meta.is_some() || func.meta.iter().any(|m| m.name.sym == "extern");
             let c_alias = c_meta.and_then(|m| match m.args.first() {
                 Some(MetaArg::Positional(Expr::Lit(Lit::Str(s)))) => Some(s.clone()),
                 _ => None,
@@ -583,9 +595,13 @@ impl Codegen {
                     self.writeln("defer if (!__self_moved) { const __T = @TypeOf(self); if (@typeInfo(__T) == .pointer) { const Child = @typeInfo(__T).pointer.child; if (@typeInfo(Child) == .@\"struct\" and @hasDecl(Child, \"release\")) { const RType = @typeInfo(@TypeOf(Child.release)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) { _ = self.release() catch {}; } else { self.release(); } } } };");
                 }
             }
+            for name in &mutable_copy_params {
+                self.writeln(&format!("var {0} = _cp_{0}; _ = &{0};", name));
+            }
             for p in &func.params {
                 if p.ident.sym != "this" && p.ident.sym != "_" && p.ident.sym != "self" {
-                    let is_used = self.last_use_map.contains_key(&p.ident.sym)
+                    let is_used = mutable_copy_params.contains(&p.ident.sym)
+                        || self.last_use_map.contains_key(&p.ident.sym)
                         || Self::block_contains_ident(&func.body, &p.ident.sym);
                     if !p.is_comptime && !is_used {
                         self.writeln(&format!("_ = {};", p.ident.sym));
@@ -994,10 +1010,13 @@ impl Codegen {
                                                         .cloned()
                                                         .or_else(|| tys.first().cloned())
                                                         .unwrap_or(Type::I32);
-                                                    let is_const = v.kind == crate::ast::VarDeclKind::Const;
+                                                    let is_const =
+                                                        v.kind == crate::ast::VarDeclKind::Const;
                                                     let arr_ty = if is_const {
                                                         Type::BorrowType {
-                                                            inner: Box::new(Type::Array(Box::new(elem_ty))),
+                                                            inner: Box::new(Type::Array(Box::new(
+                                                                elem_ty,
+                                                            ))),
                                                             is_mut: false,
                                                             lifetimes: vec![],
                                                         }
@@ -1050,10 +1069,13 @@ impl Codegen {
                                                             fields.first().map(|f| f.ty.clone())
                                                         })
                                                         .unwrap_or(Type::I32);
-                                                    let is_const = v.kind == crate::ast::VarDeclKind::Const;
+                                                    let is_const =
+                                                        v.kind == crate::ast::VarDeclKind::Const;
                                                     let arr_ty = if is_const {
                                                         Type::BorrowType {
-                                                            inner: Box::new(Type::Array(Box::new(elem_ty))),
+                                                            inner: Box::new(Type::Array(Box::new(
+                                                                elem_ty,
+                                                            ))),
                                                             is_mut: false,
                                                             lifetimes: vec![],
                                                         }
@@ -1084,10 +1106,13 @@ impl Codegen {
                                             }
                                             Pattern::Rest(inner) => {
                                                 if let Pattern::Ident(i) = &**inner {
-                                                    let is_const = v.kind == crate::ast::VarDeclKind::Const;
+                                                    let is_const =
+                                                        v.kind == crate::ast::VarDeclKind::Const;
                                                     let arr_ty = if is_const {
                                                         Type::BorrowType {
-                                                            inner: Box::new(Type::Array(elem_ty.clone())),
+                                                            inner: Box::new(Type::Array(
+                                                                elem_ty.clone(),
+                                                            )),
                                                             is_mut: false,
                                                             lifetimes: vec![],
                                                         }
@@ -1095,10 +1120,8 @@ impl Codegen {
                                                         Type::Array(elem_ty.clone())
                                                     };
                                                     let arr_t_str = self.map_type(&arr_ty);
-                                                    self.locals
-                                                        .insert(i.sym.clone(), arr_t_str);
-                                                    self.var_cp_types
-                                                        .insert(i.sym.clone(), arr_ty);
+                                                    self.locals.insert(i.sym.clone(), arr_t_str);
+                                                    self.var_cp_types.insert(i.sym.clone(), arr_ty);
                                                 }
                                             }
                                             _ => {}
@@ -1433,10 +1456,13 @@ impl Codegen {
                                                         .cloned()
                                                         .or_else(|| tys.first().cloned())
                                                         .unwrap_or(Type::I32);
-                                                    let is_const = var.kind == crate::ast::VarDeclKind::Const;
+                                                    let is_const =
+                                                        var.kind == crate::ast::VarDeclKind::Const;
                                                     let arr_ty = if is_const {
                                                         Type::BorrowType {
-                                                            inner: Box::new(Type::Array(Box::new(elem_ty))),
+                                                            inner: Box::new(Type::Array(Box::new(
+                                                                elem_ty,
+                                                            ))),
                                                             is_mut: false,
                                                             lifetimes: vec![],
                                                         }
@@ -1490,10 +1516,13 @@ impl Codegen {
                                                             fields.first().map(|f| f.ty.clone())
                                                         })
                                                         .unwrap_or(Type::I32);
-                                                    let is_const = var.kind == crate::ast::VarDeclKind::Const;
+                                                    let is_const =
+                                                        var.kind == crate::ast::VarDeclKind::Const;
                                                     let arr_ty = if is_const {
                                                         Type::BorrowType {
-                                                            inner: Box::new(Type::Array(Box::new(elem_ty))),
+                                                            inner: Box::new(Type::Array(Box::new(
+                                                                elem_ty,
+                                                            ))),
                                                             is_mut: false,
                                                             lifetimes: vec![],
                                                         }
