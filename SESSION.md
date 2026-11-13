@@ -1083,3 +1083,23 @@
   1. `lib/sourcemap/`（`vlq.cp`, `line_offset.cp`, `mapping.cp`, `index.cp`）；
   2. `cap/test/test_sourcemap.cp`：3 大端到端测试套件；
   3. `SESSION.md`, `CHANGELOG.md`, `DEVLOG.md`：四线文档同步。
+
+---
+
+## 2026-11-14 连续自主推进：构建 `lib/s3/` (`cap:s3`) S3 凭证管理、ACL/StorageClass 与 AWS SigV4 (`AWS4-HMAC-SHA256`) 签名子系统
+
+### 1. 执行结果汇报
+1. **吸收 Bun `/data/dev/bun/src/s3_signing/` 资产，构建 [`lib/s3/`](file:///data/dev/cp/lib/s3/) (`cap:s3`)**：
+   - [`lib/s3/types.cp`](file:///data/dev/cp/lib/s3/types.cp)：`S3Acl`（8 种标准 S3 访问控制策略双向转换）、`S3StorageClass`（11 种 S3 存储层级双向转换）、`S3SignErrorCode` 与 `S3Error`；
+   - [`lib/s3/credentials.cp`](file:///data/dev/cp/lib/s3/credentials.cp)：`S3Credentials` 凭证模型，支持必填项校验、HTTP 方法合法性校验，以及 Virtual-Hosted Style（`<bucket>.<endpoint>` + `/<key>`）与 Path Style（`<endpoint>` + `/<bucket>/<key>`）双模式零堆分配 URI/Host 格式化；
+   - [`lib/s3/signing.cp`](file:///data/dev/cp/lib/s3/signing.cp)：AWS Signature Version 4 (`AWS4-HMAC-SHA256`) 签名引擎 `SigV4Signer`（支持 `sha256Hex`、`hmacSha256`、`deriveSigningKey` 四级 HMAC 密钥派生、`formatCredentialScope` 与一键签名 `signS3CanonicalRequest`）；
+   - [`lib/s3/index.cp`](file:///data/dev/cp/lib/s3/index.cp)：`cap:s3` 统一对外出口。
+2. **端到端测试验证**：
+   - [`cap/test/test_s3.cp`](file:///data/dev/cp/cap/test/test_s3.cp)：3 大测试套件（`S3Acl`/`S3StorageClass`/`S3Error` 映射、Path-Style 与 Virtual-Hosted URL 构造、AWS S3 官方文档 GET Object `AWS4-HMAC-SHA256` 标准测试向量验证）100% PASS（`Total: 3 | Passed: 3 | Failed: 0`）。
+
+### 2. 阶段里程碑 Git 提交 (`lib/s3/`)
+- **提交说明**：`feat(s3): add lib/s3 ACL/StorageClass, credentials and AWS SigV4 HMAC-SHA256 signer`
+- **提交范围**：
+  1. `lib/s3/`（`types.cp`, `credentials.cp`, `signing.cp`, `index.cp`）；
+  2. `cap/test/test_s3.cp`：3 大端到端测试套件；
+  3. `SESSION.md`, `CHANGELOG.md`, `DEVLOG.md`：四线文档同步。

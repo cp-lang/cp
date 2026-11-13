@@ -523,3 +523,10 @@
   - 新增 [`lib/sourcemap/index.cp`](file:///data/dev/cp/lib/sourcemap/index.cp)：`cap:sourcemap` 对外统一出口。
 - [`cap/test/test_sourcemap.cp`](file:///data/dev/cp/cap/test/test_sourcemap.cp):
   - 新增覆盖 Base64 VLQ、二分行偏移表与 SourceMap v3 映射反查的 3 大测试套件（3/3 PASS）。
+- [`lib/s3/`](file:///data/dev/cp/lib/s3/):
+  - 新增 [`lib/s3/types.cp`](file:///data/dev/cp/lib/s3/types.cp)：`S3Acl`、`S3StorageClass`、`S3SignErrorCode` 与 `S3Error`；
+  - 新增 [`lib/s3/credentials.cp`](file:///data/dev/cp/lib/s3/credentials.cp)：`S3Credentials` 凭证校验与 Virtual-Hosted / Path-Style 端点构造；
+  - 新增 [`lib/s3/signing.cp`](file:///data/dev/cp/lib/s3/signing.cp)：AWS Signature Version 4 (`AWS4-HMAC-SHA256`) 四级密钥派生与请求签名器 `SigV4Signer`；
+  - 新增 [`lib/s3/index.cp`](file:///data/dev/cp/lib/s3/index.cp)：`cap:s3` 对外统一出口。
+- [`cap/test/test_s3.cp`](file:///data/dev/cp/cap/test/test_s3.cp):
+  - 新增覆盖 S3 ACL/StorageClass、凭证 URL 格式化与 AWS SigV4 官方测试向量的 3 大测试套件（3/3 PASS）。

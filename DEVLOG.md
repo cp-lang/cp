@@ -764,3 +764,9 @@ Bun AGY 在 265 个模块的实战重构中提交了 8 项遗漏审查。经逐�
 ### 1. 架构设计与核心实现
 - **栈内联 Base64 VLQ 编解码 (`vlq.cp`)**：吸收 `/data/dev/bun/src/sourcemap/VLQ.cp`，使用 7 字节定长数组 `[7]u8` 存储 Base64 VLQ 序列并搭配 `*this` 指针接收者返回安全切片，支持任意 `i32` 正负整数的最低位符号编码与 5-bit 续位（bit 5 continuation）流式解码。
 - **二分行偏移表与 SourceMap v3 相对状态机 (`line_offset.cp`, `mapping.cp`)**：吸收 `LineOffsetTable.cp` 与 `ParsedSourceMap.cp`，使用编译期常量泛型实现零堆分配的 `LineOffsetTable<MAX_LINES>`（`O(log N)` 二分查找行号）与 `ParsedSourceMap<CAP>`（维护 `gen_line`, `gen_col`, `src_idx`, `orig_line`, `orig_col`, `name_idx` 六维累加寄存器解析 `;`/`,` 分隔的 VLQ 映射串）。
+
+## 2026-11-14 构建 `lib/s3/` (吸收 Bun S3 凭证与 AWS SigV4 `AWS4-HMAC-SHA256` 签名子系统)
+
+### 1. 架构设计与核心实现
+- **S3 类型契约与双模式端点构造 (`types.cp`, `credentials.cp`)**：吸收 `/data/dev/bun/src/s3_signing/acl.cp`、`storage_class.cp`、`error.cp` 与 `credentials.cp`，支持 8 种 `S3Acl`、11 种 `S3StorageClass` 以及 Virtual-Hosted Style 与 Path Style 双模式 Host/URI 栈上格式化（注意枚举静态方法参数命名避开编译器自动生成的 `.name()` 方法名以防 Zig 局部变量遮蔽）。
+- **AWS Signature Version 4 四级 HMAC-SHA256 密钥派生 (`signing.cp`)**：实现完整的 `kDate = HMAC("AWS4" + secret, date)` -> `kRegion = HMAC(kDate, region)` -> `kService = HMAC(kRegion, service)` -> `kSigning = HMAC(kService, "aws4_request")` 四级派生链与 Canonical Request 签名，并通过 AWS S3 官方文档标准测试向量（`f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41`）100% 精确校验。
