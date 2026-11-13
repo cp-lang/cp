@@ -409,8 +409,9 @@ impl Codegen {
                         .map(|cls| !cls.generic_params.is_empty())
                         .unwrap_or(false);
                     let is_enum = self.enum_defs.contains_key(c);
-                    let is_val = is_enum || self.value_classes.contains(c) || is_generic;
-                    let type_name = if is_generic {
+                    let is_val =
+                        is_enum || self.value_classes.contains(c) || is_generic || c == "@This()";
+                    let type_name = if is_generic || c == "@This()" {
                         "@This()".to_string()
                     } else {
                         c.clone()
@@ -453,6 +454,13 @@ impl Codegen {
                 if self.is_class_method
                     && (p.ident.sym == "this" || p.ident.sym == "_" || p.ident.sym == "self")
                 {
+                    continue;
+                }
+                if p.ident.sym == "..." {
+                    if !params_str.is_empty() {
+                        params_str.push_str(", ");
+                    }
+                    params_str.push_str("...");
                     continue;
                 }
                 let mapped_ty = match &p.ty {
@@ -569,8 +577,7 @@ impl Codegen {
                 }
                 return;
             }
-            let is_export = func.meta.iter().any(|m| m.name.sym == "export")
-                || (is_c && !func.body.body.is_empty());
+            let is_export = func.meta.iter().any(|m| m.name.sym == "export");
             let export_kw = if is_export { "export " } else { "" };
             self.current_func_name = Some(func.ident.sym.clone());
             self.record_source_location(func.span);

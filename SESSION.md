@@ -854,3 +854,37 @@
   1. `cpc/src/parser.rs`、`cpc/src/codegen/actor.rs`、`cpc/src/codegen/pattern.rs`、`cpc/src/codegen/stmt.rs`、`cap/test/test_let_param.cp`：`fn(let param: T)` 形参解析与 Zig 代码生成闭环及前置关联修复/回归测试；
   2. `cp_agent_ref.md`、`cp_ref.md`：双轨规范全量对齐与独立交叉审计修正定稿（消除全部 Zig 残留与未实现幻觉，补齐 32 大标准库与全部核心语法）；
   3. `TASK.md`、`SESSION.md`、`CHANGELOG.md`、`DEVLOG.md`：任务状态与四线文档全量同步。
+
+
+---
+
+## 2026-11-13（续 2） Bun AGY Wave 0/1 编译热修闭环、内置 `/pattern/flags` 正则字面量与双轨规范两轮显微镜级对齐
+
+### 1. 收到用户指令
+1. 理解并合并 Bun AGY Wave 1/2 建议（`@bitCast` 与 `as` 区别、SIMD 向量与位计数原语 `@Vector`/`@splat`/`@clz`/`@ctz`/`@popCount`/`@reduce`/`@select`/`@byteSwap`/`@bitSizeOf`、`@typeInfo(T)` 编译期反射内省）至 `cp_ref.md` 与 `cp_agent_ref.md`；
+2. 落实 Gemini 4 第一轮对比审计（7 处细节语法遗漏 + 3 处规范同步项），并实现类似 TypeScript 的 `/pattern/flags` 正则表达式字面量，将 `RegExp` 作为 CP 语言内置类无需 `import`，完成后执行 `cpc check` / `cap run` 实测；
+3. 审查并落实 Gemini 4 第二轮显微镜对比审计（4 处细微语法遗漏：多级命名空间点路径类型值直通、`T ! FileErr || err{...}` 匿名即席错误集联合、单行 `@c fn` / `@c export fn`、`switch` 分支 `|` 与 `,` 兼容；3 处规范差异与笔误：枚举 `.get`/`.has` 与 `fromName` 对齐、前缀 `try` 仅前端迁移兼容而智能体严禁、`cp_ref.md` 中 `exort` 与 `rait` 笔误修正），确保 `cp_agent_ref.md` 与 `cp_ref.md` 100% 一致；
+4. `git 提交`。
+
+### 2. 执行结果汇报
+1. **7 项 Bun AGY 编译任务全量清零与热修验证**：
+   - 修复并结单 `task-20261113-memory-auto-unsafe`、`task-20261113-const-ptr-mutate`、`task-20261113-comptime-name-and-union`、`task-20261113-const-rawptr-cfunc`、`task-20261113-ffi-varargs-fnptr`、`task-20261113-align-ptr-typefn`、`task-20261113-zeroes-fixedarray-splat`（涵盖 `Expr::TypeVal`、`[*]const T?!` 指针可选层剥离顺序、主表达式 `[N]T` 定长数组类型实参、泛型结构体内部自实例化 `@This(){ ... }` 与字段默认值 `[0; N]` 类型传播）。
+2. **TypeScript 风格 `/pattern/flags` 正则字面量与内置 `RegExp` 实装**：
+   - 在 `cpc/src/lexer.rs` 增加 `base_offset` 与 `reset_at`，在 `cpc/src/parser.rs` 主表达式位置解析 `/pattern/flags`（支持 `\/` 转义、`[...]` 字符类与 `i`/`m` 等标志，不影响二元除法 `/`），直接降级为内置 `RegExp` 构造，无需任何 `import`；
+   - 在 `cpc/src/codegen/mod.rs` 补齐 `RegExp.init` 对 `i` / `m` 标志位解析，在 `cpc/src/codegen/expr.rs` 将 `Expr::New` 块标签改为唯一 `blk_new_{id}` 防止嵌套块遮蔽。
+3. **文档新语法实测驱动的编译器自愈增强**：
+   - 支持 `@Vector(N, T)` 与常量类型别名（`const V = @Vector(16, u8);`）的 `sema` 类型兼容、参数/初值匿名列表生成及原生向量逐元素比较（`v == zeros` 不走 `cp_eq`）；
+   - 支持 `*T!` 向 `*const T!` 裸指针常量协变；
+   - 修复 `Type::ErrorUnion` 在 `Expr::Question` 与 `Expr::QuestionFallback`（如 `(expr)?` / `expr ? fallback`）下的解包类型推导；
+   - 支持类型实参指针写法（如 `isPointerType(*i32)` / `*BoxVal`）直接生成指针类型而非运行时取地址。
+4. **`cp_ref.md` 与 `cp_agent_ref.md` 两轮显微镜级双向同步**：
+   - 全量补齐第一轮 7 项细节语法、Bun AGY Wave 1/2 原语矩阵（`@bitCast` vs `as`、SIMD/位操作、`@typeInfo(T)` 反射、Zig 0.17 `info.field_names.len`、`Err.init(...).with_cause(move b)`）与第二轮 4+3 项细节（多级点路径值类型直通、`T ! FileErr || err{...}`、极简 `@c fn`、`switch` `|` 与 `,` 兼容、枚举 `.get`/`.has`、前缀 `try` 边界说明及 `export`/`Trait` 笔误修正）；
+   - 9 组 `cap/test/` 回归测试与专项文档语法验证全部 100% 通过，`cpc` 与 `cpc_dev` 完成同步构建。
+
+### 3. 阶段里程碑 Git 提交
+- **用户指令**：`git 提交`
+- **提交说明**：`feat(cpc,spec): add /pattern/flags regex literals, SIMD/FFI fixes, and sync dual specs`
+- **提交范围**：
+  1. `cpc/src/*` & `cpc_dev/src/*`：内置 `/pattern/flags` 正则字面量、`Expr::TypeVal`、`@Vector` 常量别名与向量比较、`[*]const T?!` 与 `[N]T` 类型实参、`*T!` -> `*const T!` 协变、`ErrorUnion` 降级解包及 Bun AGY 7 项编译热修；
+  2. `cp_agent_ref.md`、`cp_ref.md`：完成两轮 Gemini 4 审计项与 Bun AGY Wave 1/2 底层原语双向 100% 同步；
+  3. `TASK.md`、`SESSION.md`、`CHANGELOG.md`、`DEVLOG.md`：任务状态与四线文档同步。

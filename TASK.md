@@ -4046,7 +4046,7 @@ walteryu99@gmail.com 111h
 walteryu66@gmail.com 108h
 walteryu33@gmail.com 118h
 yuway566@gmail.com 123h
-waywayyu66@gmail.com 32元，需取消 11-12
+waywayyu66@gmail.com 145h 32元，需取消 11-12
 
 agyr --json | jq -r '.[].id'
 640a7490-6bcb-4d2f-a6af-60d7b8d6c522 最早

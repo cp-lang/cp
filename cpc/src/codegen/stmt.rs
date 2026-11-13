@@ -78,19 +78,18 @@ impl Codegen {
                     let old_box_trait = self.expected_box_trait.clone();
                     let old_array_elem = self.expected_array_elem_type.clone();
                     if let Some(ty) = &var.ty {
-                        match ty {
-                            Type::FixedArray(elem, _) | Type::Array(elem) => {
-                                self.expected_array_elem_type = Some((**elem).clone());
-                            }
-                            Type::Ref(id) if id.sym.starts_with('[') => {
-                                if let Some(idx) = id.sym.find(']') {
-                                    let elem_name =
-                                        id.sym[idx + 1..].trim_start_matches("const ").trim();
-                                    self.expected_array_elem_type =
-                                        Some(Self::type_from_name_static(elem_name));
-                                }
-                            }
-                            _ => {}
+                        let resolved_ty = if let Type::Ref(id) = ty {
+                            self.type_aliases
+                                .get(&id.sym)
+                                .map(|ta| &ta.target_ty)
+                                .unwrap_or(ty)
+                        } else {
+                            ty
+                        };
+                        if let Some(el) = Self::fixed_or_vec_elem_type(resolved_ty) {
+                            self.expected_array_elem_type = Some(el);
+                        } else if let Type::Array(elem) = resolved_ty {
+                            self.expected_array_elem_type = Some((**elem).clone());
                         }
                     }
                     match &var.ty {
@@ -153,8 +152,43 @@ impl Codegen {
                         Pattern::Ident(ident) => {
                             if matches!(var.kind, crate::ast::VarDeclKind::Const) {
                                 self.const_vars.insert(ident.sym.clone());
+                                if let Expr::Builtin(call) = init {
+                                    if call.name == "@Vector" && call.args.len() == 2 {
+                                        let n_str = self.generate_expr(&call.args[0]);
+                                        let el_str = self.generate_expr(&call.args[1]);
+                                        self.type_aliases.insert(
+                                            ident.sym.clone(),
+                                            crate::ast::TypeAliasDecl {
+                                                span: var.span,
+                                                ident: ident.clone(),
+                                                target_ty: Type::Ref(Ident {
+                                                    span: var.span,
+                                                    sym: format!("@Vector({},{})", n_str, el_str),
+                                                }),
+                                                is_pub: var.is_pub,
+                                            },
+                                        );
+                                    }
+                                } else if let Expr::TypeVal { ty: alias_ty, .. } = init {
+                                    self.type_aliases.insert(
+                                        ident.sym.clone(),
+                                        crate::ast::TypeAliasDecl {
+                                            span: var.span,
+                                            ident: ident.clone(),
+                                            target_ty: alias_ty.clone(),
+                                            is_pub: var.is_pub,
+                                        },
+                                    );
+                                }
                             } else {
                                 self.const_vars.remove(&ident.sym);
+                            }
+                            let is_type_ns = matches!(&var.ty, Some(Type::Ref(tid)) if tid.sym == "type")
+                                || Self::is_type_namespace_expr(init);
+                            if is_type_ns {
+                                self.type_namespace_vars.insert(ident.sym.clone());
+                            } else {
+                                self.type_namespace_vars.remove(&ident.sym);
                             }
                             self.var_scope_depth
                                 .insert(ident.sym.clone(), self.current_scope_depth);
@@ -836,7 +870,8 @@ impl Codegen {
                     self.write_to_case(&sw_code);
                 }
                 Expr::Zig(zig) => {
-                    self.write_to_case(&format!("{}\n", lower_struct_body(&zig.code)))
+                    let lowered = self.generate_zig_or_struct(&zig.code);
+                    self.write_to_case(&format!("{}\n", lowered))
                 }
                 Expr::Bin(bin)
                     if bin.op == BinaryOp::LogicalOr
@@ -2159,6 +2194,32 @@ impl Codegen {
                 self.write_to_case("};");
             }
             _ => {}
+        }
+    }
+
+    pub(crate) fn is_type_namespace_expr(expr: &Expr) -> bool {
+        match expr {
+            Expr::Zig(z) => {
+                let t = z.code.trim_start();
+                t.starts_with("struct")
+                    || t.starts_with("union")
+                    || t.starts_with("enum")
+                    || t.starts_with("packed ")
+                    || t.starts_with("extern ")
+                    || t.starts_with("opaque ")
+            }
+            Expr::If { cons, alt, .. } => {
+                Self::is_type_namespace_expr(cons)
+                    || alt
+                        .as_ref()
+                        .map_or(false, |a| Self::is_type_namespace_expr(a))
+            }
+            Expr::ComptimeExpr(e) => Self::is_type_namespace_expr(e),
+            Expr::Comptime(b) => b.body.last().map_or(
+                false,
+                |s| matches!(s, Stmt::Expr(e) if Self::is_type_namespace_expr(e)),
+            ),
+            _ => false,
         }
     }
 }

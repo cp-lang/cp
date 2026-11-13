@@ -675,3 +675,13 @@ Bun AGY 在 265 个模块的实战重构中提交了 8 项遗漏审查。经逐�
 ### 2. 双轨规范与真实编译器/标准库的零冲突对齐方法
 - 采用“文档对照 + 前端源码（`lexer.rs` / `parser.rs` / `resolver.rs` / `main.rs`）+ `lib/` 实装目录交叉审计”策略，引入独立审查子智能体逐项验证语法解析边界；
 - 重点剔除“文档想象但前端未实现”或“历史 Zig 残留”语法（如 `pub default class`、`/regex/` 字面量、`receive { |res| }`、`downcast(T)`、`inline for (x) |x|` 与虚构 `cap:task`），确保任何智能体按 `cp_agent_ref.md` 生成的代码均能精准通过 `cpc` 解析与借用检查。
+
+## 2026-11-13 内置 `/pattern/flags` 正则字面量、SIMD/FFI 类型流转增强与双轨规范显微镜对齐
+
+### 1. 上下文感知的 `/pattern/flags` 正则字面量解析
+- **语法消歧原理**：在表达式文法中，`/` 位于二元中缀位置时始终为算术除法（`a / b`），而在 `parse_primary_expr`（主表达式/前缀位置，如赋值右值、函数实参、括号内或语句起始）出现 `Token::Slash` 时，必定不可能是二元除法。
+- **实现方案**：在 `Lexer` 中引入 `base_offset` 与 `reset_at(full_input, offset)`，当 `parse_primary_expr` 遇到 `Token::Slash` 时，直接在原始字节流上扫描正则主体（正确处理 `\/` 转义与 `[...]` 字符类内部的 `/`），提取尾随 ASCII 字母标志（`i`, `m`, `g` 等），重置词法器游标并降级为 `Expr::New(RegExp, [pattern, flags])`，使 `RegExp` 作为语言一等内置类无需 `import` 即可开箱使用。
+
+### 2. `@Vector(N, T)` 与类型实参表达式 (`Expr::TypeVal`) 闭环
+- 针对 SIMD 高速扫描场景中高频出现的 `const V = @Vector(16, u8); const v: V = chunk; const cmp = v == zeros;`，在 `sema` 与 `codegen` 中同步打通 `const` 向量类型别名注册、`[N]T` 与数组字面量到 `@Vector` 的隐式协变，以及向量间 `==` / `!=` 直接发射 Zig 原生逐元素向量比较（返回 `@Vector(N, bool)` 供 `@bitCast` 提取位掩码，而非调用返回标量 `bool` 的 `cp_eq`）。
+- 针对编译期反射与泛型函数接收类型实参（如 `std.mem.zeroes([16]u8)`、`isPointerType(*i32)`、`@c fn(...)`），统一通过 `Expr::TypeVal` 承载并在代码生成阶段映射为原生 Zig 类型表达式。

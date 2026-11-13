@@ -814,16 +814,22 @@ let big: usize = small; // 100% 静态安全无损，直接流转
 
 ```ts
 unsafe {
-  // 裸指针类型重新按位解释
-  let raw_u8: *u8 = ptr_i32 as *u8;
+  // 裸指针类型重新按位解释 (自动生成 @ptrCast(@alignCast(...)))
+  let raw_u8: *u8! = ptr_i32 as *u8!;
 
-  // 裸指针与物理地址数值互转
+  // 裸指针与物理地址数值互转 (对应底层 @intFromPtr / @ptrFromInt)
   let addr: usize = ptr_i32 as usize;
-  let new_ptr: *i32 = addr as *i32;
+  let new_ptr: *i32! = addr as *i32!;
+
+  // 物理位模式零转换重解释 (Tagged Pointer / IEEE-754 位模式 / @Vector 位掩码)
+  // as 用于数值截断、符号变更与指针强转；@bitCast 严格保留原始二进制位不变
+  let bits: u32 = @bitCast(float_val);
+  let tag_addr: usize = @intFromPtr(ptr_i32);
 }
 ```
 
-若在普通安全代码块中试图使用 as 强转裸指针，cpc 编译器前端静态报错：CP Compile Error: Raw pointer casting is only allowed inside unsafe block。
+若在普通安全代码块中试图使用 `as` 强转裸指针，cpc 编译器前端静态报错：`CP Compile Error: Raw pointer casting is only allowed inside unsafe block`。
+> **与 `@bitCast` 的明确界分**：数值大小裁剪、有符号/无符号转换及标量转型使用 `as` 或 `T(x)`；仅当需要保持底层二进制位 100% 不变（如 Tagged Pointer 指针高低位打标、`f32 <-> u32`、`@Vector` 位压缩）时，显式使用 `@bitCast(expr)`（详见 19.7 节）。
 
 ---
 
@@ -990,6 +996,18 @@ export enum FetchRequestMode: u2 {
         });
         pub const toJS = @import("../http_jsc/fetch_enums_jsc.zig").fetchRequestModeToJS;
     }
+}
+```
+
+#### 3.5.4 开放枚举 (Open Enums)
+
+针对系统错误码、硬件扩展位标志等需兼容未命名整型值的 C-ABI 场景，CP 支持在底层整型枚举末尾使用 `_` 定义**开放枚举（Open Enum）**，允许该枚举安全承载任意未显式命名的整型值：
+
+```typescript
+pub enum ExtFlag: usize {
+    none = 0,
+    read_only = 1,
+    _,
 }
 ```
 
@@ -2920,7 +2938,7 @@ fn inspect_dynamic(res: string ! Err) {
 
 针对极其复杂的微服务错误栈或插件体系，CP 提供了与 Rust 类似但更轻量安全的 **`Box<dyn Trait>` 胖指针与 `downcast` 机制**：
 
-- 动态错误 `Err` 可通过 `Err.with_cause(move box_err)` 挂载堆上动态分配的胖指针；
+- 动态错误 `Err` 可通过 `Err.init(code, msg).with_cause(move box_err)` 挂载堆上动态分配的胖指针；
 - 在模式匹配与函数调用中，**双轨支持 `:` 与 `:=`（Walrus 海象解构符）**，均能精确向下转型并绑定解构后的具体错误实例：
   - `err(e: ConcreteError) => ...`（类型窄化匹配与绑定）
   - `err(e := ConcreteError) => ...`（显式解构赋值与绑定）
@@ -2956,7 +2974,7 @@ switch (res) {
    - **多错误联合类型**：`FileErr || NetErr`（零成本原生联合）、`FileErr || err{...}`、`FileErr || Err`；
    - **动态业务错误**：内置轻量结构体 `Err`（`code`, `msg`, `cause`），原 `Error` 保持完全兼容；
    - **普通枚举转错误**：`enum HttpError`，通过 `err(HttpError.BadRequest)` 包裹升格为强类型错误；
-   - **多态胖指针错误**：`Box<dyn Trait>`，通过 `Err.with_cause(move b)` 挂载，并在 `switch` 中支持 `err(e: T)` 与 `err(e := T)` 双轨安全 downcast 还原具体出错实例。
+   - **多态胖指针错误**：`Box<dyn Trait>`，通过 `Err.init(code, msg).with_cause(move b)` 挂载，并在 `switch` 中支持 `err(e: T)` 与 `err(e := T)` 双轨安全 downcast 还原具体出错实例。
 
 2. **已实装的 `From` 声明式与自动类型提升机制**：
    - **枚举声明式 `from` 桥接**：在定义错误枚举时，可声明 `enum AppErr { Io(FileErr) from FileErr, Net(NetErr) from NetErr }`。当子函数返回 `! FileErr` 时，使用 `?` 冒泡会自动根据 `from FileErr` 规则转换为 `AppErr.Io(fe)`；
@@ -3135,8 +3153,8 @@ process_transaction() catch err => {
     print("Failed transaction:", err);
 };
 
-// 4. 前缀 try 表达式兼容语法（Zig/Rust 迁移兼容与极速适配）
-// 支持直接书写前缀 try expr，前端自动映射为标准错误传播（Expr::Question）：
+// 4. 前缀 try 表达式前端兼容语法（仅限历史/外部 Zig 代码迁移兼容，新代码与 AI 智能体严禁使用！）
+// 编译器前端可将前缀 try expr 自动映射为标准错误传播（Expr::Question），但规范强制要求 100% 书写后缀 expr?：
 fn send_data(*socket: Socket, data: []const u8): void! {
     try socket.write(data);
     const amount = try socket.flush();
@@ -3556,7 +3574,9 @@ let is_same = std.mem.eql(u8, slice_a, slice_b);
 
 ---
 
-### 9.4 字符串模板插值与原生正则表达式
+### 9.4 字符串模板插值与内置正则表达式 (`RegExp` / `/pattern/flags`)
+
+`RegExp` 是 CP 语言的**内建原生类（Built-in Class）**，开箱即用，**无需任何 `import`**。同时支持 TypeScript 风格正则字面量 **`/pattern/flags`**（支持 `\/` 斜杠转义与 `i` 忽略大小写、`m` 多行标志）以及 `new RegExp(pattern, flags)` 构造语法，并由编译器确定性 RAII 自动释放底层正则状态：
 
 ```typescript
 let agentName = "Nexus-9";
@@ -3565,11 +3585,15 @@ let taskCount = 42;
 // 模板插值（必须使用反引号）
 let summary = `Agent ${agentName} executed ${taskCount} reductions.`;
 
-// 原生正则字面量
-let emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
-if (emailRegex.test("admin@cp-nest.org")) {
+// 1. TypeScript 风格原生正则字面量（无需 import）
+let emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/i;
+if (emailRegex.test("ADMIN@cp-nest.org")) {
   print("Valid email format");
 }
+
+// 2. 动态模式或运行期拼接时使用 new RegExp(pattern, flags)（同样无需 import）
+let pathRe = new RegExp("^/api/v[0-9]+/users$", "i");
+let matched = pathStr.match(pathRe);
 ```
 
 ---
@@ -5662,17 +5686,25 @@ pub const c = struct {
 };
 ```
 
-#### 11.9.2 `@c` 单行导出与 C 调用约定修饰
+#### 11.9.2 `@c` 调用约定修饰与外部符号声明 (`extern const` / `extern let` / `extern fn`)
 
-当需要在 CP 模块中导出供 C 语言宿主反向调用的函数（如 Trampoline 蹦床跳板、系统回调）时，使用 `@c` 前缀修饰符：
+当需要在 CP 模块中编写或导出符合 C 调用约定（`callconv(.c)`）的函数，以及链接外部 C 静态库/动态库暴露的全局变量与函数符号时，可使用以下原生语法：
 
 ```typescript
-@c pub fn bun_vtable_on_open_trampoline(s: *any!) void {
-    // 蹦床跳板实现
+// 1. 声明 C 调用约定回调函数（按需加 pub / @export 导出符号）
+@c pub fn bun_vtable_on_open_trampoline(s: *any!): void {
+    // 生成 pub fn ... callconv(.c) void
 }
+
+// 2. 外部 C 符号常量、可变变量与函数原型声明
+extern const c_abi_version: u32;             // 只读外部 C 符号 (extern const)
+extern let c_errno_state: i32;               // 可变外部 C 全局状态 (extern let)
+pub extern fn mimalloc_free(ptr: *!): void;  // 外部 C 库函数声明 (自动绑定 C ABI)
 ```
 
-- **语义**：`@c` 替代冗长的 `@callconv("c") export`，直观易读且与 `@c { ... }` 块保持完全对称的设计美学。
+- **语义**：
+  - `@c` 替代冗长的 `@callconv("c")`，与 `@c { ... }` 块保持对称；内部 C 回调声明为 `@c fn` 仅注入 `callconv(.c)`，需对外暴露符号给 C 链接器时可叠加 `export` / `@export`；
+  - `extern const` / `extern let` 用于绑定 C/Zig 链接单元中的外部全局变量与常量，严格延续 CP 的 `const`（不可变）与 `let`（可变）语义。
 
 #### 11.9.3 C-ABI 函数指针类型与可选回调 (`@c ((params): Ret)?`)
 
@@ -7377,7 +7409,7 @@ let branch = @if (reflect.hasMethod(Handler, "onOpen")) 100 else 200;
 #### 2. 枚举双向转换
 
 - 数值转枚举：支持构造器语法 `TaskState(2)` 或强制转换 `1 as TaskState`。
-- 字符串转枚举：支持静态方法 `TaskState.fromName("Idle")`，返回可选类型 `TaskState?`。
+- 字符串转枚举与存在性判定：首选静态方法 `TaskState.get("Idle")`（兼容 `TaskState.fromName("Idle")`），返回可选类型 `TaskState?`；支持 `TaskState.has("Idle")` 返回 `bool`。
 
 ```typescript
 enum TaskState {
@@ -7392,7 +7424,8 @@ let val = st as i32;      // 1（首选：直接强转获取底层数值）
 
 let from_int = TaskState(2); // TaskState.Completed
 let from_as = 1 as TaskState; // TaskState.Running
-let from_str = TaskState.fromName("Idle"); // TaskState?, .? 为 TaskState.Idle
+let from_get = TaskState.get("Idle");      // TaskState?（首选静态查找，兼容 TaskState.fromName("Idle")）
+let exists = TaskState.has("Running");     // true
 ```
 
 ---
@@ -7430,7 +7463,7 @@ let s4 = string.from(12345); // "12345"
 | `enum`   | 枚举类型定义                                            |
 | `type`   | 类型别名声明                                            |
 | `import` | 导入模块、导入类型/函数                                 |
-| `exort`  | 导出模块、导出类型/函数                                 |
+| `export` | 导出模块、导出类型/函数                                 |
 | `pub`    | 公开导出，外部模块可访问                                |
 | `priv`   | 私有，仅当前模块内可见                                  |
 | `Err`    | 错误构造函数，生成错误联合里的错误变体，switch 匹配错误 |
@@ -7477,7 +7510,7 @@ let s4 = string.from(12345); // "12345"
 | `async` | 异步函数       |
 | `await` | 等待异步返回值 |
 
-### 15.6 rait 关键字
+### 15.6 Trait 关键字
 
 | 关键字  | 含义说明       |
 | ------- | -------------- |
@@ -9394,6 +9427,58 @@ let count_str = count.toString();  // "42"
 
 let flag = true;
 let flag_str = flag.toString();    // "true"
+```
+
+---
+
+#### 19.7 底层位模式重解释 (`@bitCast`)、SIMD 向量与编译期反射原语 (`@Vector` / `@typeInfo`)
+
+在迁移底层内存指针库（如 Tagged Pointer、`RefCount`）、无锁容器及 SIMD 高速字符串/Unicode 扫描器（如 `strings`/`unicode`）时，CP 编译器完整透传并支持以下零开销底层原语：
+
+##### 1. `@bitCast` vs `as` 数值转换 vs 地址转换
+
+| 原语 / 语法 | 语义边界 | 典型用途 |
+| :--- | :--- | :--- |
+| **`x as TargetT` / `T(x)`** | **数值与地址转换**：可能执行整数截断、浮点转整或指针/整型转换（`ptr as *T!` 自动织入 `@ptrCast(@alignCast(ptr))`；`ptr as usize` 对应 `@intFromPtr`；`addr as *T!` 对应 `@ptrFromInt`） | 普通数值裁剪、C 指针强转、句柄转地址 |
+| **`@bitCast(expr)` / `@as(T, @bitCast(expr))`** | **物理二进制位 1:1 无损重解释**：要求源类型与目标类型位宽（`@bitSizeOf`）严格相等，不修改任何二进制位 | Tagged Pointer 指针高位/低位打标、`f32 <-> u32`、Packed Struct 转整型、`@Vector` 转位掩码 |
+
+##### 2. SIMD 向量与硬件位计数原语
+
+- **`@Vector(N, T)` & `@splat(v)`**：声明固定宽度硬件 SIMD 向量并将标量广播填充所有通道；
+- **`@reduce(op, vec)` & `@select(T, pred, a, b)`**：向量通道水平归约（`.And`, `.Or`, `.Xor`, `.Add`, `.Min`, `.Max`）与无分支掩码选择；
+- **硬件位扫描与字节序**：`@clz(v)`（前导零计数）、`@ctz(v)`（尾随零计数）、`@popCount(v)`（置 1 位数统计）、`@byteSwap(v)`（高低字节翻转）、`@bitSizeOf(T)`（类型精确位宽）。
+
+```typescript
+pub fn hasZeroByte16(chunk: [16]u8): bool {
+    const V = @Vector(16, u8);
+    const v: V = chunk;
+    const zeros: V = @splat(0);
+    const cmp = v == zeros;
+    const mask: u16 = @bitCast(cmp);
+    return mask != 0;
+}
+
+pub fn firstSetBitIndex(mask: u64): usize {
+    if (mask == 0) return 64;
+    return @ctz(mask);
+}
+```
+
+##### 3. 编译期类型反射内省 (`@typeInfo(T)`)
+
+用于编译期泛型容器与指针库按类型结构静态分派逻辑，常见激活字段标签包括 `.pointer`、`.@"struct"`、`.@"enum"`、`.@"union"`、`.int`、`.optional` 等：
+
+```typescript
+pub fn isPointerType(comptime T: type): bool {
+    return @typeInfo(T) == .pointer;
+}
+
+pub fn structFieldCount(comptime T: type): usize {
+    return switch (@typeInfo(T)) {
+        .@"struct" => |info| info.field_names.len,
+        else => 0,
+    };
+}
 ```
 
 ---

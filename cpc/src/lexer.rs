@@ -164,10 +164,22 @@ pub enum Token {
     #[regex(r#"@"([^"\\]|\\.)*""#, |lex| lex.slice().to_string())]
     #[regex(r"(\$\{?[a-zA-Z0-9_]+\}?|#?[a-zA-Z_])(\$\{?[a-zA-Z0-9_]+\}?|[a-zA-Z0-9_])*", |lex| lex.slice().to_string())]
     Ident(String),
-    #[regex(r"0x[0-9a-fA-F]+", |lex| u64::from_str_radix(&lex.slice()[2..], 16).map(|v| v as i64).ok())]
-    #[regex(r"0b[01]+", |lex| u64::from_str_radix(&lex.slice()[2..], 2).map(|v| v as i64).ok())]
-    #[regex(r"0o[0-7]+", |lex| u64::from_str_radix(&lex.slice()[2..], 8).map(|v| v as i64).ok())]
-    #[regex(r"[0-9]+", |lex| lex.slice().parse::<i64>().or_else(|_| lex.slice().parse::<u64>().map(|v| v as i64)).ok())]
+    #[regex(r"0x[0-9a-fA-F][0-9a-fA-F_]*", |lex| {
+        let s: String = lex.slice()[2..].chars().filter(|&c| c != '_').collect();
+        u64::from_str_radix(&s, 16).map(|v| v as i64).ok()
+    })]
+    #[regex(r"0b[01][01_]*", |lex| {
+        let s: String = lex.slice()[2..].chars().filter(|&c| c != '_').collect();
+        u64::from_str_radix(&s, 2).map(|v| v as i64).ok()
+    })]
+    #[regex(r"0o[0-7][0-7_]*", |lex| {
+        let s: String = lex.slice()[2..].chars().filter(|&c| c != '_').collect();
+        u64::from_str_radix(&s, 8).map(|v| v as i64).ok()
+    })]
+    #[regex(r"[0-9][0-9_]*", |lex| {
+        let s: String = lex.slice().chars().filter(|&c| c != '_').collect();
+        s.parse::<i64>().or_else(|_| s.parse::<u64>().map(|v| v as i64)).ok()
+    })]
     #[regex(r"'([^'\\]|\\.)'", |lex| {
         let s = lex.slice();
         let content = &s[1..s.len()-1];
@@ -187,7 +199,10 @@ pub enum Token {
         }
     })]
     IntLiteral(i64),
-    #[regex(r"[0-9]*\.[0-9]+", |lex| lex.slice().parse::<f64>().ok())]
+    #[regex(r"([0-9][0-9_]*)?\.[0-9][0-9_]*([eE][+-]?[0-9][0-9_]*)?", |lex| {
+        let s: String = lex.slice().chars().filter(|&c| c != '_').collect();
+        s.parse::<f64>().ok()
+    })]
     FloatLiteral(f64),
     #[regex(r#""([^"\\]|\\.)*""#, |lex| {
         let s = lex.slice();
@@ -336,13 +351,20 @@ pub enum Token {
 #[derive(Clone)]
 pub struct Lexer<'a> {
     inner: logos::Lexer<'a, Token>,
+    base_offset: usize,
 }
 
 impl<'a> Lexer<'a> {
     pub fn new(input: &'a str) -> Self {
         Self {
             inner: Token::lexer(input),
+            base_offset: 0,
         }
+    }
+
+    pub fn reset_at(&mut self, full_input: &'a str, offset: usize) {
+        self.inner = Token::lexer(&full_input[offset..]);
+        self.base_offset = offset;
     }
 }
 
@@ -362,7 +384,10 @@ impl<'a> Iterator for Lexer<'a> {
                 Token::Error
             }
         };
-        Some((token, self.inner.span()))
+        let mut span = self.inner.span();
+        span.start += self.base_offset;
+        span.end += self.base_offset;
+        Some((token, span))
     }
 }
 

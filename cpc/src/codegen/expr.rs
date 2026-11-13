@@ -202,6 +202,15 @@ impl Codegen {
             }
             Expr::Borrow(inner, is_mut) => {
                 if let Expr::Ident(i) = &**inner {
+                    if *is_mut
+                        && (self.class_defs.contains_key(&i.sym)
+                            || self.enum_defs.contains_key(&i.sym)
+                            || self.trait_defs.contains_key(&i.sym)
+                            || self.type_aliases.contains_key(&i.sym)
+                            || self.type_namespace_vars.contains(&i.sym))
+                    {
+                        return format!("*{}", i.sym);
+                    }
                     if self.local_trampolines.contains(&i.sym) {
                         return format!("&__cp_trampoline_{}.{}", i.sym, i.sym);
                     }
@@ -448,12 +457,32 @@ impl Codegen {
                             || matches!(&*bin.right, Expr::Lit(Lit::Bool(_)))
                     }
                 };
+                let is_vec_ty = |t_opt: &Option<Type>| -> bool {
+                    if let Some(Type::Ref(id)) = t_opt {
+                        if id.sym.starts_with("@Vector(") {
+                            return true;
+                        }
+                        if let Some(ta) = self.type_aliases.get(&id.sym) {
+                            if let Type::Ref(tid) = &ta.target_ty {
+                                return tid.sym.starts_with("@Vector(");
+                            }
+                        }
+                    }
+                    false
+                };
+                let is_vec_cmp = is_vec_ty(&l_ty) || is_vec_ty(&r_ty);
                 match bin.op {
                     BinaryOp::Eq => {
                         let has_num = are_both_numeric
                             || matches!(&*bin.left, Expr::Lit(Lit::Int(_)) | Expr::Lit(Lit::Float(_)))
                             || matches!(&*bin.right, Expr::Lit(Lit::Int(_)) | Expr::Lit(Lit::Float(_)));
-                        if self.is_lib_mode || has_num || is_null_cmp || is_enum_cmp || is_bool_cmp {
+                        if self.is_lib_mode
+                            || has_num
+                            || is_null_cmp
+                            || is_enum_cmp
+                            || is_bool_cmp
+                            || is_vec_cmp
+                        {
                             format!("({} == {})", l, r)
                         } else {
                             format!("cp_eq({}, {})", l, r)
@@ -463,7 +492,13 @@ impl Codegen {
                         let has_num = are_both_numeric
                             || matches!(&*bin.left, Expr::Lit(Lit::Int(_)) | Expr::Lit(Lit::Float(_)))
                             || matches!(&*bin.right, Expr::Lit(Lit::Int(_)) | Expr::Lit(Lit::Float(_)));
-                        if self.is_lib_mode || has_num || is_null_cmp || is_enum_cmp || is_bool_cmp {
+                        if self.is_lib_mode
+                            || has_num
+                            || is_null_cmp
+                            || is_enum_cmp
+                            || is_bool_cmp
+                            || is_vec_cmp
+                        {
                             format!("({} != {})", l, r)
                         } else {
                             format!("cp_neq({}, {})", l, r)
@@ -1700,9 +1735,13 @@ impl Codegen {
                 for (idx, arg) in call.args.iter().enumerate() {
                     let mut arg_is_move_param = false;
                     let old_box = self.expected_box_trait.clone();
+                    let old_array_elem = self.expected_array_elem_type.clone();
                     if let Some(sig) = &fn_sig_opt {
                         if idx < sig.params.len() {
                             let param = &sig.params[idx];
+                            if let Some(el) = Self::fixed_or_vec_elem_type(&param.ty) {
+                                self.expected_array_elem_type = Some(el);
+                            }
                             if let Type::BoxDyn(tr_id) = &param.ty {
                                 self.expected_box_trait = Some(tr_id.sym.clone());
                             }
@@ -1780,6 +1819,7 @@ impl Codegen {
                     if gen_arg.starts_with("lambda_") {
                         gen_arg = format!("@ptrCast(@constCast(&{}))", gen_arg);
                     }
+                    self.expected_array_elem_type = old_array_elem;
                     self.expected_box_trait = old_box;
                     if arg_is_move_param {
                         if let Expr::Ident(arg_id) = arg {
@@ -2349,7 +2389,29 @@ impl Codegen {
                             }
                         }
                     }
-                    let mapped_name = self.map_type_name(&ei.enum_name.sym);
+                    let mapped_name = if self.current_class_name.as_deref() == Some(base_name)
+                        && cls_opt
+                            .as_ref()
+                            .map_or(false, |c| !c.generic_params.is_empty())
+                    {
+                        "@This()".to_string()
+                    } else if !ei.enum_name.sym.contains('<')
+                        && cls_opt
+                            .as_ref()
+                            .map_or(false, |c| !c.generic_params.is_empty())
+                    {
+                        if let Some(Type::Ref(ret_id)) = &self.current_fn_ret_ty {
+                            if ret_id.sym.starts_with(&format!("{}<", base_name)) {
+                                self.map_type_name(&ret_id.sym)
+                            } else {
+                                self.map_type_name(&ei.enum_name.sym)
+                            }
+                        } else {
+                            self.map_type_name(&ei.enum_name.sym)
+                        }
+                    } else {
+                        self.map_type_name(&ei.enum_name.sym)
+                    };
                     let mut s = format!("{}{{ ", mapped_name);
                     for (idx, f) in fields_slice.iter().enumerate() {
                         let old_array_elem = self.expected_array_elem_type.clone();
@@ -2377,6 +2439,24 @@ impl Codegen {
                     return s;
                 }
                 if ei.enum_name.sym.is_empty() {
+                    if let Some(tuple_args) = &ei.tuple_args {
+                        let is_known_payload_variant = self.enum_defs.values().any(|en| {
+                            en.variants
+                                .iter()
+                                .any(|v| v.ident.sym == ei.variant_name.sym && v.tuple_type.is_some())
+                        });
+                        let starts_lower = ei
+                            .variant_name
+                            .sym
+                            .chars()
+                            .next()
+                            .map_or(false, |c| c.is_lowercase());
+                        if tuple_args.is_empty() || (!is_known_payload_variant && starts_lower) {
+                            let args_str: Vec<String> =
+                                tuple_args.iter().map(|a| self.generate_expr(a)).collect();
+                            return format!(".{}({})", ei.variant_name.sym, args_str.join(", "));
+                        }
+                    }
                     if !tuple_slice.is_empty() {
                         let is_expected_tuple = self.enum_defs.values().any(|en| {
                             en.variants.iter().any(|v| {
@@ -2424,13 +2504,29 @@ impl Codegen {
                             format!(".{}", ei.variant_name.sym)
                         }
                     } else {
+                        let anon_cls_opt = if let Some(Type::Ref(ret_id)) = &self.current_fn_ret_ty {
+                            let b = ret_id.sym.split('<').next().unwrap_or(&ret_id.sym);
+                            self.class_defs.get(b).cloned()
+                        } else if let Some(ref cname) = self.current_class_name {
+                            self.class_defs.get(cname).cloned()
+                        } else {
+                            None
+                        };
                         let mut f_str = String::new();
                         for (idx, f) in fields_slice.iter().enumerate() {
-                            f_str.push_str(&format!(
-                                ".{} = {}",
-                                f.key.sym,
-                                self.generate_expr(&f.val)
-                            ));
+                            let old_array_elem = self.expected_array_elem_type.clone();
+                            if let Some(ref cls) = anon_cls_opt {
+                                if let Some(cf) =
+                                    cls.fields.iter().find(|fl| fl.ident.sym == f.key.sym)
+                                {
+                                    if let Type::FixedArray(elem, _) | Type::Array(elem) = &cf.ty {
+                                        self.expected_array_elem_type = Some((**elem).clone());
+                                    }
+                                }
+                            }
+                            let val_code = self.generate_expr(&f.val);
+                            self.expected_array_elem_type = old_array_elem;
+                            f_str.push_str(&format!(".{} = {}", f.key.sym, val_code));
                             if idx + 1 < fields_slice.len() {
                                 f_str.push_str(", ");
                             }
@@ -2523,6 +2619,15 @@ impl Codegen {
                     }
                     if ei.variant_name.sym.is_empty() {
                         format!("{}{{ {} }}", ei.enum_name.sym, f_str)
+                    } else if !self.enum_defs.contains_key(&ei.enum_name.sym)
+                        && ei
+                            .variant_name
+                            .sym
+                            .chars()
+                            .next()
+                            .map_or(false, |c| c.is_uppercase())
+                    {
+                        format!("{}.{}{{ {} }}", ei.enum_name.sym, ei.variant_name.sym, f_str)
                     } else {
                         format!(
                             "{}{{ .{} = .{{ {} }} }}",
@@ -2667,7 +2772,9 @@ impl Codegen {
                         args.push_str(", ");
                     }
                 }
-                format!("(blk: {{ const _obj = {}._create({}) catch unreachable; if (@hasDecl({}, \"init\")) {{ const RType = @typeInfo(@TypeOf({}.init)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _obj.init({}) catch unreachable; }} else {{ _obj.init({}); }} }} break :blk _obj; }})", class_name, self.current_allocator(), class_name, class_name, args, args)
+                self.tmp_counter += 1;
+                let blk_lbl = format!("blk_new_{}", self.tmp_counter);
+                format!("({}: {{ const _obj = {}._create({}) catch unreachable; if (@hasDecl({}, \"init\")) {{ const RType = @typeInfo(@TypeOf({}.init)).@\"fn\".return_type.?; if (@typeInfo(RType) == .error_union) {{ _obj.init({}) catch unreachable; }} else {{ _obj.init({}); }} }} break :{} _obj; }})", blk_lbl, class_name, self.current_allocator(), class_name, class_name, args, args, blk_lbl)
             }
             Expr::Await(inner) => {
                 if let Expr::Call(call) = &**inner {
@@ -2901,10 +3008,10 @@ impl Codegen {
                         return format!("@intFromEnum({})", obj);
                     }
                     if member.prop.sym == "name" {
-                        return format!("(if (comptime @typeInfo(@TypeOf({0})) == .@\"enum\" or @typeInfo(@TypeOf({0})) == .@\"union\") @tagName({0}) else {0}.name)", obj);
+                        return format!("(if (@typeInfo(@TypeOf({0})) == .@\"enum\" or @typeInfo(@TypeOf({0})) == .@\"union\") @tagName({0}) else {0}.name)", obj);
                     }
                     if member.prop.sym == "value" {
-                        return format!("(if (comptime @typeInfo(@TypeOf({0})) == .@\"enum\") @intFromEnum({0}) else {0}.value)", obj);
+                        return format!("(if (@typeInfo(@TypeOf({0})) == .@\"enum\") @intFromEnum({0}) else {0}.value)", obj);
                     }
                 }
 
@@ -3628,6 +3735,7 @@ impl Codegen {
                     "@panic(\"Cannot reflect non-class type\")".to_string()
                 }
             }
+            Expr::TypeVal { ty, .. } => self.map_type(ty),
             Expr::ReflectOf { expr, .. } => {
                 let class_name = if let Expr::Ident(id) = &**expr {
                     self.resolve_var_type_name(&id.sym)
@@ -3915,6 +4023,7 @@ impl Codegen {
                 self.current_case_content = saved;
                 format!("(blk: {{\n{}\n}})", body_str)
             }
+            Expr::ComptimeExpr(e) => format!("(comptime {})", self.generate_expr(e)),
             Expr::Comptime(b) => {
                 let saved = self.current_case_content.clone();
                 let saved_sm = self.is_state_machine;
@@ -4081,6 +4190,14 @@ impl Codegen {
                                 | Expr::Return(_, _) => {
                                     self.generate_stmt(s);
                                 }
+                                Expr::Builtin(b)
+                                    if matches!(
+                                        b.name.as_str(),
+                                        "@compileError" | "@panic" | "@trap"
+                                    ) =>
+                                {
+                                    self.generate_stmt(s);
+                                }
                                 _ => {
                                     let ec = self.generate_expr(e);
                                     self.write_to_case(&format!("break :{} {};\n", blk_label, ec));
@@ -4150,7 +4267,13 @@ impl Codegen {
                 }
                 format!("std.StaticStringMap({}).initComptime(.{{ {} }})", val_zig_ty, entries_str.join(", "))
             }
-            Expr::Zig(z) => lower_struct_body(&z.code),
+            Expr::Zig(z) => {
+                if z.code.trim() == "*const !" {
+                    "*const anyopaque".to_string()
+                } else {
+                    self.generate_zig_or_struct(&z.code)
+                }
+            }
             _ => "0".to_string(),
         }
     }

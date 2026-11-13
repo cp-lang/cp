@@ -1408,6 +1408,26 @@ impl<'a> Parser<'a> {
         let mut params = Vec::new();
         while self.peek() != Some(&Token::RParen) {
             let meta = self.parse_meta_list()?;
+            if self.peek() == Some(&Token::DotDotDot) {
+                let dot_span = self.bump()?.1;
+                params.push(Param {
+                    span: dot_span,
+                    ident: Ident {
+                        span: dot_span,
+                        sym: "...".to_string(),
+                    },
+                    ty: Type::Any,
+                    is_comptime: false,
+                    is_mut: false,
+                    is_move: false,
+                    default: None,
+                    meta,
+                });
+                if self.peek() == Some(&Token::Comma) {
+                    self.bump()?;
+                }
+                continue;
+            }
             let mut is_mut = false;
             let mut is_move = false;
             let mut is_comptime = meta.iter().any(|m| m.name.sym == "comptime");
@@ -1612,6 +1632,38 @@ impl<'a> Parser<'a> {
         if matches!(self.peek(), Some(Token::Ident(_)) | Some(Token::ErrorKw)) {
             return true;
         }
+        if self.peek() == Some(&Token::LParen) {
+            let checkpoint = self.lexer.clone();
+            let p1 = self.peeked.clone();
+            let p2 = self.peeked2.clone();
+            let _ = self.bump();
+            let mut depth = 1i32;
+            let mut has_union_pipe = false;
+            while let Some(tok) = self.peek() {
+                match tok {
+                    Token::LParen => depth += 1,
+                    Token::RParen => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    Token::Pipe | Token::PipePipe if depth == 1 => {
+                        has_union_pipe = true;
+                        break;
+                    }
+                    Token::Semicolon => break,
+                    _ => {}
+                }
+                let _ = self.bump();
+            }
+            self.lexer = checkpoint;
+            self.peeked = p1;
+            self.peeked2 = p2;
+            if has_union_pipe {
+                return true;
+            }
+        }
         if self.peek() == Some(&Token::LBrace) {
             let checkpoint = self.lexer.clone();
             let p1 = self.peeked.clone();
@@ -1633,6 +1685,12 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_error_type_rhs(&mut self) -> ParseResult<ErrorType> {
+        if self.peek() == Some(&Token::LParen) {
+            self.bump()?;
+            let err = self.parse_error_type_rhs()?;
+            self.expect(Token::RParen)?;
+            return Ok(err);
+        }
         if self.peek() == Some(&Token::LBrace) {
             self.bump()?;
             let mut variants = Vec::new();
@@ -1784,6 +1842,10 @@ impl<'a> Parser<'a> {
 
     fn parse_fn_type_sig(&mut self, is_c: bool) -> ParseResult<Type> {
         self.expect(Token::Fn)?;
+        self.parse_fn_type_sig_body(is_c)
+    }
+
+    fn parse_fn_type_sig_body(&mut self, is_c: bool) -> ParseResult<Type> {
         self.expect(Token::LParen)?;
         let mut param_types = Vec::new();
         while self.peek() != Some(&Token::RParen) && self.peek().is_some() {
@@ -1823,6 +1885,83 @@ impl<'a> Parser<'a> {
             Ok(Type::CFn(param_types, Box::new(ret_ty)))
         } else {
             Ok(Type::Fn(param_types, Box::new(ret_ty)))
+        }
+    }
+
+    fn parse_ptr_qualifiers(&mut self) -> ParseResult<(String, bool)> {
+        let mut qual = String::new();
+        let mut has_const = false;
+        loop {
+            if self.peek() == Some(&Token::Const) {
+                self.bump()?;
+                has_const = true;
+                continue;
+            }
+            if let Some(Token::Ident(id)) = self.peek().cloned() {
+                if (id == "align" || id == "addrspace") && self.peek_next() == Some(&Token::LParen)
+                {
+                    self.bump()?; // consume 'align' / 'addrspace'
+                    self.bump()?; // consume '('
+                    let inner_start = self.peek_span().start;
+                    let mut paren_depth = 1i32;
+                    let mut inner_end = inner_start;
+                    while paren_depth > 0 && self.peek().is_some() {
+                        let (tok, t_span) = self.bump()?;
+                        match tok {
+                            Token::LParen => paren_depth += 1,
+                            Token::RParen => {
+                                paren_depth -= 1;
+                                if paren_depth == 0 {
+                                    inner_end = t_span.start;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    let arg_str = self.input[inner_start..inner_end].trim();
+                    qual.push_str(&format!("{}({}) ", id, arg_str));
+                    continue;
+                }
+                if id == "volatile" || id == "allowzero" {
+                    let mut clone = self.clone_lookahead();
+                    let _ = clone.bump();
+                    if clone.peek() == Some(&Token::Const)
+                        || clone.peek().map(Self::is_type_start).unwrap_or(false)
+                    {
+                        self.bump()?;
+                        qual.push_str(&id);
+                        qual.push(' ');
+                        continue;
+                    }
+                }
+            }
+            break;
+        }
+        Ok((qual, has_const))
+    }
+
+    fn apply_ptr_qualifiers(elem_ty: Type, qual: String, has_const: bool) -> Type {
+        if qual.is_empty() {
+            if has_const {
+                Type::BorrowType {
+                    inner: Box::new(elem_ty),
+                    is_mut: false,
+                    lifetimes: vec![],
+                }
+            } else {
+                elem_ty
+            }
+        } else {
+            let full_qual = if has_const {
+                format!("{}const ", qual)
+            } else {
+                qual
+            };
+            Type::Aligned {
+                qual: full_qual,
+                inner: Box::new(elem_ty),
+            }
         }
     }
 
@@ -1901,6 +2040,35 @@ impl<'a> Parser<'a> {
                     let ty = self.parse_fn_type_sig(true)?;
                     return self.parse_postfix_type_modifiers(ty);
                 }
+                if clone.peek() == Some(&Token::LParen) {
+                    let _ = clone.bump(); // consume outer '('
+                    if clone.peek() == Some(&Token::LParen) {
+                        self.bump()?; // '@'
+                        self.bump()?; // 'c'
+                        self.bump()?; // outer '('
+                        let ty = self.parse_fn_type_sig_body(true)?;
+                        self.expect(Token::RParen)?;
+                        return self.parse_postfix_type_modifiers(ty);
+                    }
+                    // Also check @c (params): ret
+                    let mut depth = 1i32;
+                    while depth > 0 {
+                        let Ok((tok, _)) = clone.bump() else {
+                            break;
+                        };
+                        match tok {
+                            Token::LParen => depth += 1,
+                            Token::RParen => depth -= 1,
+                            _ => {}
+                        }
+                    }
+                    if matches!(clone.peek(), Some(Token::Colon | Token::Arrow)) {
+                        self.bump()?; // '@'
+                        self.bump()?; // 'c'
+                        let ty = self.parse_fn_type_sig_body(true)?;
+                        return self.parse_postfix_type_modifiers(ty);
+                    }
+                }
             }
             self.bump()?; // consume '@'
             let id = self.parse_ident()?;
@@ -1976,10 +2144,20 @@ impl<'a> Parser<'a> {
                 };
                 return self.parse_postfix_type_modifiers(ty);
             }
-            let mut is_mut = true;
-            if self.peek() == Some(&Token::Const) {
-                self.bump()?;
-                is_mut = false;
+            let (ptr_qual, has_const) = self.parse_ptr_qualifiers()?;
+            let is_mut = !has_const;
+            if self.peek() == Some(&Token::Bang) && (ptr_qual.is_empty() || !is_mut) {
+                self.bump()?; // consume '!'
+                let base_inner = if is_mut {
+                    Type::Any
+                } else {
+                    Self::apply_ptr_qualifiers(Type::Any, ptr_qual, true)
+                };
+                let ty = Type::RawPtr {
+                    inner: Box::new(base_inner),
+                    depth,
+                };
+                return self.parse_postfix_type_modifiers(ty);
             }
             let mut lifetimes = Vec::new();
             if depth == 1 {
@@ -2086,14 +2264,29 @@ impl<'a> Parser<'a> {
                 };
                 if is_raw_ptr_bang {
                     self.bump()?; // consume '!'
+                    let wrapped = if !ptr_qual.is_empty() {
+                        Self::apply_ptr_qualifiers(inner, ptr_qual, !is_mut)
+                    } else if !is_mut {
+                        Type::BorrowType {
+                            inner: Box::new(inner),
+                            is_mut: false,
+                            lifetimes: vec![],
+                        }
+                    } else {
+                        inner
+                    };
                     let ty = Type::RawPtr {
-                        inner: Box::new(inner),
+                        inner: Box::new(wrapped),
                         depth,
                     };
                     return self.parse_postfix_type_modifiers(ty);
                 }
             }
-            let mut ty = inner;
+            let mut ty = if !ptr_qual.is_empty() {
+                Self::apply_ptr_qualifiers(inner, ptr_qual, !is_mut)
+            } else {
+                inner
+            };
             for idx in 0..depth {
                 ty = Type::BorrowType {
                     inner: Box::new(ty),
@@ -2173,11 +2366,18 @@ impl<'a> Parser<'a> {
                 self.bump()?;
                 if self.peek() == Some(&Token::RBracket) {
                     self.bump()?;
+                    let (qual, has_const) = self.parse_ptr_qualifiers()?;
                     let elem_ty = if self.peek() == Some(&Token::Bang) {
+                        self.bump()?;
                         Type::Any
                     } else {
                         self.parse_base_type()?
                     };
+                    let (elem_ty, has_elem_opt) = match elem_ty {
+                        Type::Optional(inner) => (*inner, true),
+                        other => (other, false),
+                    };
+                    let elem_ty = Self::apply_ptr_qualifiers(elem_ty, qual, has_const);
                     let mut is_optional = false;
                     if self.peek() == Some(&Token::Question)
                         && self.peek_next() == Some(&Token::Bang)
@@ -2192,10 +2392,6 @@ impl<'a> Parser<'a> {
                             is_optional = true;
                         }
                     }
-                    let (elem_ty, has_elem_opt) = match elem_ty {
-                        Type::Optional(inner) => (*inner, true),
-                        other => (other, false),
-                    };
                     let mut ty = Type::ManyRawPtr(Box::new(elem_ty));
                     if is_optional || has_elem_opt {
                         ty = Type::Optional(Box::new(ty));
@@ -2238,7 +2434,13 @@ impl<'a> Parser<'a> {
                         return self.parse_postfix_type_modifiers(ty);
                     } else if self.peek() == Some(&Token::RBracket) {
                         self.bump()?;
+                        let (qual, has_const) = self.parse_ptr_qualifiers()?;
                         let elem_ty = self.parse_base_type()?;
+                        let (elem_ty, has_elem_opt) = match elem_ty {
+                            Type::Optional(inner) => (*inner, true),
+                            other => (other, false),
+                        };
+                        let elem_ty = Self::apply_ptr_qualifiers(elem_ty, qual, has_const);
                         let mut is_optional = false;
                         if self.peek() == Some(&Token::Question)
                             && self.peek_next() == Some(&Token::Bang)
@@ -2253,10 +2455,6 @@ impl<'a> Parser<'a> {
                                 is_optional = true;
                             }
                         }
-                        let (elem_ty, has_elem_opt) = match elem_ty {
-                            Type::Optional(inner) => (*inner, true),
-                            other => (other, false),
-                        };
                         let mut ty = Type::CPtr(Box::new(elem_ty));
                         if is_optional || has_elem_opt {
                             ty = Type::Optional(Box::new(ty));
@@ -2306,48 +2504,57 @@ impl<'a> Parser<'a> {
             self.peeked2 = p2.clone();
             let (_, span) = self.bump()?;
             if let Some(Token::IntLiteral(_)) | Some(Token::Ident(_)) = self.peek() {
-                let size_tok = self.bump()?.0;
-                let size_str = match size_tok {
-                    Token::IntLiteral(n) => n.to_string(),
-                    Token::Ident(s) => s,
+                let (size_tok, size_span) = self.bump()?;
+                let (array_size, size_str) = match size_tok {
+                    Token::IntLiteral(n) => (ArraySize::Literal(n as usize), n.to_string()),
+                    Token::Ident(s) => (
+                        ArraySize::Ident(Ident {
+                            span: size_span,
+                            sym: s.clone(),
+                        }),
+                        s,
+                    ),
                     _ => unreachable!(),
                 };
                 if self.peek() == Some(&Token::RBracket) {
                     self.bump()?;
-                    let has_const = if self.peek() == Some(&Token::Const) {
-                        self.bump()?;
-                        true
-                    } else {
-                        false
-                    };
-                    let elem_ty = if self.peek() == Some(&Token::Bang) {
-                        Type::Any
-                    } else {
-                        self.parse_base_type()?
-                    };
-                    let base_str = match &elem_ty {
-                        Type::U8 => "u8".to_string(),
-                        Type::I8 => "i8".to_string(),
-                        Type::U16 => "u16".to_string(),
-                        Type::I16 => "i16".to_string(),
-                        Type::U32 => "u32".to_string(),
-                        Type::I32 => "i32".to_string(),
-                        Type::U64 => "u64".to_string(),
-                        Type::I64 => "i64".to_string(),
-                        Type::Bool => "bool".to_string(),
-                        Type::Ref(id) => id.sym.clone(),
-                        _ => Self::type_to_str(&elem_ty),
-                    };
-                    let elem_str = if has_const {
-                        format!("const {}", base_str)
-                    } else {
-                        base_str
-                    };
-                    let ty = Type::Ref(Ident {
-                        span,
-                        sym: format!("[{}]{}", size_str, elem_str),
-                    });
-                    return self.parse_postfix_type_modifiers(ty);
+                    let can_start_elem = !matches!(
+                        self.peek(),
+                        Some(
+                            Token::Comma
+                                | Token::RParen
+                                | Token::RBracket
+                                | Token::RBrace
+                                | Token::Semicolon
+                                | Token::Assign
+                                | Token::Colon
+                                | Token::FatArrow
+                                | Token::LBrace
+                        ) | None
+                    );
+                    if matches!(array_size, ArraySize::Literal(_)) || can_start_elem {
+                        let has_const = if self.peek() == Some(&Token::Const) {
+                            self.bump()?;
+                            true
+                        } else {
+                            false
+                        };
+                        let elem_ty = if self.peek() == Some(&Token::Bang) {
+                            self.bump()?;
+                            Type::Any
+                        } else {
+                            self.parse_base_type()?
+                        };
+                        let ty = if has_const {
+                            Type::Ref(Ident {
+                                span,
+                                sym: format!("[{}]const {}", size_str, Self::type_to_str(&elem_ty)),
+                            })
+                        } else {
+                            Type::FixedArray(Box::new(elem_ty), array_size)
+                        };
+                        return self.parse_postfix_type_modifiers(ty);
+                    }
                 }
             }
             self.lexer = checkpoint.clone();
@@ -2399,13 +2606,9 @@ impl<'a> Parser<'a> {
             }
             if self.peek() == Some(&Token::RBracket) {
                 self.bump()?;
-                let has_const = if self.peek() == Some(&Token::Const) {
-                    self.bump()?;
-                    true
-                } else {
-                    false
-                };
-                if has_const
+                let (qual, has_const) = self.parse_ptr_qualifiers()?;
+                if !qual.is_empty()
+                    || has_const
                     || matches!(
                         self.peek(),
                         Some(
@@ -2438,7 +2641,11 @@ impl<'a> Parser<'a> {
                     )
                 {
                     let elem_ty = self.parse_base_type()?;
-                    let ty = if has_const {
+                    let ty = if !qual.is_empty() {
+                        Type::Array(Box::new(Self::apply_ptr_qualifiers(
+                            elem_ty, qual, has_const,
+                        )))
+                    } else if has_const {
                         Type::BorrowType {
                             inner: Box::new(Type::Array(Box::new(elem_ty))),
                             is_mut: false,
@@ -2826,6 +3033,22 @@ impl<'a> Parser<'a> {
         }
         if self.peek() == Some(&Token::Bang) {
             self.bump()?;
+            if self.peek() == Some(&Token::LParen) && self.is_error_type_rhs_start() {
+                let err = self.parse_error_type_rhs()?;
+                let ok_ty = if self.peek().map(Self::is_type_start).unwrap_or(false)
+                    && !matches!(
+                        self.peek(),
+                        Some(Token::LBrace | Token::Semicolon | Token::Comma | Token::RParen)
+                    ) {
+                    self.parse_type()?
+                } else {
+                    Type::Void
+                };
+                return Ok(Type::ResultType {
+                    ok: Box::new(ok_ty),
+                    err,
+                });
+            }
             if matches!(
                 self.peek(),
                 Some(Token::LBrace)
@@ -2907,6 +3130,7 @@ impl<'a> Parser<'a> {
             Type::SentinelSlice(inner, n) => format!("[:{n}]{}", Self::type_to_str(inner)),
             Type::Optional(inner) => format!("{}?", Self::type_to_str(inner)),
             Type::Shared(inner) => format!("Shared<{}>", Self::type_to_str(inner)),
+            Type::Aligned { qual, inner } => format!("{}{}", qual, Self::type_to_str(inner)),
             Type::Ref(id) => id.sym.clone(),
             Type::Conditional(_cond, cons, alt) => {
                 format!(
@@ -3415,6 +3639,61 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_single_pattern(&mut self) -> ParseResult<Pattern> {
+        if self.in_switch_arm > 0 && self.in_paren_pattern == 0 {
+            if matches!(
+                self.peek(),
+                Some(
+                    Token::U8
+                        | Token::I8
+                        | Token::U16
+                        | Token::I16
+                        | Token::U32
+                        | Token::I32
+                        | Token::U64
+                        | Token::I64
+                        | Token::U128
+                        | Token::I128
+                        | Token::USize
+                        | Token::ISize
+                        | Token::F32
+                        | Token::F64
+                        | Token::Bool
+                        | Token::Void
+                        | Token::TypeKw
+                        | Token::String
+                        | Token::CStr
+                        | Token::Any
+                        | Token::Auto
+                )
+            ) {
+                let ty = self.parse_type()?;
+                return Ok(Pattern::Type(ty));
+            }
+            if matches!(
+                self.peek(),
+                Some(Token::Star | Token::LBracket | Token::Question)
+            ) && !(self.peek() == Some(&Token::Star)
+                && matches!(
+                    self.peek_next(),
+                    Some(Token::FatArrow | Token::Comma | Token::Pipe | Token::If) | None
+                ))
+            {
+                let checkpoint = self.lexer.clone();
+                let p1 = self.peeked.clone();
+                let p2 = self.peeked2.clone();
+                if let Ok(ty) = self.parse_type() {
+                    if matches!(
+                        self.peek(),
+                        Some(Token::FatArrow | Token::Comma | Token::Pipe | Token::If)
+                    ) {
+                        return Ok(Pattern::Type(ty));
+                    }
+                }
+                self.lexer = checkpoint;
+                self.peeked = p1;
+                self.peeked2 = p2;
+            }
+        }
         match self.peek() {
             Some(Token::At) => {
                 let expr = self.parse_postfix_expr()?;
@@ -4414,6 +4693,7 @@ impl<'a> Parser<'a> {
         let mut fields = Vec::new();
         let mut methods = Vec::new();
         let mut extra_zig = Vec::new();
+        let mut nested_classes = Vec::new();
         self.expect(Token::LBrace)?;
         while self.peek() != Some(&Token::RBrace) && self.peek().is_some() {
             if self.peek() == Some(&Token::ZigEscape) {
@@ -4433,7 +4713,10 @@ impl<'a> Parser<'a> {
                 }
                 self.bump()?;
             }
-            let mut is_field_static = is_static;
+            let mut is_field_static = is_static
+                || meta_list
+                    .iter()
+                    .any(|m| m.name.sym == "tls" || m.name.sym == "threadlocal");
             if self.peek() == Some(&Token::Static) {
                 if !matches!(
                     self.peek_next(),
@@ -4445,13 +4728,23 @@ impl<'a> Parser<'a> {
                 }
             }
             if self.peek_next() != Some(&Token::Colon)
+                && matches!(
+                    self.peek(),
+                    Some(Token::Struct | Token::Union | Token::Class)
+                )
+            {
+                let mut nested = self.parse_class()?;
+                nested.meta.extend(meta_list);
+                nested.is_pub = member_is_pub;
+                nested.is_static = true;
+                nested_classes.push(nested);
+                continue;
+            }
+            if self.peek_next() != Some(&Token::Colon)
                 && (self.peek() == Some(&Token::Const)
                     || self.peek() == Some(&Token::Var)
                     || self.peek() == Some(&Token::TypeKw)
-                    || self.peek() == Some(&Token::Union)
-                    || self.peek() == Some(&Token::Struct)
                     || self.peek() == Some(&Token::Enum)
-                    || self.peek() == Some(&Token::Class)
                     || self.peek() == Some(&Token::Interface)
                     || self.peek() == Some(&Token::Trait))
             {
@@ -4610,6 +4903,7 @@ impl<'a> Parser<'a> {
             is_pub: false,
             is_static,
             is_union,
+            nested_classes,
             generic_params,
         })
     }
@@ -6591,7 +6885,20 @@ impl<'a> Parser<'a> {
                     let mut end_idx = span.end;
                     while let Some(tok) = self.peek() {
                         match tok {
-                            Token::Semicolon | Token::Comma => {
+                            Token::Semicolon
+                            | Token::Comma
+                            | Token::Eq
+                            | Token::NotEq
+                            | Token::Less
+                            | Token::LessEq
+                            | Token::Greater
+                            | Token::GreaterEq
+                            | Token::AmpAmp
+                            | Token::PipePipe
+                            | Token::Question
+                            | Token::Colon
+                            | Token::FatArrow
+                            | Token::Assign => {
                                 if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 {
                                     break;
                                 }
@@ -6605,15 +6912,29 @@ impl<'a> Parser<'a> {
                             }
                             Token::LParen => paren_depth += 1,
                             Token::RParen => {
+                                if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 {
+                                    break;
+                                }
                                 if paren_depth > 0 {
                                     paren_depth -= 1;
                                 }
                             }
                             Token::LBracket => bracket_depth += 1,
                             Token::RBracket => {
+                                if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 {
+                                    break;
+                                }
                                 if bracket_depth > 0 {
                                     bracket_depth -= 1;
                                 }
+                            }
+                            Token::Ident(id)
+                                if (id == "else" || id == "and" || id == "or")
+                                    && brace_depth == 0
+                                    && paren_depth == 0
+                                    && bracket_depth == 0 =>
+                            {
+                                break;
                             }
                             _ => {}
                         }
@@ -6633,6 +6954,46 @@ impl<'a> Parser<'a> {
                 while self.peek() == Some(&Token::Star) {
                     self.bump()?;
                     depth += 1;
+                }
+                if matches!(
+                    self.peek(),
+                    Some(
+                        Token::U8
+                            | Token::I8
+                            | Token::U16
+                            | Token::I16
+                            | Token::U32
+                            | Token::I32
+                            | Token::U64
+                            | Token::I64
+                            | Token::U128
+                            | Token::I128
+                            | Token::USize
+                            | Token::ISize
+                            | Token::F32
+                            | Token::F64
+                            | Token::Bool
+                            | Token::Void
+                            | Token::String
+                    )
+                ) && self.peek_next() != Some(&Token::LParen)
+                {
+                    let mut ty = self.parse_base_type()?;
+                    let end = self.peek_span().end;
+                    for _ in 0..depth {
+                        ty = Type::BorrowType {
+                            inner: Box::new(ty),
+                            is_mut: true,
+                            lifetimes: vec![],
+                        };
+                    }
+                    return Ok(Expr::TypeVal {
+                        span: Span {
+                            start: span.start,
+                            end,
+                        },
+                        ty,
+                    });
                 }
                 let inner = self.parse_postfix_expr()?;
                 if self.peek() == Some(&Token::Bang) {
@@ -6947,6 +7308,23 @@ impl<'a> Parser<'a> {
                         name,
                         args,
                     }))
+                } else if sym == "comptime"
+                    && !matches!(
+                        self.peek(),
+                        Some(
+                            Token::Comma
+                                | Token::Semicolon
+                                | Token::RParen
+                                | Token::RBracket
+                                | Token::RBrace
+                                | Token::Colon
+                                | Token::Assign
+                                | Token::Dot
+                        ) | None
+                    )
+                {
+                    let inner = self.parse_bin_expr(4)?;
+                    Ok(Expr::ComptimeExpr(Box::new(inner)))
                 } else {
                     Ok(Expr::Ident(Ident { span, sym }))
                 }
@@ -6989,6 +7367,57 @@ impl<'a> Parser<'a> {
                         },
                         sym: name,
                     }));
+                }
+                if name == "@c" {
+                    if self.peek() == Some(&Token::Fn) {
+                        let ty = self.parse_fn_type_sig(true)?;
+                        let end = self.peek_span().start;
+                        return Ok(Expr::TypeVal {
+                            span: Span {
+                                start: span.start,
+                                end,
+                            },
+                            ty,
+                        });
+                    }
+                    if self.peek() == Some(&Token::LParen) {
+                        let mut clone = self.clone_lookahead();
+                        let _ = clone.bump();
+                        if clone.peek() == Some(&Token::LParen) {
+                            self.bump()?; // outer '('
+                            let ty = self.parse_fn_type_sig_body(true)?;
+                            let end = self.expect(Token::RParen)?.end;
+                            return Ok(Expr::TypeVal {
+                                span: Span {
+                                    start: span.start,
+                                    end,
+                                },
+                                ty,
+                            });
+                        }
+                        let mut depth = 1i32;
+                        while depth > 0 {
+                            let Ok((tok, _)) = clone.bump() else {
+                                break;
+                            };
+                            match tok {
+                                Token::LParen => depth += 1,
+                                Token::RParen => depth -= 1,
+                                _ => {}
+                            }
+                        }
+                        if matches!(clone.peek(), Some(Token::Colon | Token::Arrow)) {
+                            let ty = self.parse_fn_type_sig_body(true)?;
+                            let end = self.peek_span().start;
+                            return Ok(Expr::TypeVal {
+                                span: Span {
+                                    start: span.start,
+                                    end,
+                                },
+                                ty,
+                            });
+                        }
+                    }
                 }
                 if name == "@as" {
                     self.expect(Token::LParen)?;
@@ -7566,6 +7995,7 @@ impl<'a> Parser<'a> {
                     };
                     return Ok(Expr::Ident(Ident { span, sym: ty_sym }));
                 }
+                let size_start = self.peek_span().start;
                 let first = self.parse_expr()?;
                 if self.peek() == Some(&Token::Semicolon) {
                     self.bump()?;
@@ -7574,7 +8004,9 @@ impl<'a> Parser<'a> {
                     return Ok(Expr::ArrayRepeat(Box::new(first), Box::new(count)));
                 }
                 let mut elements = vec![first];
+                let mut had_comma = false;
                 if self.peek() == Some(&Token::Comma) {
+                    had_comma = true;
                     self.bump()?;
                     while self.peek() != Some(&Token::RBracket) {
                         elements.push(self.parse_expr()?);
@@ -7583,7 +8015,83 @@ impl<'a> Parser<'a> {
                         }
                     }
                 }
-                let _end = self.expect(Token::RBracket)?.end;
+                let rbracket_span = self.expect(Token::RBracket)?;
+                if elements.len() == 1 && !had_comma {
+                    let is_adj_type = matches!(
+                        self.peek(),
+                        Some(
+                            Token::U8
+                                | Token::I8
+                                | Token::U16
+                                | Token::I16
+                                | Token::U32
+                                | Token::I32
+                                | Token::U64
+                                | Token::I64
+                                | Token::U128
+                                | Token::I128
+                                | Token::USize
+                                | Token::ISize
+                                | Token::F32
+                                | Token::F64
+                                | Token::Bool
+                                | Token::String
+                                | Token::Const
+                                | Token::Void
+                                | Token::Any
+                                | Token::CStr
+                                | Token::LBracket
+                        ) | Some(Token::Ident(_))
+                    ) || (self.peek() == Some(&Token::Star)
+                        && matches!(
+                            self.peek_next(),
+                            Some(
+                                Token::Const
+                                    | Token::Bang
+                                    | Token::LBracket
+                                    | Token::Star
+                                    | Token::Ident(_)
+                                    | Token::U8
+                                    | Token::I8
+                                    | Token::U16
+                                    | Token::I16
+                                    | Token::U32
+                                    | Token::I32
+                                    | Token::U64
+                                    | Token::I64
+                                    | Token::U128
+                                    | Token::I128
+                                    | Token::USize
+                                    | Token::ISize
+                                    | Token::F32
+                                    | Token::F64
+                                    | Token::Bool
+                                    | Token::String
+                                    | Token::Void
+                                    | Token::Any
+                                    | Token::CStr
+                            )
+                        ));
+                    if is_adj_type {
+                        let size_raw = self.input[size_start..rbracket_span.start]
+                            .trim()
+                            .to_string();
+                        let arr_size = match &elements[0] {
+                            Expr::Lit(Lit::Int(n)) => ArraySize::Literal(*n as usize),
+                            Expr::Ident(id) => ArraySize::Ident(id.clone()),
+                            _ => ArraySize::Expr(size_raw),
+                        };
+                        let elem_ty = self.parse_type()?;
+                        let end = self.peek_span().start;
+                        return Ok(Expr::TypeVal {
+                            span: Span {
+                                start: span.start,
+                                end,
+                            },
+                            ty: Type::FixedArray(Box::new(elem_ty), arr_size),
+                        });
+                    }
+                }
                 Ok(Expr::Array(elements))
             }
             Token::Continue => Ok(Expr::Continue(span)),
@@ -7650,6 +8158,88 @@ impl<'a> Parser<'a> {
                     alt,
                     is_comptime,
                 })
+            }
+            Token::Slash => {
+                let bytes = self.input.as_bytes();
+                let mut pos = span.end;
+                let mut in_class = false;
+                let mut escaped = false;
+                let mut closed = false;
+                while pos < bytes.len() {
+                    let b = bytes[pos];
+                    if escaped {
+                        escaped = false;
+                        pos += 1;
+                        continue;
+                    }
+                    if b == b'\\' {
+                        escaped = true;
+                        pos += 1;
+                        continue;
+                    }
+                    if b == b'\n' || b == b'\r' {
+                        break;
+                    }
+                    if b == b'[' {
+                        in_class = true;
+                        pos += 1;
+                        continue;
+                    }
+                    if b == b']' && in_class {
+                        in_class = false;
+                        pos += 1;
+                        continue;
+                    }
+                    if b == b'/' && !in_class {
+                        closed = true;
+                        break;
+                    }
+                    pos += 1;
+                }
+                if !closed {
+                    return Err(ParseError::UnexpectedToken(Token::Slash, span));
+                }
+                let raw_pat = &self.input[span.end..pos];
+                let mut pattern = String::with_capacity(raw_pat.len());
+                let mut chars = raw_pat.chars().peekable();
+                while let Some(c) = chars.next() {
+                    if c == '\\' {
+                        if chars.peek() == Some(&'/') {
+                            chars.next();
+                            pattern.push('/');
+                        } else if let Some(next_c) = chars.next() {
+                            pattern.push('\\');
+                            pattern.push(next_c);
+                        }
+                    } else {
+                        pattern.push(c);
+                    }
+                }
+                pos += 1; // skip closing '/'
+                let flag_start = pos;
+                while pos < bytes.len() && bytes[pos].is_ascii_alphabetic() {
+                    pos += 1;
+                }
+                let flags = self.input[flag_start..pos].to_string();
+                self.lexer.reset_at(self.input, pos);
+                self.peeked = None;
+                self.peeked2 = None;
+                self.prev_token_end = pos;
+                Ok(Expr::New(CallExpr {
+                    span: Span {
+                        start: span.start,
+                        end: pos,
+                    },
+                    callee: Box::new(Expr::Ident(Ident {
+                        span: Span {
+                            start: span.start,
+                            end: pos,
+                        },
+                        sym: "RegExp".to_string(),
+                    })),
+                    args: vec![Expr::Lit(Lit::Str(pattern)), Expr::Lit(Lit::Str(flags))],
+                    is_comptime: false,
+                }))
             }
             _ => Err(ParseError::UnexpectedToken(token, span)),
         }
@@ -7934,13 +8524,16 @@ fn left_span(expr: &Expr) -> Span {
         Expr::Move(e) => left_span(e),
         Expr::Borrow(e, _) => left_span(e),
         Expr::Builtin(b) => b.span,
-        Expr::ReflectType { span, .. } | Expr::ReflectOf { span, .. } => *span,
+        Expr::ReflectType { span, .. }
+        | Expr::ReflectOf { span, .. }
+        | Expr::TypeVal { span, .. } => *span,
         Expr::PipePlaceholder(span) => *span,
         Expr::Range { span, .. } => *span,
         Expr::Cast { span, .. } => *span,
         Expr::Deref(d) => left_span(d),
         Expr::BitNot(d) => left_span(d),
         Expr::Unsafe(b) | Expr::Comptime(b) | Expr::Arena(b) => b.span,
+        Expr::ComptimeExpr(e) => left_span(e),
         Expr::If { span, .. } => *span,
         Expr::Continue(span) | Expr::LabeledContinue(span, _) => *span,
         Expr::Break(span, _) | Expr::LabeledBreak(span, _, _) => *span,
@@ -7981,13 +8574,16 @@ fn right_span(expr: &Expr) -> Span {
         Expr::Move(e) => right_span(e),
         Expr::Borrow(e, _) => right_span(e),
         Expr::Builtin(b) => b.span,
-        Expr::ReflectType { span, .. } | Expr::ReflectOf { span, .. } => *span,
+        Expr::ReflectType { span, .. }
+        | Expr::ReflectOf { span, .. }
+        | Expr::TypeVal { span, .. } => *span,
         Expr::PipePlaceholder(span) => *span,
         Expr::Range { span, .. } => *span,
         Expr::Cast { span, .. } => *span,
         Expr::Deref(d) => right_span(d),
         Expr::BitNot(d) => right_span(d),
         Expr::Unsafe(b) | Expr::Comptime(b) | Expr::Arena(b) => b.span,
+        Expr::ComptimeExpr(e) => right_span(e),
         Expr::If { span, .. } => *span,
         Expr::Continue(span) | Expr::LabeledContinue(span, _) => *span,
         Expr::Break(span, val) | Expr::LabeledBreak(span, _, val) => {

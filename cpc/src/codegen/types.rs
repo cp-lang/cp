@@ -120,6 +120,23 @@ impl Codegen {
         }
     }
 
+    pub fn fixed_or_vec_elem_type(ty: &Type) -> Option<Type> {
+        match ty {
+            Type::FixedArray(elem, _) => Some((**elem).clone()),
+            Type::Ref(id) if id.sym.starts_with('[') => {
+                let idx = id.sym.find(']')?;
+                let elem_name = id.sym[idx + 1..].trim_start_matches("const ").trim();
+                Some(Self::type_from_name_static(elem_name))
+            }
+            Type::Ref(id) if id.sym.starts_with("@Vector(") => {
+                let comma_idx = id.sym.find(',')?;
+                let elem_name = id.sym[comma_idx + 1..].trim_end_matches(')').trim();
+                Some(Self::type_from_name_static(elem_name))
+            }
+            _ => None,
+        }
+    }
+
     pub fn fnv1a_type_id(name: &str) -> u64 {
         let mut hash: u64 = 0xcbf29ce484222325;
         for b in name.as_bytes() {
@@ -242,13 +259,20 @@ impl Codegen {
                 let has_err = idents
                     .iter()
                     .any(|i| i.sym == "Err" || i.sym == "Error" || i.sym == "err");
-                if has_err {
-                    "Err".to_string()
-                } else if idents.iter().all(|i| {
+                let all_zig_sets = idents.iter().all(|i| {
                     self.error_sets.contains_key(&i.sym)
                         || i.sym.starts_with("error{")
                         || i.sym == "anyerror"
-                }) {
+                        || i.sym.contains('.')
+                });
+                let has_qualified = idents.iter().any(|i| i.sym.contains('.'));
+                if has_err
+                    && !self.is_lib_mode
+                    && !has_qualified
+                    && !self.error_sets.contains_key("Error")
+                {
+                    "Err".to_string()
+                } else if all_zig_sets || has_qualified || self.is_lib_mode {
                     let names: Vec<String> = idents
                         .iter()
                         .map(|i| {
@@ -1413,6 +1437,10 @@ impl Codegen {
                             Type::Optional(opt_in) if fn_bubbles_null => Some(*opt_in),
                             other => Some(other),
                         },
+                        Type::ErrorUnion(err_in) => match *err_in {
+                            Type::Optional(opt_in) if fn_bubbles_null => Some(*opt_in),
+                            other => Some(other),
+                        },
                         Type::Optional(opt_in) => Some(*opt_in),
                         other => Some(other),
                     };
@@ -1427,6 +1455,10 @@ impl Codegen {
                 if let Some(inner_ty) = self.infer_cp_type_with_mock(inner, mock_types) {
                     return match inner_ty {
                         Type::ResultType { ok, .. } => match *ok {
+                            Type::Optional(opt_in) => Some(*opt_in),
+                            other => Some(other),
+                        },
+                        Type::ErrorUnion(err_in) => match *err_in {
                             Type::Optional(opt_in) => Some(*opt_in),
                             other => Some(other),
                         },
@@ -1708,7 +1740,12 @@ impl Codegen {
                 span: Span { start: 0, end: 0 },
                 sym: "TypeInfo".to_string(),
             })),
+            Expr::TypeVal { .. } => Some(Type::Ref(Ident {
+                span: Span { start: 0, end: 0 },
+                sym: "type".to_string(),
+            })),
             Expr::Range { .. } => Some(Type::I32),
+            Expr::ComptimeExpr(e) => self.infer_cp_type_with_mock(e, mock_types),
             Expr::Comptime(b) | Expr::Unsafe(b) | Expr::Arena(b) => {
                 let mut local_mocks = mock_types.clone();
                 for s in &b.body {
@@ -2097,6 +2134,9 @@ impl Codegen {
                 Expr::ReflectType { .. } | Expr::ReflectOf { .. } => {
                     return "*const TypeInfo".to_string();
                 }
+                Expr::TypeVal { .. } => {
+                    return "type".to_string();
+                }
                 Expr::Index { .. } => {
                     if let Some(cp_ty) = self.infer_cp_type(expr) {
                         return self.map_type(&cp_ty);
@@ -2320,6 +2360,9 @@ impl Codegen {
                         return format!("?*const {}", clean_opt);
                     }
                     let inner_zig = self.map_type(inner);
+                    if matches!(**inner, Type::Aligned { .. }) {
+                        return format!("*{}", inner_zig);
+                    }
                     if inner_zig.starts_with("*const ") {
                         return inner_zig;
                     }
@@ -2476,6 +2519,9 @@ impl Codegen {
                 let alt_str = self.map_type(alt);
                 format!("if ({}) {} else {}", cond_str, cons_str, alt_str)
             }
+            Type::Aligned { qual, inner } => {
+                format!("{}{}", qual, self.map_type(inner))
+            }
             _ => "i32".to_string(),
         }
     }
@@ -2566,6 +2612,9 @@ impl Codegen {
                     id.sym.clone()
                 }
             }
+            Type::Aligned { qual, inner } => {
+                format!("{}{}", qual, self.map_raw_ptr_base(inner))
+            }
             _ => self.map_type(ty),
         }
     }
@@ -2625,6 +2674,9 @@ pub(crate) fn type_to_display_string(ty: &Type) -> String {
                 p_strs.join(", "),
                 type_to_display_string(ret)
             )
+        }
+        Type::Aligned { qual, inner } => {
+            format!("{}{}", qual, type_to_display_string(inner))
         }
         _ => "any".to_string(),
     }

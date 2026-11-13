@@ -213,6 +213,8 @@ pub struct Class {
     pub generic_params: Vec<GenericParam>,
     #[serde(default)]
     pub is_union: bool,
+    #[serde(default)]
+    pub nested_classes: Vec<Class>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -327,6 +329,7 @@ pub enum Pattern {
         ident: Ident,
         ty: Type,
     },
+    Type(Type),
     Expr(Box<Expr>),
 }
 
@@ -464,6 +467,10 @@ pub enum Expr {
         span: Span,
         target_ty: Type,
     },
+    TypeVal {
+        span: Span,
+        ty: Type,
+    },
     ReflectOf {
         span: Span,
         expr: Box<Expr>,
@@ -485,6 +492,7 @@ pub enum Expr {
     BitNot(Box<Expr>),
     Unsafe(BlockStmt),
     Comptime(BlockStmt),
+    ComptimeExpr(Box<Expr>),
     Arena(BlockStmt),
     If {
         span: Span,
@@ -776,6 +784,10 @@ pub enum Type {
     CStr,
     CFn(Vec<Type>, Box<Type>),
     Auto,
+    Aligned {
+        qual: String,
+        inner: Box<Type>,
+    },
     Conditional(Box<Expr>, Box<Type>, Box<Type>),
 }
 
@@ -1060,6 +1072,7 @@ impl Expr {
             Expr::Borrow(b, _) => b.span(),
             Expr::Builtin(b) => b.span,
             Expr::ReflectType { span, .. } => *span,
+            Expr::TypeVal { span, .. } => *span,
             Expr::ReflectOf { span, .. } => *span,
             Expr::PipePlaceholder(span) => *span,
             Expr::Range { span, .. } => *span,
@@ -1069,6 +1082,7 @@ impl Expr {
             Expr::BitNot(b) => b.span(),
             Expr::Unsafe(b) => b.span,
             Expr::Comptime(b) => b.span,
+            Expr::ComptimeExpr(e) => e.span(),
             Expr::Arena(b) => b.span,
             Expr::If { span, .. } => *span,
             Expr::Continue(span) => *span,

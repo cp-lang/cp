@@ -14,7 +14,11 @@ impl Codegen {
                 return false;
             }
             match &arm.pat {
-                Pattern::Lit(_) | Pattern::Wildcard | Pattern::Range { .. } | Pattern::Expr(_) => {}
+                Pattern::Lit(_)
+                | Pattern::Wildcard
+                | Pattern::Range { .. }
+                | Pattern::Expr(_)
+                | Pattern::Type(_) => {}
                 Pattern::Ident(_) => {}
                 Pattern::Enum(ep)
                     if ep.fields.is_none()
@@ -29,6 +33,8 @@ impl Codegen {
                             Pattern::Lit(_)
                                 | Pattern::Range { .. }
                                 | Pattern::Expr(_)
+                                | Pattern::Type(_)
+                                | Pattern::Ident(_)
                                 | Pattern::Enum(crate::ast::EnumPattern {
                                     fields: None,
                                     tuple_pats: None,
@@ -917,6 +923,10 @@ impl Codegen {
                 }
                 (format!("({})", conds.join(" or ")), String::new())
             }
+            Pattern::Type(ty) => {
+                let t_str = self.map_type(ty);
+                (format!("({} == {})", val_expr, t_str), String::new())
+            }
             Pattern::Expr(expr) => {
                 let e_code = Self::format_simple_expr(expr);
                 (format!("cp_eq({}, {})", val_expr, e_code), String::new())
@@ -1050,9 +1060,129 @@ impl Codegen {
         }
     }
 
+    pub(crate) fn pattern_contains_type(pat: &Pattern) -> bool {
+        match pat {
+            Pattern::Type(_) => true,
+            Pattern::Or(pats) => pats.iter().any(Self::pattern_contains_type),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn format_type_switch_cond(&self, pat: &Pattern, disc_expr: &str) -> Option<String> {
+        match pat {
+            Pattern::Type(ty) => Some(format!("({} == {})", disc_expr, self.map_type(ty))),
+            Pattern::Ident(id) if id.sym == "_" || id.sym == "else" => None,
+            Pattern::Wildcard => None,
+            Pattern::Ident(id) => Some(format!("({} == {})", disc_expr, id.sym)),
+            Pattern::Enum(ep) if ep.fields.is_none() && ep.tuple_pats.is_none() => {
+                if ep.enum_name.sym.is_empty() {
+                    Some(format!("({} == .{})", disc_expr, ep.variant_name.sym))
+                } else {
+                    Some(format!(
+                        "({} == {}.{})",
+                        disc_expr, ep.enum_name.sym, ep.variant_name.sym
+                    ))
+                }
+            }
+            Pattern::Or(pats) => {
+                let mut parts = Vec::new();
+                for p in pats {
+                    if let Some(c) = self.format_type_switch_cond(p, disc_expr) {
+                        parts.push(c);
+                    } else {
+                        return None;
+                    }
+                }
+                if parts.is_empty() {
+                    None
+                } else {
+                    Some(format!("({})", parts.join(" or ")))
+                }
+            }
+            Pattern::Expr(e) => {
+                let ec = Self::format_simple_expr(e);
+                Some(format!("({} == {})", disc_expr, ec))
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn generate_switch(&mut self, m: &MatchExpr, is_expr: bool) -> String {
         let disc_cp_ty = self.infer_cp_type(&m.disc);
         self.check_switch_exhaustiveness(m, disc_cp_ty.as_ref());
+
+        let is_type_switch = matches!(&disc_cp_ty, Some(Type::Ref(id)) if id.sym == "type")
+            || m.arms.iter().any(|a| Self::pattern_contains_type(&a.pat));
+        if is_type_switch && Self::is_simple_literal_switch(m) {
+            let disc_code = self.generate_expr(&m.disc);
+            let mut branches: Vec<(Option<String>, String)> = Vec::new();
+            for arm in &m.arms {
+                let cond = self.format_type_switch_cond(&arm.pat, &disc_code);
+                let body_str = if is_expr {
+                    match &*arm.body {
+                        Stmt::Expr(e) => self.generate_expr(e),
+                        Stmt::Block(b) if b.body.len() == 1 => {
+                            if let Stmt::Expr(e) = &b.body[0] {
+                                self.generate_expr(e)
+                            } else {
+                                let saved = self.current_case_content.clone();
+                                self.current_case_content.clear();
+                                for s in &b.body {
+                                    self.generate_stmt(s);
+                                }
+                                let s_str = self.current_case_content.trim().to_string();
+                                self.current_case_content = saved;
+                                format!("{{\n{}\n}}", s_str)
+                            }
+                        }
+                        _ => {
+                            let saved = self.current_case_content.clone();
+                            self.current_case_content.clear();
+                            self.generate_stmt(&arm.body);
+                            let s_str = self.current_case_content.trim().to_string();
+                            self.current_case_content = saved;
+                            format!("{{\n{}\n}}", s_str)
+                        }
+                    }
+                } else {
+                    let saved = self.current_case_content.clone();
+                    self.current_case_content.clear();
+                    if let Stmt::Block(b) = &*arm.body {
+                        for s in &b.body {
+                            self.generate_stmt(s);
+                        }
+                    } else {
+                        self.generate_stmt(&arm.body);
+                    }
+                    let s_str = self.current_case_content.trim().to_string();
+                    self.current_case_content = saved;
+                    format!("{{\n{}\n}}", s_str)
+                };
+                branches.push((cond, body_str));
+            }
+            let mut out = String::new();
+            let mut has_else = false;
+            for (idx, (cond, body)) in branches.into_iter().enumerate() {
+                if let Some(c) = cond {
+                    if idx == 0 {
+                        out.push_str(&format!("if {} {}", c, body));
+                    } else {
+                        out.push_str(&format!(" else if {} {}", c, body));
+                    }
+                } else {
+                    has_else = true;
+                    if idx == 0 {
+                        out.push_str(&body);
+                    } else {
+                        out.push_str(&format!(" else {}", body));
+                    }
+                }
+            }
+            if !has_else && is_expr {
+                out.push_str(" else unreachable");
+            }
+            return if is_expr { format!("({})", out) } else { out };
+        }
 
         if Self::is_simple_literal_switch(m) {
             let disc_code = self.generate_expr(&m.disc);

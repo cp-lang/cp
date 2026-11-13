@@ -602,6 +602,7 @@ impl Analyzer {
             is_pub: true,
             is_static: false,
             is_union: false,
+            nested_classes: vec![],
             generic_params: vec![],
         };
         self.classes
@@ -623,6 +624,7 @@ impl Analyzer {
             is_pub: true,
             is_static: false,
             is_union: false,
+            nested_classes: vec![],
             generic_params: vec![],
         };
         self.classes.insert("Set".to_string(), set_class.clone());
@@ -644,6 +646,7 @@ impl Analyzer {
             is_pub: true,
             is_static: false,
             is_union: false,
+            nested_classes: vec![],
             generic_params: vec![],
         };
         self.classes.insert("Map".to_string(), map_class.clone());
@@ -665,6 +668,7 @@ impl Analyzer {
             is_pub: true,
             is_static: false,
             is_union: false,
+            nested_classes: vec![],
             generic_params: vec![],
         };
         self.classes.insert("Dict".to_string(), dict_class.clone());
@@ -711,6 +715,7 @@ impl Analyzer {
             is_pub: true,
             is_static: false,
             is_union: false,
+            nested_classes: vec![],
             generic_params: vec![],
         };
         self.classes
@@ -735,6 +740,7 @@ impl Analyzer {
             is_pub: true,
             is_static: false,
             is_union: false,
+            nested_classes: vec![],
             generic_params: vec![],
         };
         self.classes.insert("Box".to_string(), box_class.clone());
@@ -764,6 +770,7 @@ impl Analyzer {
                 is_pub: true,
                 is_static: false,
                 is_union: false,
+                nested_classes: vec![],
                 generic_params: vec![],
             };
             self.classes.insert(reflect_name.to_string(), cls.clone());
@@ -798,6 +805,7 @@ impl Analyzer {
                 is_pub: true,
                 is_static: false,
                 is_union: false,
+                nested_classes: vec![],
                 generic_params: vec![],
             };
             self.classes.insert(name.to_string(), cls.clone());
@@ -2783,7 +2791,20 @@ impl Analyzer {
                     if var.kind == VarDeclKind::Const {
                         if let Some(init) = &var.init {
                             if let Some(val) = self.eval_int_expr(init) {
-                                self.set_const_int(var_name, val);
+                                self.set_const_int(var_name.clone(), val);
+                            }
+                            if let Expr::Builtin(call) = init {
+                                if call.name == "@Vector" {
+                                    self.type_aliases.insert(
+                                        var_name,
+                                        Type::Ref(Ident {
+                                            span: var.span,
+                                            sym: "@Vector(alias)".to_string(),
+                                        }),
+                                    );
+                                }
+                            } else if let Expr::TypeVal { ty: alias_ty, .. } = init {
+                                self.type_aliases.insert(var_name, alias_ty.clone());
                             }
                         }
                     }
@@ -3617,6 +3638,7 @@ impl Analyzer {
                     return Err(SemaError::UndefinedSymbol(type_name, *span));
                 }
             }
+            Expr::TypeVal { .. } => {}
             Expr::ReflectOf { span, expr } => {
                 self.analyze_expr(expr)?;
                 let ty = self.infer_type(expr)?;
@@ -3708,6 +3730,9 @@ impl Analyzer {
             }
             Expr::Comptime(block) => {
                 self.analyze_block(block)?;
+            }
+            Expr::ComptimeExpr(e) => {
+                self.analyze_expr(e)?;
             }
             Expr::Arena(block) => {
                 self.analyze_block(block)?;
@@ -4747,6 +4772,28 @@ impl Analyzer {
             }
         }
 
+        // @Vector(N, T) coercion from fixed array / array literal / tuple
+        if let Type::Ref(id) = target {
+            if id.sym.starts_with("@Vector(")
+                && matches!(
+                    src,
+                    Type::FixedArray(_, _) | Type::Array(_) | Type::Tuple(_)
+                )
+            {
+                return true;
+            }
+        }
+        if let Type::Ref(id) = src {
+            if id.sym.starts_with("@Vector(")
+                && matches!(
+                    target,
+                    Type::FixedArray(_, _) | Type::Array(_) | Type::Tuple(_)
+                )
+            {
+                return true;
+            }
+        }
+
         // Object literal initializing a struct/class reference
         if let Type::Ref(_) = target {
             if matches!(src, Type::Object(_)) || matches!(init_expr, Some(Expr::Object(_))) {
@@ -4754,7 +4801,7 @@ impl Analyzer {
             }
         }
 
-        // Raw pointers (same depth and coerceable inner)
+        // Raw pointers (same depth and coerceable inner, allowing *T! -> *const T!)
         if let (
             Type::RawPtr {
                 inner: t_inner,
@@ -4766,8 +4813,25 @@ impl Analyzer {
             },
         ) = (target, src)
         {
-            if t_d == s_d && self.can_coerce(t_inner, s_inner, None) {
-                return true;
+            if t_d == s_d {
+                if let Type::BorrowType {
+                    inner: t_base,
+                    is_mut: false,
+                    ..
+                } = &**t_inner
+                {
+                    let s_base = match &**s_inner {
+                        Type::BorrowType { inner, .. } => &**inner,
+                        other => other,
+                    };
+                    if self.can_coerce(t_base, s_base, None) {
+                        return true;
+                    }
+                } else if !matches!(&**s_inner, Type::BorrowType { is_mut: false, .. })
+                    && self.can_coerce(t_inner, s_inner, None)
+                {
+                    return true;
+                }
             }
         }
         // Coerce between Type::Ref("[N]T") and Type::FixedArray(T, Literal(N))
@@ -5032,6 +5096,12 @@ impl Analyzer {
                 self.types_eq(c1, other) || self.types_eq(a1, other)
             }
             (Type::Ref(t1), Type::Ref(t2)) => t1.sym == t2.sym,
+            (Type::Ref(t1), Type::FixedArray(_, _) | Type::Array(_) | Type::Tuple(_))
+            | (Type::FixedArray(_, _) | Type::Array(_) | Type::Tuple(_), Type::Ref(t1))
+                if t1.sym.starts_with("@Vector(") =>
+            {
+                true
+            }
             (Type::BoxDyn(t1), Type::BoxDyn(t2)) => t1.sym == t2.sym,
             (Type::BoxDyn(_), Type::Ref(_)) | (Type::Ref(_), Type::BoxDyn(_)) => true,
             (Type::BorrowType { inner: i1, .. }, Type::BorrowType { inner: i2, .. }) => {
@@ -5134,7 +5204,22 @@ impl Analyzer {
             (Type::Void, Type::Void) => true,
             (Type::Any, _) | (_, Type::Any) => true,
             (Type::Auto, _) | (_, Type::Auto) => true,
-            _ => a == b,
+            (Type::Aligned { inner, .. }, other) | (other, Type::Aligned { inner, .. }) => {
+                self.types_eq(inner, other)
+            }
+            _ => {
+                if let Type::Ref(id) = a {
+                    if let Some(aliased) = self.type_aliases.get(&id.sym).cloned() {
+                        return self.types_eq(&aliased, b);
+                    }
+                }
+                if let Type::Ref(id) = b {
+                    if let Some(aliased) = self.type_aliases.get(&id.sym).cloned() {
+                        return self.types_eq(a, &aliased);
+                    }
+                }
+                a == b
+            }
         }
     }
 
@@ -5639,7 +5724,25 @@ impl Analyzer {
                         return Ok(Type::ManyRawPtr(Box::new(Type::U8)));
                     }
                     if let Some(SymbolKind::Func { ret: Some(ret), .. }) = self.resolve(&fid.sym) {
-                        return Ok(ret.clone());
+                        let ret_cloned = ret.clone();
+                        if let Some(func_decl) = self.functions.get(&fid.sym).cloned() {
+                            let mut subs = HashMap::new();
+                            for (idx, p) in func_decl.params.iter().enumerate() {
+                                if p.is_comptime
+                                    && matches!(&p.ty, Type::Ref(pid) if pid.sym == "type")
+                                {
+                                    if let Some(arg_expr) = call.args.get(idx) {
+                                        if let Some(arg_ty) = Self::expr_as_type_arg(arg_expr) {
+                                            subs.insert(p.ident.sym.clone(), arg_ty);
+                                        }
+                                    }
+                                }
+                            }
+                            if !subs.is_empty() {
+                                return Ok(Self::substitute_type_params(&ret_cloned, &subs));
+                            }
+                        }
+                        return Ok(ret_cloned);
                     }
                     if let Some(SymbolKind::Enum(_)) = self.resolve(&fid.sym) {
                         return Ok(Type::Ref(fid.clone()));
@@ -6002,6 +6105,10 @@ impl Analyzer {
                 span: *span,
                 sym: "TypeInfo".to_string(),
             })),
+            Expr::TypeVal { span, .. } => Ok(Type::Ref(Ident {
+                span: *span,
+                sym: "type".to_string(),
+            })),
             Expr::Range { .. } => Ok(Type::I32),
             Expr::Cast {
                 expr, target_ty, ..
@@ -6052,6 +6159,7 @@ impl Analyzer {
                     other => Ok(other),
                 }
             }
+            Expr::ComptimeExpr(e) => self.infer_type(e),
             Expr::Unsafe(b) | Expr::Comptime(b) | Expr::Arena(b) => {
                 if let Some(Stmt::Expr(e)) = b.body.last() {
                     return Ok(self.infer_type(e).unwrap_or(Type::Any));
@@ -6241,6 +6349,91 @@ impl Analyzer {
                 Ok(Type::Void)
             }
             _ => Ok(Type::Any),
+        }
+    }
+
+    fn expr_as_type_arg(expr: &Expr) -> Option<Type> {
+        match expr {
+            Expr::Ident(id) => match id.sym.as_str() {
+                "u8" => Some(Type::U8),
+                "i8" => Some(Type::I8),
+                "u16" => Some(Type::U16),
+                "i16" => Some(Type::I16),
+                "i32" => Some(Type::I32),
+                "u32" => Some(Type::U32),
+                "i64" => Some(Type::I64),
+                "u64" => Some(Type::U64),
+                "i128" => Some(Type::I128),
+                "u128" => Some(Type::U128),
+                "isize" => Some(Type::ISize),
+                "usize" => Some(Type::USize),
+                "f32" => Some(Type::F32),
+                "f64" => Some(Type::F64),
+                "bool" => Some(Type::Bool),
+                "void" => Some(Type::Void),
+                "string" => Some(Type::String),
+                "cstr" => Some(Type::CStr),
+                _ => Some(Type::Ref(id.clone())),
+            },
+            Expr::ReflectType { target_ty, .. } => Some(target_ty.clone()),
+            _ => None,
+        }
+    }
+
+    fn substitute_type_params(ty: &Type, subs: &HashMap<String, Type>) -> Type {
+        match ty {
+            Type::Ref(id) => subs.get(&id.sym).cloned().unwrap_or_else(|| ty.clone()),
+            Type::Optional(inner) => {
+                Type::Optional(Box::new(Self::substitute_type_params(inner, subs)))
+            }
+            Type::ErrorUnion(inner) => {
+                Type::ErrorUnion(Box::new(Self::substitute_type_params(inner, subs)))
+            }
+            Type::ResultType { ok, err } => Type::ResultType {
+                ok: Box::new(Self::substitute_type_params(ok, subs)),
+                err: err.clone(),
+            },
+            Type::Array(inner) => Type::Array(Box::new(Self::substitute_type_params(inner, subs))),
+            Type::FixedArray(inner, len) => Type::FixedArray(
+                Box::new(Self::substitute_type_params(inner, subs)),
+                len.clone(),
+            ),
+            Type::RawPtr { inner, depth } => Type::RawPtr {
+                inner: Box::new(Self::substitute_type_params(inner, subs)),
+                depth: *depth,
+            },
+            Type::ManyRawPtr(inner) => {
+                Type::ManyRawPtr(Box::new(Self::substitute_type_params(inner, subs)))
+            }
+            Type::CPtr(inner) => Type::CPtr(Box::new(Self::substitute_type_params(inner, subs))),
+            Type::BorrowType {
+                inner,
+                is_mut,
+                lifetimes,
+            } => Type::BorrowType {
+                inner: Box::new(Self::substitute_type_params(inner, subs)),
+                is_mut: *is_mut,
+                lifetimes: lifetimes.clone(),
+            },
+            Type::Aligned { qual, inner } => Type::Aligned {
+                qual: qual.clone(),
+                inner: Box::new(Self::substitute_type_params(inner, subs)),
+            },
+            Type::Fn(params, ret) => Type::Fn(
+                params
+                    .iter()
+                    .map(|p| Self::substitute_type_params(p, subs))
+                    .collect(),
+                Box::new(Self::substitute_type_params(ret, subs)),
+            ),
+            Type::CFn(params, ret) => Type::CFn(
+                params
+                    .iter()
+                    .map(|p| Self::substitute_type_params(p, subs))
+                    .collect(),
+                Box::new(Self::substitute_type_params(ret, subs)),
+            ),
+            other => other.clone(),
         }
     }
 }

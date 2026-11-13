@@ -126,7 +126,7 @@ pub fn find_referenced_vars_in_expr(expr: &Expr, vars: &mut HashSet<String>) {
             ArrowBody::Expr(e) => find_referenced_vars_in_expr(e, vars),
             ArrowBody::Block(b) => find_referenced_vars_in_block(b, vars),
         },
-        Expr::ReflectType { .. } => {}
+        Expr::ReflectType { .. } | Expr::TypeVal { .. } => {}
         Expr::ReflectOf { expr, .. } => {
             find_referenced_vars_in_expr(expr, vars);
         }
@@ -135,7 +135,9 @@ pub fn find_referenced_vars_in_expr(expr: &Expr, vars: &mut HashSet<String>) {
             find_referenced_vars_in_expr(end, vars);
         }
         Expr::Cast { expr, .. } => find_referenced_vars_in_expr(expr, vars),
-        Expr::Deref(d) | Expr::Unwrap(d) | Expr::BitNot(d) => find_referenced_vars_in_expr(d, vars),
+        Expr::Deref(d) | Expr::Unwrap(d) | Expr::BitNot(d) | Expr::ComptimeExpr(d) => {
+            find_referenced_vars_in_expr(d, vars)
+        }
         Expr::Unsafe(b) | Expr::Comptime(b) | Expr::Arena(b) => {
             find_referenced_vars_in_block(b, vars)
         }

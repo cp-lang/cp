@@ -134,6 +134,9 @@ impl ModuleFeatures {
                     }
                     self.scan_block(&m.body);
                 }
+                for nc in &c.nested_classes {
+                    self.scan_decl(&Decl::Class(nc.clone()));
+                }
             }
             Decl::Trait(t) => {
                 for m in &t.methods {
@@ -609,6 +612,7 @@ impl ModuleFeatures {
             | Expr::Unwrap(inner)
             | Expr::Deref(inner)
             | Expr::BitNot(inner)
+            | Expr::ComptimeExpr(inner)
             | Expr::BoxNew(inner) => {
                 self.scan_expr(inner);
             }
@@ -621,6 +625,11 @@ impl ModuleFeatures {
             Expr::LabeledBreak(_, _, val) => {
                 if let Some(v) = val {
                     self.scan_expr(v);
+                }
+            }
+            Expr::Zig(z) => {
+                if let Some(cls) = super::Codegen::parse_anon_struct_or_union(&z.code) {
+                    self.scan_decl(&Decl::Class(cls));
                 }
             }
             _ => {}

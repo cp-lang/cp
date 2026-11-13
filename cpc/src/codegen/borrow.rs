@@ -383,11 +383,27 @@ impl Codegen {
                     self.check_borrow_conflict("_", true);
                     return;
                 }
-                if self.const_vars.contains(&id.sym) {
-                    panic!(
-                        "CP Compile Error: Cannot perform mutable operation ({}) on 'const' variable '{}' (declare with 'let' to allow mutation)",
-                        op_desc, id.sym
-                    );
+                if self.const_vars.contains(&id.sym) && !self.type_namespace_vars.contains(&id.sym)
+                {
+                    let allow_pointee_mut = op_desc != "assignment '='"
+                        && self.var_cp_types.get(&id.sym).map_or(false, |t| {
+                            matches!(
+                                t,
+                                Type::RawPtr { .. }
+                                    | Type::ManyRawPtr(_)
+                                    | Type::CPtr(_)
+                                    | Type::SentinelPtr(_, _)
+                                    | Type::BorrowType { is_mut: true, .. }
+                                    | Type::Auto
+                                    | Type::Array(_)
+                            )
+                        });
+                    if !allow_pointee_mut {
+                        panic!(
+                            "CP Compile Error: Cannot perform mutable operation ({}) on 'const' variable '{}' (declare with 'let' to allow mutation)",
+                            op_desc, id.sym
+                        );
+                    }
                 }
                 if self.moved_vars.contains(&id.sym) {
                     panic!("CP Compile Error: Use of moved value '{}'", id.sym);
@@ -438,7 +454,12 @@ impl Codegen {
                             if let Some(param_ty) = self.var_cp_types.get(&id.sym) {
                                 matches!(
                                     param_ty,
-                                    Type::RawPtr { .. } | Type::BorrowType { is_mut: true, .. }
+                                    Type::RawPtr { .. }
+                                        | Type::ManyRawPtr(_)
+                                        | Type::CPtr(_)
+                                        | Type::SentinelPtr(_, _)
+                                        | Type::BorrowType { is_mut: true, .. }
+                                        | Type::Auto
                                 )
                             } else {
                                 false
@@ -698,7 +719,18 @@ impl Codegen {
                     return (sources.clone(), *is_m, is_ref_st);
                 }
                 if self.current_fn_params.contains(&id.sym) {
-                    return (vec![(id.sym.clone(), None)], false, is_ref_st);
+                    let is_m = self.mutable_fn_params.contains(&id.sym)
+                        || matches!(
+                            self.var_cp_types.get(&id.sym),
+                            Some(
+                                Type::BorrowType { is_mut: true, .. }
+                                    | Type::RawPtr { .. }
+                                    | Type::ManyRawPtr(_)
+                                    | Type::CPtr(_)
+                                    | Type::SentinelPtr(_, _)
+                            )
+                        );
+                    return (vec![(id.sym.clone(), None)], is_m, is_ref_st);
                 }
                 (vec![], false, is_ref_st)
             }

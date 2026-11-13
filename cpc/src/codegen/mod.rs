@@ -87,6 +87,7 @@ pub struct Codegen {
     pub type_aliases: HashMap<String, TypeAliasDecl>,
     pub narrowed_null_vars: HashSet<String>,
     pub const_vars: HashSet<String>,
+    pub type_namespace_vars: HashSet<String>,
     pub current_block_label: Option<String>,
     pub local_trampolines: HashSet<String>,
     pub source_dir: Option<std::path::PathBuf>,
@@ -170,6 +171,7 @@ impl Codegen {
             type_aliases: HashMap::new(),
             narrowed_null_vars: HashSet::new(),
             const_vars: HashSet::new(),
+            type_namespace_vars: HashSet::new(),
             current_block_label: None,
             local_trampolines: HashSet::new(),
             source_dir: None,
@@ -810,19 +812,10 @@ impl Codegen {
                 };
                 let old_array_elem = self.expected_array_elem_type.clone();
                 if let Some(ty) = &var.ty {
-                    match ty {
-                        Type::FixedArray(elem, _) | Type::Array(elem) => {
-                            self.expected_array_elem_type = Some((**elem).clone());
-                        }
-                        Type::Ref(id) if id.sym.starts_with('[') => {
-                            if let Some(idx) = id.sym.find(']') {
-                                let elem_name =
-                                    id.sym[idx + 1..].trim_start_matches("const ").trim();
-                                self.expected_array_elem_type =
-                                    Some(Self::type_from_name_static(elem_name));
-                            }
-                        }
-                        _ => {}
+                    if let Some(el) = Self::fixed_or_vec_elem_type(ty) {
+                        self.expected_array_elem_type = Some(el);
+                    } else if let Type::Array(elem) = ty {
+                        self.expected_array_elem_type = Some((**elem).clone());
                     }
                 }
                 match &var.pat {
@@ -880,8 +873,10 @@ impl Codegen {
             self.writeln(
                 "    pub fn init(self: *RegExp, pattern: []const u8, flags: []const u8) void {",
             );
-            self.writeln("        _ = flags; self.source = pattern; const c_pattern = std.heap.page_allocator.allocSentinel(u8, pattern.len, 0) catch unreachable; @import(\"std\").mem.copyForwards(u8, c_pattern, pattern); defer std.heap.page_allocator.free(c_pattern);");
-            self.writeln("        if (regcomp(&self.preg, c_pattern.ptr, 1) != 0) { std.debug.print(\"Regex Compilation Failed\\n\", .{}); @panic(\"Invalid RegExp\"); }");
+            self.writeln("        self.source = pattern; const c_pattern = std.heap.page_allocator.allocSentinel(u8, pattern.len, 0) catch unreachable; @import(\"std\").mem.copyForwards(u8, c_pattern, pattern); defer std.heap.page_allocator.free(c_pattern);");
+            self.writeln("        var cflags: i32 = 1; // REG_EXTENDED");
+            self.writeln("        for (flags) |fc| { if (fc == 'i') { cflags |= 2; } else if (fc == 'm') { cflags |= (if (comptime @import(\"builtin\").os.tag == .linux) @as(i32, 4) else @as(i32, 8)); } }");
+            self.writeln("        if (regcomp(&self.preg, c_pattern.ptr, cflags) != 0) { std.debug.print(\"Regex Compilation Failed\\n\", .{}); @panic(\"Invalid RegExp\"); }");
             self.writeln("    }");
             self.writeln("    pub fn @\"test\"(self: *RegExp, str: []const u8) bool {");
             self.writeln("        const c_str = std.heap.page_allocator.allocSentinel(u8, str.len, 0) catch unreachable; @import(\"std\").mem.copyForwards(u8, c_str, str); defer std.heap.page_allocator.free(c_str);");
@@ -2643,7 +2638,89 @@ impl Codegen {
         self.writeln("}; };\n");
     }
 
+    fn field_align_str(&mut self, f: &Field) -> String {
+        if let Some(m) = f.meta.iter().find(|m| m.name.sym == "align") {
+            let a_val = match m.args.first() {
+                Some(crate::ast::MetaArg::Positional(e)) => self.generate_expr(e),
+                Some(crate::ast::MetaArg::Named(_, e)) => self.generate_expr(e),
+                None => "1".to_string(),
+            };
+            format!(" align({})", a_val)
+        } else {
+            String::new()
+        }
+    }
+
+    pub(crate) fn parse_anon_struct_or_union(code: &str) -> Option<Class> {
+        let trimmed = code.trim();
+        let is_struct_or_union = (trimmed.starts_with("struct")
+            && trimmed.as_bytes().get("struct".len()).map_or(false, |b| {
+                b.is_ascii_whitespace() || *b == b'{' || *b == b'('
+            }))
+            || (trimmed.starts_with("union")
+                && trimmed.as_bytes().get("union".len()).map_or(false, |b| {
+                    b.is_ascii_whitespace() || *b == b'{' || *b == b'('
+                }));
+
+        if !is_struct_or_union {
+            return None;
+        }
+        let brace_idx = trimmed.find('{')?;
+        let wrapped = format!(
+            "{} __CpAnonStruct__ {}",
+            trimmed[..brace_idx].trim_end(),
+            &trimmed[brace_idx..]
+        );
+        let mut parser = crate::parser::Parser::new(&wrapped);
+        if let Ok(module) = parser.parse_module() {
+            if let Some(ModuleItem::Decl(Decl::Class(cls))) = module.body.into_iter().next() {
+                return Some(cls);
+            }
+        }
+        None
+    }
+
+    pub(crate) fn generate_zig_or_struct(&mut self, code: &str) -> String {
+        if let Some(mut cls) = Self::parse_anon_struct_or_union(code) {
+            for m in &mut cls.methods {
+                let has_explicit_self = m
+                    .params
+                    .first()
+                    .map_or(false, |p| p.ident.sym == "this" || p.ident.sym == "_");
+                if !has_explicit_self {
+                    m.is_static = true;
+                }
+            }
+            let mut sub = Codegen::new();
+            sub.is_lib_mode = self.is_lib_mode;
+            sub.is_beam_mode = self.is_beam_mode;
+            sub.globals = self.globals.clone();
+            for name in self.current_fn_params.iter().chain(self.locals.keys()) {
+                sub.globals.insert(name.clone());
+            }
+            sub.ref_classes = self.ref_classes.clone();
+            sub.value_classes = self.value_classes.clone();
+            sub.fn_sigs = self.fn_sigs.clone();
+            sub.class_defs = self.class_defs.clone();
+            sub.trait_defs = self.trait_defs.clone();
+            sub.enum_defs = self.enum_defs.clone();
+            sub.error_sets = self.error_sets.clone();
+            sub.type_aliases = self.type_aliases.clone();
+            sub.dec_defs = self.dec_defs.clone();
+            sub.anon_obj_structs = self.anon_obj_structs.clone();
+            sub.value_classes.insert("@This()".to_string());
+            sub.class_defs.insert("@This()".to_string(), cls.clone());
+            sub.generate_class_inner(&cls, true);
+            return sub.output.trim_end().to_string();
+        }
+        lower_struct_body(code)
+    }
+
     pub(crate) fn generate_class(&mut self, class: &Class) {
+        self.generate_class_inner(class, false);
+    }
+
+    pub(crate) fn generate_class_inner(&mut self, class: &Class, is_anon: bool) {
         if class.ident.sym == "Task"
             || class.ident.sym == "TypeInfo"
             || class.ident.sym == "FieldInfo"
@@ -2771,8 +2848,10 @@ impl Codegen {
         } else {
             "struct".to_string()
         };
-        let is_generic = !class.generic_params.is_empty();
-        if is_generic {
+        let is_generic = !is_anon && !class.generic_params.is_empty();
+        if is_anon {
+            writeln!(self.output, "{} {{", struct_kind).unwrap();
+        } else if is_generic {
             let mut params_str = Vec::new();
             for gp in &class.generic_params {
                 match gp {
@@ -2820,18 +2899,17 @@ impl Codegen {
         }
         if class.is_static {
             for f in &class.fields {
-                let align_str = if let Some(m) = f.meta.iter().find(|m| m.name.sym == "align") {
-                    let a_val = match m.args.first() {
-                        Some(crate::ast::MetaArg::Positional(e)) => self.generate_expr(e),
-                        Some(crate::ast::MetaArg::Named(_, e)) => self.generate_expr(e),
-                        None => "1".to_string(),
-                    };
-                    format!(" align({})", a_val)
-                } else {
-                    String::new()
-                };
+                let align_str = self.field_align_str(f);
                 let default_init = if let Some(def) = &f.default {
-                    format!(" = {}", self.generate_expr(def))
+                    let old_array_elem = self.expected_array_elem_type.clone();
+                    if let crate::ast::Type::FixedArray(elem, _) | crate::ast::Type::Array(elem) =
+                        &f.ty
+                    {
+                        self.expected_array_elem_type = Some((**elem).clone());
+                    }
+                    let res = format!(" = {}", self.generate_expr(def));
+                    self.expected_array_elem_type = old_array_elem;
+                    res
                 } else {
                     " = undefined".to_string()
                 };
@@ -2847,18 +2925,20 @@ impl Codegen {
             }
         } else {
             for f in &class.fields {
-                let align_str = if let Some(m) = f.meta.iter().find(|m| m.name.sym == "align") {
-                    let a_val = match m.args.first() {
-                        Some(crate::ast::MetaArg::Positional(e)) => self.generate_expr(e),
-                        Some(crate::ast::MetaArg::Named(_, e)) => self.generate_expr(e),
-                        None => "1".to_string(),
-                    };
-                    format!(" align({})", a_val)
-                } else {
-                    String::new()
-                };
+                if f.is_static {
+                    continue;
+                }
+                let align_str = self.field_align_str(f);
                 let default_init = if let Some(def) = &f.default {
-                    format!(" = {},", self.generate_expr(def))
+                    let old_array_elem = self.expected_array_elem_type.clone();
+                    if let crate::ast::Type::FixedArray(elem, _) | crate::ast::Type::Array(elem) =
+                        &f.ty
+                    {
+                        self.expected_array_elem_type = Some((**elem).clone());
+                    }
+                    let res = format!(" = {},", self.generate_expr(def));
+                    self.expected_array_elem_type = old_array_elem;
+                    res
                 } else {
                     ",".to_string()
                 };
@@ -2880,6 +2960,47 @@ impl Codegen {
             {
                 self.writeln("\npub fn _create(allocator: std.mem.Allocator) !*@This() { const self_ptr = try allocator.create(@This()); self_ptr.* = undefined; return self_ptr; }");
             }
+            for f in &class.fields {
+                if !f.is_static {
+                    continue;
+                }
+                let align_str = self.field_align_str(f);
+                let default_init = if let Some(def) = &f.default {
+                    let old_array_elem = self.expected_array_elem_type.clone();
+                    if let crate::ast::Type::FixedArray(elem, _) | crate::ast::Type::Array(elem) =
+                        &f.ty
+                    {
+                        self.expected_array_elem_type = Some((**elem).clone());
+                    }
+                    let res = format!(" = {}", self.generate_expr(def));
+                    self.expected_array_elem_type = old_array_elem;
+                    res
+                } else {
+                    " = undefined".to_string()
+                };
+                let pub_prefix = if f.is_pub { "pub " } else { "" };
+                let tls_prefix = if f
+                    .meta
+                    .iter()
+                    .any(|m| m.name.sym == "tls" || m.name.sym == "threadlocal")
+                {
+                    "threadlocal "
+                } else {
+                    ""
+                };
+                self.writeln(&format!(
+                    "{}{}var {}: {}{}{};",
+                    pub_prefix,
+                    tls_prefix,
+                    f.ident.sym,
+                    self.map_type(&f.ty),
+                    align_str,
+                    default_init
+                ));
+            }
+            for nc in &class.nested_classes {
+                self.generate_class_inner(nc, false);
+            }
         }
         if needs_trait_infra {
             self.writeln(&format!(
@@ -2887,8 +3008,13 @@ impl Codegen {
                 class.ident.sym
             ));
         }
+        let method_owner = if is_anon {
+            Some("@This()".to_string())
+        } else {
+            Some(class.ident.sym.clone())
+        };
         for m in &class.methods {
-            self.generate_function_decorated(m, Some(&class.ident.sym));
+            self.generate_function_decorated(m, method_owner.as_ref());
         }
         for code in &class.extra_zig {
             for line in code.lines() {
@@ -2916,6 +3042,10 @@ impl Codegen {
             self.writeln("pub fn deref(self: *@This()) void { RefCount.deref(self); }");
         }
         self.dedent();
+        if is_anon {
+            self.writeln("}");
+            return;
+        }
         self.writeln("};");
         if is_generic {
             self.dedent();
